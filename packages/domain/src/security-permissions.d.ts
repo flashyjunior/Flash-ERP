@@ -1,0 +1,51 @@
+export type SecurityPermissionDomain = "Master" | "Settings" | "Security" | "Inventory" | "POS" | "Sync" | "Operations";
+export type SecurityPermissionSurface = "enterprise" | "store" | "both";
+export type SecurityPermissionDefinition = {
+    code: string;
+    name: string;
+    description: string;
+    domain: SecurityPermissionDomain;
+    group: string;
+    surface: SecurityPermissionSurface;
+    sortOrder: number;
+    legacy?: boolean;
+};
+export declare const securityPermissionCatalog: SecurityPermissionDefinition[];
+export declare const securityPermissionDomains: SecurityPermissionDomain[];
+export declare function getSecurityPermissionDefinition(code: string): SecurityPermissionDefinition | null;
+export declare function expandGrantedPermissionCodes(permissionCodes: string[]): string[];
+export declare function groupSecurityPermissions(permissionCodes?: string[]): {
+    domain: SecurityPermissionDomain;
+    groups: {
+        group: string;
+        permissions: SecurityPermissionDefinition[];
+    }[];
+}[];
+export declare function deriveRetailUserCapabilities(permissionCodes: string[], accountStatus: string): {
+    normalizedPermissionCodes: string[];
+    cashierEligible: boolean;
+    supervisorEligible: boolean;
+    canOpenShift: boolean;
+    canCloseShift: boolean;
+    canProcessSale: boolean;
+    canProcessReturn: boolean;
+    canProcessExchange: boolean;
+    canSearchReceipt: boolean;
+    canReprintReceipt: boolean;
+    canAttachCustomer: boolean;
+    canCollectAccountPayment: boolean;
+    canRedeemLoyalty: boolean;
+    canApproveNoReceiptReturn: boolean;
+    canApproveDiscountOverride: boolean;
+    canApprovePriceOverride: boolean;
+    hasInventoryVisibility: boolean;
+    canAdjustInventory: boolean;
+    canSubmitCount: boolean;
+    canCommitCount: boolean;
+    canRequestTransfer: boolean;
+    canIssueTransfer: boolean;
+    canReceiveTransfer: boolean;
+    canReceiveGoods: boolean;
+    canManageSupplierReturns: boolean;
+    canOperateStoreSync: boolean;
+};

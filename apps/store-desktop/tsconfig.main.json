@@ -1,0 +1,33 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-electron",
+    "rootDir": ".",
+    "noEmit": false,
+    "paths": {
+      "@flash-erp/domain": [
+        "../../packages/domain/dist/index.d.ts"
+      ],
+      "@flash-erp/domain/*": [
+        "../../packages/domain/dist/*"
+      ],
+      "@flash-erp/sync-core": [
+        "../../packages/sync-core/dist/index.d.ts"
+      ],
+      "@flash-erp/sync-core/*": [
+        "../../packages/sync-core/dist/*"
+      ],
+      "@renderer/*": [
+        "./src/renderer/*"
+      ],
+      "@shared/*": [
+        "./src/shared/*"
+      ]
+    }
+  },
+  "include": [
+    "electron/**/*.ts",
+    "src/main/**/*.ts",
+    "src/shared/**/*.ts"
+  ]
+}

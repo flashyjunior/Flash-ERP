@@ -1,0 +1,25191 @@
+import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import bcrypt from "bcryptjs";
+import type {
+  AutomaticPromotionPolicy,
+  CustomerAccountPostingEffect,
+  CustomerAccountPostingCustomer,
+  EnterpriseBarcodePublishedPayload,
+  EnterpriseCatalogProductPublishedPayload,
+  EnterpriseCustomerPublishedPayload,
+  EnterpriseBankAccountPublishedPayload,
+  EnterpriseInterStoreTransferPublishedPayload,
+  EnterpriseInterStoreTransferRequestTargetPublishedPayload,
+  EnterpriseInventoryLocationPublishedPayload,
+  EnterpriseGiftCertificatePublishedPayload,
+  EnterprisePermissionPublishedPayload,
+  EnterpriseRetailUserPublishedPayload,
+  EnterpriseRolePublishedPayload,
+  EnterpriseStoreSettingsPublishedPayload,
+  EnterprisePurchaseOrderPublishedPayload,
+  EnterpriseInventorySerialSnapshotPublishedPayload,
+  EnterpriseSupplierReturnPublishedPayload,
+  EnterpriseProductCategoryPublishedPayload,
+  EnterpriseProductDepartmentPublishedPayload,
+  EnterprisePromotionPublishedPayload,
+  EnterprisePriceListPublishedPayload,
+  EnterpriseTaxProfilePublishedPayload,
+  EnterpriseTenderMethodPublishedPayload,
+  EnterpriseUnitOfMeasurePublishedPayload,
+  EnterpriseSyncTaskPayload,
+  StoreGoodsReceiptRecordedExceptionPayload,
+  StoreGoodsReceiptRecordedPayload,
+  StoreSupplierReturnCancellationAcknowledgedPayload,
+  StoreSupplierReturnRecordedPayload,
+  StoreStockCountSessionSubmittedPayload,
+  StoreInventoryLedgerRecordedPayload,
+  StoreInterStoreTransferRequestedPayload,
+  StoreInterStoreTransferIssuedPayload,
+  StoreInterStoreTransferReceivedPayload,
+  StoreInventoryTransferRecordedPayload,
+  StoreCustomerAccountEntryRecordedPayload,
+  StoreSalesOrderRecordedPayload,
+  StoreEodReconciliationRecordedPayload,
+  StoreBankingDepositRecordedPayload,
+  StoreNodePullResponse,
+  StoreNodePushRequest,
+  StoreNodePushResponse,
+  StorePosTransactionCompletedPayload,
+  StoreSyncRecoveryTaskCompletedPayload,
+  SyncEnvelope,
+  SyncPaymentMethod,
+  SyncPosLineIntent,
+  SyncPromotionDiscountType,
+  SyncPromotionTargetScope,
+  SyncRejectedEnvelope,
+  StoreNodeTelemetry,
+} from "@flash-erp/sync-core";
+import {
+  applyAutomaticPromotions,
+  calculateLoyaltyRedemption,
+  deriveCustomerAccountPostingEffect,
+  getRetryDelayMs,
+  MAX_SYNC_RETRY_ATTEMPTS,
+  normalizeLoyaltyPolicy,
+  shouldMoveToDeadLetter,
+} from "@flash-erp/sync-core";
+import { deriveRetailUserCapabilities } from "@flash-erp/domain";
+
+import {
+  computeNextStoreSyncAt,
+  readStoreSyncPolicyFromMetadata,
+  storeSyncPolicyToMetadataEntries,
+} from "../../shared/desktop-runtime.js";
+import {
+  postSyncJsonRaw,
+  SyncHttpClientError,
+} from "../sync-http-client.js";
+import type {
+  StoreBasketCheckoutRequest,
+  StoreBasketCustomerAttachmentInput,
+  StoreBasketAppliedPromotionSummary,
+  StoreBasketItemRequest,
+  StoreBasketLoyaltyRedemptionInput,
+  StoreCatalogBrowseItem,
+  StoreCatalogBrowseRequest,
+  StoreCustomerSearchRequest,
+  StoreCustomerSummary,
+  StoreTransactionReferenceSearchRequest,
+  StoreTransactionReferenceSummary,
+  StorePermissionSummary,
+  StoreRoleSummary,
+  StoreUserSummary,
+  StoreBasketLineSummary,
+  StoreBasketLineUpdateRequest,
+  StoreCancelSalesOrderRequest,
+  StoreBankingDepositSummary,
+  StoreCustomerAccountEntrySummary,
+  StoreCustomerAccountPaymentRequest,
+  StoreCreateSalesOrderRequest,
+  StoreEodReconciliationSummary,
+  StoreInventoryBrowseItem,
+  StoreInventoryBrowseRequest,
+  StoreOperatorCapabilities,
+  StoreOperatorSessionSummary,
+  StoreOperatorSignInInput,
+  StoreReceiptLineReturnRequest,
+  StoreReceiptLookupLine,
+  StoreReceiptLookupResult,
+  StoreReceiptHistoryKind,
+  StoreReceiptSearchRequest,
+  StoreReceiptSearchResult,
+  StoreShiftCloseInput,
+  StoreShiftOpenInput,
+  StoreShiftSummary,
+  StoreShiftTenderSummary,
+  StoreBasketSummary,
+  StoreInventoryLocationSummary,
+  StoreLocalGoodsReceiptSummary,
+  StoreLocalSupplierReturnSummary,
+  StoreLocalReceiptLogoInput,
+  StoreReceiptPrinterSettingsInput,
+  StoreTransferRequestTargetSummary,
+  StoreCatalogLookupResult,
+  StoreParkedBasketSummary,
+  StoreProductCategorySummary,
+  StoreProductDepartmentSummary,
+  StorePriceListEntrySummary,
+  StorePromotionSummary,
+  StorePurchaseOrderBrowseRequest,
+  StoreInterStoreTransferBrowseRequest,
+  StoreInterStoreTransferRequestDraftInput,
+  StoreInterStoreTransferRequestDraftSummary,
+  StoreInterStoreTransferIssueRequest,
+  StoreInterStoreTransferReceiveRequest,
+  StoreInterStoreTransferSummary,
+  StorePurchaseOrderReceiptRequest,
+  StoreRecordBankingDepositRequest,
+  StoreRecordEodReconciliationRequest,
+  StoreStockCountSessionDraftInput,
+  StoreStockCountSessionSummary,
+  StorePurchaseOrderSummary,
+  StoreRecoveryTaskSummary,
+  StoreLoyaltySettingsSummary,
+  StoreOptionSettingsSummary,
+  StoreSerialRegistryBrowseItem,
+  StoreSerialRegistryBrowseRequest,
+  StoreSalesOrderSummary,
+  StoreSellCaptureRequest,
+  StoreSupplierReturnCancellationAcknowledgementRequest,
+  StoreSupplierReturnRequest,
+  StoreSupervisorOverrideInput,
+  StoreSyncActionResult,
+  StoreSyncDeadLetterSummary,
+  StoreSyncEventDetail,
+  StoreSyncHealth,
+  StoreSyncRunOptions,
+  StoreSyncRun,
+  StoreSyncSnapshot,
+  StoreDeploymentMode,
+  StoreStandaloneBankAccountInput,
+  StoreStandaloneCategoryInput,
+  StoreStandaloneCustomerInput,
+  StoreStandaloneDepartmentInput,
+  StoreStandaloneLocationInput,
+  StoreStandalonePasswordPolicyInput,
+  StoreStandalonePriceInput,
+  StoreStandaloneProductInput,
+  StoreStandalonePromotionInput,
+  StoreStandalonePurchaseOrderInput,
+  StoreStandaloneRoleInput,
+  StoreStandaloneSettingsInput,
+  StoreStandaloneSupplierInput,
+  StoreStandaloneTaxProfileInput,
+  StoreStandaloneTenderInput,
+  StoreStandaloneUnitInput,
+  StoreStandaloneUserInput,
+  StoreTerminalConnectionSummary,
+  StoreCatalogMatrixVariant,
+  StoreTenderMethodSummary,
+  StoreBankAccountSummary,
+  StoreSupplierSummary,
+  StoreTransactionSummary,
+  StorePrintableAccountPaymentReceiptDocument,
+  StorePrintableReceiptDocument,
+  StoreReportBrowseRequest,
+  StoreReportResult,
+  StoreSalesReportRow,
+  StoreRemoteInterStoreStockRequestInput,
+  StoreRemoteInventoryLookupInput,
+  StoreRemoteInventoryLookupResult,
+  StoreTenderReportRow,
+  StoreAccountPaymentReportRow,
+  StoreProductSalesReportRow,
+  StoreInventoryReportRow,
+  StoreBankingReportRow,
+} from "../../shared/desktop-runtime.js";
+import { localStoreSchemaSql } from "./local-store-schema.js";
+
+const ENTERPRISE_NODE_CODE = "enterprise-primary";
+const remoteSyncCleanupVersion = "flash-erp-store-remote-sync-v1";
+const DEFAULT_SYNC_PULL_LIMIT = 3;
+const MAX_SYNC_PULL_LIMIT = 5;
+const MAX_SYNC_RESPONSE_BYTES = 8 * 1024 * 1024;
+const demoOutboxSeedIds = ["outbox-001", "outbox-002", "outbox-003"] as const;
+const demoInboxSeedIds = ["inbox-001", "inbox-002", "inbox-003"] as const;
+const demoRunLogSummaries = [
+  "Applied 1 downstream packet and acknowledged 2 upstream events during an earlier store cycle.",
+  "A role publication failed and was parked for operator review.",
+] as const;
+
+const defaultStoreConfig = {
+  retailOrgName: "Flash Retail",
+  storeCode: "accra-central",
+  storeName: "Accra Central",
+  terminalCode: "front-01",
+  nodeCode: process.env.FLASH_ERP_STORE_NODE_CODE ?? "store-accra-central-01",
+} as const;
+
+const defaultInventoryLocations = [
+  {
+    id: "location-001",
+    code: "accra-sales-floor",
+    name: "Accra Sales Floor",
+    locationType: "STORE_FLOOR",
+    status: "ACTIVE",
+    defaults: "Sales default",
+    isSalesDefault: 1,
+    isSalesOrderDefault: 1,
+    isReceivingDefault: 0,
+  },
+  {
+    id: "location-002",
+    code: "accra-central-sales-floor",
+    name: "Accra Central Sales Floor",
+    locationType: "STORE_FLOOR",
+    status: "ACTIVE",
+    defaults: "Standard",
+    isSalesDefault: 0,
+    isSalesOrderDefault: 0,
+    isReceivingDefault: 0,
+  },
+] as const;
+
+const defaultLocationBalanceMatrix = {
+  "FLASH-COLA-50CL": {
+    "accra-sales-floor": 30,
+    "accra-central-sales-floor": 12,
+  },
+  "FLASH-WATER-75CL": {
+    "accra-sales-floor": 40,
+    "accra-central-sales-floor": 18,
+  },
+  "FLASH-BISCUIT-CHOCO": {
+    "accra-sales-floor": 26,
+    "accra-central-sales-floor": 8,
+  },
+  "FLASH-RICE-2KG": {
+    "accra-sales-floor": 10,
+    "accra-central-sales-floor": 6,
+  },
+  "FLASH-TAB-A8": {
+    "accra-sales-floor": 2,
+    "accra-central-sales-floor": 0,
+  },
+} as const;
+
+const demoSerializedProduct = {
+  id: "product-005",
+  code: "FLASH-TAB-A8",
+  name: "Flash Tab A8",
+  barcode: "1000000000005",
+  unitPrice: 299.99,
+  quantityOnHand: 2,
+  soldSerialNumber: "FTA8-0001",
+  availableSerialNumbers: ["FTA8-0002", "FTA8-0003"],
+} as const;
+
+const demoProductHierarchy = {
+  departments: [
+    {
+      id: "department-001",
+      code: "BEVERAGES",
+      name: "Beverages",
+      description: "Ready-to-sell drinks and bottled refreshment.",
+      sortOrder: 10,
+    },
+    {
+      id: "department-002",
+      code: "GROCERY",
+      name: "Grocery",
+      description: "Ambient food, staples, and everyday packaged goods.",
+      sortOrder: 20,
+    },
+    {
+      id: "department-003",
+      code: "ELECTRONICS",
+      name: "Electronics",
+      description: "Serialized consumer devices and related retail technology.",
+      sortOrder: 30,
+    },
+  ],
+  categories: [
+    {
+      id: "category-001",
+      code: "SOFT-DRINKS",
+      name: "Soft Drinks",
+      departmentCode: "BEVERAGES",
+      departmentName: "Beverages",
+      description: "Carbonated and sweetened ready-to-drink beverages.",
+      sortOrder: 10,
+    },
+    {
+      id: "category-002",
+      code: "WATER",
+      name: "Water",
+      departmentCode: "BEVERAGES",
+      departmentName: "Beverages",
+      description: "Packaged still and sparkling water ranges.",
+      sortOrder: 20,
+    },
+    {
+      id: "category-003",
+      code: "SNACKS",
+      name: "Snacks",
+      departmentCode: "GROCERY",
+      departmentName: "Grocery",
+      description: "Impulse food, biscuits, and light packaged snacks.",
+      sortOrder: 10,
+    },
+    {
+      id: "category-004",
+      code: "STAPLES",
+      name: "Staples",
+      departmentCode: "GROCERY",
+      departmentName: "Grocery",
+      description: "Household pantry essentials and dry goods.",
+      sortOrder: 20,
+    },
+    {
+      id: "category-005",
+      code: "TABLETS",
+      name: "Tablets",
+      departmentCode: "ELECTRONICS",
+      departmentName: "Electronics",
+      description: "Serialized tablet devices and related mobility hardware.",
+      sortOrder: 10,
+    },
+  ],
+  productAssignments: {
+    "FLASH-COLA-50CL": {
+      departmentCode: "BEVERAGES",
+      categoryCode: "SOFT-DRINKS",
+      subcategory: "Carbonated",
+    },
+    "FLASH-WATER-75CL": {
+      departmentCode: "BEVERAGES",
+      categoryCode: "WATER",
+      subcategory: "Still Water",
+    },
+    "FLASH-BISCUIT-CHOCO": {
+      departmentCode: "GROCERY",
+      categoryCode: "SNACKS",
+      subcategory: "Biscuits",
+    },
+    "FLASH-RICE-2KG": {
+      departmentCode: "GROCERY",
+      categoryCode: "STAPLES",
+      subcategory: "Rice",
+    },
+    "FLASH-TAB-A8": {
+      departmentCode: "ELECTRONICS",
+      categoryCode: "TABLETS",
+      subcategory: "Android Tablets",
+    },
+  },
+} as const;
+
+const syncPaymentMethods = new Set<SyncPaymentMethod>([
+  "CASH",
+  "CARD",
+  "BANK_TRANSFER",
+  "MOBILE_MONEY",
+  "STORE_CREDIT",
+  "GIFT_CARD",
+  "OTHER",
+]);
+
+const productSnapshotColumns = [
+  "id",
+  "product_code",
+  "product_name",
+  "product_type",
+  "short_name",
+  "description",
+  "primary_image_url",
+  "department_code",
+  "category_code",
+  "subcategory",
+  "unit_of_measure",
+  "taxable",
+  "tax_profile_code",
+  "tax_profile_name",
+  "tax_rate_percent",
+  "tax_inclusive",
+  "track_inventory",
+  "is_serialized",
+  "track_size",
+  "track_color",
+  "must_enter_price_at_pos",
+  "min_stock_level",
+  "reorder_point",
+  "safety_stock_level",
+  "catalog_membership_active",
+  "catalog_sort_order",
+  "unit_price",
+  "quantity_on_hand",
+];
+
+const productSnapshotSelectSql = productSnapshotColumns.join(", ");
+
+function buildQualifiedColumnSelectSql(
+  alias: string,
+  columns: readonly string[],
+) {
+  return columns.map((column) => `${alias}.${column} AS ${column}`).join(", ");
+}
+
+const qualifiedProductSnapshotSelectSql = buildQualifiedColumnSelectSql(
+  "product",
+  productSnapshotColumns,
+);
+const qualifiedProductSnapshotWithoutStockSelectSql =
+  buildQualifiedColumnSelectSql(
+    "product",
+    productSnapshotColumns.filter(
+      (column) => column !== "unit_price" && column !== "quantity_on_hand",
+    ),
+  );
+
+type NumericRow = {
+  value: number | string | bigint | null;
+};
+
+type MetadataRow = {
+  key: string;
+  value: string;
+};
+
+type RunRow = {
+  id: string;
+  run_kind: string;
+  result: string;
+  summary: string;
+  upstream_processed: number | string;
+  downstream_applied: number | string;
+  started_at: string;
+  finished_at: string | null;
+};
+
+type TransactionRow = {
+  transaction_no: string;
+  source_transaction_no: string | null;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE";
+  status: string;
+  total_amount: number | string;
+  customer_no: string | null;
+  customer_name: string | null;
+  terminal_code: string | null;
+  cashier_code: string | null;
+  shift_no: string | null;
+  line_count: number | string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+type CustomerRow = {
+  id: string;
+  customer_no: string;
+  full_name: string;
+  customer_type: string;
+  phone: string | null;
+  email: string | null;
+  home_store_code: string | null;
+  home_store_name: string | null;
+  city: string | null;
+  country_code: string | null;
+  loyalty_enrolled: number | string;
+  loyalty_tier: string | null;
+  loyalty_points_balance: number | string;
+  allow_credit_sales: number | string;
+  credit_limit_amount: number | string | null;
+  receivable_balance_amount: number | string;
+  note: string | null;
+  status: string;
+  updated_at: string;
+};
+
+type CustomerAccountEntryRow = {
+  id: string;
+  entry_no: string;
+  customer_id: string;
+  customer_no: string;
+  customer_name: string;
+  entry_type: "ACCOUNT_PAYMENT";
+  payment_method: SyncPaymentMethod;
+  tender_method_code: string | null;
+  tender_method_name: string | null;
+  bank_account_id?: string | null;
+  bank_code?: string | null;
+  bank_name?: string | null;
+  bank_branch_code?: string | null;
+  bank_branch_name?: string | null;
+  bank_account_number?: string | null;
+  bank_account_name?: string | null;
+  amount: number | string;
+  reference: string | null;
+  note: string | null;
+  shift_id: string;
+  shift_no: string | null;
+  cashier_code: string | null;
+  synced_at: string | null;
+  occurred_at: string;
+  updated_at: string;
+};
+
+type ReportSalesRow = {
+  id: string;
+  transaction_no: string;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE";
+  source_transaction_no: string | null;
+  subtotal_amount: number | string;
+  discount_amount: number | string;
+  tax_amount: number | string;
+  total_amount: number | string;
+  paid_amount: number | string;
+  completed_at: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
+  cashier_code: string | null;
+  line_count: number | string;
+  product_preview: string | null;
+};
+
+type ReportTenderRow = {
+  method: SyncPaymentMethod;
+  tender_method_code: string | null;
+  tender_method_name: string | null;
+  transaction_count: number | string;
+  net_amount: number | string;
+};
+
+type ReportAccountPaymentRow = {
+  entry_no: string;
+  occurred_at: string;
+  cashier_code: string | null;
+  customer_no: string;
+  customer_name: string;
+  payment_method: SyncPaymentMethod;
+  tender_method_code: string | null;
+  tender_method_name: string | null;
+  amount: number | string;
+  reference: string | null;
+};
+
+type ReportProductRow = {
+  product_code: string;
+  product_name: string;
+  quantity: number | string;
+  gross_amount: number | string;
+  discount_amount: number | string;
+  tax_amount: number | string;
+  net_amount: number | string;
+};
+
+type ReportInventoryRow = {
+  location_code: string;
+  location_name: string;
+  product_code: string;
+  product_name: string;
+  quantity_on_hand: number | string;
+  unit_price: number | string;
+  updated_at: string;
+};
+
+type ReportBankingRow = {
+  deposit_no: string;
+  reconciliation_no: string;
+  shift_no: string;
+  deposited_at: string;
+  operator_name: string | null;
+  bank_name: string | null;
+  bank_branch_name: string | null;
+  bank_account_number: string | null;
+  amount: number | string;
+  reference: string | null;
+};
+
+type SalesOrderRow = {
+  id: string;
+  order_no: string;
+  source_transaction_id: string;
+  source_transaction_no: string;
+  customer_id: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
+  status: "OPEN" | "FULFILLED" | "CANCELLED";
+  total_amount: number | string;
+  deposit_amount: number | string;
+  balance_amount: number | string;
+  deposit_tender_method_code: string | null;
+  deposit_tender_method_name: string | null;
+  deposit_payment_method: SyncPaymentMethod | null;
+  deposit_reference: string | null;
+  deposit_paid_at: string | null;
+  line_count: number | string;
+  item_count: number | string;
+  operator_name: string | null;
+  note: string | null;
+  fulfilled_transaction_id: string | null;
+  fulfilled_transaction_no: string | null;
+  synced_at: string | null;
+  created_at: string;
+  fulfilled_at: string | null;
+  cancelled_at: string | null;
+  updated_at: string;
+};
+
+type EodReconciliationRow = {
+  id: string;
+  reconciliation_no: string;
+  shift_id: string;
+  shift_no: string;
+  cashier_code: string;
+  expected_cash_amount: number | string;
+  declared_cash_amount: number | string;
+  variance_amount: number | string;
+  net_sales_amount: number | string;
+  cash_tendered_amount: number | string;
+  non_cash_tendered_amount: number | string;
+  transaction_count: number | string;
+  operator_name: string | null;
+  note: string | null;
+  synced_at: string | null;
+  reconciled_at: string;
+  updated_at: string;
+};
+
+type BankingDepositRow = {
+  id: string;
+  deposit_no: string;
+  reconciliation_id: string;
+  reconciliation_no: string;
+  shift_id: string;
+  shift_no: string;
+  amount: number | string;
+  bank_account_id: string | null;
+  bank_code: string | null;
+  bank_name: string | null;
+  bank_branch_code: string | null;
+  bank_branch_name: string | null;
+  bank_account_number: string | null;
+  bank_account_name: string | null;
+  reference: string | null;
+  operator_name: string | null;
+  note: string | null;
+  synced_at: string | null;
+  deposited_at: string;
+  updated_at: string;
+};
+
+type RetailUserSnapshotRow = {
+  id: string;
+  login_id: string;
+  email: string | null;
+  display_name: string;
+  account_status: string;
+  home_store_code: string | null;
+  home_store_name: string | null;
+  role_codes_json: string | null;
+  role_names_json: string | null;
+  permission_codes_json: string | null;
+  password_hash: string | null;
+  password_updated_at: string | null;
+  cashier_eligible: number | string;
+  supervisor_eligible: number | string;
+  updated_at: string;
+};
+
+type RoleSnapshotRow = {
+  id: string;
+  role_code: string;
+  role_name: string;
+  description: string | null;
+  status: string;
+  permission_codes_json: string | null;
+  updated_at: string;
+  user_count?: number | string;
+};
+
+type PermissionSnapshotRow = {
+  id: string;
+  permission_code: string;
+  permission_name: string;
+  description: string | null;
+  updated_at: string;
+};
+
+type ActiveOperatorSessionRow = {
+  session_id: string;
+  terminal_code: string | null;
+  opened_at: string;
+  last_seen_at: string;
+  user_id: string;
+  login_id: string;
+  email: string | null;
+  display_name: string;
+  account_status: string;
+  home_store_code: string | null;
+  home_store_name: string | null;
+  role_codes_json: string | null;
+  role_names_json: string | null;
+  permission_codes_json: string | null;
+  updated_at: string;
+};
+
+type TerminalConnectionRow = {
+  terminal_code: string;
+  client_name: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  request_count: number | string;
+  last_method: string | null;
+  remote_address: string | null;
+  user_agent: string | null;
+};
+
+type PosShiftRow = {
+  id: string;
+  shift_no: string;
+  terminal_code: string;
+  cashier_code: string;
+  status: "OPEN" | "CLOSED";
+  opening_float_amount: number | string;
+  closing_declared_cash: number | string | null;
+  closing_variance: number | string | null;
+  opened_at: string;
+  closed_at: string | null;
+  record_version: number | string;
+};
+
+type ShiftTransactionSummaryRow = {
+  id: string;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE";
+  total_amount: number | string;
+  change_amount: number | string;
+  has_cash_payment: number | string;
+};
+
+type ShiftPaymentSummaryRow = {
+  pos_transaction_id: string;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE" | "ACCOUNT_PAYMENT";
+  total_amount: number | string;
+  method: SyncPaymentMethod;
+  tender_method_code: string | null;
+  tender_method_name: string | null;
+  amount: number | string;
+};
+
+type BasketHeaderRow = {
+  id: string;
+  transaction_no: string;
+  customer_id: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
+  customer_loyalty_enrolled: number | string | null;
+  customer_loyalty_tier: string | null;
+  customer_loyalty_points_balance: number | string | null;
+  source_transaction_id: string | null;
+  source_transaction_no: string | null;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE";
+  status: string;
+  subtotal_amount: number | string;
+  discount_amount: number | string;
+  loyalty_redemption_points: number | string;
+  loyalty_redemption_amount: number | string;
+  tax_amount: number | string;
+  total_amount: number | string;
+  paid_amount: number | string;
+  change_amount: number | string;
+  notes: string | null;
+  header_reference?: string | null;
+  additional_details?: string | null;
+  updated_at: string;
+  completed_at: string | null;
+  record_version: number | string;
+};
+
+type BasketLineRow = {
+  id: string;
+  pos_transaction_id: string;
+  product_id: string;
+  line_intent: SyncPosLineIntent;
+  source_line_id: string | null;
+  applied_promotion_code: string | null;
+  applied_promotion_name: string | null;
+  product_code_snapshot: string;
+  product_variant_code_snapshot: string | null;
+  product_name_snapshot: string;
+  variant_size: string | null;
+  variant_color: string | null;
+  variant_attributes_snapshot: string | null;
+  line_note: string | null;
+  serial_numbers_json: string | null;
+  quantity: number | string;
+  unit_price: number | string;
+  discount_amount: number | string;
+  tax_amount: number | string;
+  line_total: number | string;
+  manual_price_override: number | string;
+  manual_discount_override: number | string;
+};
+
+type ReceiptPrintHeaderRow = {
+  id: string;
+  transaction_no: string;
+  source_transaction_no: string | null;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE";
+  status: string;
+  subtotal_amount: number | string;
+  discount_amount: number | string;
+  loyalty_redemption_points: number | string;
+  loyalty_redemption_amount: number | string;
+  tax_amount: number | string;
+  total_amount: number | string;
+  paid_amount: number | string;
+  change_amount: number | string;
+  notes: string | null;
+  header_reference: string | null;
+  additional_details: string | null;
+  completed_at: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
+  shift_no: string | null;
+  cashier_code: string | null;
+};
+
+type ReceiptPrintLineRow = {
+  id: string;
+  line_intent: SyncPosLineIntent;
+  source_line_id: string | null;
+  applied_promotion_code: string | null;
+  applied_promotion_name: string | null;
+  product_code_snapshot: string;
+  product_name_snapshot: string;
+  variant_size: string | null;
+  variant_color: string | null;
+  line_note: string | null;
+  serial_numbers_json: string | null;
+  quantity: number | string;
+  unit_price: number | string;
+  discount_amount: number | string;
+  tax_amount: number | string;
+  line_total: number | string;
+};
+
+type ReceiptPrintPaymentRow = {
+  id: string;
+  tender_method_code: string | null;
+  tender_method_name: string | null;
+  bank_account_id: string | null;
+  bank_code: string | null;
+  bank_name: string | null;
+  bank_branch_code: string | null;
+  bank_branch_name: string | null;
+  bank_account_number: string | null;
+  bank_account_name: string | null;
+  method: SyncPaymentMethod;
+  amount: number | string;
+  reference: string | null;
+  received_at: string;
+};
+
+type ProductRow = {
+  id: string;
+  product_code: string;
+  product_name: string;
+  product_type: string;
+  short_name: string | null;
+  description: string | null;
+  primary_image_url: string | null;
+  department_code: string | null;
+  category_code: string | null;
+  subcategory: string | null;
+  unit_of_measure: string;
+  taxable: number | string;
+  tax_profile_code: string | null;
+  tax_profile_name: string | null;
+  tax_rate_percent: number | string | null;
+  tax_inclusive: number | string;
+  track_inventory: number | string;
+  is_serialized: number | string;
+  track_size: number | string;
+  track_color: number | string;
+  must_enter_price_at_pos: number | string;
+  min_stock_level: number | string | null;
+  reorder_point: number | string | null;
+  safety_stock_level: number | string | null;
+  catalog_membership_active?: number | string;
+  catalog_sort_order?: number | string | null;
+  unit_price: number | string;
+  quantity_on_hand: number | string;
+};
+
+type SerialRegistryStatus =
+  | "AVAILABLE"
+  | "IN_TRANSIT"
+  | "SOLD"
+  | "ADJUSTED_OUT";
+
+type SerialRegistryRow = {
+  id: string;
+  product_code: string;
+  serial_number: string;
+  inventory_location_code: string | null;
+  status: SerialRegistryStatus;
+  source_transaction_id: string | null;
+  source_transaction_no: string | null;
+  updated_at: string;
+};
+
+type TenderMethodRow = {
+  tender_method_code: string;
+  tender_method_name: string;
+  payment_method: SyncPaymentMethod;
+  gateway_provider: "PAYSTACK" | "FLUTTERWAVE" | "OTHER" | null;
+  gateway_mode: "TEST" | "LIVE" | null;
+  gateway_merchant_id: string | null;
+  gateway_public_key: string | null;
+  gateway_callback_url: string | null;
+  gateway_active: number | string;
+  gateway_status: "DISABLED" | "READY" | "NEEDS_REVIEW";
+  requires_reference: number | string;
+  allow_change: number | string;
+  allow_refund: number | string;
+  allow_open_cash_drawer: number | string;
+  status: string;
+  sort_order: number | string;
+  updated_at: string;
+};
+
+type BankAccountSnapshotRow = {
+  id: string;
+  bank_code: string;
+  bank_name: string;
+  branch_code: string;
+  branch_name: string;
+  account_number: string;
+  account_name: string;
+  currency_code: string;
+  status: string;
+  updated_at: string;
+};
+
+type PromotionSnapshotRow = {
+  id: string;
+  promotion_code: string;
+  promotion_name: string;
+  description: string | null;
+  discount_type: "PERCENT" | "AMOUNT" | "FIXED_PRICE";
+  target_scope: "ALL_ITEMS" | "DEPARTMENT" | "CATEGORY" | "PRODUCT";
+  discount_value: number | string;
+  minimum_basket_amount: number | string | null;
+  minimum_line_quantity: number | string | null;
+  buy_quantity: number | string | null;
+  reward_quantity: number | string | null;
+  target_department_code: string | null;
+  target_category_code: string | null;
+  target_product_code: string | null;
+  eligible_store_codes_json: string | null;
+  eligible_customer_types_json: string | null;
+  eligible_loyalty_tiers_json: string | null;
+  active_days_of_week_json: string | null;
+  active_from_minutes: number | string | null;
+  active_to_minutes: number | string | null;
+  coupon_required: number | string;
+  coupon_code: string | null;
+  allow_with_loyalty: number | string;
+  apply_once_per_basket: number | string;
+  priority: number | string;
+  start_at: string | null;
+  end_at: string | null;
+  status: string;
+  updated_at: string;
+};
+
+type BarcodeSnapshotRow = {
+  id: string;
+  barcode_code: string;
+  product_code: string;
+  barcode_type: string;
+  updated_at: string;
+};
+
+type ProductVariantSnapshotRow = {
+  id: string;
+  product_code: string;
+  variant_code: string;
+  sku: string | null;
+  display_name: string | null;
+  unit_price: number | string;
+  quantity_on_hand: number | string;
+  barcode: string | null;
+  status: string;
+  attributes_json: string | null;
+  updated_at: string;
+};
+
+type CatalogLookupRow = ProductRow & {
+  barcode_code: string | null;
+  barcode_type: string | null;
+  matched_on: "barcode" | "productCode";
+  product_variant_code: string | null;
+};
+
+type InventoryLocationRow = {
+  location_code: string;
+  location_name: string;
+  location_type: string;
+  status: string;
+  defaults: string;
+  is_sales_default: number | string;
+  is_sales_order_default: number | string;
+  is_receiving_default: number | string;
+  updated_at: string;
+  tracked_products: number | string;
+  on_hand_quantity: number | string;
+  negative_positions: number | string;
+};
+
+type InventoryLocationHighlightRow = {
+  location_code: string;
+  product_code: string;
+  quantity_on_hand: number | string;
+};
+
+type InventoryBrowseRow = {
+  location_code: string;
+  location_name: string;
+  product_code: string;
+  product_name: string;
+  short_name: string | null;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  quantity_on_hand: number | string;
+  min_stock_level: number | string | null;
+  reorder_point: number | string | null;
+  safety_stock_level: number | string | null;
+  unit_price: number | string;
+  is_serialized: number | string;
+  updated_at: string;
+};
+
+type SerialRegistryBrowseRow = {
+  product_code: string;
+  product_name: string | null;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  serial_number: string;
+  inventory_location_code: string | null;
+  location_name: string | null;
+  status: SerialRegistryStatus;
+  source_transaction_id: string | null;
+  source_transaction_no: string | null;
+  updated_at: string;
+};
+
+type PurchaseOrderSnapshotRow = {
+  id: string;
+  purchase_order_no: string;
+  status: string;
+  inventory_location_code: string;
+  inventory_location_name: string;
+  supplier_no: string | null;
+  supplier_name: string | null;
+  external_reference: string | null;
+  note: string | null;
+  operator_name: string | null;
+  ordered_quantity: number | string;
+  received_quantity: number | string;
+  exception_quantity: number | string;
+  outstanding_quantity: number | string;
+  committed_at: string | null;
+  closed_at: string | null;
+  closure_reason: string | null;
+  closure_note: string | null;
+  closure_operator_name: string | null;
+  updated_at: string;
+};
+
+type PurchaseOrderLineSnapshotRow = {
+  id: string;
+  purchase_order_id: string;
+  line_no: number | string;
+  product_code: string;
+  product_name: string;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  is_serialized: number | string;
+  ordered_quantity: number | string;
+  received_quantity: number | string;
+  exception_quantity: number | string;
+  outstanding_quantity: number | string;
+  unit_cost: number | string | null;
+  updated_at: string;
+};
+
+type LocalGoodsReceiptRow = {
+  id: string;
+  goods_receipt_no: string;
+  purchase_order_id: string | null;
+  purchase_order_no: string | null;
+  inventory_location_code: string;
+  inventory_location_name: string | null;
+  supplier_no: string | null;
+  supplier_name: string | null;
+  external_reference: string | null;
+  note: string | null;
+  operator_name: string;
+  total_quantity: number | string;
+  line_count: number | string;
+  exception_quantity: number | string;
+  exception_count: number | string;
+  synced_at: string | null;
+  received_at: string;
+  updated_at: string;
+};
+
+type LocalGoodsReceiptLineRow = {
+  id: string;
+  local_goods_receipt_id: string;
+  purchase_order_line_id: string | null;
+  line_no: number | string;
+  product_code: string;
+  product_name: string;
+  ordered_quantity: number | string | null;
+  quantity: number | string;
+  unit_cost: number | string | null;
+  serial_numbers_json: string | null;
+};
+
+type LocalGoodsReceiptExceptionRow = {
+  id: string;
+  local_goods_receipt_id: string;
+  purchase_order_line_id: string | null;
+  line_no: number | string;
+  product_code: string;
+  product_name: string;
+  quantity: number | string;
+  unit_cost: number | string | null;
+  reason: string;
+  note: string | null;
+};
+
+type LocalSupplierReturnRow = {
+  id: string;
+  supplier_return_no: string;
+  purchase_order_id: string | null;
+  purchase_order_no: string | null;
+  goods_receipt_id: string;
+  goods_receipt_no: string;
+  inventory_location_code: string;
+  inventory_location_name: string | null;
+  supplier_no: string;
+  supplier_name: string;
+  external_reference: string | null;
+  reason: string;
+  status: "POSTED" | "CANCELLED";
+  note: string | null;
+  operator_name: string;
+  total_quantity: number | string;
+  line_count: number | string;
+  synced_at: string | null;
+  returned_at: string;
+  cancelled_at: string | null;
+  cancellation_note: string | null;
+  cancellation_operator_name: string | null;
+  cancellation_acknowledged_at: string | null;
+  cancellation_acknowledged_by: string | null;
+  cancellation_acknowledgement_note: string | null;
+  cancellation_ack_synced_at: string | null;
+  updated_at: string;
+};
+
+type LocalSupplierReturnLineRow = {
+  id: string;
+  local_supplier_return_id: string;
+  goods_receipt_line_id: string | null;
+  purchase_order_line_id: string | null;
+  line_no: number | string;
+  product_code: string;
+  product_name: string;
+  quantity: number | string;
+  unit_cost: number | string | null;
+  serial_numbers_json: string | null;
+};
+
+type InterStoreTransferSnapshotRow = {
+  id: string;
+  transfer_no: string;
+  transfer_batch_no: string | null;
+  line_no: number | string;
+  role: "SOURCE" | "DESTINATION";
+  origin: "ENTERPRISE" | "STORE_REQUEST";
+  status: string;
+  external_reference: string | null;
+  source_store_code: string;
+  source_store_name: string;
+  source_location_code: string;
+  source_location_name: string;
+  destination_store_code: string;
+  destination_store_name: string;
+  destination_location_code: string;
+  destination_location_name: string;
+  product_code: string;
+  product_name: string;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  is_serialized: number | string;
+  requested_quantity: number | string;
+  issued_quantity: number | string;
+  received_quantity: number | string;
+  outstanding_issue_quantity: number | string;
+  outstanding_receipt_quantity: number | string;
+  unit_cost: number | string | null;
+  issued_serial_numbers_json: string | null;
+  received_serial_numbers_json: string | null;
+  request_note: string | null;
+  issue_note: string | null;
+  receipt_note: string | null;
+  request_operator_name: string | null;
+  issue_operator_name: string | null;
+  receipt_operator_name: string | null;
+  requested_by_node_code: string | null;
+  source_node_code: string | null;
+  destination_node_code: string | null;
+  requested_at: string;
+  required_at: string | null;
+  issued_at: string | null;
+  received_at: string | null;
+  closed_at: string | null;
+  updated_at: string;
+};
+
+type TransferRequestTargetSnapshotRow = {
+  source_store_code: string;
+  source_store_name: string;
+  source_store_sales_enabled: number | string;
+  source_store_warehouse_enabled: number | string;
+  source_location_code: string;
+  source_location_name: string;
+  source_location_type: string;
+  source_location_status: string;
+  source_location_defaults: string;
+  source_warehouse_code: string | null;
+  source_warehouse_name: string | null;
+  use_for_sales_default: number | string;
+  use_for_receiving_default: number | string;
+  updated_at: string;
+};
+
+type InterStoreTransferRequestDraftRow = {
+  id: string;
+  request_no: string;
+  status: "DRAFT" | "SUBMITTED";
+  source_store_code: string;
+  source_store_name: string;
+  source_location_code: string;
+  source_location_name: string;
+  destination_store_code: string;
+  destination_store_name: string;
+  destination_location_code: string;
+  destination_location_name: string;
+  product_code: string;
+  product_name: string;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  is_serialized: number | string;
+  quantity: number | string;
+  external_reference: string | null;
+  note: string | null;
+  operator_name: string;
+  submitted_at: string | null;
+  updated_at: string;
+};
+
+type StockCountSessionRow = {
+  id: string;
+  session_no: string;
+  status: "DRAFT" | "SUBMITTED" | "COMMITTED";
+  inventory_location_code: string;
+  inventory_location_name: string;
+  product_code: string;
+  product_name: string;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  is_serialized: number | string;
+  previous_quantity: number | string;
+  counted_quantity: number | string;
+  variance_quantity: number | string;
+  previous_serial_numbers_json: string | null;
+  counted_serial_numbers_json: string | null;
+  note: string | null;
+  operator_name: string;
+  submitted_at: string | null;
+  committed_at: string | null;
+  updated_at: string;
+};
+
+type ProductDepartmentSnapshotRow = {
+  department_code: string;
+  department_name: string;
+  description: string | null;
+  status: string;
+  sort_order: number | string;
+  updated_at: string;
+  category_count?: number | string;
+};
+
+type ProductCategorySnapshotRow = {
+  category_code: string;
+  category_name: string;
+  department_code: string;
+  department_name: string;
+  description: string | null;
+  status: string;
+  sort_order: number | string;
+  updated_at: string;
+};
+
+type ReceiptSearchHeaderRow = {
+  id: string;
+  transaction_no: string;
+  source_transaction_no: string | null;
+  transaction_type: BasketTransactionType;
+  status: string;
+  total_amount: number | string;
+  completed_at: string | null;
+  updated_at: string;
+  notes: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
+  cashier_code: string | null;
+  shift_no: string | null;
+};
+
+type ReceiptSearchLineRow = {
+  pos_transaction_id: string;
+  product_code_snapshot: string;
+  product_name_snapshot: string;
+  barcode_code: string | null;
+};
+
+type AccountPaymentReceiptSearchRow = {
+  id: string;
+  entry_no: string;
+  amount: number | string;
+  occurred_at: string;
+  note: string | null;
+  customer_no: string;
+  customer_name: string;
+  cashier_code: string | null;
+  shift_no: string | null;
+  payment_method: SyncPaymentMethod;
+  tender_method_name: string | null;
+  reference: string | null;
+};
+
+type ReceiptLookupHeaderRow = {
+  id: string;
+  transaction_no: string;
+  customer_id: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
+  transaction_type: BasketTransactionType;
+  status: string;
+  total_amount: number | string;
+  header_reference: string | null;
+  additional_details: string | null;
+  completed_at: string | null;
+};
+
+type ReceiptLookupLineRow = {
+  source_line_id: string;
+  applied_promotion_code: string | null;
+  applied_promotion_name: string | null;
+  product_code_snapshot: string;
+  product_name_snapshot: string;
+  serial_numbers_json: string | null;
+  quantity_sold: number | string;
+  quantity_returned: number | string;
+  quantity_pending: number | string;
+  unit_price: number | string;
+  discount_amount: number | string;
+  tax_amount: number | string;
+  line_total: number | string;
+};
+
+type RecoveryTaskRow = {
+  id: string;
+  task_type: string;
+  status: string;
+  title: string;
+  instructions: string;
+  source_inbound_event_id: string;
+  source_event_type: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  transaction_no: string | null;
+  product_code: string | null;
+  replacement_aggregate_type: string;
+  replacement_aggregate_id: string;
+  replacement_event_type: string;
+  replacement_record_version: number | string;
+  replacement_payload_json: string;
+  operator_name: string;
+  operator_note: string;
+  store_note: string | null;
+  requested_at: string;
+  completed_at: string | null;
+};
+
+type RecoveryTaskSnapshotRow = RecoveryTaskRow & {
+  product_name: string | null;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  is_serialized: number | string | null;
+};
+
+type OutboxEnvelopeRow = {
+  id: string;
+  target_node_code: string | null;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  idempotency_key: string;
+  payload_json: string;
+  attempt_count: number | string;
+  record_version: number | string;
+  created_at: string;
+};
+
+type SyncDeadLetterRow = {
+  id: string;
+  direction: "UPSTREAM" | "DOWNSTREAM";
+  status: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  node_code: string | null;
+  attempt_count: number | string;
+  payload_json: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SyncEventDetailRow = SyncDeadLetterRow & {
+  payload_json: string;
+  applied_at: string | null;
+  acknowledged_at: string | null;
+};
+
+type InboxEnvelopeRow = {
+  id: string;
+  source_node_code: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  payload_json: string;
+  status: string;
+  received_at: string;
+  acknowledged_at: string | null;
+};
+
+export type StoreTerminalContext = {
+  terminalCode?: string | null;
+  clientName?: string | null;
+};
+
+type LocalStoreServiceOptions = {
+  deploymentMode?: StoreDeploymentMode | string | null;
+  syncBaseUrl?: string | null;
+  databasePath?: string | null;
+  nodeCode?: string | null;
+  terminalCode?: string | null;
+};
+
+type ShiftContext = {
+  id: string;
+  shift_no: string;
+  cashier_code: string;
+};
+
+type NormalizedCheckoutPayment = {
+  paymentId: string;
+  method: SyncPaymentMethod;
+  tenderMethodCode: string | null;
+  tenderMethodName: string | null;
+  bankAccountId: string | null;
+  bankCode: string | null;
+  bankName: string | null;
+  bankBranchCode: string | null;
+  bankBranchName: string | null;
+  bankAccountNumber: string | null;
+  bankAccountName: string | null;
+  allowChange: boolean;
+  allowRefund: boolean;
+  requiresReference: boolean;
+  amount: number;
+  reference: string | null;
+  receivedAt: string;
+};
+
+type BasketTransactionType = BasketHeaderRow["transaction_type"];
+
+const ENTERPRISE_DATABASE_SCHEMA_ERROR_CODE =
+  "ENTERPRISE_DATABASE_SCHEMA_NOT_READY";
+const enterpriseDatabaseSchemaNotReadyMessage =
+  "Enterprise database schema is not ready for this Flash ERP build. Apply the pending Prisma migrations on HQ and restart the enterprise server before retrying sync.";
+
+type StoreSyncFailureKind =
+  | "HTTP"
+  | "SERVER"
+  | "TIMEOUT"
+  | "NETWORK"
+  | "SCHEMA"
+  | "UNKNOWN";
+
+class StoreSyncTransportError extends Error {
+  constructor(
+    message: string,
+    readonly failureKind: StoreSyncFailureKind,
+    readonly httpStatus: number | null = null,
+  ) {
+    super(message);
+    this.name = "StoreSyncTransportError";
+  }
+}
+
+function isOversizedSyncResponseError(error: unknown) {
+  return (
+    error instanceof StoreSyncTransportError &&
+    error.failureKind === "SERVER" &&
+    error.httpStatus === 413
+  );
+}
+
+function formatBytes(value: number) {
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  if (value >= 1024) {
+    return `${Math.ceil(value / 1024)} KB`;
+  }
+
+  return `${value} B`;
+}
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function addMillisecondsIso(value: string, milliseconds: number) {
+  return new Date(new Date(value).getTime() + milliseconds).toISOString();
+}
+
+function nextSyncRetryAt(baseAt: string, attemptCount: number) {
+  return addMillisecondsIso(baseAt, getRetryDelayMs(Math.max(0, attemptCount)));
+}
+
+function classifySyncFailure(error: unknown): {
+  message: string;
+  failureKind: StoreSyncFailureKind;
+  httpStatus: number | null;
+} {
+  if (error instanceof StoreSyncTransportError) {
+    return {
+      message: error.message,
+      failureKind: error.failureKind,
+      httpStatus: error.httpStatus,
+    };
+  }
+
+  return {
+    message:
+      error instanceof Error
+        ? error.message
+        : "The enterprise sync request failed.",
+    failureKind: "UNKNOWN",
+    httpStatus: null,
+  };
+}
+
+function isSyncSchemaDriftPayload(payload: {
+  code?: string;
+  schemaDrift?: boolean;
+}) {
+  return (
+    payload.schemaDrift === true ||
+    payload.code === ENTERPRISE_DATABASE_SCHEMA_ERROR_CODE
+  );
+}
+
+function minutesAgo(value: number) {
+  return new Date(Date.now() - value * 60_000).toISOString();
+}
+
+function daysAgo(value: number) {
+  return new Date(Date.now() - value * 86_400_000).toISOString();
+}
+
+function buildLocalGoodsReceiptNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `GRN-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalSupplierReturnNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `RTV-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalPurchaseOrderNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `PO-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalStockCountSessionNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `CNT-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalCustomerAccountEntryNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `CAP-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalSalesOrderNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `SO-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalReconciliationNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `EOD-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalBankingDepositNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `BNK-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function deriveLocalInterStoreTransferStatus(input: {
+  requestedQuantity: number;
+  issuedQuantity: number;
+  receivedQuantity: number;
+  closedAt?: string | null;
+}) {
+  if (input.closedAt) {
+    return "CLOSED" as const;
+  }
+
+  if (input.receivedQuantity > 0) {
+    if (input.receivedQuantity + 0.0001 >= input.requestedQuantity) {
+      return "RECEIVED" as const;
+    }
+
+    return "PART_RECEIVED" as const;
+  }
+
+  if (input.issuedQuantity > 0) {
+    if (input.issuedQuantity + 0.0001 >= input.requestedQuantity) {
+      return "ISSUED" as const;
+    }
+
+    return "PART_ISSUED" as const;
+  }
+
+  return "REQUESTED" as const;
+}
+
+function asNumber(value: number | string | bigint | null | undefined) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  if (typeof value === "string") {
+    return Number(value);
+  }
+
+  return 0;
+}
+
+function asNullableNumber(value: number | string | bigint | null | undefined) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  return asNumber(value);
+}
+
+function asBooleanFlag(value: number | string | bigint | null | undefined) {
+  return asNumber(value) > 0;
+}
+
+function formatLocalLocationDefaults(input: {
+  defaults: string | null | undefined;
+  is_sales_default: number | string | bigint | null | undefined;
+  is_sales_order_default: number | string | bigint | null | undefined;
+  is_receiving_default: number | string | bigint | null | undefined;
+}) {
+  const labels = new Set(
+    String(input.defaults ?? "")
+      .split(/[,/]/)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+
+  if (asBooleanFlag(input.is_sales_default)) {
+    labels.add("Sales default");
+  }
+
+  if (asBooleanFlag(input.is_sales_order_default)) {
+    labels.add("Sales order default");
+  }
+
+  if (asBooleanFlag(input.is_receiving_default)) {
+    labels.add("Receiving default");
+  }
+
+  return labels.size ? Array.from(labels).join(", ") : "Standard";
+}
+
+function hasLocalLoyaltyAccount(input: {
+  loyalty_enrolled: number | string | null | undefined;
+  loyalty_tier?: string | null;
+  loyalty_points_balance: number | string | null | undefined;
+}) {
+  return (
+    asBooleanFlag(input.loyalty_enrolled) ||
+    Math.trunc(asNumber(input.loyalty_points_balance)) > 0 ||
+    Boolean(input.loyalty_tier?.trim())
+  );
+}
+
+function normalizeSerialNumbers(serialNumbers?: string[] | null) {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawValue of serialNumbers ?? []) {
+    if (typeof rawValue !== "string") {
+      continue;
+    }
+
+    const nextValue = rawValue.trim();
+
+    if (!nextValue) {
+      continue;
+    }
+
+    const duplicateKey = nextValue.toUpperCase();
+
+    if (seen.has(duplicateKey)) {
+      continue;
+    }
+
+    seen.add(duplicateKey);
+    normalized.push(nextValue);
+  }
+
+  return normalized;
+}
+
+function readSerializedLineNumbers(value: string | null | undefined) {
+  if (!value) {
+    return [] as string[];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? normalizeSerialNumbers(parsed as string[])
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSerializedLineNumbers(serialNumbers: string[]) {
+  return serialNumbers.length > 0 ? JSON.stringify(serialNumbers) : null;
+}
+
+function readStringArray(value: string | null | undefined) {
+  if (!value) {
+    return [] as string[];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      return [] as string[];
+    }
+
+    return parsed
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  } catch {
+    return [] as string[];
+  }
+}
+
+function writeStringArray(values: string[]) {
+  const normalized = values
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .filter(
+      (value, index, items) =>
+        value.length > 0 && items.indexOf(value) === index,
+    );
+
+  return normalized.length > 0 ? JSON.stringify(normalized) : null;
+}
+
+function readMatrixVariantAttributes(value: string | null | undefined) {
+  if (!value) {
+    return [] as StoreCatalogMatrixVariant["attributes"];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      return [] as StoreCatalogMatrixVariant["attributes"];
+    }
+
+    return parsed
+      .map((entry) =>
+        entry && typeof entry === "object" && !Array.isArray(entry)
+          ? (entry as Record<string, unknown>)
+          : null,
+      )
+      .filter((entry): entry is Record<string, unknown> => entry !== null)
+      .map((entry) => ({
+        attributeCode:
+          typeof entry.attributeCode === "string" ? entry.attributeCode : "",
+        attributeName:
+          typeof entry.attributeName === "string" ? entry.attributeName : "",
+        valueCode: typeof entry.valueCode === "string" ? entry.valueCode : "",
+        valueLabel:
+          typeof entry.valueLabel === "string" ? entry.valueLabel : "",
+      }))
+      .filter(
+        (entry) =>
+          entry.attributeCode.trim().length > 0 &&
+          entry.valueCode.trim().length > 0,
+      );
+  } catch {
+    return [] as StoreCatalogMatrixVariant["attributes"];
+  }
+}
+
+function writeMatrixVariantAttributes(
+  attributes: StoreCatalogMatrixVariant["attributes"],
+) {
+  const normalized = attributes.filter(
+    (attribute) =>
+      attribute.attributeCode.trim().length > 0 &&
+      attribute.valueCode.trim().length > 0,
+  );
+
+  return JSON.stringify(normalized);
+}
+
+function formatMatrixVariantAttributes(
+  attributes: StoreCatalogMatrixVariant["attributes"],
+) {
+  return attributes
+    .map((attribute) => `${attribute.attributeName}: ${attribute.valueLabel}`)
+    .join(" / ");
+}
+
+function readCatalogPolicy(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    const readCodes = (key: string) => {
+      const codes = Array.isArray(parsed[key])
+        ? parsed[key]
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => entry.trim())
+            .filter(
+              (entry, index, items) =>
+                entry.length > 0 && items.indexOf(entry) === index,
+            )
+        : [];
+
+      return codes.length > 0 ? codes : null;
+    };
+    const readProductSortOrders = () => {
+      const rawSortOrders = parsed.productSortOrders;
+
+      if (
+        !rawSortOrders ||
+        typeof rawSortOrders !== "object" ||
+        Array.isArray(rawSortOrders)
+      ) {
+        return null;
+      }
+
+      const entries = Object.entries(rawSortOrders as Record<string, unknown>)
+        .map(([rawProductCode, rawSortOrder]) => {
+          const productCode = rawProductCode.trim().toUpperCase();
+          const sortOrder =
+            typeof rawSortOrder === "number"
+              ? rawSortOrder
+              : typeof rawSortOrder === "string"
+                ? Number(rawSortOrder)
+                : Number.NaN;
+
+          return {
+            productCode,
+            sortOrder,
+          };
+        })
+        .filter(
+          (entry) =>
+            entry.productCode.length > 0 &&
+            Number.isFinite(entry.sortOrder),
+        );
+
+      return entries.length > 0
+        ? Object.fromEntries(
+            entries.map((entry) => [
+              entry.productCode,
+              Math.trunc(entry.sortOrder),
+            ]),
+          )
+        : null;
+    };
+
+    return {
+      catalogCodes: readCodes("catalogCodes"),
+      departmentCodes: readCodes("departmentCodes"),
+      categoryCodes: readCodes("categoryCodes"),
+      productCodes: readCodes("productCodes"),
+      productSortOrders: readProductSortOrders(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readCatalogProductPolicy(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const productCodes = Array.isArray(record.productCodes)
+    ? record.productCodes
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim().toUpperCase())
+        .filter(
+          (entry, index, items) =>
+            entry.length > 0 && items.indexOf(entry) === index,
+        )
+    : null;
+  const productSortOrders = new Map<string, number>();
+
+  if (
+    record.productSortOrders &&
+    typeof record.productSortOrders === "object" &&
+    !Array.isArray(record.productSortOrders)
+  ) {
+    for (const [rawProductCode, rawSortOrder] of Object.entries(
+      record.productSortOrders as Record<string, unknown>,
+    )) {
+      const productCode = rawProductCode.trim().toUpperCase();
+      const sortOrder =
+        typeof rawSortOrder === "number"
+          ? rawSortOrder
+          : typeof rawSortOrder === "string"
+            ? Number(rawSortOrder)
+            : Number.NaN;
+
+      if (productCode && Number.isFinite(sortOrder)) {
+        productSortOrders.set(productCode, Math.trunc(sortOrder));
+      }
+    }
+  }
+
+  productCodes?.forEach((productCode, index) => {
+    if (!productSortOrders.has(productCode)) {
+      productSortOrders.set(productCode, index + 1);
+    }
+  });
+
+  return {
+    productCodes,
+    productSortOrders,
+  };
+}
+
+function serialNumberSetsMatch(left: string[], right: string[]) {
+  const leftValues = normalizeSerialNumbers(left);
+  const rightValues = normalizeSerialNumbers(right);
+
+  if (leftValues.length !== rightValues.length) {
+    return false;
+  }
+
+  const leftKeys = new Set(
+    leftValues.map((serialNumber) => serialNumber.toUpperCase()),
+  );
+  return rightValues.every((serialNumber) =>
+    leftKeys.has(serialNumber.toUpperCase()),
+  );
+}
+
+function validateSerializedLineInput(input: {
+  isSerialized: boolean;
+  productName: string;
+  quantity: number;
+  serialNumbers?: string[] | null;
+}) {
+  const normalizedSerialNumbers = normalizeSerialNumbers(input.serialNumbers);
+
+  if (!input.isSerialized) {
+    if (normalizedSerialNumbers.length > 0) {
+      throw new Error(
+        `${input.productName} is not configured as a serialized item in Flash ERP. Clear the serial numbers before continuing.`,
+      );
+    }
+
+    return [] as string[];
+  }
+
+  if (!Number.isInteger(input.quantity)) {
+    throw new Error(
+      `${input.productName} is serialized, so Flash ERP requires a whole-number quantity.`,
+    );
+  }
+
+  if (normalizedSerialNumbers.length !== input.quantity) {
+    throw new Error(
+      `${input.productName} is serialized, so Flash ERP needs exactly ${input.quantity} serial number(s).`,
+    );
+  }
+
+  return normalizedSerialNumbers;
+}
+
+function ensureSerialSelectionWithinAllowedSet(input: {
+  productName: string;
+  selectedSerialNumbers: string[];
+  allowedSerialNumbers: string[];
+}) {
+  const allowedKeys = new Set(
+    input.allowedSerialNumbers.map((serialNumber) =>
+      serialNumber.toUpperCase(),
+    ),
+  );
+  const invalidSerialNumbers = input.selectedSerialNumbers.filter(
+    (serialNumber) => !allowedKeys.has(serialNumber.toUpperCase()),
+  );
+
+  if (invalidSerialNumbers.length > 0) {
+    throw new Error(
+      `Flash ERP could not validate serial number(s) ${invalidSerialNumbers.join(", ")} for ${input.productName}.`,
+    );
+  }
+}
+
+function signedInventoryQuantity(
+  movementType: StoreInventoryLedgerRecordedPayload["movementType"],
+  quantity: number,
+) {
+  const absoluteQuantity = Math.abs(quantity);
+
+  switch (movementType) {
+    case "SALE":
+    case "RETURN_TO_VENDOR":
+    case "STOCK_TRANSFER_OUT":
+    case "ADJUSTMENT_NEGATIVE":
+      return absoluteQuantity * -1;
+    case "OPENING_BALANCE":
+    case "GOODS_RECEIPT":
+    case "STOCK_TRANSFER_IN":
+    case "RETURN":
+    case "ADJUSTMENT_POSITIVE":
+      return absoluteQuantity;
+    case "COUNT_VARIANCE":
+      return quantity;
+    default:
+      return quantity;
+  }
+}
+
+function getLineIntentForBasket(
+  transactionType: BasketTransactionType,
+  requestedLineIntent?: SyncPosLineIntent,
+): SyncPosLineIntent {
+  if (transactionType === "RETURN") {
+    return "RETURN";
+  }
+
+  if (transactionType === "EXCHANGE") {
+    return requestedLineIntent ?? "SALE";
+  }
+
+  return "SALE";
+}
+
+function getLineDirection(
+  transactionType: BasketTransactionType,
+  lineIntent: SyncPosLineIntent,
+) {
+  if (transactionType === "EXCHANGE" && lineIntent === "RETURN") {
+    return -1;
+  }
+
+  return 1;
+}
+
+function getInventoryMovementTypeForLine(
+  transactionType: BasketTransactionType,
+  lineIntent: SyncPosLineIntent,
+): StoreInventoryLedgerRecordedPayload["movementType"] {
+  return getLineIntentForBasket(transactionType, lineIntent) === "RETURN"
+    ? "RETURN"
+    : "SALE";
+}
+
+function minutesSince(value: string | null) {
+  if (!value) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.max(
+    0,
+    Math.floor((Date.now() - new Date(value).getTime()) / 60_000),
+  );
+}
+
+function buildStoreDatabasePath(userDataPath: string) {
+  return path.join(userDataPath, "flash-erp-store", "flash-erp-store.sqlite");
+}
+
+function buildSourceLineAmounts(
+  sourceLine: ReceiptLookupLineRow,
+  quantity: number,
+) {
+  const soldQuantity = Math.max(
+    0.001,
+    Number(asNumber(sourceLine.quantity_sold).toFixed(3)),
+  );
+  const normalizedQuantity = Number(quantity.toFixed(3));
+  const unitPrice = Number(asNumber(sourceLine.unit_price).toFixed(2));
+  const discountAmount = Number(
+    (
+      (asNumber(sourceLine.discount_amount) / soldQuantity) *
+      normalizedQuantity
+    ).toFixed(2),
+  );
+  const taxAmount = Number(
+    (
+      (asNumber(sourceLine.tax_amount) / soldQuantity) *
+      normalizedQuantity
+    ).toFixed(2),
+  );
+  const lineTotal = Number(
+    (
+      (asNumber(sourceLine.line_total) / soldQuantity) *
+      normalizedQuantity
+    ).toFixed(2),
+  );
+
+  return {
+    quantity: normalizedQuantity,
+    unitPrice,
+    discountAmount,
+    taxAmount,
+    lineTotal,
+  };
+}
+
+function calculateSaleLineAmounts(input: {
+  unitPrice: number;
+  quantity: number;
+  discountAmount?: number;
+  taxable: boolean;
+  taxRatePercent: number | null;
+  taxInclusive: boolean;
+}) {
+  const extendedPrice = Number((input.unitPrice * input.quantity).toFixed(2));
+  const normalizedDiscountAmount = Number(
+    Math.min(Math.max(0, input.discountAmount ?? 0), extendedPrice).toFixed(2),
+  );
+  const discountedPrice = Number(
+    (extendedPrice - normalizedDiscountAmount).toFixed(2),
+  );
+  const effectiveRate = input.taxable
+    ? Math.max(0, input.taxRatePercent ?? 0) / 100
+    : 0;
+
+  if (effectiveRate <= 0) {
+    return {
+      subtotal: discountedPrice,
+      discountAmount: normalizedDiscountAmount,
+      taxAmount: 0,
+      lineTotal: discountedPrice,
+    };
+  }
+
+  if (input.taxInclusive) {
+    const subtotal = Number((discountedPrice / (1 + effectiveRate)).toFixed(2));
+    const taxAmount = Number((discountedPrice - subtotal).toFixed(2));
+
+    return {
+      subtotal,
+      discountAmount: normalizedDiscountAmount,
+      taxAmount,
+      lineTotal: discountedPrice,
+    };
+  }
+
+  const subtotal = discountedPrice;
+  const taxAmount = Number((subtotal * effectiveRate).toFixed(2));
+
+  return {
+    subtotal,
+    discountAmount: normalizedDiscountAmount,
+    taxAmount,
+    lineTotal: Number((subtotal + taxAmount).toFixed(2)),
+  };
+}
+
+function normalizePromotionCode(value: string | null | undefined) {
+  const normalized = value?.trim() ?? "";
+  return normalized ? normalized.toUpperCase() : null;
+}
+
+function normalizeLoginId(value: string | null | undefined) {
+  return value?.trim().toUpperCase() ?? "";
+}
+
+function normalizeCapturedTransactionReference(value: string | null | undefined) {
+  const trimmed = value?.trim() ?? "";
+
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.toUpperCase().replace(/[^A-Z0-9]/g, "") || trimmed.toUpperCase();
+}
+
+function normalizeTerminalCode(value: string | null | undefined) {
+  return value?.trim().toLowerCase().replace(/\s+/g, "-") ?? "";
+}
+
+function normalizeDeploymentMode(
+  value: StoreDeploymentMode | string | null | undefined,
+): StoreDeploymentMode {
+  const normalized = value?.trim().toUpperCase().replace(/[-\s]+/g, "_") ?? "";
+  return normalized === "STANDALONE" ? "STANDALONE" : "ENTERPRISE_MANAGED";
+}
+
+function normalizeSetupCode(value: string | null | undefined, label: string) {
+  const normalized = value?.trim().toUpperCase() ?? "";
+
+  if (!normalized) {
+    throw new Error(`${label} is required for standalone setup.`);
+  }
+
+  return normalized;
+}
+
+function normalizeSetupName(value: string | null | undefined, label: string) {
+  const normalized = value?.trim() ?? "";
+
+  if (!normalized) {
+    throw new Error(`${label} is required for standalone setup.`);
+  }
+
+  return normalized;
+}
+
+function optionalSetupText(value: string | null | undefined) {
+  const normalized = value?.trim() ?? "";
+  return normalized ? normalized : null;
+}
+
+function optionalSetupStringList(values: string[] | null | undefined) {
+  const normalized = (values ?? [])
+    .map((value) => value.trim())
+    .filter(
+      (value, index, items) =>
+        value.length > 0 && items.indexOf(value) === index,
+    );
+
+  return normalized.length > 0 ? normalized : null;
+}
+
+function readProductSizesMetadata(value: string | null | undefined) {
+  if (!value) {
+    return [] as string[];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return optionalSetupStringList(
+      parsed.filter((item): item is string => typeof item === "string"),
+    ) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function optionalSetupNumberList(values: Array<number | string> | null | undefined) {
+  const seen = new Set<string>();
+  const normalized: number[] = [];
+
+  for (const value of values ?? []) {
+    const numeric = Number(value);
+
+    if (!Number.isFinite(numeric) || numeric <= 0 || numeric > 100) {
+      continue;
+    }
+
+    const rate = Number(numeric.toFixed(2));
+    const key = rate.toFixed(2);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalized.push(rate);
+  }
+
+  return normalized.length > 0 ? normalized : null;
+}
+
+function readPosDiscountRatesMetadata(value: string | null | undefined) {
+  if (!value) {
+    return [] as number[];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return optionalSetupNumberList(
+      parsed.filter(
+        (item): item is number | string =>
+          typeof item === "number" || typeof item === "string",
+      ),
+    ) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function formatDiscountRate(rate: number) {
+  return Number.isInteger(rate) ? rate.toFixed(0) : rate.toFixed(2);
+}
+
+function normalizeSetupNumber(
+  value: number | string | null | undefined,
+  fallback: number,
+  decimals = 2,
+) {
+  const parsed = Number(value ?? fallback);
+  const normalized = Number.isFinite(parsed) ? parsed : fallback;
+  return Number(normalized.toFixed(decimals));
+}
+
+function normalizePolicyInteger(
+  value: number | string | null | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+) {
+  const parsed = Math.trunc(Number(value ?? fallback));
+  const normalized = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.min(maximum, Math.max(minimum, normalized));
+}
+
+function readDownstreamPageLimit() {
+  const configured = Number(process.env.FLASH_ERP_STORE_SYNC_PULL_LIMIT);
+
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1, Math.min(Math.trunc(configured), MAX_SYNC_PULL_LIMIT));
+  }
+
+  return DEFAULT_SYNC_PULL_LIMIT;
+}
+
+function readDownstreamPullPassLimit(
+  trigger: StoreSyncRunOptions["trigger"] | null | undefined,
+  drainDownstream = false,
+) {
+  const configured = Number(process.env.FLASH_ERP_STORE_SYNC_PULL_PASSES);
+
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1, Math.min(Math.trunc(configured), 25));
+  }
+
+  if (trigger === "scheduled") {
+    return 1;
+  }
+
+  if (drainDownstream) {
+    return 15;
+  }
+
+  return 1;
+}
+
+function validateStandalonePasswordPolicy(
+  password: string,
+  policy: {
+    minimumLength: number;
+    requireUppercase: boolean;
+    requireLowercase: boolean;
+    requireNumber: boolean;
+    requireSymbol: boolean;
+  },
+) {
+  const failures: string[] = [];
+
+  if (password.length < policy.minimumLength) {
+    failures.push(`at least ${policy.minimumLength} characters`);
+  }
+
+  if (policy.requireUppercase && !/[A-Z]/.test(password)) {
+    failures.push("an uppercase letter");
+  }
+
+  if (policy.requireLowercase && !/[a-z]/.test(password)) {
+    failures.push("a lowercase letter");
+  }
+
+  if (policy.requireNumber && !/[0-9]/.test(password)) {
+    failures.push("a number");
+  }
+
+  if (policy.requireSymbol && !/[^A-Za-z0-9]/.test(password)) {
+    failures.push("a symbol");
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `Password policy requires ${failures.join(", ")}.`,
+    );
+  }
+}
+
+const standaloneCashierPermissionCodes = [
+  "pos.shift.open",
+  "pos.shift.close",
+  "pos.sale.process",
+  "pos.receipt.search",
+  "pos.customer.attach",
+] as const;
+
+const standaloneSupervisorPermissionCodes = [
+  ...standaloneCashierPermissionCodes,
+  "pos.return.process",
+  "pos.exchange.process",
+  "pos.receipt.reprint",
+  "pos.customer.account.collect",
+  "pos.loyalty.redeem",
+  "pos.override.no-receipt-return",
+  "pos.override.discount",
+  "pos.override.price",
+  "inventory.view",
+  "inventory.adjust",
+  "inventory.count.submit",
+  "inventory.count.commit",
+  "inventory.transfer.request",
+  "inventory.transfer.issue",
+  "inventory.transfer.receive",
+  "inventory.grn.receive",
+  "inventory.supplier-return.manage",
+  "sync.store.operate",
+] as const;
+
+const standalonePaymentMethods = new Set<SyncPaymentMethod>([
+  "CASH",
+  "CARD",
+  "BANK_TRANSFER",
+  "MOBILE_MONEY",
+  "STORE_CREDIT",
+  "GIFT_CARD",
+  "OTHER",
+]);
+
+function standalonePermissionCodes(input: {
+  cashierEligible?: boolean | null;
+  supervisorEligible?: boolean | null;
+}) {
+  const source =
+    input.supervisorEligible === true
+      ? standaloneSupervisorPermissionCodes
+      : input.cashierEligible === false
+        ? []
+        : standaloneCashierPermissionCodes;
+
+  return [...source];
+}
+
+function normalizeStandalonePaymentMethod(
+  value: string | null | undefined,
+): SyncPaymentMethod {
+  const normalized = normalizeSetupCode(
+    value ?? "CASH",
+    "Tender payment method",
+  ) as SyncPaymentMethod;
+
+  return standalonePaymentMethods.has(normalized) ? normalized : "OTHER";
+}
+
+const standalonePromotionDiscountTypes = new Set<SyncPromotionDiscountType>([
+  "PERCENT",
+  "AMOUNT",
+  "FIXED_PRICE",
+]);
+const standalonePromotionTargetScopes = new Set<SyncPromotionTargetScope>([
+  "ALL_ITEMS",
+  "DEPARTMENT",
+  "CATEGORY",
+  "PRODUCT",
+]);
+
+function normalizeStandalonePromotionDiscountType(
+  value: string | null | undefined,
+): SyncPromotionDiscountType {
+  const normalized = normalizeSetupCode(
+    value ?? "PERCENT",
+    "Promotion discount type",
+  ) as SyncPromotionDiscountType;
+
+  return standalonePromotionDiscountTypes.has(normalized)
+    ? normalized
+    : "PERCENT";
+}
+
+function normalizeStandalonePromotionTargetScope(
+  value: string | null | undefined,
+): SyncPromotionTargetScope {
+  const normalized = normalizeSetupCode(
+    value ?? "ALL_ITEMS",
+    "Promotion target scope",
+  ) as SyncPromotionTargetScope;
+
+  return standalonePromotionTargetScopes.has(normalized)
+    ? normalized
+    : "ALL_ITEMS";
+}
+
+function buildStoreOperatorCapabilities(
+  permissionCodes: string[],
+  accountStatus: string,
+) {
+  const capabilities = deriveRetailUserCapabilities(
+    permissionCodes,
+    accountStatus,
+  );
+
+  return {
+    cashierEligible: capabilities.cashierEligible,
+    supervisorEligible: capabilities.supervisorEligible,
+    canOpenShift: capabilities.canOpenShift,
+    canCloseShift: capabilities.canCloseShift,
+    canProcessSale: capabilities.canProcessSale,
+    canProcessReturn: capabilities.canProcessReturn,
+    canProcessExchange: capabilities.canProcessExchange,
+    canSearchReceipt: capabilities.canSearchReceipt,
+    canReprintReceipt: capabilities.canReprintReceipt,
+    canAttachCustomer: capabilities.canAttachCustomer,
+    canCollectAccountPayment: capabilities.canCollectAccountPayment,
+    canRedeemLoyalty: capabilities.canRedeemLoyalty,
+    canApproveNoReceiptReturn: capabilities.canApproveNoReceiptReturn,
+    canApproveDiscountOverride: capabilities.canApproveDiscountOverride,
+    canApprovePriceOverride: capabilities.canApprovePriceOverride,
+    hasInventoryVisibility: capabilities.hasInventoryVisibility,
+    canAdjustInventory: capabilities.canAdjustInventory,
+    canSubmitCount: capabilities.canSubmitCount,
+    canCommitCount: capabilities.canCommitCount,
+    canRequestTransfer: capabilities.canRequestTransfer,
+    canIssueTransfer: capabilities.canIssueTransfer,
+    canReceiveTransfer: capabilities.canReceiveTransfer,
+    canReceiveGoods: capabilities.canReceiveGoods,
+    canManageSupplierReturns: capabilities.canManageSupplierReturns,
+    canOperateStoreSync: capabilities.canOperateStoreSync,
+  } satisfies StoreOperatorCapabilities;
+}
+
+export class LocalStoreService {
+  private db: DatabaseSync;
+  private readonly deploymentMode: StoreDeploymentMode;
+  private readonly syncBaseUrl: string | null;
+  private readonly fallbackNodeCode: string;
+  private readonly fallbackTerminalCode: string;
+  private syncCycleInFlight: Promise<StoreSyncActionResult> | null = null;
+  private readonly terminalContextStorage =
+    new AsyncLocalStorage<StoreTerminalContext | null>();
+
+  readonly databasePath: string;
+
+  constructor(userDataPath: string, options: LocalStoreServiceOptions = {}) {
+    this.databasePath = options.databasePath?.trim()
+      ? path.resolve(options.databasePath.trim())
+      : buildStoreDatabasePath(userDataPath);
+    this.deploymentMode = normalizeDeploymentMode(options.deploymentMode);
+    this.syncBaseUrl = options.syncBaseUrl?.replace(/\/+$/, "") ?? null;
+    this.fallbackNodeCode = options.nodeCode?.trim() || defaultStoreConfig.nodeCode;
+    this.fallbackTerminalCode =
+      normalizeTerminalCode(options.terminalCode) ||
+      defaultStoreConfig.terminalCode;
+    mkdirSync(path.dirname(this.databasePath), { recursive: true });
+    this.db = new DatabaseSync(this.databasePath);
+    this.db.exec("PRAGMA journal_mode = WAL;");
+    this.db.exec("PRAGMA synchronous = NORMAL;");
+    this.db.exec("PRAGMA busy_timeout = 5000;");
+    this.db.exec("PRAGMA temp_store = MEMORY;");
+    this.db.exec("PRAGMA wal_autocheckpoint = 1000;");
+    this.db.exec(localStoreSchemaSql);
+    this.ensureCompatibleSchema();
+    this.bootstrap();
+    this.setMetadata("deployment_mode", this.deploymentMode);
+    this.setMetadata("node_code", this.fallbackNodeCode);
+    this.reconcileLegacySharedShiftOwner();
+    this.reconcileSyncSeedMode();
+  }
+
+  close() {
+    this.db.close();
+  }
+
+  runWithTerminalContext<T>(
+    context: StoreTerminalContext | null | undefined,
+    work: () => T,
+  ) {
+    return this.terminalContextStorage.run(context ?? null, work);
+  }
+
+  private getTerminalCode() {
+    const activeTerminalContext = this.terminalContextStorage.getStore();
+
+    return (
+      normalizeTerminalCode(activeTerminalContext?.terminalCode) ||
+      normalizeTerminalCode(this.metadata("terminal_code")) ||
+      this.fallbackTerminalCode ||
+      defaultStoreConfig.terminalCode
+    );
+  }
+
+  private getActiveBasketMetadataKey() {
+    return `active_basket_id:${this.getTerminalCode()}`;
+  }
+
+  private getTerminalMetadataKey(key: string) {
+    return `${key}:${this.getTerminalCode()}`;
+  }
+
+  private isStandaloneDeployment() {
+    return this.deploymentMode === "STANDALONE";
+  }
+
+  private requireStandaloneSetupMode() {
+    if (!this.isStandaloneDeployment()) {
+      throw new Error(
+        "Desktop master-data setup is only available when this store desktop runs in standalone mode.",
+      );
+    }
+  }
+
+  private requireStandaloneSupervisor() {
+    const session = this.requireActiveOperatorSession({
+      purpose: "standalone setup",
+    });
+
+    if (!session.capabilities.supervisorEligible) {
+      throw new Error(
+        `${this.formatOperatorLabel(session)} is not eligible to manage standalone setup.`,
+      );
+    }
+
+    return session;
+  }
+
+  private buildLocalPublication<TPayload>(
+    aggregateType: SyncEnvelope<TPayload>["aggregateType"],
+    aggregateId: string,
+    eventType: string,
+    payload: TPayload,
+    occurredAt: string,
+  ): SyncEnvelope<TPayload> {
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+
+    return {
+      eventId: randomUUID(),
+      idempotencyKey: `standalone:${aggregateType}:${aggregateId}:${eventType}:${occurredAt}`,
+      aggregateType,
+      aggregateId,
+      eventType,
+      originatingNodeCode: nodeCode,
+      targetNodeCode: nodeCode,
+      recordVersion: Date.now(),
+      occurredAt,
+      payload,
+    };
+  }
+
+  recordTerminalHeartbeat(input?: {
+    method?: string | null;
+    remoteAddress?: string | null;
+    userAgent?: string | null;
+    clientName?: string | null;
+  }) {
+    const terminalCode = this.getTerminalCode();
+    const timestamp = isoNow();
+    const clientName = input?.clientName?.trim() || null;
+    const method = input?.method?.trim() || null;
+    const remoteAddress = input?.remoteAddress?.trim() || null;
+    const userAgent = input?.userAgent?.trim() || null;
+
+    this.db
+      .prepare(
+        `INSERT INTO terminal_connection (
+          terminal_code,
+          client_name,
+          first_seen_at,
+          last_seen_at,
+          request_count,
+          last_method,
+          remote_address,
+          user_agent
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+        ON CONFLICT(terminal_code) DO UPDATE SET
+          client_name = COALESCE(excluded.client_name, terminal_connection.client_name),
+          last_seen_at = excluded.last_seen_at,
+          request_count = terminal_connection.request_count + 1,
+          last_method = excluded.last_method,
+          remote_address = COALESCE(excluded.remote_address, terminal_connection.remote_address),
+          user_agent = COALESCE(excluded.user_agent, terminal_connection.user_agent)`,
+      )
+      .run(
+        terminalCode,
+        clientName,
+        timestamp,
+        timestamp,
+        method,
+        remoteAddress,
+        userAgent,
+      );
+  }
+
+  private resolveEnterpriseMediaUrl(value: string | null | undefined) {
+    const trimmedValue = value?.trim() ?? "";
+
+    if (!trimmedValue) {
+      return null;
+    }
+
+    if (/^(https?:|data:|file:|blob:)/i.test(trimmedValue)) {
+      return trimmedValue;
+    }
+
+    if (!this.syncBaseUrl) {
+      return trimmedValue;
+    }
+
+    try {
+      const baseUrl = new URL(this.syncBaseUrl);
+      const enterpriseRoot = `${baseUrl.protocol}//${baseUrl.host}`;
+
+      return new URL(
+        trimmedValue.startsWith("/") ? trimmedValue : `/${trimmedValue}`,
+        enterpriseRoot,
+      ).toString();
+    } catch {
+      return trimmedValue;
+    }
+  }
+
+  private resolveStoreLogoUrl(metadata: Record<string, string>) {
+    return this.resolveEnterpriseMediaUrl(
+      metadata.local_company_logo_url ?? metadata.company_logo_url,
+    );
+  }
+
+  private toStoreUserSummary(row: RetailUserSnapshotRow): StoreUserSummary {
+    const permissionCodes = readStringArray(row.permission_codes_json);
+    const roleCodes = readStringArray(row.role_codes_json);
+    const roleNames = readStringArray(row.role_names_json);
+    const capabilities = buildStoreOperatorCapabilities(
+      permissionCodes,
+      row.account_status,
+    );
+
+    return {
+      userId: row.id,
+      loginId: row.login_id,
+      displayName: row.display_name,
+      email: row.email,
+      accountStatus: row.account_status,
+      homeStoreCode: row.home_store_code,
+      homeStoreName: row.home_store_name,
+      roleCodes,
+      roleNames,
+      permissionCodes,
+      cashierEligible: capabilities.cashierEligible,
+      supervisorEligible: capabilities.supervisorEligible,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private toStoreOperatorSessionSummary(
+    row: ActiveOperatorSessionRow,
+  ): StoreOperatorSessionSummary {
+    const permissionCodes = readStringArray(row.permission_codes_json);
+    const roleCodes = readStringArray(row.role_codes_json);
+    const roleNames = readStringArray(row.role_names_json);
+    const capabilities = buildStoreOperatorCapabilities(
+      permissionCodes,
+      row.account_status,
+    );
+
+    return {
+      sessionId: row.session_id,
+      userId: row.user_id,
+      loginId: row.login_id,
+      displayName: row.display_name,
+      email: row.email,
+      accountStatus: row.account_status,
+      homeStoreCode: row.home_store_code,
+      homeStoreName: row.home_store_name,
+      roleCodes,
+      roleNames,
+      permissionCodes,
+      openedAt: row.opened_at,
+      lastSeenAt: row.last_seen_at,
+      capabilities,
+    };
+  }
+
+  private formatOperatorLabel(input: { loginId: string; displayName: string }) {
+    return `${input.displayName} (${input.loginId})`;
+  }
+
+  private getStoreCode() {
+    return this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+  }
+
+  private ensureStoreUserCanAccessThisStore(input: {
+    loginId: string;
+    homeStoreCode: string | null;
+  }) {
+    if (!input.homeStoreCode) {
+      throw new Error(
+        `${input.loginId} is not assigned to this Flash ERP store node.`,
+      );
+    }
+
+    if (
+      input.homeStoreCode &&
+      normalizeLoginId(input.homeStoreCode) !==
+        normalizeLoginId(this.getStoreCode())
+    ) {
+      throw new Error(
+        `${input.loginId} is assigned to ${input.homeStoreCode}, not to this Flash ERP store node.`,
+      );
+    }
+  }
+
+  private getActiveOperatorSessionRow() {
+    const terminalCode = this.getTerminalCode();
+
+    return this.db
+      .prepare(
+        `SELECT
+          session.id AS session_id,
+          session.terminal_code,
+          session.opened_at,
+          session.last_seen_at,
+          user.id AS user_id,
+          user.login_id,
+          user.email,
+          user.display_name,
+          user.account_status,
+          user.home_store_code,
+          user.home_store_name,
+          user.role_codes_json,
+          user.role_names_json,
+          user.permission_codes_json,
+          user.updated_at
+        FROM operator_session AS session
+        JOIN retail_user_snapshot AS user
+          ON user.id = session.retail_user_id
+        WHERE session.closed_at IS NULL
+          AND (session.terminal_code = ? OR session.terminal_code IS NULL)
+        ORDER BY session.opened_at DESC
+        LIMIT 1`,
+      )
+      .get(terminalCode) as ActiveOperatorSessionRow | undefined;
+  }
+
+  private closeOperatorSession(
+    sessionId: string,
+    reason: string,
+    timestamp: string,
+  ) {
+    this.db
+      .prepare(
+        "UPDATE operator_session SET closed_at = COALESCE(closed_at, ?), close_reason = COALESCE(close_reason, ?) WHERE id = ?",
+      )
+      .run(timestamp, reason, sessionId);
+  }
+
+  private touchOperatorSession(sessionId: string, timestamp: string) {
+    this.db
+      .prepare(
+        "UPDATE operator_session SET last_seen_at = ? WHERE id = ? AND closed_at IS NULL",
+      )
+      .run(timestamp, sessionId);
+  }
+
+  private getActiveOperatorSessionSummary() {
+    const row = this.getActiveOperatorSessionRow();
+
+    if (!row) {
+      return null;
+    }
+
+    if (row.account_status !== "ACTIVE") {
+      this.closeOperatorSession(row.session_id, "ACCOUNT_INACTIVE", isoNow());
+      return null;
+    }
+
+    try {
+      this.ensureStoreUserCanAccessThisStore({
+        loginId: row.login_id,
+        homeStoreCode: row.home_store_code,
+      });
+    } catch {
+      this.closeOperatorSession(
+        row.session_id,
+        "STORE_ASSIGNMENT_CHANGED",
+        isoNow(),
+      );
+      return null;
+    }
+
+    return this.toStoreOperatorSessionSummary(row);
+  }
+
+  private authenticateStoreUser(
+    loginId: string,
+    password: string,
+    traceId?: string | null,
+  ) {
+    const normalizedLoginId = loginId.trim();
+    const normalizedPassword = password.trim();
+    const authStartedAt = Date.now();
+
+    if (!normalizedLoginId || !normalizedPassword) {
+      throw new Error("Enter your operator login ID and password.");
+    }
+
+    console.info("Store Desktop sign-in auth lookup started.", {
+      traceId,
+      loginId: normalizedLoginId,
+    });
+    const user = this.getStoreUserByLoginId(normalizedLoginId);
+    console.info("Store Desktop sign-in auth lookup completed.", {
+      traceId,
+      loginId: normalizedLoginId,
+      found: Boolean(user),
+      elapsedMs: Date.now() - authStartedAt,
+    });
+
+    if (!user) {
+      if (
+        this.scalar("SELECT count(*) AS value FROM retail_user_snapshot") === 0
+      ) {
+        throw new Error(
+          this.isStandaloneDeployment()
+            ? "No local operator accounts are available on this desktop yet."
+            : "No synced operator accounts are available on this desktop yet. Run a sync cycle, then try signing in again.",
+        );
+      }
+
+      throw new Error(
+        "Invalid operator login ID or password for this desktop.",
+      );
+    }
+
+    if (user.account_status !== "ACTIVE") {
+      throw new Error(
+        "Invalid operator login ID or password for this desktop.",
+      );
+    }
+
+    this.ensureStoreUserCanAccessThisStore({
+      loginId: user.login_id,
+      homeStoreCode: user.home_store_code,
+    });
+
+    if (!user.password_hash) {
+      throw new Error(
+        this.isStandaloneDeployment()
+          ? `${user.display_name} (${user.login_id}) has no local sign-in credential on this desktop yet. Set a local password from standalone setup.`
+          : `${user.display_name} (${user.login_id}) has no local sign-in credential on this desktop yet. Run a sync cycle after setting or resetting the user password at enterprise.`,
+      );
+    }
+
+    const compareStartedAt = Date.now();
+    console.info("Store Desktop sign-in password check started.", {
+      traceId,
+      loginId: user.login_id,
+    });
+    if (!bcrypt.compareSync(normalizedPassword, user.password_hash)) {
+      throw new Error(
+        "Invalid operator login ID or password for this desktop.",
+      );
+    }
+    console.info("Store Desktop sign-in password check completed.", {
+      traceId,
+      loginId: user.login_id,
+      elapsedMs: Date.now() - compareStartedAt,
+    });
+
+    return user;
+  }
+
+  private requireActiveOperatorSession(input?: {
+    permissionCodes?: string[];
+    any?: boolean;
+    purpose?: string;
+  }) {
+    const session = this.getActiveOperatorSessionSummary();
+
+    if (!session) {
+      throw new Error(
+        this.isStandaloneDeployment()
+          ? "Sign in with a local Flash ERP operator account before using this desktop workflow."
+          : "Sign in with a synced Flash ERP operator account before using this desktop workflow.",
+      );
+    }
+
+    const permissionCodes = (input?.permissionCodes ?? []).filter(Boolean);
+
+    if (permissionCodes.length > 0) {
+      const authorized = input?.any
+        ? permissionCodes.some((permissionCode) =>
+            session.permissionCodes.includes(permissionCode),
+          )
+        : permissionCodes.every((permissionCode) =>
+            session.permissionCodes.includes(permissionCode),
+          );
+
+      if (!authorized) {
+        throw new Error(
+          `${this.formatOperatorLabel(session)} does not have the required Flash ERP privilege for ${input?.purpose ?? "this workflow"}.`,
+        );
+      }
+    }
+
+    this.touchOperatorSession(session.sessionId, isoNow());
+    return session;
+  }
+
+  private requireActiveCashierLaneSession(input: {
+    permissionCodes: string[];
+    purpose: string;
+  }) {
+    const session = this.requireActiveOperatorSession({
+      permissionCodes: input.permissionCodes,
+      purpose: input.purpose,
+    });
+    const openShift = this.getOpenShiftRow();
+
+    if (!openShift) {
+      throw new Error(
+        "Open a cashier shift before Flash ERP can use this POS workflow on the desktop.",
+      );
+    }
+
+    return {
+      session,
+      openShift,
+    };
+  }
+
+  private ensureSupervisorSupportsPermission(
+    capabilities: ReturnType<typeof buildStoreOperatorCapabilities>,
+    permissionCode: string,
+  ) {
+    switch (permissionCode) {
+      case "pos.override.no-receipt-return":
+        return capabilities.canApproveNoReceiptReturn;
+      case "pos.override.discount":
+        return capabilities.canApproveDiscountOverride;
+      case "pos.override.price":
+        return capabilities.canApprovePriceOverride;
+      default:
+        return false;
+    }
+  }
+
+  private requireSupervisorApproval(input: {
+    supervisorCode: string;
+    supervisorPassword: string;
+    permissionCodes: string[];
+    purpose: string;
+  }) {
+    const supervisorCode = input.supervisorCode.trim();
+    const supervisorPassword = input.supervisorPassword.trim();
+
+    if (!supervisorCode || !supervisorPassword) {
+      throw new Error(
+        `Enter the supervisor login ID and password before ${input.purpose}.`,
+      );
+    }
+
+    const supervisor = this.authenticateStoreUser(
+      supervisorCode,
+      supervisorPassword,
+    );
+    const capabilities = buildStoreOperatorCapabilities(
+      readStringArray(supervisor.permission_codes_json),
+      supervisor.account_status,
+    );
+    const missingPermissions = input.permissionCodes.filter(
+      (permissionCode) =>
+        !this.ensureSupervisorSupportsPermission(capabilities, permissionCode),
+    );
+
+    if (missingPermissions.length > 0) {
+      throw new Error(
+        `${supervisor.display_name} (${supervisor.login_id}) is not allowed to ${input.purpose} on this desktop.`,
+      );
+    }
+
+    return this.toStoreUserSummary(supervisor);
+  }
+
+  private requireSupervisorOverride(input: StoreSupervisorOverrideInput) {
+    return this.requireSupervisorApproval({
+      supervisorCode: input.supervisorCode,
+      supervisorPassword: input.supervisorPassword?.trim() ?? "",
+      permissionCodes: ["pos.override.no-receipt-return"],
+      purpose: "approving a manual correction",
+    });
+  }
+
+  signInOperator(input: StoreOperatorSignInInput): StoreSyncActionResult {
+    const traceId =
+      input.traceId?.trim() ??
+      `signin-sqlite-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const startedAt = Date.now();
+    const timestamp = isoNow();
+    const terminalCode = this.getTerminalCode();
+
+    console.info("Store Desktop SQLite sign-in started.", {
+      traceId,
+      loginId: input.loginId.trim(),
+      terminalCode,
+    });
+
+    try {
+      const user = this.authenticateStoreUser(
+        input.loginId,
+        input.password,
+        traceId,
+      );
+      const operatorLabel = this.formatOperatorLabel({
+        loginId: user.login_id,
+        displayName: user.display_name,
+      });
+
+      console.info("Store Desktop SQLite sign-in session write started.", {
+        traceId,
+        loginId: user.login_id,
+      });
+      this.withTransaction(() => {
+        const activeSession = this.getActiveOperatorSessionRow();
+
+        if (activeSession && activeSession.user_id === user.id) {
+          this.db
+            .prepare(
+              "UPDATE operator_session SET terminal_code = COALESCE(terminal_code, ?) WHERE id = ?",
+            )
+            .run(terminalCode, activeSession.session_id);
+          this.touchOperatorSession(activeSession.session_id, timestamp);
+          return;
+        }
+
+        this.db
+          .prepare(
+            "UPDATE operator_session SET closed_at = ?, close_reason = COALESCE(close_reason, 'REPLACED_SESSION') WHERE closed_at IS NULL AND (terminal_code = ? OR terminal_code IS NULL)",
+          )
+          .run(timestamp, terminalCode);
+
+        this.db
+          .prepare(
+            "INSERT INTO operator_session (id, retail_user_id, terminal_code, opened_at, last_seen_at, closed_at, close_reason) VALUES (?, ?, ?, ?, ?, NULL, NULL)",
+          )
+          .run(randomUUID(), user.id, terminalCode, timestamp, timestamp);
+      });
+      console.info("Store Desktop SQLite sign-in session write completed.", {
+        traceId,
+        elapsedMs: Date.now() - startedAt,
+      });
+
+      console.info("Store Desktop SQLite sign-in snapshot started.", {
+        traceId,
+      });
+      const snapshot = this.getSyncSnapshot();
+      console.info("Store Desktop SQLite sign-in snapshot completed.", {
+        traceId,
+        elapsedMs: Date.now() - startedAt,
+        activeOperator: Boolean(snapshot.activeOperatorSession),
+        storeUsers: snapshot.storeUsers.length,
+      });
+
+      return {
+        message: `${operatorLabel} is now signed in on terminal ${terminalCode}.`,
+        snapshot,
+      };
+    } catch (error) {
+      console.error("Store Desktop SQLite sign-in failed.", {
+        traceId,
+        elapsedMs: Date.now() - startedAt,
+        error,
+      });
+      throw error;
+    }
+  }
+
+  signOutOperator(): StoreSyncActionResult {
+    const timestamp = isoNow();
+    const activeSession = this.getActiveOperatorSessionSummary();
+
+    if (!activeSession) {
+      return {
+        message: "No operator is currently signed in on this desktop.",
+        snapshot: this.getSyncSnapshot(),
+      };
+    }
+
+    const openShift = this.getOpenShiftRow();
+
+    this.withTransaction(() => {
+      this.closeOperatorSession(
+        activeSession.sessionId,
+        "SIGNED_OUT",
+        timestamp,
+      );
+    });
+
+    return {
+      message: openShift
+        ? `${this.formatOperatorLabel(activeSession)} signed out. ${openShift.shift_no} remains open on terminal ${this.getTerminalCode()}.`
+        : `${this.formatOperatorLabel(activeSession)} signed out from terminal ${this.getTerminalCode()}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  bootstrapStandaloneAdmin(
+    input: StoreStandaloneUserInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+
+    if (this.scalar("SELECT count(*) AS value FROM retail_user_snapshot") > 0) {
+      throw new Error(
+        "This standalone desktop already has local operator accounts. Sign in with a supervisor to manage users.",
+      );
+    }
+
+    const timestamp = isoNow();
+    const loginId = normalizeSetupCode(input.loginId, "Login ID");
+    const displayName = normalizeSetupName(input.displayName, "Display name");
+    const password = optionalSetupText(input.password);
+
+    if (!password) {
+      throw new Error("Password is required when creating the first standalone administrator.");
+    }
+
+    validateStandalonePasswordPolicy(
+      password,
+      this.getPasswordPolicySummary(this.getMetadata()),
+    );
+
+    const roleName =
+      optionalSetupText(input.roleName) ?? "Standalone administrator";
+    const roleCode = roleName.toUpperCase().replace(/[^A-Z0-9]+/g, "-");
+    const passwordHash = bcrypt.hashSync(password, 10);
+    const permissionCodes = standalonePermissionCodes({
+      cashierEligible: true,
+      supervisorEligible: true,
+    });
+    const storeCode = this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const userId = `standalone-user-${loginId.toLowerCase()}`;
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseRetailUserPublishedPayload>(
+          "retailUser",
+          userId,
+          "security.user.published",
+          {
+            storeCode,
+            userId,
+            loginId,
+            email: optionalSetupText(input.email),
+            displayName,
+            accountStatus: "ACTIVE",
+            homeStoreCode: storeCode,
+            homeStoreName:
+              this.metadata("store_name") ?? defaultStoreConfig.storeName,
+            roleCodes: [roleCode || "STANDALONE-ADMINISTRATOR"],
+            roleNames: [roleName],
+            permissionCodes,
+            passwordHash,
+            passwordUpdatedAt: timestamp,
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${displayName} was created as the first standalone administrator.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneSettings(
+    input: StoreStandaloneSettingsInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+
+    this.withTransaction(() => {
+      const storeName = optionalSetupText(input.storeName);
+      const shortName = optionalSetupText(input.shortName);
+      const currencyCode = optionalSetupText(input.currencyCode)?.toUpperCase();
+      const timezone = optionalSetupText(input.timezone);
+      const companyLogoUrl = optionalSetupText(input.companyLogoUrl);
+      const receiptHeader = optionalSetupText(input.receiptHeader);
+      const receiptFooter = optionalSetupText(input.receiptFooter);
+
+      if (storeName) {
+        this.setMetadata("store_name", storeName);
+      }
+
+      if (shortName) {
+        this.setMetadata("store_short_name", shortName);
+      } else if (input.shortName !== undefined) {
+        this.deleteMetadata("store_short_name");
+      }
+
+      if (currencyCode) {
+        this.setMetadata("currency_code", currencyCode);
+      }
+
+      if (timezone) {
+        this.setMetadata("timezone", timezone);
+      }
+
+      if (typeof input.touchModeEnabled === "boolean") {
+        this.setMetadata("touch_mode_enabled", input.touchModeEnabled ? "1" : "0");
+      }
+
+      if (typeof input.showCriticalStocksOnStartup === "boolean") {
+        this.setMetadata(
+          "show_critical_stocks_on_startup",
+          input.showCriticalStocksOnStartup ? "1" : "0",
+        );
+      }
+
+      if (companyLogoUrl) {
+        this.setMetadata("local_company_logo_url", companyLogoUrl);
+      } else if (input.companyLogoUrl !== undefined) {
+        this.deleteMetadata("local_company_logo_url");
+      }
+
+      if (receiptHeader) {
+        this.setMetadata("receipt_header", receiptHeader);
+      } else if (input.receiptHeader !== undefined) {
+        this.deleteMetadata("receipt_header");
+      }
+
+      if (receiptFooter) {
+        this.setMetadata("receipt_footer", receiptFooter);
+      } else if (input.receiptFooter !== undefined) {
+        this.deleteMetadata("receipt_footer");
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: "Standalone store settings were saved on this desktop.",
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandalonePasswordPolicy(
+    input: StoreStandalonePasswordPolicyInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const existing = this.getPasswordPolicySummary(this.getMetadata());
+    const nextPolicy = {
+      minimumLength: normalizePolicyInteger(
+        input.minimumLength,
+        existing.minimumLength,
+        4,
+        128,
+      ),
+      requireUppercase:
+        typeof input.requireUppercase === "boolean"
+          ? input.requireUppercase
+          : existing.requireUppercase,
+      requireLowercase:
+        typeof input.requireLowercase === "boolean"
+          ? input.requireLowercase
+          : existing.requireLowercase,
+      requireNumber:
+        typeof input.requireNumber === "boolean"
+          ? input.requireNumber
+          : existing.requireNumber,
+      requireSymbol:
+        typeof input.requireSymbol === "boolean"
+          ? input.requireSymbol
+          : existing.requireSymbol,
+      temporaryPasswordMustChange:
+        typeof input.temporaryPasswordMustChange === "boolean"
+          ? input.temporaryPasswordMustChange
+          : existing.temporaryPasswordMustChange,
+      passwordExpiryDays: normalizePolicyInteger(
+        input.passwordExpiryDays,
+        existing.passwordExpiryDays,
+        0,
+        999,
+      ),
+      passwordHistoryCount: normalizePolicyInteger(
+        input.passwordHistoryCount,
+        existing.passwordHistoryCount,
+        0,
+        24,
+      ),
+      lockoutThreshold: normalizePolicyInteger(
+        input.lockoutThreshold,
+        existing.lockoutThreshold,
+        0,
+        20,
+      ),
+      lockoutMinutes: normalizePolicyInteger(
+        input.lockoutMinutes,
+        existing.lockoutMinutes,
+        0,
+        1440,
+      ),
+    };
+
+    this.withTransaction(() => {
+      this.setMetadata(
+        "password_policy_minimum_length",
+        String(nextPolicy.minimumLength),
+      );
+      this.setMetadata(
+        "password_policy_require_uppercase",
+        nextPolicy.requireUppercase ? "1" : "0",
+      );
+      this.setMetadata(
+        "password_policy_require_lowercase",
+        nextPolicy.requireLowercase ? "1" : "0",
+      );
+      this.setMetadata(
+        "password_policy_require_number",
+        nextPolicy.requireNumber ? "1" : "0",
+      );
+      this.setMetadata(
+        "password_policy_require_symbol",
+        nextPolicy.requireSymbol ? "1" : "0",
+      );
+      this.setMetadata(
+        "password_policy_temporary_must_change",
+        nextPolicy.temporaryPasswordMustChange ? "1" : "0",
+      );
+      this.setMetadata(
+        "password_policy_expiry_days",
+        String(nextPolicy.passwordExpiryDays),
+      );
+      this.setMetadata(
+        "password_policy_history_count",
+        String(nextPolicy.passwordHistoryCount),
+      );
+      this.setMetadata(
+        "password_policy_lockout_threshold",
+        String(nextPolicy.lockoutThreshold),
+      );
+      this.setMetadata(
+        "password_policy_lockout_minutes",
+        String(nextPolicy.lockoutMinutes),
+      );
+      this.setMetadata("password_policy_updated_at", timestamp);
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: "Standalone password policy was saved.",
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneDepartment(
+    input: StoreStandaloneDepartmentInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const departmentCode = normalizeSetupCode(input.departmentCode, "Department code");
+    const departmentName = normalizeSetupName(input.departmentName, "Department name");
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseProductDepartmentPublishedPayload>(
+          "productDepartment",
+          `standalone-department-${departmentCode.toLowerCase()}`,
+          "setup.product-department.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            departmentCode,
+            departmentName,
+            description: optionalSetupText(input.description),
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            sortOrder: Math.trunc(normalizeSetupNumber(input.sortOrder, 0, 0)),
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${departmentName} was saved in standalone departments.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneCategory(
+    input: StoreStandaloneCategoryInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const categoryCode = normalizeSetupCode(input.categoryCode, "Category code");
+    const categoryName = normalizeSetupName(input.categoryName, "Category name");
+    const departmentCode = normalizeSetupCode(input.departmentCode, "Department code");
+    const departmentRow = this.db
+      .prepare(
+        "SELECT department_name FROM product_department_snapshot WHERE department_code = ? LIMIT 1",
+      )
+      .get(departmentCode) as { department_name: string } | undefined;
+    const departmentName =
+      optionalSetupText(input.departmentName) ??
+      departmentRow?.department_name ??
+      departmentCode;
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseProductCategoryPublishedPayload>(
+          "productCategory",
+          `standalone-category-${categoryCode.toLowerCase()}`,
+          "setup.product-category.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            categoryCode,
+            categoryName,
+            departmentCode,
+            departmentName,
+            description: optionalSetupText(input.description),
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            sortOrder: Math.trunc(normalizeSetupNumber(input.sortOrder, 0, 0)),
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${categoryName} was saved in standalone categories.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneUnitOfMeasure(
+    input: StoreStandaloneUnitInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const uomCode = normalizeSetupCode(input.uomCode, "Unit code");
+    const uomName = normalizeSetupName(input.uomName, "Unit name");
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseUnitOfMeasurePublishedPayload>(
+          "unitOfMeasure",
+          `standalone-uom-${uomCode.toLowerCase()}`,
+          "setup.unit-of-measure.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            uomCode,
+            uomName,
+            description: optionalSetupText(input.description),
+            decimalPrecision: Math.max(
+              0,
+              Math.trunc(normalizeSetupNumber(input.decimalPrecision, 0, 0)),
+            ),
+            allowFractionalSale: input.allowFractionalSale === true,
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${uomName} was saved in standalone units.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneTaxProfile(
+    input: StoreStandaloneTaxProfileInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const taxProfileCode = normalizeSetupCode(
+      input.taxProfileCode,
+      "Tax code",
+    );
+    const taxProfileName = normalizeSetupName(
+      input.taxProfileName,
+      "Tax name",
+    );
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseTaxProfilePublishedPayload>(
+          "taxProfile",
+          `standalone-tax-${taxProfileCode.toLowerCase()}`,
+          "setup.tax-profile.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            taxProfileCode,
+            taxProfileName,
+            description: optionalSetupText(input.description),
+            ratePercent: normalizeSetupNumber(input.ratePercent, 0, 4),
+            isDefault: input.isDefault === true,
+            isTaxInclusive: input.isTaxInclusive === true,
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${taxProfileName} was saved in standalone tax profiles.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneTenderMethod(
+    input: StoreStandaloneTenderInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const tenderMethodCode = normalizeSetupCode(
+      input.tenderMethodCode,
+      "Tender code",
+    );
+    const tenderMethodName = normalizeSetupName(
+      input.tenderMethodName,
+      "Tender name",
+    );
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseTenderMethodPublishedPayload>(
+          "tenderMethod",
+          `standalone-tender-${tenderMethodCode.toLowerCase()}`,
+          "setup.tender-method.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            tenderMethodCode,
+            tenderMethodName,
+            paymentMethod: normalizeStandalonePaymentMethod(input.paymentMethod),
+            gatewayProvider: null,
+            gatewayMode: null,
+            gatewayMerchantId: null,
+            gatewayPublicKey: null,
+            gatewayCallbackUrl: null,
+            gatewayActive: false,
+            gatewayStatus: "DISABLED",
+            description: optionalSetupText(input.description),
+            requiresReference: input.requiresReference === true,
+            allowChange: input.allowChange !== false,
+            allowRefund: input.allowRefund !== false,
+            allowOpenCashDrawer: input.allowOpenCashDrawer !== false,
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            sortOrder: Math.trunc(normalizeSetupNumber(input.sortOrder, 0, 0)),
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${tenderMethodName} was saved in standalone tenders.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneLocation(
+    input: StoreStandaloneLocationInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const locationCode = normalizeSetupCode(input.locationCode, "Location code");
+    const locationName = normalizeSetupName(input.locationName, "Location name");
+    const existingLocations = this.scalar(
+      "SELECT count(*) AS value FROM inventory_location_snapshot",
+    );
+    const useForSalesDefault =
+      input.useForSalesDefault ?? existingLocations === 0;
+    const useForSalesOrderDefault =
+      input.useForSalesOrderDefault ?? useForSalesDefault;
+    const useForReceivingDefault =
+      input.useForReceivingDefault ?? existingLocations === 0;
+    const defaults =
+      optionalSetupText(input.defaults) ??
+      [
+        useForSalesDefault ? "SALES" : null,
+        useForSalesOrderDefault ? "SALES_ORDER" : null,
+        useForReceivingDefault ? "RECEIVING" : null,
+      ]
+        .filter(Boolean)
+        .join(",");
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseInventoryLocationPublishedPayload>(
+          "inventoryLocation",
+          `standalone-location-${locationCode.toLowerCase()}`,
+          "inventory.location.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            locationCode,
+            locationName,
+            locationType:
+              optionalSetupText(input.locationType)?.toUpperCase() ?? "STORE",
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            defaults,
+            useForSalesDefault,
+            useForSalesOrderDefault,
+            useForReceivingDefault,
+            warehouseCode: optionalSetupText(input.warehouseCode)?.toUpperCase() ?? null,
+            warehouseName: optionalSetupText(input.warehouseName),
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${locationName} was saved as a standalone inventory location.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneBankAccount(
+    input: StoreStandaloneBankAccountInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const bankCode = normalizeSetupCode(input.bankCode, "Bank code");
+    const bankName = normalizeSetupName(input.bankName, "Bank name");
+    const accountNumber = normalizeSetupName(
+      input.accountNumber,
+      "Account number",
+    );
+    const accountName = normalizeSetupName(input.accountName, "Account name");
+    const branchCode =
+      optionalSetupText(input.branchCode)?.toUpperCase() ?? "MAIN";
+    const branchName = optionalSetupText(input.branchName) ?? "Main branch";
+    const currencyCode =
+      optionalSetupText(input.currencyCode)?.toUpperCase() ??
+      this.metadata("currency_code") ??
+      "GHS";
+    const bankAccountId =
+      optionalSetupText(input.bankAccountId) ??
+      `standalone-bank-${bankCode.toLowerCase()}-${accountNumber
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")}`;
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseBankAccountPublishedPayload>(
+          "bankAccount",
+          bankAccountId,
+          "setup.bank-account.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            bankAccountId,
+            bankCode,
+            bankName,
+            branchCode,
+            branchName,
+            accountNumber,
+            accountName,
+            currencyCode,
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${bankName} ${accountNumber} was saved as a standalone bank account.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneSupplier(
+    input: StoreStandaloneSupplierInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const supplierNo = normalizeSetupCode(input.supplierNo, "Supplier number");
+    const supplierName = normalizeSetupName(input.supplierName, "Supplier name");
+
+    this.withTransaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO supplier_snapshot (
+            supplier_no,
+            supplier_name,
+            phone,
+            email,
+            tax_number,
+            address_line1,
+            city,
+            country_code,
+            status,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(supplier_no) DO UPDATE SET
+            supplier_name = excluded.supplier_name,
+            phone = excluded.phone,
+            email = excluded.email,
+            tax_number = excluded.tax_number,
+            address_line1 = excluded.address_line1,
+            city = excluded.city,
+            country_code = excluded.country_code,
+            status = excluded.status,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          supplierNo,
+          supplierName,
+          optionalSetupText(input.phone),
+          optionalSetupText(input.email),
+          optionalSetupText(input.taxNumber),
+          optionalSetupText(input.addressLine1),
+          optionalSetupText(input.city),
+          optionalSetupText(input.countryCode)?.toUpperCase() ?? null,
+          optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+          timestamp,
+        );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${supplierName} was saved in standalone suppliers.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandalonePriceListEntry(
+    input: StoreStandalonePriceInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const productCode = normalizeSetupCode(input.productCode, "Product code");
+    const product = this.db
+      .prepare(
+        "SELECT product_name FROM product_snapshot WHERE product_code = ? LIMIT 1",
+      )
+      .get(productCode) as { product_name: string } | undefined;
+
+    if (!product) {
+      throw new Error(`Product ${productCode} does not exist in the standalone catalog.`);
+    }
+
+    const priceListCode =
+      optionalSetupText(input.priceListCode) ?? "default-sell";
+    const priceListName =
+      optionalSetupText(input.priceListName) ?? "Default selling price";
+    const currencyCode =
+      optionalSetupText(input.currencyCode)?.toUpperCase() ??
+      this.metadata("currency_code") ??
+      "GHS";
+    const unitPrice = normalizeSetupNumber(input.unitPrice, 0, 2);
+    const isDefault = input.isDefault ?? priceListCode.toLowerCase() === "default-sell";
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterprisePriceListPublishedPayload>(
+          "priceList",
+          `standalone-price-${priceListCode.toLowerCase()}-${productCode.toLowerCase()}`,
+          "pricing.price-list.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            priceListCode,
+            priceListName,
+            currencyCode,
+            isDefault,
+            customerType: optionalSetupText(input.customerType)?.toUpperCase() ?? null,
+            loyaltyTier: optionalSetupText(input.loyaltyTier)?.toUpperCase() ?? null,
+            productCode,
+            unitPrice,
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${product.product_name} was repriced in standalone pricing.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandalonePromotion(
+    input: StoreStandalonePromotionInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const promotionCode = normalizeSetupCode(input.promotionCode, "Promotion code");
+    const promotionName = normalizeSetupName(input.promotionName, "Promotion name");
+    const targetScope = normalizeStandalonePromotionTargetScope(input.targetScope);
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterprisePromotionPublishedPayload>(
+          "promotion",
+          `standalone-promotion-${promotionCode.toLowerCase()}`,
+          "setup.promotion.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            promotionId: `standalone-promotion-${promotionCode.toLowerCase()}`,
+            promotionCode,
+            promotionName,
+            description: optionalSetupText(input.description),
+            discountType: normalizeStandalonePromotionDiscountType(input.discountType),
+            targetScope,
+            discountValue: normalizeSetupNumber(input.discountValue, 0, 2),
+            minimumBasketAmount:
+              input.minimumBasketAmount == null
+                ? null
+                : normalizeSetupNumber(input.minimumBasketAmount, 0, 2),
+            minimumLineQuantity:
+              input.minimumLineQuantity == null
+                ? null
+                : normalizeSetupNumber(input.minimumLineQuantity, 0, 3),
+            buyQuantity:
+              input.buyQuantity == null
+                ? null
+                : normalizeSetupNumber(input.buyQuantity, 0, 3),
+            rewardQuantity:
+              input.rewardQuantity == null
+                ? null
+                : normalizeSetupNumber(input.rewardQuantity, 0, 3),
+            targetDepartmentCode:
+              targetScope === "DEPARTMENT"
+                ? optionalSetupText(input.targetDepartmentCode)?.toUpperCase() ?? null
+                : null,
+            targetCategoryCode:
+              targetScope === "CATEGORY"
+                ? optionalSetupText(input.targetCategoryCode)?.toUpperCase() ?? null
+                : null,
+            targetProductCode:
+              targetScope === "PRODUCT"
+                ? optionalSetupText(input.targetProductCode)?.toUpperCase() ?? null
+                : null,
+            eligibleStoreCodes: null,
+            eligibleCustomerTypes: optionalSetupStringList(
+              input.eligibleCustomerTypes,
+            )?.map((value) => value.toUpperCase()) ?? null,
+            eligibleLoyaltyTiers: optionalSetupStringList(
+              input.eligibleLoyaltyTiers,
+            )?.map((value) => value.toUpperCase()) ?? null,
+            activeDaysOfWeek: optionalSetupStringList(input.activeDaysOfWeek)
+              ?.map((value) => value.toUpperCase()) ?? null,
+            activeFromMinutes:
+              input.activeFromMinutes == null
+                ? null
+                : Math.trunc(normalizeSetupNumber(input.activeFromMinutes, 0, 0)),
+            activeToMinutes:
+              input.activeToMinutes == null
+                ? null
+                : Math.trunc(normalizeSetupNumber(input.activeToMinutes, 0, 0)),
+            couponRequired: input.couponRequired === true,
+            couponCode: optionalSetupText(input.couponCode)?.toUpperCase() ?? null,
+            allowWithLoyalty: input.allowWithLoyalty !== false,
+            applyOncePerBasket: input.applyOncePerBasket === true,
+            priority: Math.trunc(normalizeSetupNumber(input.priority, 0, 0)),
+            startAt: optionalSetupText(input.startAt),
+            endAt: optionalSetupText(input.endAt),
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${promotionName} was saved in standalone promotions.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneProduct(
+    input: StoreStandaloneProductInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const productCode = normalizeSetupCode(input.productCode, "Product code");
+    const productName = normalizeSetupName(input.productName, "Product name");
+    const taxProfileCode = optionalSetupText(input.taxProfileCode)?.toUpperCase() ?? null;
+    const standaloneQuantity =
+      input.quantityOnHand == null
+        ? null
+        : normalizeSetupNumber(input.quantityOnHand, 0, 3);
+    const taxProfile = taxProfileCode
+      ? (this.db
+          .prepare(
+            "SELECT tax_profile_name, rate_percent, is_tax_inclusive FROM tax_profile_snapshot WHERE tax_profile_code = ? LIMIT 1",
+          )
+          .get(taxProfileCode) as
+          | {
+              tax_profile_name: string;
+              rate_percent: number | string;
+              is_tax_inclusive: number | string;
+            }
+          | undefined)
+      : null;
+    const barcode = optionalSetupText(input.barcode);
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseCatalogProductPublishedPayload>(
+          "product",
+          `standalone-product-${productCode.toLowerCase()}`,
+          "catalog.product.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            productCode,
+            productName,
+            sku: null,
+            shortName: optionalSetupText(input.shortName),
+            description: optionalSetupText(input.description),
+            productType: "STOCK",
+            department: optionalSetupText(input.departmentCode)?.toUpperCase() ?? null,
+            category: optionalSetupText(input.categoryCode)?.toUpperCase() ?? null,
+            subcategory: optionalSetupText(input.subcategory),
+            brand: null,
+            seasonCode: null,
+            unitOfMeasure:
+              optionalSetupText(input.unitOfMeasure)?.toUpperCase() ?? "EA",
+            packSize: null,
+            countryOfOrigin: null,
+            primaryImageUrl: optionalSetupText(input.primaryImageUrl),
+            notes: null,
+            taxable: input.taxable !== false,
+            taxProfileCode,
+            taxProfileName: taxProfile?.tax_profile_name ?? null,
+            taxRatePercent:
+              taxProfile?.rate_percent === undefined
+                ? null
+                : asNumber(taxProfile.rate_percent),
+            taxInclusive: taxProfile
+              ? asBooleanFlag(taxProfile.is_tax_inclusive)
+              : false,
+            trackInventory: input.trackInventory !== false,
+            isSerialized: input.isSerialized === true,
+            trackSize: input.trackSize === true,
+            trackColor: input.trackColor === true,
+            allowPriceOverride: true,
+            mustEnterPriceAtPos: input.mustEnterPriceAtPos === true,
+            minStockLevel:
+              input.minStockLevel == null
+                ? null
+                : normalizeSetupNumber(input.minStockLevel, 0, 3),
+            reorderPoint:
+              input.reorderPoint == null
+                ? null
+                : normalizeSetupNumber(input.reorderPoint, 0, 3),
+            reorderQuantity: null,
+            safetyStockLevel:
+              input.safetyStockLevel == null
+                ? null
+                : normalizeSetupNumber(input.safetyStockLevel, 0, 3),
+            shelfLifeDays: null,
+            weightKg: null,
+            volumeLitres: null,
+            unitPrice: normalizeSetupNumber(input.unitPrice, 0, 2),
+            quantityOnHand: standaloneQuantity,
+            catalogSortOrder:
+              input.catalogSortOrder == null
+                ? null
+                : Math.trunc(normalizeSetupNumber(input.catalogSortOrder, 0, 0)),
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+
+      if (barcode) {
+        this.applyDownstreamPayload(
+          this.buildLocalPublication<EnterpriseBarcodePublishedPayload>(
+            "barcode",
+            `standalone-barcode-${barcode.toLowerCase()}`,
+            "catalog.barcode.published",
+            {
+              storeCode:
+                this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+              productCode,
+              barcode,
+              barcodeType: "LOCAL",
+              publishedAt: timestamp,
+            },
+            timestamp,
+          ),
+          timestamp,
+        );
+      }
+
+      if (standaloneQuantity !== null) {
+        const salesLocationCode = this.getDefaultSalesLocationCode();
+
+        if (salesLocationCode) {
+          this.setLocationBalanceQuantity(
+            salesLocationCode,
+            productCode,
+            standaloneQuantity,
+            timestamp,
+          );
+        }
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${productName} was saved in the standalone product catalog.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneRole(input: StoreStandaloneRoleInput): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const roleName = normalizeSetupName(input.roleName, "Role name");
+    const roleCode =
+      optionalSetupText(input.roleCode)?.toUpperCase().replace(/[^A-Z0-9]+/g, "-") ||
+      roleName.toUpperCase().replace(/[^A-Z0-9]+/g, "-");
+    const permissionCodes =
+      input.permissionCodes?.filter((permissionCode) => permissionCode.trim()) ??
+      standalonePermissionCodes(input);
+    const roleId = `standalone-role-${roleCode.toLowerCase()}`;
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseRolePublishedPayload>(
+          "role",
+          roleId,
+          "security.role.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            roleCode,
+            roleName,
+            description: optionalSetupText(input.description),
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            permissionCodes,
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${roleName} was saved as a standalone role.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneUser(input: StoreStandaloneUserInput): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const loginId = normalizeSetupCode(input.loginId, "Login ID");
+    const displayName = normalizeSetupName(input.displayName, "Display name");
+    const existing = this.db
+      .prepare(
+        "SELECT id, password_hash FROM retail_user_snapshot WHERE login_id = ? COLLATE NOCASE LIMIT 1",
+      )
+      .get(loginId) as
+      | { id: string; password_hash: string | null }
+      | undefined;
+    const password = optionalSetupText(input.password);
+    if (password) {
+      validateStandalonePasswordPolicy(
+        password,
+        this.getPasswordPolicySummary(this.getMetadata()),
+      );
+    }
+    const passwordHash = password
+      ? bcrypt.hashSync(password, 10)
+      : (existing?.password_hash ?? null);
+
+    if (!passwordHash) {
+      throw new Error("Password is required when creating a standalone operator.");
+    }
+
+    const roleName =
+      optionalSetupText(input.roleName) ??
+      (input.supervisorEligible ? "Standalone manager" : "Standalone cashier");
+    const roleCode =
+      optionalSetupText(input.roleCode)?.toUpperCase().replace(/[^A-Z0-9]+/g, "-") ||
+      roleName.toUpperCase().replace(/[^A-Z0-9]+/g, "-");
+    const explicitPermissionCodes = Array.from(
+      new Set(
+        (input.permissionCodes ?? [])
+          .map((permissionCode) => permissionCode.trim())
+          .filter(Boolean),
+      ),
+    );
+    const roleSnapshot = this.db
+      .prepare(
+        `SELECT permission_codes_json
+        FROM role_snapshot
+        WHERE role_code = ? COLLATE NOCASE OR role_name = ? COLLATE NOCASE
+        LIMIT 1`,
+      )
+      .get(roleCode, roleName) as
+      | { permission_codes_json: string | null }
+      | undefined;
+    const rolePermissionCodes = readStringArray(
+      roleSnapshot?.permission_codes_json ?? null,
+    );
+    const permissionCodes =
+      explicitPermissionCodes.length > 0
+        ? explicitPermissionCodes
+        : rolePermissionCodes.length > 0
+          ? rolePermissionCodes
+          : standalonePermissionCodes(input);
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseRetailUserPublishedPayload>(
+          "retailUser",
+          existing?.id ?? `standalone-user-${loginId.toLowerCase()}`,
+          "security.user.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            userId: existing?.id ?? `standalone-user-${loginId.toLowerCase()}`,
+            loginId,
+            email: optionalSetupText(input.email),
+            displayName,
+            accountStatus: optionalSetupText(input.accountStatus)?.toUpperCase() ?? "ACTIVE",
+            homeStoreCode:
+              this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            homeStoreName:
+              this.metadata("store_name") ?? defaultStoreConfig.storeName,
+            roleCodes: [roleCode || "STANDALONE-CASHIER"],
+            roleNames: [roleName],
+            permissionCodes,
+            passwordHash,
+            passwordUpdatedAt: password ? timestamp : null,
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${displayName} was saved as a standalone operator.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStandaloneCustomer(
+    input: StoreStandaloneCustomerInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const customerNo = normalizeSetupCode(input.customerNo, "Customer number");
+    const fullName = normalizeSetupName(input.fullName, "Customer name");
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterpriseCustomerPublishedPayload>(
+          "customer",
+          `standalone-customer-${customerNo.toLowerCase()}`,
+          "customer.published",
+          {
+            storeCode: this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            customerId: `standalone-customer-${customerNo.toLowerCase()}`,
+            customerNo,
+            fullName,
+            customerType: optionalSetupText(input.customerType)?.toUpperCase() ?? "RETAIL",
+            phone: optionalSetupText(input.phone),
+            email: optionalSetupText(input.email),
+            addressLine1: optionalSetupText(input.addressLine1),
+            city: optionalSetupText(input.city),
+            countryCode: optionalSetupText(input.countryCode)?.toUpperCase() ?? null,
+            homeStoreCode:
+              this.metadata("store_code") ?? defaultStoreConfig.storeCode,
+            homeStoreName:
+              this.metadata("store_name") ?? defaultStoreConfig.storeName,
+            loyaltyEnrolled: input.loyaltyEnrolled === true,
+            loyaltyTier: optionalSetupText(input.loyaltyTier)?.toUpperCase() ?? null,
+            loyaltyPointsBalance:
+              input.loyaltyPointsBalance == null
+                ? 0
+                : Math.trunc(normalizeSetupNumber(input.loyaltyPointsBalance, 0, 0)),
+            allowCreditSales: input.allowCreditSales === true,
+            creditLimitAmount:
+              input.creditLimitAmount == null
+                ? null
+                : normalizeSetupNumber(input.creditLimitAmount, 0, 2),
+            receivableBalanceAmount:
+              input.receivableBalanceAmount == null
+                ? 0
+                : normalizeSetupNumber(input.receivableBalanceAmount, 0, 2),
+            note: optionalSetupText(input.note),
+            status: optionalSetupText(input.status)?.toUpperCase() ?? "ACTIVE",
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${fullName} was saved in standalone customers.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  private getSyncQueueMetrics(): StoreSyncSnapshot["queueMetrics"] {
+    return {
+      upstreamQueued: this.scalar(
+        "SELECT count(*) AS value FROM sync_outbox WHERE status = 'PENDING'",
+      ),
+      upstreamInFlight: this.scalar(
+        "SELECT count(*) AS value FROM sync_outbox WHERE status = 'IN_FLIGHT'",
+      ),
+      downstreamQueued: this.scalar(
+        "SELECT count(*) AS value FROM sync_inbox WHERE status IN ('RECEIVED', 'PENDING')",
+      ),
+      deadLetter:
+        this.scalar(
+          "SELECT count(*) AS value FROM sync_outbox WHERE status IN ('FAILED', 'DEAD_LETTER')",
+        ) +
+        this.scalar(
+          "SELECT count(*) AS value FROM sync_inbox WHERE status IN ('FAILED', 'DEAD_LETTER')",
+        ),
+    };
+  }
+
+  private getSyncLogContext(nodeCode?: string | null) {
+    const metadata = this.getMetadata();
+
+    return {
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      nodeCode: nodeCode ?? metadata.node_code ?? defaultStoreConfig.nodeCode,
+      terminalCode: this.getTerminalCode(),
+      deploymentMode: this.deploymentMode,
+      syncBaseUrlConfigured: Boolean(this.syncBaseUrl),
+    };
+  }
+
+  private describeSyncLogError(error: unknown) {
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      };
+    }
+
+    return {
+      name: "UnknownError",
+      message: String(error),
+    };
+  }
+
+  private getEmptyOperationsMetrics(): StoreSyncSnapshot["operationsMetrics"] {
+    return {
+      completedSales: 0,
+      parkedSales: 0,
+      openShifts: 0,
+      connectedTerminals: 0,
+      openSalesOrders: 0,
+      catalogItems: 0,
+      barcodeLinks: 0,
+      availableUnits: 0,
+      openPurchaseOrders: 0,
+      openInterStoreTransfers: 0,
+      openStockCountSessions: 0,
+      recentCloseouts: 0,
+      recentBankingDeposits: 0,
+      bankedAmount: 0,
+      pendingBankingAmount: 0,
+      openRecoveryTasks: 0,
+    };
+  }
+
+  private getSyncActionSnapshot(
+    snapshotMode: StoreSyncRunOptions["snapshotMode"] | undefined,
+  ): StoreSyncSnapshot {
+    return snapshotMode === "status"
+      ? this.getSyncStatusSnapshot()
+      : this.getSyncSnapshot();
+  }
+
+  getSyncStatusSnapshot(): StoreSyncSnapshot {
+    const metadata = this.getMetadata();
+    const queueMetrics = this.getSyncQueueMetrics();
+    const lastSyncAt = metadata.last_sync_at ?? null;
+    const lastEnterpriseAckAt =
+      (
+        this.db
+          .prepare(
+            "SELECT last_applied_at FROM sync_checkpoint WHERE remote_node_code = ? LIMIT 1",
+          )
+          .get(ENTERPRISE_NODE_CODE) as
+          | { last_applied_at: string | null }
+          | undefined
+      )?.last_applied_at ?? null;
+    const standalone = this.isStandaloneDeployment();
+    const health =
+      !standalone && !this.syncBaseUrl
+        ? "attention"
+        : this.getHealth(queueMetrics, lastSyncAt, standalone);
+    const recentRuns = this.db
+      .prepare(
+        "SELECT id, run_kind, result, summary, upstream_processed, downstream_applied, started_at, finished_at FROM sync_run_log ORDER BY started_at DESC LIMIT 4",
+      )
+      .all() as RunRow[];
+    const syncPolicy = readStoreSyncPolicyFromMetadata(metadata);
+
+    return {
+      deploymentMode: this.deploymentMode,
+      standaloneBootstrapAvailable: false,
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      companyLogoUrl: this.resolveStoreLogoUrl(metadata),
+      loginBackgroundImageUrl: this.resolveEnterpriseMediaUrl(
+        metadata.login_background_image_url,
+      ),
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      storeGroupCode: metadata.store_group_code ?? null,
+      storeGroupName: metadata.store_group_name ?? null,
+      storeGroupType: metadata.store_group_type ?? null,
+      storeLicenseStatus: metadata.store_license_status ?? "LICENSED",
+      storeLicenseKey: metadata.store_license_key ?? null,
+      storeLicensedUntil: metadata.store_licensed_until ?? null,
+      terminalLicenseStatus: metadata.terminal_license_status ?? "LICENSED",
+      terminalLicenseKey: metadata.terminal_license_key ?? null,
+      terminalLicensedUntil: metadata.terminal_licensed_until ?? null,
+      touchModeEnabled:
+        metadata.touch_mode_enabled == null
+          ? true
+          : metadata.touch_mode_enabled === "1",
+      catalogPolicy: readCatalogPolicy(metadata.catalog_policy_json),
+      terminalCode: this.getTerminalCode(),
+      nodeCode: metadata.node_code ?? defaultStoreConfig.nodeCode,
+      enterpriseBaseUrl: this.syncBaseUrl,
+      databasePath: this.databasePath,
+      offlineReady: true,
+      health,
+      lastLocalWriteAt: metadata.last_local_write_at ?? null,
+      lastSyncAt,
+      lastEnterpriseAckAt,
+      syncPolicy,
+      queueMetrics,
+      operationsMetrics: this.getEmptyOperationsMetrics(),
+      recentRuns: recentRuns.map<StoreSyncRun>((run) => ({
+        id: run.id,
+        runKind: run.run_kind,
+        result: run.result,
+        summary: run.summary,
+        upstreamProcessed: asNumber(run.upstream_processed),
+        downstreamApplied: asNumber(run.downstream_applied),
+        startedAt: run.started_at,
+        finishedAt: run.finished_at,
+      })),
+      syncDeadLetters: [],
+      recentSyncEvents: [],
+      connectedTerminals: [],
+      recentTransactions: [],
+      activeShift: null,
+      openShifts: [],
+      recentClosedShifts: [],
+      recentStoreShifts: [],
+      activeOperatorSession: null,
+      recoveryTasks: [],
+      activeBasket: null,
+      parkedBaskets: [],
+      salesOrders: [],
+      recentEodReconciliations: [],
+      recentBankingDeposits: [],
+      inventoryLocations: [],
+      transferRequestTargets: [],
+      transferRequestDrafts: [],
+      stockCountSessions: [],
+      recentGoodsReceipts: [],
+      recentSupplierReturns: [],
+      recentCustomerAccountEntries: [],
+      storeUsers: [],
+      standaloneRoles: standalone ? [] : undefined,
+      standalonePermissions: standalone ? [] : undefined,
+      productDepartments: [],
+      productCategories: [],
+      availableTenderMethods: [],
+      availableBankAccounts: [],
+      availableSuppliers: [],
+      standaloneSuppliers: standalone ? [] : undefined,
+      priceListEntries: [],
+      promotions: [],
+      standaloneCustomers: standalone ? [] : undefined,
+      passwordPolicy: this.getPasswordPolicySummary(metadata),
+      optionSettings: this.getOptionSettingsSummary(metadata),
+      loyaltySettings: this.getLoyaltySettingsSummary(metadata),
+      receiptSettings: this.getReceiptSettingsSummary(metadata),
+      receiptPrinterSettings: this.getReceiptPrinterSettingsSummary(metadata),
+      activityFeed: [],
+      generatedAt: isoNow(),
+    };
+  }
+
+  getSyncSnapshot(): StoreSyncSnapshot {
+    const metadata = this.getMetadata();
+    const queueMetrics = this.getSyncQueueMetrics();
+    const standaloneBootstrapAvailable =
+      this.isStandaloneDeployment() &&
+      this.scalar("SELECT count(*) AS value FROM retail_user_snapshot") === 0;
+    const operationsMetrics = {
+      completedSales: this.scalar(
+        "SELECT count(*) AS value FROM pos_transaction WHERE status = 'COMPLETED'",
+      ),
+      parkedSales: this.scalar(
+        "SELECT count(*) AS value FROM pos_transaction WHERE status = 'PARKED'",
+      ),
+      openShifts: this.scalar(
+        "SELECT count(*) AS value FROM pos_shift WHERE status = 'OPEN'",
+      ),
+      connectedTerminals: this.scalar(
+        "SELECT count(*) AS value FROM terminal_connection WHERE last_seen_at >= ?",
+        minutesAgo(5),
+      ),
+      openSalesOrders: this.scalar(
+        "SELECT count(*) AS value FROM sales_order WHERE status = 'OPEN'",
+      ),
+      catalogItems: this.scalar(
+        "SELECT count(*) AS value FROM product_snapshot WHERE COALESCE(catalog_membership_active, 1) = 1",
+      ),
+      barcodeLinks: this.scalar(
+        "SELECT count(*) AS value FROM barcode_snapshot",
+      ),
+      availableUnits: this.scalar(
+        "SELECT COALESCE(sum(quantity_on_hand), 0) AS value FROM product_snapshot WHERE COALESCE(catalog_membership_active, 1) = 1",
+      ),
+      openPurchaseOrders: this.scalar(
+        "SELECT count(*) AS value FROM purchase_order_snapshot WHERE status IN ('COMMITTED', 'PART_RECEIVED')",
+      ),
+      openInterStoreTransfers: this.scalar(
+        "SELECT count(*) AS value FROM inter_store_transfer_snapshot WHERE status IN ('REQUESTED', 'PART_ISSUED', 'ISSUED', 'PART_RECEIVED')",
+      ),
+      openStockCountSessions: this.scalar(
+        "SELECT count(*) AS value FROM stock_count_session WHERE status IN ('DRAFT', 'SUBMITTED')",
+      ),
+      recentCloseouts: this.scalar(
+        "SELECT count(*) AS value FROM eod_reconciliation",
+      ),
+      recentBankingDeposits: this.scalar(
+        "SELECT count(*) AS value FROM banking_deposit",
+      ),
+      bankedAmount: this.scalar(
+        "SELECT COALESCE(sum(amount), 0) AS value FROM banking_deposit",
+      ),
+      pendingBankingAmount: this.scalar(
+        `SELECT COALESCE(sum(reconciliation.declared_cash_amount), 0) - COALESCE((
+          SELECT sum(deposit.amount)
+          FROM banking_deposit AS deposit
+        ), 0) AS value
+        FROM eod_reconciliation AS reconciliation`,
+      ),
+      openRecoveryTasks: this.scalar(
+        "SELECT count(*) AS value FROM sync_recovery_task WHERE status = 'OPEN'",
+      ),
+    };
+    const lastSyncAt = metadata.last_sync_at ?? null;
+    const lastEnterpriseAckAt =
+      (
+        this.db
+          .prepare(
+            "SELECT last_applied_at FROM sync_checkpoint WHERE remote_node_code = ? LIMIT 1",
+          )
+          .get(ENTERPRISE_NODE_CODE) as
+          | { last_applied_at: string | null }
+          | undefined
+      )?.last_applied_at ?? null;
+    const standalone = this.isStandaloneDeployment();
+    const health =
+      !standalone && !this.syncBaseUrl
+        ? "attention"
+        : this.getHealth(queueMetrics, lastSyncAt, standalone);
+    const recentRuns = this.db
+      .prepare(
+        "SELECT id, run_kind, result, summary, upstream_processed, downstream_applied, started_at, finished_at FROM sync_run_log ORDER BY started_at DESC LIMIT 4",
+      )
+      .all() as RunRow[];
+    const syncDeadLetters = this.db
+      .prepare(
+        `SELECT
+          id,
+          'UPSTREAM' AS direction,
+          status,
+          aggregate_type,
+          aggregate_id,
+          event_type,
+          target_node_code AS node_code,
+          attempt_count,
+          payload_json,
+          error_message,
+          created_at,
+          updated_at
+        FROM sync_outbox
+        WHERE status IN ('FAILED', 'DEAD_LETTER')
+        UNION ALL
+        SELECT
+          id,
+          'DOWNSTREAM' AS direction,
+          status,
+          aggregate_type,
+          aggregate_id,
+          event_type,
+          source_node_code AS node_code,
+          0 AS attempt_count,
+          payload_json,
+          error_message,
+          received_at AS created_at,
+          COALESCE(applied_at, received_at) AS updated_at
+        FROM sync_inbox
+        WHERE status IN ('FAILED', 'DEAD_LETTER')
+        ORDER BY updated_at DESC
+        LIMIT 20`,
+      )
+      .all() as SyncDeadLetterRow[];
+    const recentSyncEvents = this.db
+      .prepare(
+        `SELECT
+          id,
+          'UPSTREAM' AS direction,
+          status,
+          aggregate_type,
+          aggregate_id,
+          event_type,
+          target_node_code AS node_code,
+          attempt_count,
+          payload_json,
+          error_message,
+          created_at,
+          last_attempt_at AS applied_at,
+          acknowledged_at,
+          COALESCE(acknowledged_at, last_attempt_at, updated_at, created_at) AS updated_at
+        FROM sync_outbox
+        UNION ALL
+        SELECT
+          id,
+          'DOWNSTREAM' AS direction,
+          status,
+          aggregate_type,
+          aggregate_id,
+          event_type,
+          source_node_code AS node_code,
+          0 AS attempt_count,
+          payload_json,
+          error_message,
+          received_at AS created_at,
+          applied_at,
+          acknowledged_at,
+          COALESCE(acknowledged_at, applied_at, received_at) AS updated_at
+        FROM sync_inbox
+        ORDER BY updated_at DESC
+        LIMIT 30`,
+      )
+      .all() as SyncEventDetailRow[];
+    const connectedTerminalRows = this.db
+      .prepare(
+        `SELECT
+          terminal_code,
+          client_name,
+          first_seen_at,
+          last_seen_at,
+          request_count,
+          last_method,
+          remote_address,
+          user_agent
+        FROM terminal_connection
+        ORDER BY last_seen_at DESC, terminal_code ASC
+        LIMIT 24`,
+      )
+      .all() as TerminalConnectionRow[];
+    const recentTransactions = this.db
+      .prepare(
+        `SELECT
+          txn.transaction_no AS transaction_no,
+          txn.source_transaction_no AS source_transaction_no,
+          txn.transaction_type AS transaction_type,
+          txn.status AS status,
+          txn.total_amount AS total_amount,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          shift.terminal_code AS terminal_code,
+          COALESCE(txn.cashier_code, shift.cashier_code) AS cashier_code,
+          shift.shift_no AS shift_no,
+          (
+            SELECT count(*)
+            FROM pos_transaction_line AS line
+            WHERE line.pos_transaction_id = txn.id
+          ) AS line_count,
+          txn.updated_at AS updated_at,
+          txn.completed_at AS completed_at
+        FROM pos_transaction AS txn
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = txn.shift_id
+        ORDER BY txn.updated_at DESC, txn.transaction_no DESC
+        LIMIT 200`,
+      )
+      .all() as TransactionRow[];
+    const activeShift = this.getActiveShiftSummary();
+    const openShifts = this.getOpenShiftSummaries();
+    const recentClosedShifts = this.getRecentClosedShiftSummaries();
+    const recentStoreShifts = this.getRecentStoreShiftSummaries();
+    const activeOperatorSession = this.getActiveOperatorSessionSummary();
+    const recoveryTasks = this.db
+      .prepare(
+        `SELECT
+          task.id AS id,
+          task.task_type AS task_type,
+          task.status AS status,
+          task.title AS title,
+          task.instructions AS instructions,
+          task.source_inbound_event_id AS source_inbound_event_id,
+          task.source_event_type AS source_event_type,
+          task.aggregate_type AS aggregate_type,
+          task.aggregate_id AS aggregate_id,
+          task.transaction_no AS transaction_no,
+          task.product_code AS product_code,
+          task.replacement_aggregate_type AS replacement_aggregate_type,
+          task.replacement_aggregate_id AS replacement_aggregate_id,
+          task.replacement_event_type AS replacement_event_type,
+          task.replacement_record_version AS replacement_record_version,
+          task.replacement_payload_json AS replacement_payload_json,
+          task.operator_name AS operator_name,
+          task.operator_note AS operator_note,
+          task.store_note AS store_note,
+          task.requested_at AS requested_at,
+          task.completed_at AS completed_at,
+          product.product_name AS product_name,
+          product.department_code AS department_code,
+          department.department_name AS department_name,
+          product.category_code AS category_code,
+          category.category_name AS category_name,
+          product.subcategory AS subcategory,
+          product.is_serialized AS is_serialized
+        FROM sync_recovery_task AS task
+        LEFT JOIN product_snapshot AS product
+          ON product.product_code = task.product_code
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = product.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = product.category_code
+        ORDER BY CASE WHEN task.status = 'OPEN' THEN 0 ELSE 1 END, task.requested_at DESC
+        LIMIT 6`,
+      )
+      .all() as RecoveryTaskSnapshotRow[];
+    const activeBasket = this.getActiveBasketSummary();
+    const parkedBaskets = this.getParkedBasketSummaries(
+      activeBasket?.transactionId ?? null,
+    );
+    const salesOrders = this.getSalesOrderSummaries();
+    const recentEodReconciliations = this.getRecentEodReconciliationSummaries();
+    const recentBankingDeposits = this.getRecentBankingDepositSummaries();
+    const inventoryLocations = this.getInventoryLocationSummaries();
+    const transferRequestTargets = this.getTransferRequestTargetSummaries();
+    const transferRequestDrafts =
+      this.getInterStoreTransferRequestDraftSummaries();
+    const stockCountSessions = this.getStockCountSessionSummaries();
+    const recentGoodsReceipts = this.getLocalGoodsReceiptSummaries();
+    const recentSupplierReturns = this.getLocalSupplierReturnSummaries();
+    const recentCustomerAccountEntries =
+      this.getRecentCustomerAccountEntrySummaries();
+    const storeUsers = this.getStoreUserSummaries();
+    const standaloneRoles = this.isStandaloneDeployment()
+      ? this.getStandaloneRoleSummaries(storeUsers)
+      : undefined;
+    const standalonePermissions = this.isStandaloneDeployment()
+      ? this.getStandalonePermissionSummaries()
+      : undefined;
+    const productDepartments = this.getProductDepartmentSummaries();
+    const productCategories = this.getProductCategorySummaries();
+    const availableTenderMethods = this.listActiveTenderMethods();
+    const availableBankAccounts = this.listActiveBankAccounts();
+    const availableSuppliers = this.listSuppliers({ activeOnly: true });
+    const standaloneSuppliers = this.isStandaloneDeployment()
+      ? this.listSuppliers({ activeOnly: false })
+      : undefined;
+    const priceListEntries = this.listPriceListEntries();
+    const promotions = this.listPromotions();
+    const standaloneCustomers = this.isStandaloneDeployment()
+      ? this.searchCustomers({ limit: 300 })
+      : undefined;
+    const passwordPolicy = this.getPasswordPolicySummary(metadata);
+    const optionSettings = this.getOptionSettingsSummary(metadata);
+    const loyaltySettings = this.getLoyaltySettingsSummary(metadata);
+    const receiptSettings = this.getReceiptSettingsSummary(metadata);
+    const receiptPrinterSettings =
+      this.getReceiptPrinterSettingsSummary(metadata);
+    const syncPolicy = readStoreSyncPolicyFromMetadata(metadata);
+
+    return {
+      deploymentMode: this.deploymentMode,
+      standaloneBootstrapAvailable,
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      companyLogoUrl: this.resolveStoreLogoUrl(metadata),
+      loginBackgroundImageUrl: this.resolveEnterpriseMediaUrl(
+        metadata.login_background_image_url,
+      ),
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      storeGroupCode: metadata.store_group_code ?? null,
+      storeGroupName: metadata.store_group_name ?? null,
+      storeGroupType: metadata.store_group_type ?? null,
+      storeLicenseStatus: metadata.store_license_status ?? "LICENSED",
+      storeLicenseKey: metadata.store_license_key ?? null,
+      storeLicensedUntil: metadata.store_licensed_until ?? null,
+      terminalLicenseStatus: metadata.terminal_license_status ?? "LICENSED",
+      terminalLicenseKey: metadata.terminal_license_key ?? null,
+      terminalLicensedUntil: metadata.terminal_licensed_until ?? null,
+      touchModeEnabled:
+        metadata.touch_mode_enabled == null
+          ? true
+          : metadata.touch_mode_enabled === "1",
+      catalogPolicy: readCatalogPolicy(metadata.catalog_policy_json),
+      terminalCode: this.getTerminalCode(),
+      nodeCode: metadata.node_code ?? defaultStoreConfig.nodeCode,
+      enterpriseBaseUrl: this.syncBaseUrl,
+      databasePath: this.databasePath,
+      offlineReady: true,
+      health,
+      lastLocalWriteAt: metadata.last_local_write_at ?? null,
+      lastSyncAt,
+      lastEnterpriseAckAt,
+      syncPolicy,
+      queueMetrics,
+      operationsMetrics,
+      recentRuns: recentRuns.map<StoreSyncRun>((run) => ({
+        id: run.id,
+        runKind: run.run_kind,
+        result: run.result,
+        summary: run.summary,
+        upstreamProcessed: asNumber(run.upstream_processed),
+        downstreamApplied: asNumber(run.downstream_applied),
+        startedAt: run.started_at,
+        finishedAt: run.finished_at,
+      })),
+      syncDeadLetters: syncDeadLetters.map<StoreSyncDeadLetterSummary>(
+        (row) => ({
+          id: row.id,
+          direction: row.direction,
+          status: row.status,
+          aggregateType: row.aggregate_type,
+          aggregateId: row.aggregate_id,
+          eventType: row.event_type,
+          nodeCode: row.node_code,
+          attemptCount: Math.trunc(asNumber(row.attempt_count)),
+          errorMessage: row.error_message,
+          diagnosticSummary: this.describeSyncEventPayload(
+            row.aggregate_type,
+            row.event_type,
+            row.payload_json,
+          ),
+          payloadPreview: this.formatPayloadPreview(row.payload_json),
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }),
+      ),
+      recentSyncEvents: recentSyncEvents.map<StoreSyncEventDetail>((row) => ({
+        id: row.id,
+        direction: row.direction,
+        status: row.status,
+        aggregateType: row.aggregate_type,
+        aggregateId: row.aggregate_id,
+        eventType: row.event_type,
+        nodeCode: row.node_code,
+        attemptCount: Math.trunc(asNumber(row.attempt_count)),
+        summary: this.describeSyncEventPayload(
+          row.aggregate_type,
+          row.event_type,
+          row.payload_json,
+        ),
+        errorMessage: row.error_message,
+        diagnosticSummary: this.describeSyncEventPayload(
+          row.aggregate_type,
+          row.event_type,
+          row.payload_json,
+        ),
+        payloadPreview: this.formatPayloadPreview(row.payload_json),
+        createdAt: row.created_at,
+        appliedAt: row.applied_at,
+        acknowledgedAt: row.acknowledged_at,
+        updatedAt: row.updated_at,
+      })),
+      connectedTerminals:
+        connectedTerminalRows.map<StoreTerminalConnectionSummary>((row) => ({
+          terminalCode: row.terminal_code,
+          clientName: row.client_name,
+          firstSeenAt: row.first_seen_at,
+          lastSeenAt: row.last_seen_at,
+          requestCount: Math.trunc(asNumber(row.request_count)),
+          lastMethod: row.last_method,
+          remoteAddress: row.remote_address,
+          online: minutesSince(row.last_seen_at) <= 5,
+        })),
+      recentTransactions: recentTransactions.map<StoreTransactionSummary>(
+        (transaction) => ({
+          transactionNo: transaction.transaction_no,
+          sourceTransactionNo: transaction.source_transaction_no,
+          transactionType: transaction.transaction_type,
+          status: transaction.status,
+          totalAmount: asNumber(transaction.total_amount),
+          customerNo: transaction.customer_no,
+          customerName: transaction.customer_name,
+          terminalCode: transaction.terminal_code,
+          cashierCode: transaction.cashier_code,
+          shiftNo: transaction.shift_no,
+          lineCount: Number(asNumber(transaction.line_count).toFixed(0)),
+          updatedAt: transaction.updated_at,
+          completedAt: transaction.completed_at,
+        }),
+      ),
+      activeShift,
+      openShifts,
+      recentClosedShifts,
+      recentStoreShifts,
+      activeOperatorSession,
+      recoveryTasks: recoveryTasks.map<StoreRecoveryTaskSummary>((task) => {
+        const replacementPayload = this.parsePayloadJson(
+          task.replacement_payload_json,
+        ) as Partial<
+          StoreInventoryLedgerRecordedPayload &
+            StoreInventoryTransferRecordedPayload
+        > | null;
+        const sourceLocationCode =
+          typeof replacementPayload?.inventoryLocationCode === "string"
+            ? replacementPayload.inventoryLocationCode
+            : typeof replacementPayload?.sourceInventoryLocationCode ===
+                "string"
+              ? replacementPayload.sourceInventoryLocationCode
+              : null;
+        const targetLocationCode =
+          typeof replacementPayload?.destinationInventoryLocationCode ===
+          "string"
+            ? replacementPayload.destinationInventoryLocationCode
+            : null;
+
+        return {
+          id: task.id,
+          taskType: task.task_type,
+          status: task.status,
+          title: task.title,
+          instructions: task.instructions,
+          transactionNo: task.transaction_no,
+          productCode: task.product_code,
+          productName: task.product_name,
+          departmentCode: task.department_code,
+          departmentName: task.department_name,
+          categoryCode: task.category_code,
+          categoryName: task.category_name,
+          subcategory: task.subcategory,
+          isSerialized: asBooleanFlag(task.is_serialized ?? 0),
+          locationCode: sourceLocationCode,
+          targetLocationCode,
+          movementType:
+            typeof replacementPayload?.movementType === "string"
+              ? replacementPayload.movementType
+              : null,
+          quantity:
+            typeof replacementPayload?.quantity === "number"
+              ? replacementPayload.quantity
+              : typeof (
+                    replacementPayload as { countedQuantity?: unknown } | null
+                  )?.countedQuantity === "number"
+                ? (replacementPayload as { countedQuantity: number })
+                    .countedQuantity
+                : null,
+          serialNumbers: normalizeSerialNumbers(
+            Array.isArray(
+              (replacementPayload as { serialNumbers?: unknown } | null)
+                ?.serialNumbers,
+            )
+              ? ((
+                  replacementPayload as { serialNumbers?: unknown[] }
+                ).serialNumbers?.filter(
+                  (entry): entry is string => typeof entry === "string",
+                ) ?? [])
+              : [],
+          ),
+          operatorName: task.operator_name,
+          operatorNote: task.operator_note,
+          storeNote: task.store_note,
+          requestedAt: task.requested_at,
+          completedAt: task.completed_at,
+          sourceInboundEventId: task.source_inbound_event_id,
+        };
+      }),
+      activeBasket,
+      parkedBaskets,
+      salesOrders,
+      recentEodReconciliations,
+      recentBankingDeposits,
+      inventoryLocations,
+      transferRequestTargets,
+      transferRequestDrafts,
+      stockCountSessions,
+      recentGoodsReceipts,
+      recentSupplierReturns,
+      recentCustomerAccountEntries,
+      storeUsers,
+      standaloneRoles,
+      standalonePermissions,
+      productDepartments,
+      productCategories,
+      availableTenderMethods,
+      availableBankAccounts,
+      availableSuppliers,
+      standaloneSuppliers,
+      priceListEntries,
+      promotions,
+      standaloneCustomers,
+      passwordPolicy,
+      optionSettings,
+      loyaltySettings,
+      receiptSettings,
+      receiptPrinterSettings,
+      activityFeed: this.buildActivityFeed({
+        queueMetrics,
+        openRecoveryTasks: operationsMetrics.openRecoveryTasks,
+        activeDepartments: productDepartments.filter(
+          (department) => department.status === "ACTIVE",
+        ).length,
+        activeCategories: productCategories.filter(
+          (category) => category.status === "ACTIVE",
+        ).length,
+        lastSyncAt,
+        health,
+      }),
+      generatedAt: isoNow(),
+    };
+  }
+
+  lookupCatalogItem(query: string): StoreCatalogLookupResult | null {
+    const match = this.findCatalogLookup(query);
+
+    if (!match) {
+      return null;
+    }
+
+    return this.toCatalogLookupResult(match, query);
+  }
+
+  searchReceipts(
+    input?: StoreReceiptSearchRequest,
+  ): StoreReceiptSearchResult[] {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["pos.receipt.search"],
+      purpose: "searching receipt history",
+    });
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const receiptKind: StoreReceiptHistoryKind =
+      input?.receiptKind === "ACCOUNT_PAYMENT"
+        ? "ACCOUNT_PAYMENT"
+        : input?.receiptKind === "SALES_ORDER"
+          ? "SALES_ORDER"
+          : "SALES";
+    const transactionFilter = input?.transactionFilter ?? "CORRECTABLE";
+    const requestedWindowDays = Number(input?.completedWithinDays ?? 30);
+    const completedWithinDays = Number.isFinite(requestedWindowDays)
+      ? Math.min(Math.max(Math.round(requestedWindowDays), 1), 365)
+      : 30;
+    const limit = Math.min(Math.max(input?.limit ?? 12, 1), 30);
+
+    if (receiptKind === "ACCOUNT_PAYMENT") {
+      return this.getAccountPaymentReceiptSearchRows(
+        daysAgo(completedWithinDays),
+      )
+        .map((row) => ({
+          row,
+          rank: this.rankAccountPaymentReceiptSearchResult(
+            row,
+            normalizedQuery,
+          ),
+        }))
+        .filter((candidate) => candidate.rank !== Number.POSITIVE_INFINITY)
+        .sort((left, right) => {
+          if (left.rank !== right.rank) {
+            return left.rank - right.rank;
+          }
+
+          return right.row.occurred_at.localeCompare(left.row.occurred_at);
+        })
+        .slice(0, limit)
+        .map<StoreReceiptSearchResult>(({ row }) => ({
+          receiptKind: "ACCOUNT_PAYMENT",
+          transactionId: row.id,
+          transactionNo: row.entry_no,
+          sourceTransactionNo: null,
+          transactionType: null,
+          status: "COMPLETED",
+          totalAmount: Number(asNumber(row.amount).toFixed(2)),
+          completedAt: row.occurred_at,
+          customerNo: row.customer_no,
+          customerName: row.customer_name,
+          cashierCode: row.cashier_code,
+          shiftNo: row.shift_no,
+          notes: row.note,
+          lineCount: 0,
+          productPreview: [
+            row.tender_method_name ?? row.payment_method,
+            row.reference ?? "",
+          ].filter(Boolean) as string[],
+          canStartReturn: false,
+          canStartExchange: false,
+        }));
+    }
+
+    if (receiptKind === "SALES_ORDER") {
+      const orders = this.getSalesOrderReceiptSearchRows(
+        daysAgo(completedWithinDays),
+      );
+      const lineRowsByTransactionId = this.getReceiptSearchLineRowsByTransaction(
+        orders.map((order) => order.source_transaction_id),
+      );
+
+      return orders
+        .map((order) => {
+          const lineRows =
+            lineRowsByTransactionId.get(order.source_transaction_id) ?? [];
+
+          return {
+            order,
+            lineRows,
+            rank: this.rankSalesOrderReceiptSearchResult(
+              order,
+              lineRows,
+              normalizedQuery,
+            ),
+          };
+        })
+        .filter((candidate) => candidate.rank !== Number.POSITIVE_INFINITY)
+        .sort((left, right) => {
+          if (left.rank !== right.rank) {
+            return left.rank - right.rank;
+          }
+
+          return (
+            right.order.fulfilled_at ?? right.order.created_at
+          ).localeCompare(left.order.fulfilled_at ?? left.order.created_at);
+        })
+        .slice(0, limit)
+        .map<StoreReceiptSearchResult>(({ order, lineRows }) => ({
+          receiptKind: "SALES_ORDER",
+          transactionId: order.id,
+          transactionNo: order.order_no,
+          sourceTransactionNo: order.source_transaction_no,
+          transactionType: "SALES_ORDER",
+          status: order.status,
+          totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
+          completedAt: order.fulfilled_at ?? order.created_at,
+          customerNo: order.customer_no,
+          customerName: order.customer_name,
+          cashierCode: order.operator_name,
+          shiftNo: null,
+          notes: order.note,
+          lineCount: Math.trunc(asNumber(order.line_count)),
+          productPreview: [
+            ...new Set(lineRows.map((line) => line.product_name_snapshot)),
+          ].slice(0, 3),
+          canStartReturn: false,
+          canStartExchange: false,
+        }));
+    }
+
+    const headers = this.getReceiptSearchHeaders(
+      daysAgo(completedWithinDays),
+    ).filter((header) =>
+      this.matchesReceiptSearchTransactionFilter(
+        header.transaction_type,
+        transactionFilter,
+      ),
+    );
+    const lineRowsByTransactionId = this.getReceiptSearchLineRowsByTransaction(
+      headers.map((header) => header.id),
+    );
+
+    return headers
+      .map((header) => {
+        const lineRows = lineRowsByTransactionId.get(header.id) ?? [];
+
+        return {
+          header,
+          lineRows,
+          rank: this.rankReceiptSearchResult(header, lineRows, normalizedQuery),
+        };
+      })
+      .filter((candidate) => candidate.rank !== Number.POSITIVE_INFINITY)
+      .sort((left, right) => {
+        if (left.rank !== right.rank) {
+          return left.rank - right.rank;
+        }
+
+        return (
+          right.header.completed_at ?? right.header.updated_at
+        ).localeCompare(left.header.completed_at ?? left.header.updated_at);
+      })
+      .slice(0, limit)
+      .map<StoreReceiptSearchResult>(({ header, lineRows }) => ({
+        receiptKind: "SALES",
+        transactionId: header.id,
+        transactionNo: header.transaction_no,
+        sourceTransactionNo: header.source_transaction_no,
+        transactionType: header.transaction_type,
+        status: header.status,
+        totalAmount: Number(asNumber(header.total_amount).toFixed(2)),
+        completedAt: header.completed_at,
+        customerNo: header.customer_no,
+        customerName: header.customer_name,
+        cashierCode: header.cashier_code,
+        shiftNo: header.shift_no,
+        notes: header.notes,
+        lineCount: lineRows.length,
+        productPreview: [
+          ...new Set(lineRows.map((line) => line.product_name_snapshot)),
+        ].slice(0, 3),
+        canStartReturn: this.isCorrectionEligibleReceiptTransactionType(
+          header.transaction_type,
+        ),
+        canStartExchange: this.isCorrectionEligibleReceiptTransactionType(
+          header.transaction_type,
+        ),
+      }));
+  }
+
+  browseCatalogItems(
+    input?: StoreCatalogBrowseRequest,
+  ): StoreCatalogBrowseItem[] {
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const normalizedDepartmentCode =
+      input?.departmentCode?.trim().toUpperCase() || null;
+    const normalizedCategoryCode =
+      input?.categoryCode?.trim().toUpperCase() || null;
+    const serializedOnly = input?.serializedOnly === true;
+    const sellableOnly = input?.sellableOnly === true;
+    const includeInactiveCatalog = input?.includeInactiveCatalog === true;
+    const limit = Math.min(
+      Math.max(input?.limit ?? 12, 1),
+      includeInactiveCatalog ? 500 : 30,
+    );
+    const salesLocationCode = this.getDefaultSalesLocationCode();
+    const rows = this.db
+      .prepare(
+        `SELECT
+          ${qualifiedProductSnapshotSelectSql},
+          department.department_name AS department_name,
+          category.category_name AS category_name
+        FROM product_snapshot AS product
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = product.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = product.category_code
+        WHERE ${
+          includeInactiveCatalog
+            ? "1 = 1"
+            : "COALESCE(product.catalog_membership_active, 1) = 1"
+        }
+        ORDER BY COALESCE(product.catalog_sort_order, 2147483647), product.product_name ASC`,
+      )
+      .all() as Array<
+      ProductRow & {
+        department_name: string | null;
+        category_name: string | null;
+      }
+    >;
+
+    return rows
+      .filter((row) => {
+        if (
+          normalizedDepartmentCode &&
+          (row.department_code ?? "").toUpperCase() !== normalizedDepartmentCode
+        ) {
+          return false;
+        }
+
+        if (
+          normalizedCategoryCode &&
+          (row.category_code ?? "").toUpperCase() !== normalizedCategoryCode
+        ) {
+          return false;
+        }
+
+        if (serializedOnly && !asBooleanFlag(row.is_serialized)) {
+          return false;
+        }
+
+        if (sellableOnly) {
+          const salesLocationQuantity =
+            salesLocationCode !== null
+              ? this.getOptionalLocationQuantity(
+                  salesLocationCode,
+                  row.product_code,
+                )
+              : null;
+          const matrixVariants = this.getMatrixVariantsForProduct(
+            row.product_code,
+          );
+          const matrixQuantity =
+            row.product_type === "MATRIX" && matrixVariants.length > 0
+              ? matrixVariants.reduce(
+                  (sum, variant) => sum + variant.quantityOnHand,
+                  0,
+                )
+              : null;
+          const sellableQuantity =
+            salesLocationQuantity ?? matrixQuantity ?? asNumber(row.quantity_on_hand);
+
+          if (sellableQuantity <= 0) {
+            return false;
+          }
+        }
+
+        if (!normalizedQuery) {
+          return true;
+        }
+
+        const haystacks = [
+          row.product_code,
+          row.product_name,
+          row.short_name,
+          row.department_code,
+          row.department_name,
+          row.category_code,
+          row.category_name,
+          row.subcategory,
+          this.getRepresentativeBarcode(row.product_code)?.barcode_code ?? null,
+          ...this.getMatrixVariantsForProduct(row.product_code).flatMap(
+            (variant) => [
+              variant.variantCode,
+              variant.sku,
+              variant.displayName,
+              variant.barcode,
+              formatMatrixVariantAttributes(variant.attributes),
+            ],
+          ),
+        ];
+
+        return haystacks.some((value) =>
+          value?.toUpperCase().includes(normalizedQuery),
+        );
+      })
+      .slice(0, limit)
+      .map<StoreCatalogBrowseItem>((row) => {
+        const matrixVariants = this.getMatrixVariantsForProduct(row.product_code);
+        const isMatrixProduct =
+          row.product_type === "MATRIX" && matrixVariants.length > 0;
+        const matrixQuantity = isMatrixProduct
+          ? matrixVariants.reduce(
+              (sum, variant) => sum + variant.quantityOnHand,
+              0,
+            )
+          : null;
+        const matrixPrice = isMatrixProduct
+          ? Math.min(...matrixVariants.map((variant) => variant.unitPrice))
+          : null;
+
+        return {
+          productCode: row.product_code,
+          productName: row.product_name,
+          productType: row.product_type,
+          shortName: row.short_name,
+          description: row.description,
+          departmentCode: row.department_code,
+          departmentName: row.department_name,
+          categoryCode: row.category_code,
+          categoryName: row.category_name,
+          subcategory: row.subcategory,
+          unitOfMeasure: row.unit_of_measure,
+          taxable: asBooleanFlag(row.taxable),
+          taxProfileCode: row.tax_profile_code,
+          trackInventory: asBooleanFlag(row.track_inventory),
+          trackSize: asBooleanFlag(row.track_size),
+          trackColor: asBooleanFlag(row.track_color),
+          primaryImageUrl: row.primary_image_url,
+          barcode:
+            this.getRepresentativeBarcode(row.product_code)?.barcode_code ??
+            null,
+          unitPrice: Number(asNumber(matrixPrice ?? row.unit_price).toFixed(2)),
+          quantityOnHand: Number(
+            asNumber(matrixQuantity ?? row.quantity_on_hand).toFixed(3),
+          ),
+          minStockLevel:
+            row.min_stock_level === null
+              ? null
+              : Number(asNumber(row.min_stock_level).toFixed(3)),
+          reorderPoint:
+            row.reorder_point === null
+              ? null
+              : Number(asNumber(row.reorder_point).toFixed(3)),
+          safetyStockLevel:
+            row.safety_stock_level === null
+              ? null
+              : Number(asNumber(row.safety_stock_level).toFixed(3)),
+          catalogSortOrder:
+            row.catalog_sort_order === null ||
+            row.catalog_sort_order === undefined
+              ? null
+              : asNumber(row.catalog_sort_order),
+          salesLocationCode,
+          salesLocationQuantity:
+            salesLocationCode !== null && !isMatrixProduct
+              ? this.getOptionalLocationQuantity(
+                  salesLocationCode,
+                  row.product_code,
+                )
+              : null,
+          isSerialized: asBooleanFlag(row.is_serialized),
+          mustEnterPriceAtPos: asBooleanFlag(row.must_enter_price_at_pos),
+          matrixVariants,
+        };
+      });
+  }
+
+  browseInventoryPositions(
+    input?: StoreInventoryBrowseRequest,
+  ): StoreInventoryBrowseItem[] {
+    if (input?.forStartupAlert === true) {
+      this.requireActiveOperatorSession({
+        purpose: "checking critical stock startup alerts",
+      });
+    } else {
+      this.requireActiveOperatorSession({
+        permissionCodes: ["inventory.view"],
+        purpose: "viewing inventory positions",
+      });
+    }
+
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const normalizedLocationCode =
+      input?.locationCode?.trim().toUpperCase() || null;
+    const normalizedDepartmentCode =
+      input?.departmentCode?.trim().toUpperCase() || null;
+    const normalizedCategoryCode =
+      input?.categoryCode?.trim().toUpperCase() || null;
+    const serializedOnly = input?.serializedOnly === true;
+    const criticalOnly = input?.criticalOnly === true;
+    const limit = Math.min(
+      Math.max(input?.limit ?? 12, 1),
+      criticalOnly ? 100 : 30,
+    );
+    const getCriticalStockFloor = (row: InventoryBrowseRow) => {
+      const thresholds = [
+        row.min_stock_level,
+        row.reorder_point,
+        row.safety_stock_level,
+      ]
+        .map((value) => (value === null ? null : asNumber(value)))
+        .filter(
+          (value): value is number =>
+            value !== null && Number.isFinite(value) && value > 0,
+        );
+
+      return thresholds[0] ?? null;
+    };
+    const fallbackLocation = normalizedLocationCode
+      ? (this.db
+          .prepare(
+            "SELECT location_code, location_name FROM inventory_location_snapshot WHERE upper(location_code) = ? LIMIT 1",
+          )
+          .get(normalizedLocationCode) as
+          | { location_code: string; location_name: string }
+          | undefined)
+      : null;
+    const fallbackLocationCode =
+      fallbackLocation?.location_code ??
+      this.getDefaultSalesLocationCode() ??
+      "UNASSIGNED";
+    const fallbackLocationName =
+      fallbackLocation?.location_name ?? "Store stock";
+    const rows = this.db
+      .prepare(
+        `SELECT
+          COALESCE(location.location_code, ?) AS location_code,
+          COALESCE(location.location_name, ?) AS location_name,
+          product.product_code AS product_code,
+          product.product_name AS product_name,
+          product.short_name AS short_name,
+          product.department_code AS department_code,
+          department.department_name AS department_name,
+          product.category_code AS category_code,
+          category.category_name AS category_name,
+          product.subcategory AS subcategory,
+          COALESCE(balance.quantity_on_hand, CASE WHEN ? IS NULL THEN product.quantity_on_hand ELSE 0 END) AS quantity_on_hand,
+          product.min_stock_level AS min_stock_level,
+          product.reorder_point AS reorder_point,
+          product.safety_stock_level AS safety_stock_level,
+          product.unit_price AS unit_price,
+          product.is_serialized AS is_serialized,
+          COALESCE(balance.updated_at, product.updated_at) AS updated_at
+        FROM product_snapshot AS product
+        LEFT JOIN inventory_location_balance AS balance
+          ON balance.product_code = product.product_code
+         AND (? IS NULL OR upper(balance.location_code) = ?)
+        LEFT JOIN inventory_location_snapshot AS location
+          ON location.location_code = balance.location_code
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = product.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = product.category_code
+        ORDER BY ABS(COALESCE(balance.quantity_on_hand, product.quantity_on_hand, 0)) DESC,
+          product.product_name ASC,
+          COALESCE(location.location_name, ?) ASC`,
+      )
+      .all(
+        fallbackLocationCode,
+        fallbackLocationName,
+        normalizedLocationCode,
+        normalizedLocationCode,
+        normalizedLocationCode,
+        fallbackLocationName,
+      ) as InventoryBrowseRow[];
+
+    const filteredRows = rows.filter((row) => {
+      if (
+        normalizedLocationCode &&
+        row.location_code.toUpperCase() !== normalizedLocationCode
+      ) {
+        return false;
+      }
+
+      if (
+        normalizedDepartmentCode &&
+        (row.department_code ?? "").toUpperCase() !== normalizedDepartmentCode
+      ) {
+        return false;
+      }
+
+      if (
+        normalizedCategoryCode &&
+        (row.category_code ?? "").toUpperCase() !== normalizedCategoryCode
+      ) {
+        return false;
+      }
+
+      if (serializedOnly && !asBooleanFlag(row.is_serialized)) {
+        return false;
+      }
+
+      if (criticalOnly) {
+        const criticalStockFloor = getCriticalStockFloor(row);
+
+        if (
+          criticalStockFloor === null ||
+          asNumber(row.quantity_on_hand) > criticalStockFloor
+        ) {
+          return false;
+        }
+      }
+
+      if (!normalizedQuery) {
+        return true;
+      }
+
+      const haystacks = [
+        row.location_code,
+        row.location_name,
+        row.product_code,
+        row.product_name,
+        row.short_name,
+        row.department_code,
+        row.department_name,
+        row.category_code,
+        row.category_name,
+        row.subcategory,
+        this.getRepresentativeBarcode(row.product_code)?.barcode_code ?? null,
+      ];
+
+      return haystacks.some((value) =>
+        value?.toUpperCase().includes(normalizedQuery),
+      );
+    });
+
+    if (criticalOnly) {
+      filteredRows.sort((left, right) => {
+        const leftFloor = getCriticalStockFloor(left) ?? 0;
+        const rightFloor = getCriticalStockFloor(right) ?? 0;
+        const leftGap = asNumber(left.quantity_on_hand) - leftFloor;
+        const rightGap = asNumber(right.quantity_on_hand) - rightFloor;
+
+        if (leftGap !== rightGap) {
+          return leftGap - rightGap;
+        }
+
+        return left.product_name.localeCompare(right.product_name);
+      });
+    }
+
+    return filteredRows
+      .slice(0, limit)
+      .map<StoreInventoryBrowseItem>((row) => ({
+        locationCode: row.location_code,
+        locationName: row.location_name,
+        productCode: row.product_code,
+        productName: row.product_name,
+        shortName: row.short_name,
+        departmentCode: row.department_code,
+        departmentName: row.department_name,
+        categoryCode: row.category_code,
+        categoryName: row.category_name,
+        subcategory: row.subcategory,
+        barcode:
+          this.getRepresentativeBarcode(row.product_code)?.barcode_code ?? null,
+        quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+        minStockLevel:
+          row.min_stock_level === null
+            ? null
+            : Number(asNumber(row.min_stock_level).toFixed(3)),
+        reorderPoint:
+          row.reorder_point === null
+            ? null
+            : Number(asNumber(row.reorder_point).toFixed(3)),
+        safetyStockLevel:
+          row.safety_stock_level === null
+            ? null
+            : Number(asNumber(row.safety_stock_level).toFixed(3)),
+        unitPrice: Number(asNumber(row.unit_price).toFixed(2)),
+        isSerialized: asBooleanFlag(row.is_serialized),
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  async lookupRemoteStoreInventory(
+    input?: StoreRemoteInventoryLookupInput,
+  ): Promise<StoreRemoteInventoryLookupResult> {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.view"],
+      purpose: "looking up stock across shops",
+    });
+
+    if (this.isStandaloneDeployment()) {
+      throw new Error(
+        "Remote shop stock lookup is not available in standalone mode.",
+      );
+    }
+
+    if (!this.syncBaseUrl) {
+      throw new Error(
+        "HQ connectivity is not configured for this store node, so Flash ERP cannot lookup stock in other shops.",
+      );
+    }
+
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+
+    return this.postJson<StoreRemoteInventoryLookupResult>(
+      `${this.syncBaseUrl}/api/sync/store-nodes/${encodeURIComponent(nodeCode)}/inventory-lookup`,
+      {
+        query: input?.query ?? null,
+        productCode: input?.productCode ?? null,
+        limit: input?.limit ?? 25,
+      },
+    );
+  }
+
+  async requestRemoteInterStoreStock(
+    input: StoreRemoteInterStoreStockRequestInput,
+  ): Promise<StoreSyncActionResult> {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.transfer.request"],
+      purpose: "requesting stock from another shop",
+    });
+
+    if (this.isStandaloneDeployment()) {
+      throw new Error(
+        "Remote shop stock requests are not available in standalone mode.",
+      );
+    }
+
+    if (!this.syncBaseUrl) {
+      throw new Error(
+        "HQ connectivity is not configured for this store node, so Flash ERP cannot place a remote stock request.",
+      );
+    }
+
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const response = await this.postJson<{ message?: string }>(
+      `${this.syncBaseUrl}/api/sync/store-nodes/${encodeURIComponent(nodeCode)}/inter-store-stock-request`,
+      input,
+    );
+
+    return {
+      message:
+        response.message ??
+        "Flash ERP placed the remote stock request through HQ.",
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  browseSerialRegistry(
+    input?: StoreSerialRegistryBrowseRequest,
+  ): StoreSerialRegistryBrowseItem[] {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.view"],
+      purpose: "viewing serialized inventory",
+    });
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const normalizedLocationCode =
+      input?.locationCode?.trim().toUpperCase() || null;
+    const normalizedDepartmentCode =
+      input?.departmentCode?.trim().toUpperCase() || null;
+    const normalizedCategoryCode =
+      input?.categoryCode?.trim().toUpperCase() || null;
+    const normalizedStatus = input?.status?.trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 40);
+    const rows = this.db
+      .prepare(
+        `SELECT
+          registry.product_code AS product_code,
+          product.product_name AS product_name,
+          product.department_code AS department_code,
+          department.department_name AS department_name,
+          product.category_code AS category_code,
+          category.category_name AS category_name,
+          product.subcategory AS subcategory,
+          registry.serial_number AS serial_number,
+          registry.inventory_location_code AS inventory_location_code,
+          location.location_name AS location_name,
+          registry.status AS status,
+          registry.source_transaction_id AS source_transaction_id,
+          registry.source_transaction_no AS source_transaction_no,
+          registry.updated_at AS updated_at
+        FROM serial_registry AS registry
+        LEFT JOIN product_snapshot AS product
+          ON product.product_code = registry.product_code
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = product.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = product.category_code
+        LEFT JOIN inventory_location_snapshot AS location
+          ON location.location_code = registry.inventory_location_code
+        ORDER BY registry.updated_at DESC, COALESCE(product.product_name, registry.product_code) ASC, registry.serial_number ASC`,
+      )
+      .all() as SerialRegistryBrowseRow[];
+
+    return rows
+      .filter((row) => {
+        if (
+          normalizedLocationCode &&
+          (row.inventory_location_code ?? "").toUpperCase() !==
+            normalizedLocationCode
+        ) {
+          return false;
+        }
+
+        if (
+          normalizedDepartmentCode &&
+          (row.department_code ?? "").toUpperCase() !== normalizedDepartmentCode
+        ) {
+          return false;
+        }
+
+        if (
+          normalizedCategoryCode &&
+          (row.category_code ?? "").toUpperCase() !== normalizedCategoryCode
+        ) {
+          return false;
+        }
+
+        if (normalizedStatus && row.status.toUpperCase() !== normalizedStatus) {
+          return false;
+        }
+
+        if (!normalizedQuery) {
+          return true;
+        }
+
+        const haystacks = [
+          row.product_code,
+          row.product_name,
+          row.department_code,
+          row.department_name,
+          row.category_code,
+          row.category_name,
+          row.subcategory,
+          row.serial_number,
+          row.inventory_location_code,
+          row.location_name,
+          row.status,
+          row.source_transaction_no,
+        ];
+
+        return haystacks.some((value) =>
+          value?.toUpperCase().includes(normalizedQuery),
+        );
+      })
+      .slice(0, limit)
+      .map<StoreSerialRegistryBrowseItem>((row) => ({
+        productCode: row.product_code,
+        productName: row.product_name ?? row.product_code,
+        departmentCode: row.department_code,
+        departmentName: row.department_name,
+        categoryCode: row.category_code,
+        categoryName: row.category_name,
+        subcategory: row.subcategory,
+        serialNumber: row.serial_number,
+        locationCode: row.inventory_location_code,
+        locationName: row.location_name,
+        status: row.status,
+        sourceTransactionId: row.source_transaction_id,
+        sourceTransactionNo: row.source_transaction_no,
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  browsePurchaseOrders(
+    input?: StorePurchaseOrderBrowseRequest,
+  ): StorePurchaseOrderSummary[] {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.view"],
+      purpose: "viewing local purchase orders",
+    });
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const normalizedStatus = input?.status?.trim().toUpperCase() || null;
+    const normalizedLocationCode =
+      input?.locationCode?.trim().toUpperCase() || null;
+    const normalizedSupplierNo =
+      input?.supplierNo?.trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(input?.limit ?? 10, 1), 24);
+    const purchaseOrders = this.db
+      .prepare(
+        `SELECT
+          id,
+          purchase_order_no,
+          status,
+          inventory_location_code,
+          inventory_location_name,
+          supplier_no,
+          supplier_name,
+          external_reference,
+          note,
+          operator_name,
+          ordered_quantity,
+          received_quantity,
+          exception_quantity,
+          outstanding_quantity,
+          committed_at,
+          closed_at,
+          closure_reason,
+          closure_note,
+          closure_operator_name,
+          updated_at
+        FROM purchase_order_snapshot
+        ORDER BY
+          CASE status
+            WHEN 'COMMITTED' THEN 0
+            WHEN 'PART_RECEIVED' THEN 1
+            WHEN 'RECEIVED' THEN 2
+            WHEN 'CLOSED' THEN 3
+            ELSE 4
+          END,
+          updated_at DESC,
+          purchase_order_no DESC`,
+      )
+      .all() as PurchaseOrderSnapshotRow[];
+
+    const purchaseOrderIds = purchaseOrders.map(
+      (purchaseOrder) => purchaseOrder.id,
+    );
+    const lines =
+      purchaseOrderIds.length === 0
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT
+                line.id AS id,
+                line.purchase_order_id AS purchase_order_id,
+                line.line_no AS line_no,
+                line.product_code AS product_code,
+                line.product_name AS product_name,
+                line.department_code AS department_code,
+                department.department_name AS department_name,
+                line.category_code AS category_code,
+                category.category_name AS category_name,
+                line.subcategory AS subcategory,
+                line.is_serialized AS is_serialized,
+                line.ordered_quantity AS ordered_quantity,
+                line.received_quantity AS received_quantity,
+                line.exception_quantity AS exception_quantity,
+                line.outstanding_quantity AS outstanding_quantity,
+                line.unit_cost AS unit_cost,
+                line.updated_at AS updated_at
+              FROM purchase_order_line_snapshot AS line
+              LEFT JOIN product_department_snapshot AS department
+                ON department.department_code = line.department_code
+              LEFT JOIN product_category_snapshot AS category
+                ON category.category_code = line.category_code
+              WHERE line.purchase_order_id IN (${purchaseOrderIds.map(() => "?").join(", ")})
+              ORDER BY line.purchase_order_id ASC, line.line_no ASC`,
+            )
+            .all(...purchaseOrderIds) as PurchaseOrderLineSnapshotRow[]);
+    const linesByPurchaseOrderId = new Map<
+      string,
+      StorePurchaseOrderSummary["lines"]
+    >();
+
+    for (const line of lines) {
+      const currentLines =
+        linesByPurchaseOrderId.get(line.purchase_order_id) ?? [];
+      const orderedQuantity = Number(
+        asNumber(line.ordered_quantity).toFixed(3),
+      );
+      const receivedQuantity = Number(
+        asNumber(line.received_quantity).toFixed(3),
+      );
+      const exceptionQuantity = Number(
+        asNumber(line.exception_quantity).toFixed(3),
+      );
+
+      currentLines.push({
+        purchaseOrderLineId: line.id,
+        lineNo: asNumber(line.line_no),
+        productCode: line.product_code,
+        productName: line.product_name,
+        departmentCode: line.department_code,
+        departmentName: line.department_name,
+        categoryCode: line.category_code,
+        categoryName: line.category_name,
+        subcategory: line.subcategory,
+        isSerialized: asBooleanFlag(line.is_serialized),
+        orderedQuantity,
+        receivedQuantity,
+        exceptionQuantity,
+        outstandingQuantity: Number(
+          asNumber(line.outstanding_quantity).toFixed(3),
+        ),
+        unitCost: asNullableNumber(line.unit_cost),
+      });
+      linesByPurchaseOrderId.set(line.purchase_order_id, currentLines);
+    }
+
+    return purchaseOrders
+      .map<StorePurchaseOrderSummary>((purchaseOrder) => ({
+        purchaseOrderId: purchaseOrder.id,
+        purchaseOrderNo: purchaseOrder.purchase_order_no,
+        status: purchaseOrder.status as StorePurchaseOrderSummary["status"],
+        inventoryLocationCode: purchaseOrder.inventory_location_code,
+        inventoryLocationName: purchaseOrder.inventory_location_name,
+        supplierNo: purchaseOrder.supplier_no,
+        supplierName: purchaseOrder.supplier_name,
+        externalReference: purchaseOrder.external_reference,
+        note: purchaseOrder.note,
+        operatorName: purchaseOrder.operator_name,
+        orderedQuantity: Number(
+          asNumber(purchaseOrder.ordered_quantity).toFixed(3),
+        ),
+        receivedQuantity: Number(
+          asNumber(purchaseOrder.received_quantity).toFixed(3),
+        ),
+        exceptionQuantity: Number(
+          asNumber(purchaseOrder.exception_quantity).toFixed(3),
+        ),
+        outstandingQuantity: Number(
+          asNumber(purchaseOrder.outstanding_quantity).toFixed(3),
+        ),
+        lineCount: linesByPurchaseOrderId.get(purchaseOrder.id)?.length ?? 0,
+        committedAt: purchaseOrder.committed_at,
+        closedAt: purchaseOrder.closed_at,
+        closureReason:
+          typeof purchaseOrder.closure_reason === "string"
+            ? (purchaseOrder.closure_reason as StorePurchaseOrderSummary["closureReason"])
+            : null,
+        closureNote: purchaseOrder.closure_note,
+        closureOperatorName: purchaseOrder.closure_operator_name,
+        updatedAt: purchaseOrder.updated_at,
+        lines: linesByPurchaseOrderId.get(purchaseOrder.id) ?? [],
+      }))
+      .filter((purchaseOrder) => {
+        if (
+          normalizedStatus &&
+          purchaseOrder.status.toUpperCase() !== normalizedStatus
+        ) {
+          return false;
+        }
+
+        if (
+          normalizedLocationCode &&
+          purchaseOrder.inventoryLocationCode.toUpperCase() !==
+            normalizedLocationCode
+        ) {
+          return false;
+        }
+
+        if (
+          normalizedSupplierNo &&
+          (purchaseOrder.supplierNo ?? "").toUpperCase() !==
+            normalizedSupplierNo
+        ) {
+          return false;
+        }
+
+        if (!normalizedQuery) {
+          return true;
+        }
+
+        const haystacks = [
+          purchaseOrder.purchaseOrderNo,
+          purchaseOrder.status,
+          purchaseOrder.inventoryLocationCode,
+          purchaseOrder.inventoryLocationName,
+          purchaseOrder.supplierNo,
+          purchaseOrder.supplierName,
+          purchaseOrder.externalReference,
+          ...purchaseOrder.lines.flatMap((line) => [
+            line.productCode,
+            line.productName,
+            line.departmentCode,
+            line.departmentName,
+            line.categoryCode,
+            line.categoryName,
+            line.subcategory,
+          ]),
+        ];
+
+        return haystacks.some((value) =>
+          value?.toUpperCase().includes(normalizedQuery),
+        );
+      })
+      .slice(0, limit);
+  }
+
+  saveStandalonePurchaseOrder(
+    input: StoreStandalonePurchaseOrderInput,
+  ): StoreSyncActionResult {
+    this.requireStandaloneSetupMode();
+    const session = this.requireStandaloneSupervisor();
+    const timestamp = isoNow();
+    const storeCode = this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const requestedLocationCode =
+      optionalSetupText(input.inventoryLocationCode)?.toUpperCase() ??
+      this.getDefaultReceivingLocationCode();
+    const location = requestedLocationCode
+      ? (this.db
+          .prepare(
+            "SELECT location_code, location_name FROM inventory_location_snapshot WHERE location_code = ? LIMIT 1",
+          )
+          .get(requestedLocationCode) as
+          | { location_code: string; location_name: string }
+          | undefined)
+      : (this.db
+          .prepare(
+            "SELECT location_code, location_name FROM inventory_location_snapshot ORDER BY is_receiving_default DESC, is_sales_default DESC, location_name ASC LIMIT 1",
+          )
+          .get() as
+          | { location_code: string; location_name: string }
+          | undefined);
+
+    if (!location) {
+      throw new Error(
+        "Create an inventory location before raising a standalone purchase order.",
+      );
+    }
+
+    const supplierNo = optionalSetupText(input.supplierNo)?.toUpperCase() ?? null;
+    const supplier = supplierNo
+      ? (this.db
+          .prepare(
+            "SELECT supplier_no, supplier_name FROM supplier_snapshot WHERE supplier_no = ? LIMIT 1",
+          )
+          .get(supplierNo) as
+          | { supplier_no: string; supplier_name: string }
+          | undefined)
+      : null;
+
+    if (supplierNo && !supplier) {
+      throw new Error(`Supplier ${supplierNo} does not exist on this standalone desktop.`);
+    }
+
+    if (!Array.isArray(input.lines) || input.lines.length === 0) {
+      throw new Error("Add at least one product line to the standalone purchase order.");
+    }
+
+    const lines = input.lines.map((line, index) => {
+      const productCode = normalizeSetupCode(line.productCode, "Product code");
+      const product = this.db
+        .prepare(
+          `SELECT
+            product.product_code,
+            product.product_name,
+            product.department_code,
+            department.department_name,
+            product.category_code,
+            category.category_name,
+            product.subcategory,
+            product.is_serialized
+          FROM product_snapshot AS product
+          LEFT JOIN product_department_snapshot AS department
+            ON department.department_code = product.department_code
+          LEFT JOIN product_category_snapshot AS category
+            ON category.category_code = product.category_code
+          WHERE product.product_code = ?
+          LIMIT 1`,
+        )
+        .get(productCode) as
+        | {
+            product_code: string;
+            product_name: string;
+            department_code: string | null;
+            department_name: string | null;
+            category_code: string | null;
+            category_name: string | null;
+            subcategory: string | null;
+            is_serialized: number | string;
+          }
+        | undefined;
+
+      if (!product) {
+        throw new Error(`Product ${productCode} does not exist in the standalone catalog.`);
+      }
+
+      const orderedQuantity = normalizeSetupNumber(line.orderedQuantity, 0, 3);
+
+      if (orderedQuantity <= 0) {
+        throw new Error(`Line ${index + 1} needs an ordered quantity greater than zero.`);
+      }
+
+      return {
+        lineNo: index + 1,
+        product,
+        orderedQuantity,
+        unitCost:
+          line.unitCost == null
+            ? null
+            : normalizeSetupNumber(line.unitCost, 0, 2),
+      };
+    });
+    const orderedQuantity = Number(
+      lines.reduce((total, line) => total + line.orderedQuantity, 0).toFixed(3),
+    );
+    const purchaseOrderNo =
+      optionalSetupText(input.purchaseOrderNo)?.toUpperCase() ??
+      buildLocalPurchaseOrderNo(
+        storeCode,
+        this.nextSequence("purchase_order_sequence"),
+        timestamp,
+      );
+    const purchaseOrderId = `standalone-po-${purchaseOrderNo
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")}`;
+    const payloadLines: EnterprisePurchaseOrderPublishedPayload["lines"] =
+      lines.map((line) => ({
+        purchaseOrderLineId: `${purchaseOrderId}-line-${line.lineNo}`,
+        lineNo: line.lineNo,
+        productCode: line.product.product_code,
+        productName: line.product.product_name,
+        departmentCode: line.product.department_code,
+        departmentName: line.product.department_name,
+        categoryCode: line.product.category_code,
+        categoryName: line.product.category_name,
+        subcategory: line.product.subcategory,
+        isSerialized: asBooleanFlag(line.product.is_serialized),
+        orderedQuantity: line.orderedQuantity,
+        receivedQuantity: 0,
+        exceptionQuantity: 0,
+        outstandingQuantity: line.orderedQuantity,
+        unitCost: line.unitCost,
+      }));
+
+    this.withTransaction(() => {
+      this.applyDownstreamPayload(
+        this.buildLocalPublication<EnterprisePurchaseOrderPublishedPayload>(
+          "purchaseOrder",
+          purchaseOrderId,
+          "purchase-order.published",
+          {
+            storeCode,
+            purchaseOrderId,
+            purchaseOrderNo,
+            locationCode: location.location_code,
+            locationName: location.location_name,
+            supplierNo: supplier?.supplier_no ?? null,
+            supplierName: supplier?.supplier_name ?? null,
+            externalReference: optionalSetupText(input.externalReference),
+            status: "COMMITTED",
+            note: optionalSetupText(input.note),
+            operatorName:
+              optionalSetupText(input.operatorName) ??
+              this.formatOperatorLabel(session),
+            committedAt: timestamp,
+            closedAt: null,
+            closureReason: null,
+            closureNote: null,
+            closureOperatorName: null,
+            orderedQuantity,
+            receivedQuantity: 0,
+            exceptionQuantity: 0,
+            outstandingQuantity: orderedQuantity,
+            lines: payloadLines,
+            publishedAt: timestamp,
+          },
+          timestamp,
+        ),
+        timestamp,
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+    });
+
+    return {
+      message: `${purchaseOrderNo} was created for standalone receiving.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  browseInterStoreTransfers(
+    input?: StoreInterStoreTransferBrowseRequest,
+  ): StoreInterStoreTransferSummary[] {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.view"],
+      purpose: "viewing inter-store transfers",
+    });
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const normalizedRole = input?.role?.trim().toUpperCase() || null;
+    const normalizedStatus = input?.status?.trim().toUpperCase() || null;
+    const normalizedLocationCode =
+      input?.locationCode?.trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(input?.limit ?? 12, 1), 24);
+    const rows = this.db
+      .prepare(
+        `SELECT
+          transfer.id AS id,
+          transfer.transfer_no AS transfer_no,
+          transfer.transfer_batch_no AS transfer_batch_no,
+          transfer.line_no AS line_no,
+          transfer.role AS role,
+          transfer.origin AS origin,
+          transfer.status AS status,
+          transfer.external_reference AS external_reference,
+          transfer.source_store_code AS source_store_code,
+          transfer.source_store_name AS source_store_name,
+          transfer.source_location_code AS source_location_code,
+          transfer.source_location_name AS source_location_name,
+          transfer.destination_store_code AS destination_store_code,
+          transfer.destination_store_name AS destination_store_name,
+          transfer.destination_location_code AS destination_location_code,
+          transfer.destination_location_name AS destination_location_name,
+          transfer.product_code AS product_code,
+          transfer.product_name AS product_name,
+          transfer.department_code AS department_code,
+          department.department_name AS department_name,
+          transfer.category_code AS category_code,
+          category.category_name AS category_name,
+          transfer.subcategory AS subcategory,
+          transfer.is_serialized AS is_serialized,
+          transfer.requested_quantity AS requested_quantity,
+          transfer.issued_quantity AS issued_quantity,
+          transfer.received_quantity AS received_quantity,
+          transfer.outstanding_issue_quantity AS outstanding_issue_quantity,
+          transfer.outstanding_receipt_quantity AS outstanding_receipt_quantity,
+          transfer.unit_cost AS unit_cost,
+          transfer.issued_serial_numbers_json AS issued_serial_numbers_json,
+          transfer.received_serial_numbers_json AS received_serial_numbers_json,
+          transfer.request_note AS request_note,
+          transfer.issue_note AS issue_note,
+          transfer.receipt_note AS receipt_note,
+          transfer.request_operator_name AS request_operator_name,
+          transfer.issue_operator_name AS issue_operator_name,
+          transfer.receipt_operator_name AS receipt_operator_name,
+          transfer.requested_by_node_code AS requested_by_node_code,
+          transfer.source_node_code AS source_node_code,
+          transfer.destination_node_code AS destination_node_code,
+          transfer.requested_at AS requested_at,
+          transfer.required_at AS required_at,
+          transfer.issued_at AS issued_at,
+          transfer.received_at AS received_at,
+          transfer.closed_at AS closed_at,
+          transfer.updated_at AS updated_at
+        FROM inter_store_transfer_snapshot AS transfer
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = transfer.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = transfer.category_code
+        ORDER BY
+          CASE transfer.status
+            WHEN 'REQUESTED' THEN 0
+            WHEN 'PART_ISSUED' THEN 1
+            WHEN 'ISSUED' THEN 2
+            WHEN 'PART_RECEIVED' THEN 3
+            WHEN 'RECEIVED' THEN 4
+            ELSE 5
+          END,
+          transfer.updated_at DESC,
+          transfer.transfer_no DESC`,
+      )
+      .all() as InterStoreTransferSnapshotRow[];
+
+    return rows
+      .map<StoreInterStoreTransferSummary>((row) => ({
+        transferId: row.id,
+        transferNo: row.transfer_no,
+        transferBatchNo: row.transfer_batch_no,
+        lineNo: Math.max(1, Math.trunc(asNumber(row.line_no))),
+        role: row.role,
+        origin: row.origin,
+        status: row.status as StoreInterStoreTransferSummary["status"],
+        externalReference: row.external_reference,
+        sourceStoreCode: row.source_store_code,
+        sourceStoreName: row.source_store_name,
+        sourceLocationCode: row.source_location_code,
+        sourceLocationName: row.source_location_name,
+        destinationStoreCode: row.destination_store_code,
+        destinationStoreName: row.destination_store_name,
+        destinationLocationCode: row.destination_location_code,
+        destinationLocationName: row.destination_location_name,
+        productCode: row.product_code,
+        productName: row.product_name,
+        departmentCode: row.department_code,
+        departmentName: row.department_name,
+        categoryCode: row.category_code,
+        categoryName: row.category_name,
+        subcategory: row.subcategory,
+        isSerialized: asBooleanFlag(row.is_serialized),
+        requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
+        issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
+        receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
+        outstandingIssueQuantity: Number(
+          asNumber(row.outstanding_issue_quantity).toFixed(3),
+        ),
+        outstandingReceiptQuantity: Number(
+          asNumber(row.outstanding_receipt_quantity).toFixed(3),
+        ),
+        unitCost: asNullableNumber(row.unit_cost),
+        issuedSerialNumbers: readSerializedLineNumbers(
+          row.issued_serial_numbers_json,
+        ),
+        receivedSerialNumbers: readSerializedLineNumbers(
+          row.received_serial_numbers_json,
+        ),
+        requestNote: row.request_note,
+        issueNote: row.issue_note,
+        receiptNote: row.receipt_note,
+        requestOperatorName: row.request_operator_name,
+        issueOperatorName: row.issue_operator_name,
+        receiptOperatorName: row.receipt_operator_name,
+        requestedByNodeCode: row.requested_by_node_code,
+        sourceNodeCode: row.source_node_code,
+        destinationNodeCode: row.destination_node_code,
+        requestedAt: row.requested_at,
+        requiredAt: row.required_at,
+        issuedAt: row.issued_at,
+        receivedAt: row.received_at,
+        closedAt: row.closed_at,
+        updatedAt: row.updated_at,
+      }))
+      .filter((transfer) => {
+        if (normalizedRole && transfer.role.toUpperCase() !== normalizedRole) {
+          return false;
+        }
+
+        if (
+          normalizedStatus &&
+          transfer.status.toUpperCase() !== normalizedStatus
+        ) {
+          return false;
+        }
+
+        if (
+          normalizedLocationCode &&
+          transfer.sourceLocationCode.toUpperCase() !==
+            normalizedLocationCode &&
+          transfer.destinationLocationCode.toUpperCase() !==
+            normalizedLocationCode
+        ) {
+          return false;
+        }
+
+        if (!normalizedQuery) {
+          return true;
+        }
+
+        const haystacks = [
+          transfer.transferNo,
+          transfer.transferBatchNo,
+          transfer.status,
+          transfer.role,
+          transfer.externalReference,
+          transfer.sourceStoreCode,
+          transfer.sourceStoreName,
+          transfer.sourceLocationCode,
+          transfer.sourceLocationName,
+          transfer.destinationStoreCode,
+          transfer.destinationStoreName,
+          transfer.destinationLocationCode,
+          transfer.destinationLocationName,
+          transfer.productCode,
+          transfer.productName,
+          transfer.departmentCode,
+          transfer.departmentName,
+          transfer.categoryCode,
+          transfer.categoryName,
+          transfer.subcategory,
+        ];
+
+        return haystacks.some((value) =>
+          value?.toUpperCase().includes(normalizedQuery),
+        );
+      })
+      .slice(0, limit);
+  }
+
+  searchCustomers(input?: StoreCustomerSearchRequest): StoreCustomerSummary[] {
+    const normalizedQuery = input?.query?.trim().toUpperCase() ?? "";
+    const limit = Math.min(Math.max(input?.limit ?? 8, 1), 300);
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          customer_no,
+          full_name,
+          customer_type,
+          phone,
+          email,
+          home_store_code,
+          home_store_name,
+          city,
+          country_code,
+          loyalty_enrolled,
+          loyalty_tier,
+          loyalty_points_balance,
+          allow_credit_sales,
+          credit_limit_amount,
+          receivable_balance_amount,
+          note,
+          status,
+          updated_at
+        FROM customer
+        WHERE deleted_at IS NULL
+        ORDER BY full_name ASC, customer_no ASC`,
+      )
+      .all() as CustomerRow[];
+
+    return rows
+      .filter((row) => {
+        if (!normalizedQuery) {
+          return true;
+        }
+
+        const haystacks = [
+          row.customer_no,
+          row.full_name,
+          row.customer_type,
+          row.phone,
+          row.email,
+          row.home_store_name,
+          row.city,
+          row.country_code,
+          row.loyalty_tier,
+          row.status,
+        ];
+        return haystacks.some((value) =>
+          value?.toUpperCase().includes(normalizedQuery),
+        );
+      })
+      .slice(0, limit)
+      .map<StoreCustomerSummary>((row) => ({
+        customerId: row.id,
+        customerNo: row.customer_no,
+        fullName: row.full_name,
+        customerType: row.customer_type,
+        phone: row.phone,
+        email: row.email,
+        homeStoreCode: row.home_store_code,
+        homeStoreName: row.home_store_name,
+        city: row.city,
+        countryCode: row.country_code,
+        loyaltyEnrolled: hasLocalLoyaltyAccount(row),
+        loyaltyTier: row.loyalty_tier,
+        loyaltyPointsBalance: Math.trunc(asNumber(row.loyalty_points_balance)),
+        allowCreditSales: asBooleanFlag(row.allow_credit_sales),
+        creditLimitAmount:
+          row.credit_limit_amount === null
+            ? null
+            : Number(asNumber(row.credit_limit_amount).toFixed(2)),
+        receivableBalanceAmount: Number(
+          asNumber(row.receivable_balance_amount).toFixed(2),
+        ),
+        status: row.status,
+        note: row.note,
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  searchTransactionReferences(
+    input?: StoreTransactionReferenceSearchRequest,
+  ): StoreTransactionReferenceSummary[] {
+    this.requireActiveOperatorSession({
+      purpose: "searching captured transaction references",
+    });
+
+    const query = input?.query?.trim() ?? "";
+    const normalizedQuery = query.toUpperCase();
+    const normalizedReferenceQuery =
+      normalizeCapturedTransactionReference(query) ?? normalizedQuery;
+    const likeQuery = `%${normalizedQuery}%`;
+    const likeReferenceQuery = `%${normalizedReferenceQuery}%`;
+    const limit = Math.min(Math.max(input?.limit ?? 8, 1), 30);
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          reference_value,
+          normalized_reference,
+          details,
+          first_transaction_no,
+          last_transaction_no,
+          use_count,
+          first_seen_at,
+          last_seen_at,
+          updated_at
+        FROM transaction_reference_capture
+        WHERE ? = ''
+           OR UPPER(reference_value) LIKE ?
+           OR normalized_reference LIKE ?
+           OR UPPER(COALESCE(details, '')) LIKE ?
+        ORDER BY last_seen_at DESC, use_count DESC, reference_value ASC
+        LIMIT ?`,
+      )
+      .all(
+        normalizedQuery,
+        likeQuery,
+        likeReferenceQuery,
+        likeQuery,
+        limit,
+      ) as Array<{
+      id: string;
+      reference_value: string;
+      normalized_reference: string;
+      details: string | null;
+      first_transaction_no: string | null;
+      last_transaction_no: string | null;
+      use_count: number | string;
+      first_seen_at: string;
+      last_seen_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      reference: row.reference_value,
+      normalizedReference: row.normalized_reference,
+      details: row.details,
+      firstTransactionNo: row.first_transaction_no,
+      lastTransactionNo: row.last_transaction_no,
+      useCount: Math.trunc(asNumber(row.use_count)),
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private recordTransactionReferenceCapture(input: {
+    reference: string | null | undefined;
+    details: string | null | undefined;
+    transactionNo: string | null | undefined;
+    capturedAt: string;
+  }) {
+    const reference = input.reference?.trim() ?? "";
+    const normalizedReference = normalizeCapturedTransactionReference(reference);
+
+    if (!normalizedReference) {
+      return;
+    }
+
+    const details = input.details?.trim() || null;
+    const transactionNo = input.transactionNo?.trim() || null;
+
+    this.db
+      .prepare(
+        `INSERT INTO transaction_reference_capture (
+          id,
+          reference_value,
+          normalized_reference,
+          details,
+          first_transaction_no,
+          last_transaction_no,
+          use_count,
+          first_seen_at,
+          last_seen_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        ON CONFLICT(normalized_reference) DO UPDATE SET
+          reference_value = excluded.reference_value,
+          details = CASE
+            WHEN excluded.details IS NULL OR excluded.details = ''
+            THEN transaction_reference_capture.details
+            ELSE excluded.details
+          END,
+          last_transaction_no = excluded.last_transaction_no,
+          use_count = transaction_reference_capture.use_count + 1,
+          last_seen_at = excluded.last_seen_at,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        randomUUID(),
+        reference,
+        normalizedReference,
+        details,
+        transactionNo,
+        transactionNo,
+        input.capturedAt,
+        input.capturedAt,
+        input.capturedAt,
+      );
+  }
+
+  browseStoreReports(input: StoreReportBrowseRequest): StoreReportResult {
+    const session = this.requireActiveOperatorSession({
+      purpose: "viewing local desktop reports",
+    });
+    const scope = input.scope === "STORE" ? "STORE" : "CASHIER";
+
+    if (scope === "STORE" && !session.capabilities.supervisorEligible) {
+      throw new Error(
+        "Only a synced supervisor can view whole-store desktop reports.",
+      );
+    }
+
+    const dateFrom = input.dateFrom?.trim()
+      ? new Date(`${input.dateFrom.trim()}T00:00:00.000`).toISOString()
+      : null;
+    const dateTo = input.dateTo?.trim()
+      ? new Date(`${input.dateTo.trim()}T23:59:59.999`).toISOString()
+      : null;
+    const cashierCode =
+      scope === "CASHIER" ? session.loginId : input.cashierCode?.trim() || null;
+    const shiftId = input.shiftId?.trim() || null;
+    const customerQuery = input.customerQuery?.trim().toUpperCase() || null;
+    const productQuery = input.productQuery?.trim().toUpperCase() || null;
+    const limit = Math.min(Math.max(input.limit ?? 40, 1), 100);
+
+    const salesWhere = ["txn.status = 'COMPLETED'"];
+    const salesParams: SQLInputValue[] = [];
+
+    if (dateFrom) {
+      salesWhere.push("txn.completed_at >= ?");
+      salesParams.push(dateFrom);
+    }
+
+    if (dateTo) {
+      salesWhere.push("txn.completed_at <= ?");
+      salesParams.push(dateTo);
+    }
+
+    if (cashierCode) {
+      salesWhere.push("COALESCE(txn.cashier_code, shift.cashier_code) = ?");
+      salesParams.push(cashierCode);
+    }
+
+    if (shiftId) {
+      salesWhere.push("txn.shift_id = ?");
+      salesParams.push(shiftId);
+    }
+
+    if (customerQuery) {
+      salesWhere.push(
+        "(UPPER(COALESCE(customer.customer_no, '')) LIKE ? OR UPPER(COALESCE(customer.full_name, '')) LIKE ?)",
+      );
+      salesParams.push(`%${customerQuery}%`, `%${customerQuery}%`);
+    }
+
+    if (productQuery) {
+      salesWhere.push(
+        `EXISTS (
+          SELECT 1
+          FROM pos_transaction_line AS line_filter
+          WHERE line_filter.pos_transaction_id = txn.id
+            AND (
+              UPPER(line_filter.product_code_snapshot) LIKE ?
+              OR UPPER(line_filter.product_name_snapshot) LIKE ?
+            )
+        )`,
+      );
+      salesParams.push(`%${productQuery}%`, `%${productQuery}%`);
+    }
+
+    const salesRows = this.db
+      .prepare(
+        `SELECT
+          txn.id AS id,
+          txn.transaction_no AS transaction_no,
+          txn.transaction_type AS transaction_type,
+          txn.source_transaction_no AS source_transaction_no,
+          txn.subtotal_amount AS subtotal_amount,
+          txn.discount_amount AS discount_amount,
+          txn.tax_amount AS tax_amount,
+          txn.total_amount AS total_amount,
+          txn.paid_amount AS paid_amount,
+          txn.completed_at AS completed_at,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          COALESCE(txn.cashier_code, shift.cashier_code) AS cashier_code,
+          COUNT(line.id) AS line_count,
+          GROUP_CONCAT(line.product_name_snapshot, ', ') AS product_preview
+        FROM pos_transaction AS txn
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = txn.shift_id
+        LEFT JOIN pos_transaction_line AS line
+          ON line.pos_transaction_id = txn.id
+        WHERE ${salesWhere.join(" AND ")}
+        GROUP BY
+          txn.id,
+          txn.transaction_no,
+          txn.transaction_type,
+          txn.source_transaction_no,
+          txn.subtotal_amount,
+          txn.discount_amount,
+          txn.tax_amount,
+          txn.total_amount,
+          txn.paid_amount,
+          txn.completed_at,
+          customer.customer_no,
+          customer.full_name,
+          COALESCE(txn.cashier_code, shift.cashier_code)
+        ORDER BY txn.completed_at DESC, txn.transaction_no DESC
+        LIMIT ?`,
+      )
+      .all(...salesParams, limit) as ReportSalesRow[];
+
+    const tenderWhere = [...salesWhere];
+    const tenderParams = [...salesParams];
+    const accountWhere = ["1 = 1"];
+    const accountParams: SQLInputValue[] = [];
+
+    if (dateFrom) {
+      accountWhere.push("entry.occurred_at >= ?");
+      accountParams.push(dateFrom);
+    }
+
+    if (dateTo) {
+      accountWhere.push("entry.occurred_at <= ?");
+      accountParams.push(dateTo);
+    }
+
+    if (cashierCode) {
+      accountWhere.push("entry.cashier_code = ?");
+      accountParams.push(cashierCode);
+    }
+
+    if (shiftId) {
+      accountWhere.push("entry.shift_id = ?");
+      accountParams.push(shiftId);
+    }
+
+    if (customerQuery) {
+      accountWhere.push(
+        "(UPPER(entry.customer_no) LIKE ? OR UPPER(entry.customer_name) LIKE ?)",
+      );
+      accountParams.push(`%${customerQuery}%`, `%${customerQuery}%`);
+    }
+
+    const tenderRows = this.db
+      .prepare(
+        `SELECT
+          method,
+          tender_method_code,
+          tender_method_name,
+          COUNT(*) AS transaction_count,
+          SUM(net_amount) AS net_amount
+        FROM (
+          SELECT
+            payment.method AS method,
+            payment.tender_method_code AS tender_method_code,
+            payment.tender_method_name AS tender_method_name,
+            CASE
+              WHEN txn.transaction_type = 'RETURN'
+                OR (txn.transaction_type = 'EXCHANGE' AND COALESCE(txn.total_amount, 0) < 0)
+              THEN payment.amount * -1
+              ELSE payment.amount
+            END AS net_amount
+          FROM pos_payment AS payment
+          INNER JOIN pos_transaction AS txn
+            ON txn.id = payment.pos_transaction_id
+          LEFT JOIN customer
+            ON customer.id = txn.customer_id
+          LEFT JOIN pos_shift AS shift
+            ON shift.id = txn.shift_id
+          WHERE ${tenderWhere.join(" AND ")}
+        )
+        GROUP BY method, tender_method_code, tender_method_name
+        ORDER BY net_amount DESC, method ASC`,
+      )
+      .all(...tenderParams) as ReportTenderRow[];
+
+    const accountPaymentRows = this.db
+      .prepare(
+        `SELECT
+          entry.entry_no AS entry_no,
+          entry.occurred_at AS occurred_at,
+          entry.cashier_code AS cashier_code,
+          entry.customer_no AS customer_no,
+          entry.customer_name AS customer_name,
+          entry.payment_method AS payment_method,
+          entry.tender_method_code AS tender_method_code,
+          entry.tender_method_name AS tender_method_name,
+          entry.amount AS amount,
+          entry.reference AS reference
+        FROM customer_account_entry AS entry
+        WHERE ${accountWhere.join(" AND ")}
+        ORDER BY entry.occurred_at DESC, entry.entry_no DESC
+        LIMIT ?`,
+      )
+      .all(...accountParams, limit) as ReportAccountPaymentRow[];
+
+    const productRows = this.db
+      .prepare(
+        `SELECT
+          line.product_code_snapshot AS product_code,
+          line.product_name_snapshot AS product_name,
+          SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.quantity * -1 ELSE line.quantity END) AS quantity,
+          SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.unit_price * line.quantity * -1 ELSE line.unit_price * line.quantity END) AS gross_amount,
+          SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.discount_amount * -1 ELSE line.discount_amount END) AS discount_amount,
+          SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.tax_amount * -1 ELSE line.tax_amount END) AS tax_amount,
+          SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.line_total * -1 ELSE line.line_total END) AS net_amount
+        FROM pos_transaction_line AS line
+        INNER JOIN pos_transaction AS txn
+          ON txn.id = line.pos_transaction_id
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = txn.shift_id
+        WHERE ${salesWhere.join(" AND ")}
+        GROUP BY line.product_code_snapshot, line.product_name_snapshot
+        ORDER BY ABS(net_amount) DESC, line.product_name_snapshot ASC
+        LIMIT ?`,
+      )
+      .all(...salesParams, limit) as ReportProductRow[];
+
+    const shiftWhere = ["1 = 1"];
+    const shiftParams: SQLInputValue[] = [];
+
+    if (dateFrom) {
+      shiftWhere.push("(shift.opened_at >= ? OR shift.closed_at >= ?)");
+      shiftParams.push(dateFrom, dateFrom);
+    }
+
+    if (dateTo) {
+      shiftWhere.push("(shift.opened_at <= ? OR shift.closed_at <= ?)");
+      shiftParams.push(dateTo, dateTo);
+    }
+
+    if (cashierCode) {
+      shiftWhere.push("shift.cashier_code = ?");
+      shiftParams.push(cashierCode);
+    }
+
+    if (shiftId) {
+      shiftWhere.push("shift.id = ?");
+      shiftParams.push(shiftId);
+    }
+
+    const shiftRows = (
+      this.db
+        .prepare(
+          `SELECT
+            id,
+            shift_no,
+            terminal_code,
+            cashier_code,
+            status,
+            opening_float_amount,
+            closing_declared_cash,
+            closing_variance,
+            opened_at,
+            closed_at,
+            record_version
+          FROM pos_shift AS shift
+          WHERE ${shiftWhere.join(" AND ")}
+          ORDER BY COALESCE(shift.closed_at, shift.opened_at) DESC, shift.shift_no DESC
+          LIMIT ?`,
+        )
+        .all(...shiftParams, limit) as PosShiftRow[]
+    ).map((shift) => this.toShiftSummary(shift));
+
+    const inventoryWhere = ["COALESCE(balance.quantity_on_hand, 0) != 0"];
+    const inventoryParams: SQLInputValue[] = [];
+
+    if (productQuery) {
+      inventoryWhere.push(
+        "(UPPER(product.product_code) LIKE ? OR UPPER(product.product_name) LIKE ?)",
+      );
+      inventoryParams.push(`%${productQuery}%`, `%${productQuery}%`);
+    }
+
+    const inventoryRows = this.db
+      .prepare(
+        `SELECT
+          location.location_code AS location_code,
+          location.location_name AS location_name,
+          product.product_code AS product_code,
+          product.product_name AS product_name,
+          balance.quantity_on_hand AS quantity_on_hand,
+          product.unit_price AS unit_price,
+          balance.updated_at AS updated_at
+        FROM inventory_location_balance AS balance
+        INNER JOIN inventory_location_snapshot AS location
+          ON location.location_code = balance.location_code
+        INNER JOIN product_snapshot AS product
+          ON product.product_code = balance.product_code
+        WHERE ${inventoryWhere.join(" AND ")}
+        ORDER BY ABS(balance.quantity_on_hand * product.unit_price) DESC, product.product_name ASC
+        LIMIT ?`,
+      )
+      .all(...inventoryParams, limit) as ReportInventoryRow[];
+
+    const bankingWhere = ["1 = 1"];
+    const bankingParams: SQLInputValue[] = [];
+
+    if (dateFrom) {
+      bankingWhere.push("deposit.deposited_at >= ?");
+      bankingParams.push(dateFrom);
+    }
+
+    if (dateTo) {
+      bankingWhere.push("deposit.deposited_at <= ?");
+      bankingParams.push(dateTo);
+    }
+
+    if (cashierCode) {
+      bankingWhere.push("reconciliation.cashier_code = ?");
+      bankingParams.push(cashierCode);
+    }
+
+    const bankingRows = this.db
+      .prepare(
+        `SELECT
+          deposit.deposit_no AS deposit_no,
+          deposit.reconciliation_no AS reconciliation_no,
+          deposit.shift_no AS shift_no,
+          deposit.deposited_at AS deposited_at,
+          deposit.operator_name AS operator_name,
+          deposit.bank_name AS bank_name,
+          deposit.bank_branch_name AS bank_branch_name,
+          deposit.bank_account_number AS bank_account_number,
+          deposit.amount AS amount,
+          deposit.reference AS reference
+        FROM banking_deposit AS deposit
+        LEFT JOIN eod_reconciliation AS reconciliation
+          ON reconciliation.id = deposit.reconciliation_id
+        WHERE ${bankingWhere.join(" AND ")}
+        ORDER BY deposit.deposited_at DESC, deposit.deposit_no DESC
+        LIMIT ?`,
+      )
+      .all(...bankingParams, limit) as ReportBankingRow[];
+
+    const mappedSalesRows = salesRows.map<StoreSalesReportRow>((row) => ({
+      transactionNo: row.transaction_no,
+      transactionType: row.transaction_type,
+      sourceTransactionNo: row.source_transaction_no,
+      completedAt: row.completed_at,
+      cashierCode: row.cashier_code,
+      customerNo: row.customer_no,
+      customerName: row.customer_name,
+      lineCount: Math.trunc(asNumber(row.line_count)),
+      productPreview: row.product_preview ?? "",
+      subtotalAmount: Number(asNumber(row.subtotal_amount).toFixed(2)),
+      discountAmount: Number(asNumber(row.discount_amount).toFixed(2)),
+      taxAmount: Number(asNumber(row.tax_amount).toFixed(2)),
+      totalAmount: Number(asNumber(row.total_amount).toFixed(2)),
+      paidAmount: Number(asNumber(row.paid_amount).toFixed(2)),
+    }));
+    const mappedTenderRows = tenderRows.map<StoreTenderReportRow>((row) => ({
+      source: "SALES",
+      paymentMethod: row.method,
+      tenderMethodCode: row.tender_method_code,
+      tenderMethodName: row.tender_method_name,
+      transactionCount: Math.trunc(asNumber(row.transaction_count)),
+      netAmount: Number(asNumber(row.net_amount).toFixed(2)),
+    }));
+    const mappedAccountPaymentRows =
+      accountPaymentRows.map<StoreAccountPaymentReportRow>((row) => ({
+        entryNo: row.entry_no,
+        occurredAt: row.occurred_at,
+        cashierCode: row.cashier_code,
+        customerNo: row.customer_no,
+        customerName: row.customer_name,
+        paymentMethod: row.payment_method,
+        tenderMethodCode: row.tender_method_code,
+        tenderMethodName: row.tender_method_name,
+        amount: Number(asNumber(row.amount).toFixed(2)),
+        reference: row.reference,
+      }));
+    const mappedProductRows = productRows.map<StoreProductSalesReportRow>(
+      (row) => ({
+        productCode: row.product_code,
+        productName: row.product_name,
+        quantity: Number(asNumber(row.quantity).toFixed(3)),
+        grossAmount: Number(asNumber(row.gross_amount).toFixed(2)),
+        discountAmount: Number(asNumber(row.discount_amount).toFixed(2)),
+        taxAmount: Number(asNumber(row.tax_amount).toFixed(2)),
+        netAmount: Number(asNumber(row.net_amount).toFixed(2)),
+      }),
+    );
+    const mappedShiftRows = shiftRows.map((shift) => ({
+      shiftNo: shift.shiftNo,
+      terminalCode: shift.terminalCode,
+      cashierCode: shift.cashierCode,
+      status: shift.status,
+      openedAt: shift.openedAt,
+      closedAt: shift.closedAt,
+      openingFloatAmount: shift.openingFloatAmount,
+      transactionCount: shift.transactionCount,
+      salesCount: shift.salesCount,
+      returnCount: shift.returnCount,
+      exchangeCount: shift.exchangeCount,
+      netSalesAmount: shift.netSalesAmount,
+      cashTenderedAmount: shift.cashTenderedAmount,
+      nonCashTenderedAmount: shift.nonCashTenderedAmount,
+      accountPaymentsAmount: shift.accountPaymentsAmount,
+      expectedCashAmount: shift.expectedCashAmount,
+      declaredCashAmount: shift.declaredCashAmount,
+      varianceAmount: shift.varianceAmount,
+    }));
+    const mappedInventoryRows = inventoryRows.map<StoreInventoryReportRow>(
+      (row) => {
+        const quantity = Number(asNumber(row.quantity_on_hand).toFixed(3));
+        const unitPrice = Number(asNumber(row.unit_price).toFixed(2));
+
+        return {
+          locationCode: row.location_code,
+          locationName: row.location_name,
+          productCode: row.product_code,
+          productName: row.product_name,
+          quantityOnHand: quantity,
+          unitPrice,
+          stockValue: Number((quantity * unitPrice).toFixed(2)),
+          updatedAt: row.updated_at,
+        };
+      },
+    );
+    const mappedBankingRows = bankingRows.map<StoreBankingReportRow>((row) => ({
+      depositNo: row.deposit_no,
+      reconciliationNo: row.reconciliation_no,
+      shiftNo: row.shift_no,
+      depositedAt: row.deposited_at,
+      operatorName: row.operator_name,
+      bankName: row.bank_name,
+      branchName: row.bank_branch_name,
+      accountNumber: row.bank_account_number,
+      amount: Number(asNumber(row.amount).toFixed(2)),
+      reference: row.reference,
+    }));
+    const mappedSalesOrderRows = this.getSalesOrderSummaries()
+      .filter((order) => {
+        const orderDate = order.createdAt;
+        const matchesDateFrom = !dateFrom || orderDate >= dateFrom;
+        const matchesDateTo = !dateTo || orderDate <= dateTo;
+        const matchesCashier =
+          !cashierCode ||
+          (order.operatorName ?? "").toUpperCase() === cashierCode.toUpperCase();
+        const customerText = `${order.customerNo ?? ""} ${order.customerName ?? ""}`.toUpperCase();
+        const matchesCustomer = !customerQuery || customerText.includes(customerQuery);
+
+        return matchesDateFrom && matchesDateTo && matchesCashier && matchesCustomer;
+      })
+      .slice(0, limit);
+
+    return {
+      scope,
+      generatedAt: isoNow(),
+      filters: {
+        scope,
+        dateFrom: input.dateFrom ?? null,
+        dateTo: input.dateTo ?? null,
+        cashierCode,
+        customerQuery: input.customerQuery ?? null,
+        productQuery: input.productQuery ?? null,
+        limit,
+      },
+      summary: {
+        salesCount: mappedSalesRows.filter(
+          (row) => row.transactionType === "SALE",
+        ).length,
+        returnCount: mappedSalesRows.filter(
+          (row) => row.transactionType === "RETURN",
+        ).length,
+        exchangeCount: mappedSalesRows.filter(
+          (row) => row.transactionType === "EXCHANGE",
+        ).length,
+        netSalesAmount: Number(
+          mappedSalesRows
+            .reduce((sum, row) => sum + row.totalAmount, 0)
+            .toFixed(2),
+        ),
+        discountAmount: Number(
+          mappedSalesRows
+            .reduce((sum, row) => sum + row.discountAmount, 0)
+            .toFixed(2),
+        ),
+        taxAmount: Number(
+          mappedSalesRows
+            .reduce((sum, row) => sum + row.taxAmount, 0)
+            .toFixed(2),
+        ),
+        tenderedAmount: Number(
+          mappedTenderRows
+            .reduce((sum, row) => sum + row.netAmount, 0)
+            .toFixed(2),
+        ),
+        accountPaymentsAmount: Number(
+          mappedAccountPaymentRows
+            .reduce((sum, row) => sum + row.amount, 0)
+            .toFixed(2),
+        ),
+        inventoryStockValue: Number(
+          mappedInventoryRows
+            .reduce((sum, row) => sum + row.stockValue, 0)
+            .toFixed(2),
+        ),
+      },
+      salesRows: mappedSalesRows,
+      tenderRows: mappedTenderRows,
+      accountPaymentRows: mappedAccountPaymentRows,
+      productRows: mappedProductRows,
+      salesOrderRows: mappedSalesOrderRows,
+      shiftRows: mappedShiftRows,
+      inventoryRows: mappedInventoryRows,
+      bankingRows: mappedBankingRows,
+    };
+  }
+
+  private getStoreUserSummaries() {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          login_id,
+          email,
+          display_name,
+          account_status,
+          home_store_code,
+          home_store_name,
+          role_codes_json,
+          role_names_json,
+          permission_codes_json,
+          cashier_eligible,
+          supervisor_eligible,
+          updated_at
+        FROM retail_user_snapshot
+        ORDER BY
+          CASE WHEN account_status = 'ACTIVE' THEN 0 ELSE 1 END,
+          CASE WHEN cashier_eligible = 1 THEN 0 ELSE 1 END,
+          CASE WHEN supervisor_eligible = 1 THEN 0 ELSE 1 END,
+          display_name ASC,
+          login_id ASC`,
+      )
+      .all() as RetailUserSnapshotRow[];
+
+    return rows.map<StoreUserSummary>((row) => this.toStoreUserSummary(row));
+  }
+
+  private getStandaloneRoleSummaries(users: StoreUserSummary[]) {
+    const userCounts = new Map<string, number>();
+
+    users.forEach((user) => {
+      user.roleCodes.forEach((roleCode) => {
+        userCounts.set(roleCode, (userCounts.get(roleCode) ?? 0) + 1);
+      });
+    });
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          role_code,
+          role_name,
+          description,
+          status,
+          permission_codes_json,
+          updated_at
+        FROM role_snapshot
+        ORDER BY
+          CASE WHEN status = 'ACTIVE' THEN 0 ELSE 1 END,
+          role_name ASC`,
+      )
+      .all() as RoleSnapshotRow[];
+    const roles = new Map<string, StoreRoleSummary>();
+
+    rows.forEach((row) => {
+      roles.set(row.role_code, {
+        roleCode: row.role_code,
+        roleName: row.role_name,
+        description: row.description,
+        status: row.status,
+        permissionCodes: readStringArray(row.permission_codes_json),
+        userCount: userCounts.get(row.role_code) ?? 0,
+        updatedAt: row.updated_at,
+      });
+    });
+
+    users.forEach((user) => {
+      user.roleCodes.forEach((roleCode, index) => {
+        if (!roles.has(roleCode)) {
+          roles.set(roleCode, {
+            roleCode,
+            roleName: user.roleNames[index] ?? roleCode,
+            description: null,
+            status: "ACTIVE",
+            permissionCodes: user.permissionCodes,
+            userCount: userCounts.get(roleCode) ?? 0,
+            updatedAt: user.updatedAt,
+          });
+        }
+      });
+    });
+
+    return [...roles.values()];
+  }
+
+  private getStandalonePermissionSummaries() {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          permission_code,
+          permission_name,
+          description,
+          updated_at
+        FROM permission_snapshot
+        ORDER BY permission_name ASC`,
+      )
+      .all() as PermissionSnapshotRow[];
+
+    if (rows.length > 0) {
+      return rows.map<StorePermissionSummary>((row) => ({
+        permissionCode: row.permission_code,
+        permissionName: row.permission_name,
+        description: row.description,
+        updatedAt: row.updated_at,
+      }));
+    }
+
+    return standaloneSupervisorPermissionCodes.map<StorePermissionSummary>(
+      (permissionCode) => ({
+        permissionCode,
+        permissionName: permissionCode
+          .split(".")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" "),
+        description: null,
+        updatedAt: isoNow(),
+      }),
+    );
+  }
+
+  private getStoreUserByLoginId(loginId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          login_id,
+          email,
+          display_name,
+          account_status,
+          home_store_code,
+          home_store_name,
+          role_codes_json,
+          role_names_json,
+          permission_codes_json,
+          password_hash,
+          password_updated_at,
+          cashier_eligible,
+          supervisor_eligible,
+          updated_at
+        FROM retail_user_snapshot
+        WHERE login_id = ? COLLATE NOCASE
+        LIMIT 1`,
+      )
+      .get(loginId.trim()) as RetailUserSnapshotRow | undefined;
+  }
+
+  private getPreferredCashierLoginId() {
+    const row = this.db
+      .prepare(
+        `SELECT login_id
+        FROM retail_user_snapshot
+        WHERE account_status = 'ACTIVE'
+          AND cashier_eligible = 1
+        ORDER BY display_name ASC, login_id ASC
+        LIMIT 1`,
+      )
+      .get() as { login_id: string } | undefined;
+
+    return row?.login_id ?? null;
+  }
+
+  private reconcileLegacySharedShiftOwner() {
+    const openShift = this.getOpenShiftRow();
+
+    if (
+      !openShift ||
+      normalizeLoginId(openShift.cashier_code) !== "CASHIER-AMA"
+    ) {
+      return;
+    }
+
+    const preferredCashierLoginId = this.getPreferredCashierLoginId();
+
+    if (preferredCashierLoginId) {
+      this.db
+        .prepare(
+          "UPDATE pos_shift SET cashier_code = ?, record_version = record_version + 1 WHERE id = ?",
+        )
+        .run(preferredCashierLoginId, openShift.id);
+      return;
+    }
+
+    this.db
+      .prepare(
+        "UPDATE pos_shift SET status = 'CLOSED', closing_declared_cash = COALESCE(closing_declared_cash, opening_float_amount), closing_variance = COALESCE(closing_variance, 0), closed_at = COALESCE(closed_at, ?), record_version = record_version + 1 WHERE id = ?",
+      )
+      .run(isoNow(), openShift.id);
+  }
+
+  private requireStoreUserAccess(input: {
+    loginId: string;
+    access: "cashier" | "supervisor";
+  }) {
+    const normalizedLoginId = input.loginId.trim();
+
+    if (!normalizedLoginId) {
+      throw new Error(
+        input.access === "cashier"
+          ? "Choose a synced cashier before opening the shift."
+          : "Choose a synced supervisor before starting a manual correction basket.",
+      );
+    }
+
+    const user = this.getStoreUserByLoginId(normalizedLoginId);
+
+    if (!user || user.account_status !== "ACTIVE") {
+      throw new Error(
+        `${normalizedLoginId} is not currently an active Flash ERP user on this desktop. Run a sync cycle or choose another operator.`,
+      );
+    }
+
+    const isEligible =
+      input.access === "cashier"
+        ? asBooleanFlag(user.cashier_eligible)
+        : asBooleanFlag(user.supervisor_eligible);
+
+    if (!isEligible) {
+      throw new Error(
+        input.access === "cashier"
+          ? `${user.display_name} (${user.login_id}) is not allowed to open POS cashier shifts on this desktop.`
+          : `${user.display_name} (${user.login_id}) is not allowed to approve manual return or exchange overrides on this desktop.`,
+      );
+    }
+
+    return user;
+  }
+
+  saveInterStoreTransferRequestDraft(
+    input: StoreInterStoreTransferRequestDraftInput,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.transfer.request"],
+      purpose: "saving an inter-store transfer request",
+    });
+    const timestamp = isoNow();
+    const quantity = Number(Number(input.quantity).toFixed(3));
+
+    if (!input.sourceLocationCode?.trim()) {
+      throw new Error(
+        "Choose a source shop location before saving the transfer-in request.",
+      );
+    }
+
+    if (!input.destinationLocationCode?.trim()) {
+      throw new Error(
+        "Choose a local destination location before saving the transfer-in request.",
+      );
+    }
+
+    if (!input.productCode?.trim()) {
+      throw new Error(
+        "Enter a product code before saving the transfer-in request.",
+      );
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error(
+        "Enter a requested quantity greater than zero before saving the transfer-in request.",
+      );
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const storeName =
+      this.metadata("store_name") ?? defaultStoreConfig.storeName;
+    let requestNo = "";
+
+    this.withTransaction(() => {
+      const sourceTarget = this.db
+        .prepare(
+          `SELECT
+            source_store_code,
+            source_store_name,
+            source_store_sales_enabled,
+            source_store_warehouse_enabled,
+            source_location_code,
+            source_location_name,
+            source_location_type,
+            source_location_status,
+            source_location_defaults,
+            source_warehouse_code,
+            source_warehouse_name,
+            use_for_sales_default,
+            use_for_receiving_default,
+            updated_at
+          FROM inter_store_transfer_request_target_snapshot
+          WHERE source_location_code = ?
+          LIMIT 1`,
+        )
+        .get(input.sourceLocationCode.trim().toUpperCase()) as
+        | TransferRequestTargetSnapshotRow
+        | undefined;
+
+      if (!sourceTarget) {
+        throw new Error(
+          `Flash ERP could not find source location "${input.sourceLocationCode}" in the synced transfer target directory.`,
+        );
+      }
+
+      const destinationLocation = this.db
+        .prepare(
+          `SELECT
+            location_code,
+            location_name,
+            location_type,
+            status,
+            defaults,
+            updated_at,
+            0 AS tracked_products,
+            0 AS on_hand_quantity,
+            0 AS negative_positions
+          FROM inventory_location_snapshot
+          WHERE location_code = ?
+          LIMIT 1`,
+        )
+        .get(input.destinationLocationCode.trim().toUpperCase()) as
+        | InventoryLocationRow
+        | undefined;
+
+      if (!destinationLocation) {
+        throw new Error(
+          `Flash ERP could not find local destination location "${input.destinationLocationCode}".`,
+        );
+      }
+
+      const product = this.db
+        .prepare(
+          `SELECT
+            ${qualifiedProductSnapshotSelectSql},
+            department.department_name AS department_name,
+            category.category_name AS category_name
+          FROM product_snapshot AS product
+          LEFT JOIN product_department_snapshot AS department
+            ON department.department_code = product.department_code
+          LEFT JOIN product_category_snapshot AS category
+            ON category.category_code = product.category_code
+          WHERE product.product_code = ?
+          LIMIT 1`,
+        )
+        .get(input.productCode.trim().toUpperCase()) as
+        | (ProductRow & {
+            department_name: string | null;
+            category_name: string | null;
+          })
+        | undefined;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not find local product "${input.productCode}" while saving the transfer request.`,
+        );
+      }
+
+      if (!asBooleanFlag(product.track_inventory)) {
+        throw new Error(
+          `${product.product_name} is not configured for tracked inventory, so Flash ERP cannot request it through inter-store stock movement.`,
+        );
+      }
+
+      if (asBooleanFlag(product.is_serialized) && !Number.isInteger(quantity)) {
+        throw new Error(
+          `Serialized product "${product.product_code}" needs a whole-number requested quantity.`,
+        );
+      }
+
+      const requestToken =
+        storeCode
+          .replace(/[^A-Za-z0-9]/g, "")
+          .toUpperCase()
+          .slice(0, 8) || "STORE";
+      const requestStamp =
+        timestamp.replace(/[-:TZ.]/g, "").slice(0, 14) ||
+        Date.now().toString().slice(-14);
+      requestNo = `TRQ-${requestToken}-${requestStamp}-${randomUUID().slice(0, 4).toUpperCase()}`;
+      const operatorName = this.formatOperatorLabel(operatorSession);
+      const note = input.note?.trim() || null;
+      const externalReference = input.externalReference?.trim() || null;
+      const draftId = randomUUID();
+
+      this.db
+        .prepare(
+          `INSERT INTO inter_store_transfer_request_draft (
+            id,
+            request_no,
+            status,
+            source_store_code,
+            source_store_name,
+            source_location_code,
+            source_location_name,
+            destination_store_code,
+            destination_store_name,
+            destination_location_code,
+            destination_location_name,
+            product_code,
+            product_name,
+            department_code,
+            category_code,
+            subcategory,
+            is_serialized,
+            quantity,
+            external_reference,
+            note,
+            operator_name,
+            submitted_at,
+            updated_at
+          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(
+          draftId,
+          requestNo,
+          sourceTarget.source_store_code,
+          sourceTarget.source_store_name,
+          sourceTarget.source_location_code,
+          sourceTarget.source_location_name,
+          storeCode,
+          storeName,
+          destinationLocation.location_code,
+          destinationLocation.location_name,
+          product.product_code,
+          product.product_name,
+          product.department_code,
+          product.category_code,
+          product.subcategory,
+          asBooleanFlag(product.is_serialized) ? 1 : 0,
+          quantity,
+          externalReference,
+          note,
+          operatorName,
+          timestamp,
+        );
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${requestNo} was saved locally as an inter-store transfer request draft for ${product.product_name}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `${requestNo} was saved locally. Submit it when the shop manager is ready to sync the transfer-in request to enterprise.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  submitInterStoreTransferRequestDraft(draftId: string): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.transfer.request"],
+      purpose: "submitting an inter-store transfer request",
+    });
+    const timestamp = isoNow();
+
+    if (!draftId.trim()) {
+      throw new Error(
+        "Select a saved transfer request draft before submitting it.",
+      );
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let message = "";
+
+    this.withTransaction(() => {
+      const draft = this.db
+        .prepare(
+          `SELECT
+            draft.id,
+            draft.request_no,
+            draft.status,
+            draft.source_store_code,
+            draft.source_store_name,
+            draft.source_location_code,
+            draft.source_location_name,
+            draft.destination_store_code,
+            draft.destination_store_name,
+            draft.destination_location_code,
+            draft.destination_location_name,
+            draft.product_code,
+            draft.product_name,
+            draft.department_code,
+            department.department_name AS department_name,
+            draft.category_code,
+            category.category_name AS category_name,
+            draft.subcategory,
+            draft.is_serialized,
+            draft.quantity,
+            draft.external_reference,
+            draft.note,
+            draft.operator_name,
+            draft.submitted_at,
+            draft.updated_at
+          FROM inter_store_transfer_request_draft AS draft
+          LEFT JOIN product_department_snapshot AS department
+            ON department.department_code = draft.department_code
+          LEFT JOIN product_category_snapshot AS category
+            ON category.category_code = draft.category_code
+          WHERE draft.id = ?
+          LIMIT 1`,
+        )
+        .get(draftId.trim()) as InterStoreTransferRequestDraftRow | undefined;
+
+      if (!draft) {
+        throw new Error(
+          "Flash ERP could not find that local transfer request draft anymore.",
+        );
+      }
+
+      if (draft.status !== "DRAFT") {
+        throw new Error(
+          `${draft.request_no} has already been submitted and is waiting for enterprise sync.`,
+        );
+      }
+
+      const payload: StoreInterStoreTransferRequestedPayload = {
+        requestId: draft.id,
+        requestNo: draft.request_no,
+        storeCode,
+        terminalCode,
+        sourceLocationCode: draft.source_location_code,
+        destinationLocationCode: draft.destination_location_code,
+        productCode: draft.product_code,
+        quantity: Number(asNumber(draft.quantity).toFixed(3)),
+        externalReference: draft.external_reference,
+        operatorName: draft.operator_name,
+        note: draft.note,
+        occurredAt: timestamp,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'interStoreTransfer', ?, 'inter-store-transfer.requested', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            draft.id,
+            `${nodeCode}:interStoreTransfer:${draft.id}:requested:${timestamp}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE inter_store_transfer_request_draft SET status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(timestamp, timestamp, draft.id);
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${draft.request_no} was submitted locally and queued upstream as an inter-store transfer request.`
+          : `${draft.request_no} was submitted locally for standalone transfer tracking.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = shouldQueueEnterprise
+        ? `${draft.request_no} was submitted and queued for enterprise creation of the paired inter-store transfer instructions.`
+        : `${draft.request_no} was submitted locally for standalone transfer tracking.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveStockCountSessionDraft(
+    input: StoreStockCountSessionDraftInput,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.count.submit"],
+      purpose: "saving a stock count session",
+    });
+    const timestamp = isoNow();
+
+    if (!input.inventoryLocationCode?.trim()) {
+      throw new Error("Choose a location before saving the local stock count.");
+    }
+
+    if (!input.productCode?.trim()) {
+      throw new Error(
+        "Enter a product code before saving the local stock count.",
+      );
+    }
+
+    const requestedCountedQuantity = Number(
+      Number(input.countedQuantity).toFixed(3),
+    );
+
+    if (
+      !Number.isFinite(requestedCountedQuantity) ||
+      requestedCountedQuantity < 0
+    ) {
+      throw new Error(
+        "Enter a counted quantity of zero or greater before saving the local stock count.",
+      );
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    let sessionNo = "";
+
+    this.withTransaction(() => {
+      const location = this.db
+        .prepare(
+          `SELECT
+            location_code,
+            location_name,
+            location_type,
+            status,
+            defaults,
+            updated_at,
+            0 AS tracked_products,
+            0 AS on_hand_quantity,
+            0 AS negative_positions
+          FROM inventory_location_snapshot
+          WHERE location_code = ?
+          LIMIT 1`,
+        )
+        .get(input.inventoryLocationCode.trim().toUpperCase()) as
+        | InventoryLocationRow
+        | undefined;
+
+      if (!location) {
+        throw new Error(
+          `Flash ERP could not find local inventory location "${input.inventoryLocationCode}" for this stock count.`,
+        );
+      }
+
+      const product = this.db
+        .prepare(
+          `SELECT
+            ${qualifiedProductSnapshotSelectSql},
+            department.department_name AS department_name,
+            category.category_name AS category_name
+          FROM product_snapshot AS product
+          LEFT JOIN product_department_snapshot AS department
+            ON department.department_code = product.department_code
+          LEFT JOIN product_category_snapshot AS category
+            ON category.category_code = product.category_code
+          WHERE product.product_code = ?
+          LIMIT 1`,
+        )
+        .get(input.productCode.trim().toUpperCase()) as
+        | (ProductRow & {
+            department_name: string | null;
+            category_name: string | null;
+          })
+        | undefined;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not find local product "${input.productCode}" while saving the stock count.`,
+        );
+      }
+
+      if (!asBooleanFlag(product.track_inventory)) {
+        throw new Error(
+          `${product.product_name} is not configured for tracked inventory, so Flash ERP cannot count it into local stock posture.`,
+        );
+      }
+
+      const countedSerialNumbers = normalizeSerialNumbers(input.serialNumbers);
+      const previousQuantity = Number(
+        this.getLocationQuantity(
+          location.location_code,
+          product.product_code,
+        ).toFixed(3),
+      );
+      const previousSerialNumbers = asBooleanFlag(product.is_serialized)
+        ? this.listAvailableRegistrySerialNumbers(
+            product.product_code,
+            location.location_code,
+          )
+        : [];
+      const countedQuantity = asBooleanFlag(product.is_serialized)
+        ? countedSerialNumbers.length
+        : requestedCountedQuantity;
+
+      if (asBooleanFlag(product.is_serialized)) {
+        validateSerializedLineInput({
+          isSerialized: true,
+          productName: product.product_name,
+          quantity: countedQuantity,
+          serialNumbers: countedSerialNumbers,
+        });
+
+        const currentAvailableKeys = new Set(
+          previousSerialNumbers.map((serialNumber) =>
+            serialNumber.toUpperCase(),
+          ),
+        );
+        const countedKeys = new Set(
+          countedSerialNumbers.map((serialNumber) =>
+            serialNumber.toUpperCase(),
+          ),
+        );
+        const serialNumbersToRemove = previousSerialNumbers.filter(
+          (serialNumber) => !countedKeys.has(serialNumber.toUpperCase()),
+        );
+        const serialNumbersToAdd = countedSerialNumbers.filter(
+          (serialNumber) =>
+            !currentAvailableKeys.has(serialNumber.toUpperCase()),
+        );
+
+        this.ensureInventoryTaskSerialNumbersNotReserved(
+          product.product_code,
+          product.product_name,
+          [...serialNumbersToRemove, ...serialNumbersToAdd],
+        );
+
+        const conflictingLocationSerials = serialNumbersToAdd.filter(
+          (serialNumber) => {
+            const row = this.getSerialRegistryEntry(
+              product.product_code,
+              serialNumber,
+            );
+
+            return (
+              row?.status === "AVAILABLE" &&
+              row.inventory_location_code !== null &&
+              row.inventory_location_code !== location.location_code
+            );
+          },
+        );
+
+        if (conflictingLocationSerials.length > 0) {
+          throw new Error(
+            `Flash ERP cannot count serialized unit(s) ${conflictingLocationSerials.join(", ")} into ${location.location_code} because they are already available in another local location.`,
+          );
+        }
+      } else if (countedSerialNumbers.length > 0) {
+        throw new Error(
+          `${product.product_name} is not serialized, so this stock count should not include serial numbers.`,
+        );
+      }
+
+      const varianceQuantity = Number(
+        (countedQuantity - previousQuantity).toFixed(3),
+      );
+      const sessionId = randomUUID();
+      sessionNo = buildLocalStockCountSessionNo(
+        storeCode,
+        this.nextSequence("stock_count_session_sequence"),
+        timestamp,
+      );
+      const operatorName = this.formatOperatorLabel(operatorSession);
+      const note = input.note?.trim() || null;
+
+      this.db
+        .prepare(
+          `INSERT INTO stock_count_session (
+            id,
+            session_no,
+            status,
+            inventory_location_code,
+            inventory_location_name,
+            product_code,
+            product_name,
+            department_code,
+            category_code,
+            subcategory,
+            is_serialized,
+            previous_quantity,
+            counted_quantity,
+            variance_quantity,
+            previous_serial_numbers_json,
+            counted_serial_numbers_json,
+            note,
+            operator_name,
+            submitted_at,
+            committed_at,
+            updated_at
+          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          sessionId,
+          sessionNo,
+          location.location_code,
+          location.location_name,
+          product.product_code,
+          product.product_name,
+          product.department_code,
+          product.category_code,
+          product.subcategory,
+          asBooleanFlag(product.is_serialized) ? 1 : 0,
+          previousQuantity,
+          countedQuantity,
+          varianceQuantity,
+          writeSerializedLineNumbers(previousSerialNumbers),
+          writeSerializedLineNumbers(countedSerialNumbers),
+          note,
+          operatorName,
+          timestamp,
+        );
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${sessionNo} was saved locally as a stock count session for ${product.product_name} in ${location.location_name}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `${sessionNo} was saved locally. Submit it when the branch is ready to send the count session upstream.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  submitStockCountSession(sessionId: string): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.count.submit"],
+      purpose: "submitting a stock count session",
+    });
+    const timestamp = isoNow();
+
+    if (!sessionId.trim()) {
+      throw new Error(
+        "Select a saved stock count session before submitting it.",
+      );
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let message = "";
+
+    this.withTransaction(() => {
+      const session = this.db
+        .prepare(
+          `SELECT
+            session.id,
+            session.session_no,
+            session.status,
+            session.inventory_location_code,
+            session.inventory_location_name,
+            session.product_code,
+            session.product_name,
+            session.department_code,
+            department.department_name AS department_name,
+            session.category_code,
+            category.category_name AS category_name,
+            session.subcategory,
+            session.is_serialized,
+            session.previous_quantity,
+            session.counted_quantity,
+            session.variance_quantity,
+            session.previous_serial_numbers_json,
+            session.counted_serial_numbers_json,
+            session.note,
+            session.operator_name,
+            session.submitted_at,
+            session.committed_at,
+            session.updated_at
+          FROM stock_count_session AS session
+          LEFT JOIN product_department_snapshot AS department
+            ON department.department_code = session.department_code
+          LEFT JOIN product_category_snapshot AS category
+            ON category.category_code = session.category_code
+          WHERE session.id = ?
+          LIMIT 1`,
+        )
+        .get(sessionId.trim()) as StockCountSessionRow | undefined;
+
+      if (!session) {
+        throw new Error(
+          "Flash ERP could not find that local stock count session anymore.",
+        );
+      }
+
+      if (session.status !== "DRAFT") {
+        throw new Error(
+          `${session.session_no} has already been submitted or committed locally.`,
+        );
+      }
+
+      const payload: StoreStockCountSessionSubmittedPayload = {
+        sessionId: session.id,
+        sessionNo: session.session_no,
+        storeCode,
+        terminalCode,
+        inventoryLocationCode: session.inventory_location_code,
+        productCode: session.product_code,
+        previousQuantity: Number(
+          asNumber(session.previous_quantity).toFixed(3),
+        ),
+        countedQuantity: Number(asNumber(session.counted_quantity).toFixed(3)),
+        varianceQuantity: Number(
+          asNumber(session.variance_quantity).toFixed(3),
+        ),
+        previousSerialNumbers: readSerializedLineNumbers(
+          session.previous_serial_numbers_json,
+        ),
+        countedSerialNumbers: readSerializedLineNumbers(
+          session.counted_serial_numbers_json,
+        ),
+        operatorName: session.operator_name,
+        note: session.note,
+        submittedAt: timestamp,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'stockCountSession', ?, 'stock-count-session.submitted', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            session.id,
+            `${nodeCode}:stockCountSession:${session.id}:submitted:${timestamp}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE stock_count_session SET status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(timestamp, timestamp, session.id);
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${session.session_no} was submitted locally and queued upstream as a stock count session.`
+          : `${session.session_no} was submitted locally for standalone stock-count review.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = shouldQueueEnterprise
+        ? `${session.session_no} was submitted and queued for enterprise visibility. Commit it locally once the physical count is ready to post into stock.`
+        : `${session.session_no} was submitted locally. Commit it once the physical count is ready to post into stock.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  commitStockCountSession(sessionId: string): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.count.commit"],
+      purpose: "committing a stock count session",
+    });
+    const timestamp = isoNow();
+
+    if (!sessionId.trim()) {
+      throw new Error(
+        "Select a submitted stock count session before committing it locally.",
+      );
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let message = "";
+
+    this.withTransaction(() => {
+      const session = this.db
+        .prepare(
+          `SELECT
+            session.id,
+            session.session_no,
+            session.status,
+            session.inventory_location_code,
+            session.inventory_location_name,
+            session.product_code,
+            session.product_name,
+            session.department_code,
+            department.department_name AS department_name,
+            session.category_code,
+            category.category_name AS category_name,
+            session.subcategory,
+            session.is_serialized,
+            session.previous_quantity,
+            session.counted_quantity,
+            session.variance_quantity,
+            session.previous_serial_numbers_json,
+            session.counted_serial_numbers_json,
+            session.note,
+            session.operator_name,
+            session.submitted_at,
+            session.committed_at,
+            session.updated_at
+          FROM stock_count_session AS session
+          LEFT JOIN product_department_snapshot AS department
+            ON department.department_code = session.department_code
+          LEFT JOIN product_category_snapshot AS category
+            ON category.category_code = session.category_code
+          WHERE session.id = ?
+          LIMIT 1`,
+        )
+        .get(sessionId.trim()) as StockCountSessionRow | undefined;
+
+      if (!session) {
+        throw new Error(
+          "Flash ERP could not find that local stock count session anymore.",
+        );
+      }
+
+      if (session.status === "COMMITTED") {
+        throw new Error(
+          `${session.session_no} has already been committed locally.`,
+        );
+      }
+
+      if (session.status !== "SUBMITTED") {
+        throw new Error(
+          `${session.session_no} must be submitted before Flash ERP can commit it into local stock.`,
+        );
+      }
+
+      const currentLocationQuantity = Number(
+        this.getLocationQuantity(
+          session.inventory_location_code,
+          session.product_code,
+        ).toFixed(3),
+      );
+      const expectedPreviousQuantity = Number(
+        asNumber(session.previous_quantity).toFixed(3),
+      );
+
+      if (
+        Math.abs(currentLocationQuantity - expectedPreviousQuantity) > 0.0001
+      ) {
+        throw new Error(
+          `${session.session_no} can no longer be committed because local stock changed from ${expectedPreviousQuantity.toFixed(3)} to ${currentLocationQuantity.toFixed(3)} in ${session.inventory_location_code}. Start a new count session from the latest posture.`,
+        );
+      }
+
+      const previousSerialNumbers = readSerializedLineNumbers(
+        session.previous_serial_numbers_json,
+      );
+      const countedSerialNumbers = readSerializedLineNumbers(
+        session.counted_serial_numbers_json,
+      );
+
+      if (asBooleanFlag(session.is_serialized)) {
+        const currentAvailableSerialNumbers =
+          this.listAvailableRegistrySerialNumbers(
+            session.product_code,
+            session.inventory_location_code,
+          );
+
+        if (
+          !serialNumberSetsMatch(
+            currentAvailableSerialNumbers,
+            previousSerialNumbers,
+          )
+        ) {
+          throw new Error(
+            `${session.session_no} can no longer be committed because the serialized stock posture changed in ${session.inventory_location_code}. Refresh the count from the latest local registry first.`,
+          );
+        }
+      }
+
+      const appliedCount = this.applyLocalCountVariance({
+        referenceId: session.id,
+        referenceLabel: session.session_no,
+        productCode: session.product_code,
+        locationCode: session.inventory_location_code,
+        countedQuantity: Number(asNumber(session.counted_quantity).toFixed(3)),
+        countedSerialNumbers,
+        updatedAt: timestamp,
+      });
+
+      const ledgerEntryId = `inventory-count-session-${session.id}`;
+      const payload: StoreInventoryLedgerRecordedPayload = {
+        ledgerEntryId,
+        storeCode,
+        terminalCode,
+        inventoryLocationCode: session.inventory_location_code,
+        productCode: session.product_code,
+        movementType: "COUNT_VARIANCE",
+        quantity: appliedCount.varianceQuantity,
+        ...(appliedCount.countedSerialNumbers.length > 0
+          ? { serialNumbers: appliedCount.countedSerialNumbers }
+          : {}),
+        unitCost: null,
+        referenceType: "STOCK_COUNT_SESSION",
+        referenceId: session.id,
+        externalReference: session.session_no,
+        occurredAt: timestamp,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'inventoryLedgerEntry', ?, 'inventory.ledger.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            ledgerEntryId,
+            `${nodeCode}:inventoryLedgerEntry:${ledgerEntryId}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE stock_count_session SET status = 'COMMITTED', variance_quantity = ?, committed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(appliedCount.varianceQuantity, timestamp, timestamp, session.id);
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${session.session_no} was committed locally and queued upstream as a stock count variance.`
+          : `${session.session_no} was committed locally as a standalone stock count variance.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = shouldQueueEnterprise
+        ? `${session.session_no} was committed locally. Flash ERP updated the branch stock posture and queued the canonical count variance upstream.`
+        : `${session.session_no} was committed locally. Flash ERP updated the standalone stock posture.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  openShift(input: StoreShiftOpenInput): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["pos.shift.open"],
+      purpose: "opening a cashier shift",
+    });
+    const requestedCashierCode = input.cashierCode.trim();
+    const openingFloatAmount = Number(
+      Number(input.openingFloatAmount).toFixed(2),
+    );
+    const cashierCode = operatorSession.loginId;
+
+    if (
+      requestedCashierCode &&
+      normalizeLoginId(requestedCashierCode) !==
+        normalizeLoginId(operatorSession.loginId)
+    ) {
+      throw new Error(
+        `Flash ERP can only open the shift for the currently signed-in operator ${this.formatOperatorLabel(
+          operatorSession,
+        )}.`,
+      );
+    }
+
+    if (!Number.isFinite(openingFloatAmount) || openingFloatAmount < 0) {
+      throw new Error(
+        "Enter an opening float of zero or greater before opening the shift.",
+      );
+    }
+
+    const timestamp = isoNow();
+    let message = "";
+
+    this.withTransaction(() => {
+      const existingOpenShift = this.getOpenShiftRow();
+
+      if (existingOpenShift) {
+        throw new Error(
+          `${existingOpenShift.shift_no} is already open on this desktop. Close it before opening another cashier shift.`,
+        );
+      }
+
+      const shiftSequence = this.nextSequence("shift_sequence");
+      const shiftId = randomUUID();
+      const shiftNo = `SHIFT-${String(shiftSequence).padStart(4, "0")}`;
+      const terminalCode = this.getTerminalCode();
+
+      this.db
+        .prepare(
+          "INSERT INTO pos_shift (id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version) VALUES (?, ?, ?, ?, 'OPEN', ?, NULL, NULL, ?, NULL, 1)",
+        )
+        .run(
+          shiftId,
+          shiftNo,
+          terminalCode,
+          cashierCode,
+          openingFloatAmount,
+          timestamp,
+        );
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${shiftNo} was opened locally for cashier ${this.formatOperatorLabel(operatorSession)}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = `${shiftNo} is now open on this desktop with ${openingFloatAmount.toFixed(2)} opening float for cashier ${this.formatOperatorLabel(operatorSession)}.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  closeActiveShift(input: StoreShiftCloseInput): StoreSyncActionResult {
+    const { session } = this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.shift.close"],
+      purpose: "closing the active cashier shift",
+    });
+
+    if (!session.capabilities.supervisorEligible) {
+      throw new Error(
+        "Only a synced supervisor can close the active cashier shift and produce the Z report.",
+      );
+    }
+
+    const declaredCashAmount = Number(
+      Number(input.declaredCashAmount).toFixed(2),
+    );
+
+    if (!Number.isFinite(declaredCashAmount) || declaredCashAmount < 0) {
+      throw new Error(
+        "Enter a declared cash amount of zero or greater before closing the shift.",
+      );
+    }
+
+    const timestamp = isoNow();
+    let message = "";
+
+    this.withTransaction(() => {
+      const activeBasketId = this.getActiveBasketId();
+
+      if (activeBasketId) {
+        throw new Error(
+          "Park or complete the active basket before closing the cashier shift on this desktop.",
+        );
+      }
+
+      const shift = this.getOpenShiftRow();
+
+      if (!shift) {
+        throw new Error(
+          "Flash ERP could not find an open cashier shift to close.",
+        );
+      }
+
+      const currentSummary = this.toShiftSummary(shift);
+      const varianceAmount = Number(
+        (declaredCashAmount - currentSummary.expectedCashAmount).toFixed(2),
+      );
+      const nextRecordVersion = Math.max(1, asNumber(shift.record_version) + 1);
+
+      this.db
+        .prepare(
+          "UPDATE pos_shift SET status = 'CLOSED', closing_declared_cash = ?, closing_variance = ?, closed_at = ?, record_version = ? WHERE id = ?",
+        )
+        .run(
+          declaredCashAmount,
+          varianceAmount,
+          timestamp,
+          nextRecordVersion,
+          shift.id,
+        );
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${shift.shift_no} was closed locally with declared cash ${declaredCashAmount.toFixed(2)} and variance ${varianceAmount.toFixed(2)}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message =
+        varianceAmount === 0
+          ? `${shift.shift_no} closed cleanly. Declared cash matched the expected drawer exactly.`
+          : `${shift.shift_no} closed with declared cash ${declaredCashAmount.toFixed(2)} and variance ${varianceAmount.toFixed(2)}.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  attachCustomerToActiveBasket(
+    input: StoreBasketCustomerAttachmentInput,
+  ): StoreSyncActionResult {
+    this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.customer.attach"],
+      purpose: "attaching a customer to the active basket",
+    });
+    const timestamp = isoNow();
+    let message = "";
+
+    this.withTransaction(() => {
+      const basket =
+        input.customerId === null
+          ? this.requireActiveBasket()
+          : this.ensureActiveBasket(timestamp);
+
+      if (input.customerId === null) {
+        this.db
+          .prepare(
+            "UPDATE pos_transaction SET customer_id = NULL, updated_at = ? WHERE id = ?",
+          )
+          .run(timestamp, basket.id);
+        this.repriceBasketSaleLinesForCustomer(basket.id, null);
+        this.refreshBasketTotals(basket.id, timestamp);
+
+        this.setMetadata("last_local_write_at", timestamp);
+        this.insertRunLog({
+          runKind: "LOCAL_WRITE",
+          result: "SUCCESS",
+          summary: `${basket.transaction_no} was reset to walk-in customer locally.`,
+          upstreamProcessed: 0,
+          downstreamApplied: 0,
+          startedAt: timestamp,
+          finishedAt: timestamp,
+        });
+
+        message = `Flash ERP cleared the customer from basket ${basket.transaction_no}.`;
+        return;
+      }
+
+      const customer = this.db
+        .prepare(
+          "SELECT id, customer_no, full_name, customer_type, phone, email, home_store_code, home_store_name, city, country_code, loyalty_enrolled, loyalty_tier, loyalty_points_balance, allow_credit_sales, credit_limit_amount, receivable_balance_amount, note, status, updated_at FROM customer WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+        )
+        .get(input.customerId.trim()) as CustomerRow | undefined;
+
+      if (!customer) {
+        throw new Error(
+          "Flash ERP could not find that customer in the local store database.",
+        );
+      }
+
+      if (customer.status !== "ACTIVE") {
+        throw new Error(
+          `Flash ERP cannot attach ${customer.full_name} because that customer account is ${customer.status.toLowerCase()}.`,
+        );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET customer_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(customer.id, timestamp, basket.id);
+      this.repriceBasketSaleLinesForCustomer(basket.id, customer.id);
+      this.refreshBasketTotals(basket.id, timestamp);
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${customer.full_name} (${customer.customer_no}) was attached to ${basket.transaction_no}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = `Flash ERP attached ${customer.full_name} to basket ${basket.transaction_no}.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  setActiveBasketLoyaltyRedemption(
+    input: StoreBasketLoyaltyRedemptionInput,
+  ): StoreSyncActionResult {
+    this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.loyalty.redeem"],
+      purpose: "redeeming loyalty on the active basket",
+    });
+    const pointsToRedeem = Math.max(
+      0,
+      Math.trunc(Number(input.pointsToRedeem ?? 0)),
+    );
+
+    if (!Number.isFinite(pointsToRedeem) || pointsToRedeem < 0) {
+      throw new Error(
+        "Flash ERP needs loyalty redemption points to be zero or greater.",
+      );
+    }
+
+    const timestamp = isoNow();
+    let message = "";
+
+    this.withTransaction(() => {
+      const basket = this.requireActiveBasket();
+      const basketLines = this.getBasketLines(basket.id);
+      const appliedPromotions =
+        this.getPublicAppliedPromotionSummaries(basketLines);
+      const grossTotalAmount = Number(
+        (
+          asNumber(basket.subtotal_amount) + asNumber(basket.tax_amount)
+        ).toFixed(2),
+      );
+      const loyaltyRedemption = this.calculateBasketLoyaltyRedemption(
+        basket,
+        grossTotalAmount,
+        appliedPromotions,
+        pointsToRedeem,
+      );
+
+      if (pointsToRedeem > 0 && loyaltyRedemption.appliedPoints <= 0) {
+        throw new Error(
+          loyaltyRedemption.message ??
+            "Flash ERP cannot apply loyalty redemption to this basket right now.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET loyalty_redemption_points = ?, loyalty_redemption_amount = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          loyaltyRedemption.appliedPoints,
+          loyaltyRedemption.appliedAmount,
+          timestamp,
+          basket.id,
+        );
+      this.refreshBasketTotals(basket.id, timestamp);
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary:
+          loyaltyRedemption.appliedPoints > 0
+            ? `${basket.transaction_no} applied loyalty redemption for ${loyaltyRedemption.appliedPoints} point(s).`
+            : `${basket.transaction_no} cleared loyalty redemption locally.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message =
+        loyaltyRedemption.appliedPoints > 0
+          ? `Flash ERP applied ${loyaltyRedemption.appliedPoints} loyalty point(s) worth ${loyaltyRedemption.appliedAmount.toFixed(2)} to basket ${basket.transaction_no}.`
+          : `Flash ERP cleared loyalty redemption from basket ${basket.transaction_no}.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  recordCustomerAccountPayment(
+    input: StoreCustomerAccountPaymentRequest,
+  ): StoreSyncActionResult {
+    const { session } = this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.customer.account.collect"],
+      purpose: "collecting a customer account payment",
+    });
+    const timestamp = isoNow();
+    let message = "";
+    let recordedEntryNo: string | null = null;
+
+    this.withTransaction(() => {
+      const shift = this.getOpenShiftContext();
+      const customerId = input.customerId.trim();
+      const tenderMethodCode = input.tenderMethodCode.trim();
+      const amount = Number(Number(input.amount).toFixed(2));
+
+      if (!customerId) {
+        throw new Error(
+          "Choose a customer account before collecting a payment on this desktop.",
+        );
+      }
+
+      if (!tenderMethodCode) {
+        throw new Error(
+          "Choose an active enterprise tender method before collecting a payment.",
+        );
+      }
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error(
+          "Enter a payment amount greater than zero for the customer account.",
+        );
+      }
+
+      const customer = this.db
+        .prepare(
+          "SELECT id, customer_no, full_name, customer_type, phone, email, home_store_code, home_store_name, city, country_code, loyalty_enrolled, loyalty_tier, loyalty_points_balance, allow_credit_sales, credit_limit_amount, receivable_balance_amount, note, status, updated_at FROM customer WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+        )
+        .get(customerId) as CustomerRow | undefined;
+
+      if (!customer) {
+        throw new Error(
+          "Flash ERP could not find that customer account in the local store database.",
+        );
+      }
+
+      if (customer.status !== "ACTIVE") {
+        throw new Error(
+          `Flash ERP cannot collect against ${customer.full_name} because that customer account is ${customer.status.toLowerCase()}.`,
+        );
+      }
+
+      const currentReceivableBalance = Number(
+        asNumber(customer.receivable_balance_amount).toFixed(2),
+      );
+
+      if (currentReceivableBalance <= 0) {
+        throw new Error(
+          `${customer.full_name} does not currently have an outstanding receivable balance to collect.`,
+        );
+      }
+
+      if (amount > currentReceivableBalance) {
+        throw new Error(
+          `Flash ERP cannot collect more than ${customer.full_name}'s outstanding receivable balance of ${currentReceivableBalance.toFixed(2)}.`,
+        );
+      }
+
+      const tenderMethod = this.getTenderMethodByCode(tenderMethodCode);
+
+      if (!tenderMethod) {
+        throw new Error(
+          "Flash ERP needs the account payment to use an active enterprise tender method.",
+        );
+      }
+
+      if (tenderMethod.paymentMethod === "STORE_CREDIT") {
+        throw new Error(
+          "Store Credit cannot be used to settle a customer receivable balance.",
+        );
+      }
+
+      const reference = input.reference?.trim() || null;
+      const selectedBankAccount = this.getBankAccountById(input.bankAccountId);
+      const requiresBankAccount = this.tenderRequiresBankAccount(tenderMethod);
+
+      if (tenderMethod.requiresReference && !reference) {
+        throw new Error(
+          `Flash ERP needs a reference for ${tenderMethod.tenderMethodName}.`,
+        );
+      }
+
+      if (requiresBankAccount && !selectedBankAccount) {
+        throw new Error(
+          `Select the bank, branch, and account number for ${tenderMethod.tenderMethodName}.`,
+        );
+      }
+
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const terminalCode = this.getTerminalCode();
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const entryId = randomUUID();
+      const entryNo = buildLocalCustomerAccountEntryNo(
+        storeCode,
+        this.nextSequence("customer_account_entry_sequence"),
+        timestamp,
+      );
+      recordedEntryNo = entryNo;
+      const note = input.note?.trim() || null;
+      const nextReceivableBalance = Number(
+        (currentReceivableBalance - amount).toFixed(2),
+      );
+      const payload: StoreCustomerAccountEntryRecordedPayload = {
+        entryId,
+        entryNo,
+        storeCode,
+        terminalCode,
+        shiftId: shift.id,
+        shiftNo: shift.shift_no,
+        cashierCode: session.loginId,
+        customerId: customer.id,
+        customerNo: customer.customer_no,
+        customerName: customer.full_name,
+        entryType: "ACCOUNT_PAYMENT",
+        paymentMethod: tenderMethod.paymentMethod,
+        tenderMethodCode: tenderMethod.tenderMethodCode,
+        tenderMethodName: tenderMethod.tenderMethodName,
+        bankAccountId: selectedBankAccount?.bankAccountId ?? null,
+        bankCode: selectedBankAccount?.bankCode ?? null,
+        bankName: selectedBankAccount?.bankName ?? null,
+        bankBranchCode: selectedBankAccount?.branchCode ?? null,
+        bankBranchName: selectedBankAccount?.branchName ?? null,
+        bankAccountNumber: selectedBankAccount?.accountNumber ?? null,
+        bankAccountName: selectedBankAccount?.accountName ?? null,
+        amount,
+        reference,
+        note,
+        occurredAt: timestamp,
+      };
+
+      this.db
+        .prepare(
+          "INSERT INTO customer_account_entry (id, entry_no, customer_id, customer_no, customer_name, entry_type, payment_method, tender_method_code, tender_method_name, bank_account_id, bank_code, bank_name, bank_branch_code, bank_branch_name, bank_account_number, bank_account_name, amount, reference, note, shift_id, shift_no, cashier_code, synced_at, occurred_at, updated_at) VALUES (?, ?, ?, ?, ?, 'ACCOUNT_PAYMENT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .run(
+          entryId,
+          entryNo,
+          customer.id,
+          customer.customer_no,
+          customer.full_name,
+          tenderMethod.paymentMethod,
+          tenderMethod.tenderMethodCode,
+          tenderMethod.tenderMethodName,
+          selectedBankAccount?.bankAccountId ?? null,
+          selectedBankAccount?.bankCode ?? null,
+          selectedBankAccount?.bankName ?? null,
+          selectedBankAccount?.branchCode ?? null,
+          selectedBankAccount?.branchName ?? null,
+          selectedBankAccount?.accountNumber ?? null,
+          selectedBankAccount?.accountName ?? null,
+          amount,
+          reference,
+          note,
+          shift.id,
+          shift.shift_no,
+          session.loginId,
+          timestamp,
+          timestamp,
+        );
+
+      this.db
+        .prepare(
+          "UPDATE customer SET receivable_balance_amount = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(nextReceivableBalance, timestamp, customer.id);
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'customerAccountEntry', ?, 'customer-account-entry.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            entryId,
+            ENTERPRISE_NODE_CODE,
+            entryId,
+            `${nodeCode}:customerAccountEntry:${entryNo}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${entryNo} collected ${amount.toFixed(2)} from ${customer.full_name} and queued the receivable settlement for enterprise sync.`
+          : `${entryNo} collected ${amount.toFixed(2)} from ${customer.full_name} for standalone receivables.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = `${entryNo} collected ${amount.toFixed(2)} from ${customer.full_name}. ${nextReceivableBalance <= 0 ? "The receivable is now fully settled locally." : `Remaining receivable balance is ${nextReceivableBalance.toFixed(2)} locally.`}`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+      accountPaymentEntryNo: recordedEntryNo,
+    };
+  }
+
+  lookupReceiptForCorrection(
+    transactionNo: string,
+  ): StoreReceiptLookupResult | null {
+    this.requireActiveOperatorSession({
+      permissionCodes: ["pos.receipt.search"],
+      purpose: "opening a receipt for correction",
+    });
+    const normalizedTransactionNo = transactionNo.trim().toUpperCase();
+
+    if (!normalizedTransactionNo) {
+      return null;
+    }
+
+    const header = this.getReceiptHeaderByTransactionNo(
+      normalizedTransactionNo,
+    );
+    return header ? this.buildReceiptLookupResult(header) : null;
+  }
+
+  getPrintableReceiptDocument(
+    transactionNo: string,
+  ): StorePrintableReceiptDocument {
+    const normalizedTransactionNo = transactionNo.trim().toUpperCase();
+
+    if (!normalizedTransactionNo) {
+      throw new Error(
+        "Flash ERP needs a receipt number before it can open the thermal print view.",
+      );
+    }
+
+    const header = this.getReceiptPrintHeaderByTransactionNo(
+      normalizedTransactionNo,
+    );
+
+    if (!header) {
+      throw new Error(
+        `Flash ERP could not find completed receipt "${normalizedTransactionNo}" in the local store ledger.`,
+      );
+    }
+
+    const metadata = this.getMetadata();
+    const receiptSettings = this.getReceiptSettingsSummary(metadata);
+    const lineRows = this.getReceiptPrintLineRows(header.id);
+    const paymentRows = this.getReceiptPrintPaymentRows(header.id);
+
+    return {
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      companyLogoUrl: this.resolveStoreLogoUrl(metadata),
+      loginBackgroundImageUrl: this.resolveEnterpriseMediaUrl(
+        metadata.login_background_image_url,
+      ),
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      storePhone: metadata.store_phone ?? null,
+      storeAddress: metadata.store_address_line1 ?? null,
+      storeAddressLine2: metadata.store_address_line2 ?? null,
+      terminalCode: this.getTerminalCode(),
+      currencyCode: receiptSettings.currencyCode,
+      timezone: receiptSettings.timezone,
+      receiptHeader: receiptSettings.receiptHeader,
+      receiptFooter: receiptSettings.receiptFooter,
+      salesReceiptTemplateHtml: receiptSettings.salesReceiptTemplateHtml,
+      transactionId: header.id,
+      transactionNo: header.transaction_no,
+      transactionType: header.transaction_type,
+      status: header.status,
+      sourceTransactionNo: header.source_transaction_no,
+      shiftNo: header.shift_no,
+      cashierCode: header.cashier_code,
+      customerNo: header.customer_no,
+      customerName: header.customer_name,
+      subtotalAmount: Number(asNumber(header.subtotal_amount).toFixed(2)),
+      discountAmount: Number(asNumber(header.discount_amount).toFixed(2)),
+      loyaltyRedemptionPoints: Math.max(
+        0,
+        Math.trunc(asNumber(header.loyalty_redemption_points)),
+      ),
+      loyaltyRedemptionAmount: Number(
+        asNumber(header.loyalty_redemption_amount).toFixed(2),
+      ),
+      taxAmount: Number(asNumber(header.tax_amount).toFixed(2)),
+      totalAmount: Number(asNumber(header.total_amount).toFixed(2)),
+      paidAmount: Number(asNumber(header.paid_amount).toFixed(2)),
+      changeAmount: Number(asNumber(header.change_amount).toFixed(2)),
+      notes: header.notes,
+      headerReference: header.header_reference ?? null,
+      additionalDetails: header.additional_details ?? null,
+      completedAt: header.completed_at,
+      lines: lineRows.map((line) => ({
+        lineId: line.id,
+        lineIntent: line.line_intent,
+        sourceLineId: line.source_line_id,
+        productCode: line.product_code_snapshot,
+        productName: line.product_name_snapshot,
+        variantSize: line.variant_size,
+        variantColor: line.variant_color,
+        lineNote: line.line_note,
+        quantity: Number(asNumber(line.quantity).toFixed(3)),
+        unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+        discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+        taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+        lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+        serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+        appliedPromotionCode: line.applied_promotion_code,
+        appliedPromotionName: line.applied_promotion_name,
+      })),
+      payments: paymentRows.map((payment) => ({
+        paymentId: payment.id,
+        tenderMethodCode: payment.tender_method_code,
+        tenderMethodName: payment.tender_method_name,
+        method: payment.method,
+        amount: Number(asNumber(payment.amount).toFixed(2)),
+        reference: payment.reference,
+        receivedAt: payment.received_at,
+      })),
+    };
+  }
+
+  getPrintableSalesOrderReceiptDocument(
+    orderNo: string,
+  ): StorePrintableReceiptDocument {
+    const normalizedOrderNo = orderNo.trim().toUpperCase();
+
+    if (!normalizedOrderNo) {
+      throw new Error(
+        "Flash ERP needs a sales order number before it can print the order receipt.",
+      );
+    }
+
+    const order = this.db
+      .prepare(
+        `SELECT
+          id,
+          order_no,
+          source_transaction_id,
+          source_transaction_no,
+          customer_id,
+          customer_no,
+          customer_name,
+          status,
+          total_amount,
+          deposit_amount,
+          balance_amount,
+          deposit_tender_method_code,
+          deposit_tender_method_name,
+          deposit_payment_method,
+          deposit_reference,
+          deposit_paid_at,
+          0 AS line_count,
+          0 AS item_count,
+          operator_name,
+          note,
+          fulfilled_transaction_id,
+          fulfilled_transaction_no,
+          synced_at,
+          created_at,
+          fulfilled_at,
+          cancelled_at,
+          updated_at
+        FROM sales_order
+        WHERE UPPER(order_no) = ?
+        LIMIT 1`,
+      )
+      .get(normalizedOrderNo) as SalesOrderRow | undefined;
+
+    if (!order) {
+      throw new Error(
+        `Flash ERP could not find sales order "${normalizedOrderNo}" in the local store ledger.`,
+      );
+    }
+
+    const header = this.getBasketHeader(order.source_transaction_id);
+
+    if (!header) {
+      throw new Error(
+        `Flash ERP could not find the basket behind sales order "${order.order_no}".`,
+      );
+    }
+
+    const metadata = this.getMetadata();
+    const receiptSettings = this.getReceiptSettingsSummary(metadata);
+    const lineRows = this.getReceiptPrintLineRows(order.source_transaction_id);
+    const paymentRows = this.getReceiptPrintPaymentRows(order.source_transaction_id);
+
+    return {
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      companyLogoUrl: this.resolveStoreLogoUrl(metadata),
+      loginBackgroundImageUrl: this.resolveEnterpriseMediaUrl(
+        metadata.login_background_image_url,
+      ),
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      storePhone: metadata.store_phone ?? null,
+      storeAddress: metadata.store_address_line1 ?? null,
+      storeAddressLine2: metadata.store_address_line2 ?? null,
+      terminalCode: this.getTerminalCode(),
+      currencyCode: receiptSettings.currencyCode,
+      timezone: receiptSettings.timezone,
+      receiptHeader: receiptSettings.receiptHeader,
+      receiptFooter: receiptSettings.receiptFooter,
+      salesReceiptTemplateHtml: receiptSettings.salesReceiptTemplateHtml,
+      transactionId: order.id,
+      transactionNo: order.order_no,
+      transactionType: "SALES_ORDER",
+      status: order.status,
+      sourceTransactionNo: order.source_transaction_no,
+      shiftNo: null,
+      cashierCode: order.operator_name,
+      customerNo: order.customer_no ?? header.customer_no,
+      customerName: order.customer_name ?? header.customer_name,
+      subtotalAmount: Number(asNumber(header.subtotal_amount).toFixed(2)),
+      discountAmount: Number(asNumber(header.discount_amount).toFixed(2)),
+      loyaltyRedemptionPoints: Math.max(
+        0,
+        Math.trunc(asNumber(header.loyalty_redemption_points)),
+      ),
+      loyaltyRedemptionAmount: Number(
+        asNumber(header.loyalty_redemption_amount).toFixed(2),
+      ),
+      taxAmount: Number(asNumber(header.tax_amount).toFixed(2)),
+      totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
+      paidAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
+      changeAmount: 0,
+      notes: order.note,
+      headerReference: header.header_reference ?? null,
+      additionalDetails: header.additional_details ?? null,
+      completedAt: order.created_at,
+      lines: lineRows.map((line) => ({
+        lineId: line.id,
+        lineIntent: line.line_intent,
+        sourceLineId: line.source_line_id,
+        productCode: line.product_code_snapshot,
+        productName: line.product_name_snapshot,
+        variantSize: line.variant_size,
+        variantColor: line.variant_color,
+        lineNote: line.line_note,
+        quantity: Number(asNumber(line.quantity).toFixed(3)),
+        unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+        discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+        taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+        lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+        serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+        appliedPromotionCode: line.applied_promotion_code,
+        appliedPromotionName: line.applied_promotion_name,
+      })),
+      payments: paymentRows.map((payment) => ({
+        paymentId: payment.id,
+        tenderMethodCode: payment.tender_method_code,
+        tenderMethodName: payment.tender_method_name,
+        method: payment.method,
+        amount: Number(asNumber(payment.amount).toFixed(2)),
+        reference: payment.reference,
+        receivedAt: payment.received_at,
+      })),
+    };
+  }
+
+  getPrintableAccountPaymentReceiptDocument(
+    entryNo: string,
+  ): StorePrintableAccountPaymentReceiptDocument {
+    const normalizedEntryNo = entryNo.trim().toUpperCase();
+
+    if (!normalizedEntryNo) {
+      throw new Error(
+        "Flash ERP needs an account payment receipt number before it can print.",
+      );
+    }
+
+    const entry = this.db
+      .prepare(
+        `SELECT
+          id,
+          entry_no,
+          customer_id,
+          customer_no,
+          customer_name,
+          entry_type,
+          payment_method,
+          tender_method_code,
+          tender_method_name,
+          amount,
+          reference,
+          note,
+          shift_id,
+          shift_no,
+          cashier_code,
+          synced_at,
+          occurred_at,
+          updated_at
+        FROM customer_account_entry
+        WHERE UPPER(entry_no) = ?
+        LIMIT 1`,
+      )
+      .get(normalizedEntryNo) as CustomerAccountEntryRow | undefined;
+
+    if (!entry) {
+      throw new Error(
+        `Flash ERP could not find account payment receipt "${normalizedEntryNo}" in the local store ledger.`,
+      );
+    }
+
+    const customer = this.db
+      .prepare(
+        "SELECT receivable_balance_amount FROM customer WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+      )
+      .get(entry.customer_id) as
+      | { receivable_balance_amount: number | string }
+      | undefined;
+    const metadata = this.getMetadata();
+    const receiptSettings = this.getReceiptSettingsSummary(metadata);
+    const accountPaymentReceiptTemplateHtml =
+      metadata.account_payment_receipt_template_html?.trim() || null;
+
+    return {
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      companyLogoUrl: this.resolveStoreLogoUrl(metadata),
+      loginBackgroundImageUrl: this.resolveEnterpriseMediaUrl(
+        metadata.login_background_image_url,
+      ),
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      storePhone: metadata.store_phone ?? null,
+      storeAddress: metadata.store_address_line1 ?? null,
+      storeAddressLine2: metadata.store_address_line2 ?? null,
+      terminalCode: this.getTerminalCode(),
+      currencyCode: receiptSettings.currencyCode,
+      timezone: receiptSettings.timezone,
+      receiptHeader: receiptSettings.receiptHeader,
+      receiptFooter: receiptSettings.receiptFooter,
+      accountPaymentReceiptTemplateHtml,
+      entryId: entry.id,
+      entryNo: entry.entry_no,
+      customerNo: entry.customer_no,
+      customerName: entry.customer_name,
+      paymentMethod: entry.payment_method,
+      tenderMethodCode: entry.tender_method_code,
+      tenderMethodName: entry.tender_method_name,
+      amount: Number(asNumber(entry.amount).toFixed(2)),
+      reference: entry.reference,
+      note: entry.note,
+      shiftNo: entry.shift_no,
+      cashierCode: entry.cashier_code,
+      remainingBalanceAmount: customer
+        ? Number(asNumber(customer.receivable_balance_amount).toFixed(2))
+        : null,
+      occurredAt: entry.occurred_at,
+    };
+  }
+
+  saveReceiptPrinterSettings(
+    input: StoreReceiptPrinterSettingsInput,
+  ): StoreSyncActionResult {
+    const selectedPrinterName = input.selectedPrinterName?.trim() || null;
+
+    if (input.silentPrintEnabled && !selectedPrinterName) {
+      throw new Error(
+        "Flash ERP needs a selected printer before silent thermal printing can be enabled.",
+      );
+    }
+
+    const timestamp = isoNow();
+
+    this.withTransaction(() => {
+      if (selectedPrinterName) {
+        this.setMetadata(
+          this.getTerminalMetadataKey("receipt_printer_name"),
+          selectedPrinterName,
+        );
+      } else {
+        this.deleteMetadata(
+          this.getTerminalMetadataKey("receipt_printer_name"),
+        );
+      }
+
+      this.setMetadata(
+        this.getTerminalMetadataKey("receipt_printer_silent"),
+        input.silentPrintEnabled ? "1" : "0",
+      );
+      this.setMetadata(
+        this.getTerminalMetadataKey("receipt_auto_print"),
+        input.autoPrintOnComplete ? "1" : "0",
+      );
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary:
+          "Thermal receipt printer routing was updated on this desktop node.",
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    const printerLabel = selectedPrinterName ?? "manual preview only";
+
+    return {
+      message: input.silentPrintEnabled
+        ? `Flash ERP will now auto-route thermal receipts to ${printerLabel} with silent printing when the lane is configured to print.`
+        : `Flash ERP saved the thermal receipt routing. Completed baskets will ${input.autoPrintOnComplete ? "open the print flow" : "stay on screen until the cashier prints manually"}, and manual printing will use ${printerLabel}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  saveLocalReceiptLogo(
+    input: StoreLocalReceiptLogoInput,
+  ): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      purpose: "saving the local receipt logo",
+    });
+    const companyLogoUrl = optionalSetupText(input.companyLogoUrl);
+    const timestamp = isoNow();
+
+    this.withTransaction(() => {
+      if (companyLogoUrl) {
+        this.setMetadata("local_company_logo_url", companyLogoUrl);
+      } else {
+        this.deleteMetadata("local_company_logo_url");
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: companyLogoUrl
+          ? "Local receipt logo was saved on this desktop node."
+          : "Local receipt logo was cleared on this desktop node.",
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: companyLogoUrl
+        ? "Local receipt logo was saved on this shop desktop."
+        : "Local receipt logo was cleared on this shop desktop.",
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  authorizeReceiptPrint(input: { autoPrint?: boolean }) {
+    if (input.autoPrint) {
+      return;
+    }
+
+    this.requireActiveOperatorSession({
+      permissionCodes: ["pos.receipt.reprint"],
+      purpose: "printing a completed receipt",
+    });
+  }
+
+  prepareThermalTestSlip() {
+    const session = this.requireActiveOperatorSession({
+      permissionCodes: ["pos.receipt.reprint"],
+      purpose: "printing a thermal hardware test slip",
+    });
+    const metadata = this.getMetadata();
+    const printerSettings = this.getReceiptPrinterSettingsSummary(metadata);
+    const selectedPrinterName =
+      printerSettings.selectedPrinterName?.trim() || null;
+
+    if (!selectedPrinterName) {
+      throw new Error(
+        "Select and save a receipt printer on this desktop before printing a thermal test slip.",
+      );
+    }
+
+    return {
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      terminalCode: this.getTerminalCode(),
+      operatorLabel: this.formatOperatorLabel(session),
+      selectedPrinterName,
+      generatedAt: isoNow(),
+    };
+  }
+
+  prepareCashDrawerKick(input?: {
+    tenderMethodCode?: string | null;
+    reason?: string | null;
+  }) {
+    const { session, openShift } = this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.sale.process"],
+      purpose: "opening the cash drawer",
+    });
+    const metadata = this.getMetadata();
+    const printerSettings = this.getReceiptPrinterSettingsSummary(metadata);
+    const selectedPrinterName =
+      printerSettings.selectedPrinterName?.trim() || null;
+
+    if (!selectedPrinterName) {
+      throw new Error(
+        "Select and save a receipt printer on this desktop before Flash ERP can trigger the cash drawer route.",
+      );
+    }
+
+    const eligibleTenderMethods = this.listActiveTenderMethods().filter(
+      (method) => method.allowOpenCashDrawer,
+    );
+
+    if (eligibleTenderMethods.length === 0) {
+      throw new Error(
+        "No active tender method on this desktop is currently allowed to open the cash drawer.",
+      );
+    }
+
+    const normalizedTenderMethodCode =
+      input?.tenderMethodCode?.trim().toUpperCase() ?? "";
+    const selectedTenderMethod =
+      (normalizedTenderMethodCode
+        ? eligibleTenderMethods.find(
+            (method) =>
+              method.tenderMethodCode.trim().toUpperCase() ===
+              normalizedTenderMethodCode,
+          )
+        : eligibleTenderMethods[0]) ?? null;
+
+    if (!selectedTenderMethod) {
+      throw new Error(
+        "Choose a drawer-enabled tender method before opening the cash drawer.",
+      );
+    }
+
+    return {
+      retailOrgName:
+        metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      storeName: metadata.store_name ?? defaultStoreConfig.storeName,
+      terminalCode: this.getTerminalCode(),
+      shiftNo: openShift.shift_no,
+      cashierCode: openShift.cashier_code,
+      operatorLabel: this.formatOperatorLabel(session),
+      selectedPrinterName,
+      tenderMethodCode: selectedTenderMethod.tenderMethodCode,
+      tenderMethodName: selectedTenderMethod.tenderMethodName,
+      reason: input?.reason?.trim() || null,
+      generatedAt: isoNow(),
+    };
+  }
+
+  private resolveBasketUnitPrice(
+    productCode: string,
+    customerId: string | null,
+    fallbackUnitPrice: string | number,
+  ) {
+    const defaultPrice = () =>
+      (
+        this.db
+          .prepare(
+            "SELECT unit_price FROM price_list_entry_snapshot WHERE product_code = ? AND status = 'ACTIVE' AND is_default = 1 ORDER BY updated_at DESC, price_list_name ASC LIMIT 1",
+          )
+          .get(productCode) as { unit_price: string | number } | undefined
+      )?.unit_price ?? fallbackUnitPrice;
+
+    if (!customerId) {
+      return Number(asNumber(defaultPrice()).toFixed(2));
+    }
+
+    const customer = this.db
+      .prepare(
+        "SELECT customer_type, loyalty_tier FROM customer WHERE id = ? AND deleted_at IS NULL AND status = 'ACTIVE' LIMIT 1",
+      )
+      .get(customerId) as
+      | { customer_type: string | null; loyalty_tier: string | null }
+      | undefined;
+
+    if (!customer) {
+      return Number(asNumber(defaultPrice()).toFixed(2));
+    }
+
+    const customerType = customer.customer_type?.trim().toUpperCase() ?? null;
+    const loyaltyTier = customer.loyalty_tier?.trim() ?? null;
+
+    if (loyaltyTier) {
+      const tierPrice = this.db
+        .prepare(
+          "SELECT unit_price FROM price_list_entry_snapshot WHERE product_code = ? AND status = 'ACTIVE' AND loyalty_tier IS NOT NULL AND lower(loyalty_tier) = lower(?) AND (customer_type IS NULL OR customer_type = ?) ORDER BY CASE WHEN customer_type = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
+        )
+        .get(productCode, loyaltyTier, customerType, customerType) as
+        | { unit_price: string | number }
+        | undefined;
+
+      if (tierPrice) {
+        return Number(asNumber(tierPrice.unit_price).toFixed(2));
+      }
+    }
+
+    if (customerType) {
+      const profilePrice = this.db
+        .prepare(
+          "SELECT unit_price FROM price_list_entry_snapshot WHERE product_code = ? AND status = 'ACTIVE' AND customer_type = ? AND loyalty_tier IS NULL ORDER BY updated_at DESC, price_list_name ASC LIMIT 1",
+        )
+        .get(productCode, customerType) as
+        | { unit_price: string | number }
+        | undefined;
+
+      if (profilePrice) {
+        return Number(asNumber(profilePrice.unit_price).toFixed(2));
+      }
+    }
+
+    return Number(asNumber(defaultPrice()).toFixed(2));
+  }
+
+  private repriceBasketSaleLinesForCustomer(
+    transactionId: string,
+    customerId: string | null,
+  ) {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          line.id AS id,
+          product.product_code AS product_code,
+          line.quantity AS quantity,
+          product.taxable AS taxable,
+          product.tax_rate_percent AS tax_rate_percent,
+          product.tax_inclusive AS tax_inclusive,
+          line.unit_price AS unit_price
+         FROM pos_transaction_line AS line
+         INNER JOIN product_snapshot AS product
+           ON product.id = line.product_id
+         WHERE line.pos_transaction_id = ?
+           AND line.line_intent = 'SALE'
+           AND line.source_line_id IS NULL
+           AND COALESCE(line.manual_price_override, 0) = 0`,
+      )
+      .all(transactionId) as Array<{
+      id: string;
+      product_code: string;
+      quantity: string | number;
+      taxable: string | number;
+      tax_rate_percent: string | number | null;
+      tax_inclusive: string | number;
+      unit_price: string | number;
+    }>;
+
+    for (const row of rows) {
+      const unitPrice = this.resolveBasketUnitPrice(
+        row.product_code,
+        customerId,
+        row.unit_price,
+      );
+      const lineAmounts = calculateSaleLineAmounts({
+        unitPrice,
+        quantity: asNumber(row.quantity),
+        taxable: asBooleanFlag(row.taxable),
+        taxRatePercent: asNullableNumber(row.tax_rate_percent),
+        taxInclusive: asBooleanFlag(row.tax_inclusive),
+      });
+
+      this.db
+        .prepare(
+          "UPDATE pos_transaction_line SET unit_price = ?, discount_amount = ?, tax_amount = ?, line_total = ? WHERE id = ?",
+        )
+        .run(
+          unitPrice,
+          lineAmounts.discountAmount,
+          lineAmounts.taxAmount,
+          lineAmounts.lineTotal,
+          row.id,
+        );
+    }
+  }
+
+  addItemToBasket(input: StoreBasketItemRequest): StoreSyncActionResult {
+    const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+    const activeBasket = this.getActiveBasketSummary();
+    const requiredPermission =
+      activeBasket?.transactionType === "RETURN"
+        ? "pos.return.process"
+        : activeBasket?.transactionType === "EXCHANGE"
+          ? "pos.exchange.process"
+          : "pos.sale.process";
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [requiredPermission],
+      purpose: "capturing basket items at the POS lane",
+    });
+
+    if (!Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
+      throw new Error("Flash ERP needs a basket quantity greater than zero.");
+    }
+
+    const match = this.findCatalogLookup(input.lookupValue);
+
+    if (!match) {
+      throw new Error(
+        `Flash ERP could not find a local catalog item for "${input.lookupValue.trim()}".`,
+      );
+    }
+
+    const timestamp = isoNow();
+    let basketMessage = "";
+
+    this.withTransaction(() => {
+      const basket = this.ensureActiveBasket(timestamp);
+      const basketType = basket.transaction_type;
+      const lineIntent = getLineIntentForBasket(
+        basket.transaction_type,
+        input.lineIntent,
+      );
+
+      if (basket.source_transaction_id && lineIntent === "RETURN") {
+        throw new Error(
+          basketType === "RETURN"
+            ? "Flash ERP needs receipt-linked return lines to be added from the original sale lookup."
+            : "Flash ERP needs returned exchange lines to be added from the original receipt lookup.",
+        );
+      }
+
+      const mustEnterPriceAtPos = asBooleanFlag(match.must_enter_price_at_pos);
+      const requestedVariantCode =
+        optionalSetupText(input.productVariantCode ?? match.product_variant_code)
+          ?.toUpperCase() ?? null;
+      const selectedVariant =
+        match.product_type === "MATRIX" && requestedVariantCode
+          ? this.getMatrixVariantByCode(match.product_code, requestedVariantCode)
+          : null;
+      const selectedVariantAttributes = selectedVariant
+        ? readMatrixVariantAttributes(selectedVariant.attributes_json)
+        : [];
+      const variantAttributesSnapshot =
+        optionalSetupText(input.variantAttributesSnapshot) ??
+        (selectedVariant
+          ? formatMatrixVariantAttributes(selectedVariantAttributes)
+          : null);
+
+      if (match.product_type === "MATRIX" && !selectedVariant) {
+        throw new Error(
+          `Choose the matrix option for ${match.product_name} before adding it to the basket.`,
+        );
+      }
+
+      const requestedUnitPrice =
+        typeof input.unitPrice === "number"
+          ? Number(input.unitPrice.toFixed(2))
+          : null;
+
+      if (
+        mustEnterPriceAtPos &&
+        (!Number.isFinite(requestedUnitPrice) ||
+          requestedUnitPrice === null ||
+          requestedUnitPrice <= 0)
+      ) {
+        throw new Error(
+          `Enter the selling price for ${match.product_name} before adding it to the basket.`,
+        );
+      }
+
+      const automaticUnitPrice =
+        lineIntent === "SALE"
+          ? this.resolveBasketUnitPrice(
+              match.product_code,
+              basket.customer_id,
+              selectedVariant?.unit_price ?? match.unit_price,
+            )
+          : asNumber(selectedVariant?.unit_price ?? match.unit_price);
+      const unitPrice = Number(
+        asNumber(requestedUnitPrice ?? automaticUnitPrice).toFixed(2),
+      );
+      const currentBasketProductQuantity = this.getBasketLines(basket.id)
+        .filter(
+          (line) =>
+            line.product_code_snapshot === match.product_code &&
+            (line.product_variant_code_snapshot ?? null) ===
+              (selectedVariant?.variant_code ?? null) &&
+            line.line_intent === lineIntent &&
+            line.source_line_id === null,
+        )
+        .reduce((sum, line) => sum + asNumber(line.quantity), 0);
+      const requestedQuantity = Number(
+        (currentBasketProductQuantity + normalizedQuantity).toFixed(3),
+      );
+      const tracksInventory = asBooleanFlag(match.track_inventory);
+      const isSerialized = asBooleanFlag(match.is_serialized);
+      const salesLocationCode =
+        match.sales_location_code ?? this.getDefaultSalesLocationCode();
+      const nextSerialNumbers = validateSerializedLineInput({
+        isSerialized,
+        productName: match.product_name,
+        quantity: normalizedQuantity,
+        serialNumbers: input.serialNumbers ?? [],
+      });
+
+      if (isSerialized && nextSerialNumbers.length > 0) {
+        const activeBasketSerialKeys = new Set(
+          this.getBasketLines(basket.id)
+            .filter(
+              (line) =>
+                line.product_code_snapshot === match.product_code &&
+                line.line_intent === lineIntent &&
+                line.source_line_id === null,
+            )
+            .flatMap((line) =>
+              readSerializedLineNumbers(line.serial_numbers_json),
+            )
+            .map((serialNumber) => serialNumber.toUpperCase()),
+        );
+        const duplicateSerialNumbers = nextSerialNumbers.filter(
+          (serialNumber) =>
+            activeBasketSerialKeys.has(serialNumber.toUpperCase()),
+        );
+
+        if (duplicateSerialNumbers.length > 0) {
+          throw new Error(
+            `Serial number(s) ${duplicateSerialNumbers.join(", ")} are already in the active basket for ${match.product_name}.`,
+          );
+        }
+
+        const allowedSerialNumbers =
+          lineIntent === "RETURN"
+            ? this.listLocallyReturnableSerialNumbers(match.product_code)
+            : this.listAvailableSaleSerialNumbers(
+                match.product_code,
+                salesLocationCode,
+              );
+
+        ensureSerialSelectionWithinAllowedSet({
+          productName: match.product_name,
+          selectedSerialNumbers: nextSerialNumbers,
+          allowedSerialNumbers,
+        });
+      }
+
+      if (lineIntent === "SALE" && tracksInventory) {
+        const availableQuantity =
+          selectedVariant
+            ? Number(asNumber(selectedVariant.quantity_on_hand).toFixed(3))
+            : match.sales_location_quantity ??
+          Number(asNumber(match.quantity_on_hand).toFixed(3));
+
+        if (availableQuantity < requestedQuantity) {
+          throw new Error(
+            `Only ${availableQuantity.toFixed(3)} unit(s) of ${match.product_name} are available in the local sales position.`,
+          );
+        }
+      }
+
+      const lineAmounts = calculateSaleLineAmounts({
+        unitPrice,
+        quantity: normalizedQuantity,
+        taxable: asBooleanFlag(match.taxable),
+        taxRatePercent: asNullableNumber(match.tax_rate_percent),
+        taxInclusive: asBooleanFlag(match.tax_inclusive),
+      });
+      const variantSize = optionalSetupText(input.variantSize);
+      const variantColor = optionalSetupText(input.variantColor);
+      const lineNote = optionalSetupText(input.lineNote);
+
+      this.db
+        .prepare(
+          "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+        )
+        .run(
+          randomUUID(),
+          basket.id,
+          match.id,
+          lineIntent,
+          match.product_code,
+          selectedVariant?.variant_code ?? null,
+          match.product_name,
+          variantSize,
+          variantColor,
+          variantAttributesSnapshot,
+          lineNote,
+          writeSerializedLineNumbers(nextSerialNumbers),
+          normalizedQuantity,
+          unitPrice,
+          lineAmounts.taxAmount,
+          lineAmounts.lineTotal,
+          mustEnterPriceAtPos ? 1 : 0,
+        );
+
+      this.refreshBasketTotals(basket.id, timestamp);
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${match.product_name} was added to the active basket locally.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      basketMessage =
+        basketType === "RETURN"
+          ? `Flash ERP added ${match.product_name} to the active return basket.`
+          : basketType === "EXCHANGE"
+            ? `Flash ERP added ${match.product_name} to the active exchange basket as a ${lineIntent === "RETURN" ? "returned" : "replacement"} item.`
+            : `Flash ERP added ${match.product_name} to the active basket.`;
+    });
+
+    return {
+      message: basketMessage,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  startReturnBasket(
+    input: StoreSupervisorOverrideInput,
+  ): StoreSyncActionResult {
+    const timestamp = isoNow();
+    this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.return.process"],
+      purpose: "starting a manual return basket",
+    });
+    const supervisor = this.requireSupervisorOverride(input);
+    const overrideNote = input.note?.trim() || null;
+    let transactionNo = "";
+
+    this.withTransaction(() => {
+      if (this.getActiveBasketId()) {
+        throw new Error(
+          "Flash ERP already has an active basket. Park or complete it before starting a return.",
+        );
+      }
+
+      const basket = this.ensureActiveBasket(timestamp, "RETURN");
+      const auditNote = [
+        `Supervisor override approved by ${this.formatOperatorLabel(supervisor)} for a manual return basket.`,
+        overrideNote,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(" ");
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET notes = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(auditNote, timestamp, basket.id);
+      transactionNo = basket.transaction_no;
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${basket.transaction_no} was opened as a return basket on this desktop with supervisor override by ${this.formatOperatorLabel(supervisor)}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `Flash ERP opened return basket ${transactionNo} with supervisor approval from ${supervisor.displayName}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  startExchangeBasket(
+    input: StoreSupervisorOverrideInput,
+  ): StoreSyncActionResult {
+    const timestamp = isoNow();
+    this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.exchange.process"],
+      purpose: "starting a manual exchange basket",
+    });
+    const supervisor = this.requireSupervisorOverride(input);
+    const overrideNote = input.note?.trim() || null;
+    let transactionNo = "";
+
+    this.withTransaction(() => {
+      if (this.getActiveBasketId()) {
+        throw new Error(
+          "Flash ERP already has an active basket. Park or complete it before starting an exchange.",
+        );
+      }
+
+      const basket = this.ensureActiveBasket(timestamp, "EXCHANGE");
+      const auditNote = [
+        `Supervisor override approved by ${this.formatOperatorLabel(supervisor)} for a manual exchange basket.`,
+        overrideNote,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(" ");
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET notes = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(auditNote, timestamp, basket.id);
+      transactionNo = basket.transaction_no;
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${basket.transaction_no} was opened as an exchange basket on this desktop with supervisor override by ${this.formatOperatorLabel(supervisor)}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `Flash ERP opened exchange basket ${transactionNo} with supervisor approval from ${supervisor.displayName}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  private startReceiptLinkedBasket(
+    transactionNo: string,
+    transactionType: Extract<BasketTransactionType, "RETURN" | "EXCHANGE">,
+  ): StoreSyncActionResult {
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        transactionType === "RETURN"
+          ? "pos.return.process"
+          : "pos.exchange.process",
+        "pos.receipt.search",
+      ],
+      purpose:
+        transactionType === "RETURN"
+          ? "starting a receipt-linked return"
+          : "starting a receipt-linked exchange",
+    });
+    const normalizedTransactionNo = transactionNo.trim().toUpperCase();
+
+    if (!normalizedTransactionNo) {
+      throw new Error(
+        "Enter a receipt number before starting a correction basket.",
+      );
+    }
+
+    const sourceReceipt = this.lookupReceiptForCorrection(
+      normalizedTransactionNo,
+    );
+
+    if (!sourceReceipt) {
+      throw new Error(
+        `Flash ERP could not find completed receipt "${normalizedTransactionNo}" in the local store yet.`,
+      );
+    }
+
+    if (sourceReceipt.eligibleLineCount === 0) {
+      throw new Error(
+        `Receipt ${sourceReceipt.sourceTransactionNo} has no remaining quantity eligible for return or exchange.`,
+      );
+    }
+
+    const timestamp = isoNow();
+    let openedBasketNo = "";
+
+    this.withTransaction(() => {
+      if (this.getActiveBasketId()) {
+        throw new Error(
+          "Flash ERP already has an active basket. Park or complete it before starting a receipt-linked correction.",
+        );
+      }
+
+      const basket = this.ensureActiveBasket(timestamp, transactionType, {
+        id: sourceReceipt.sourceTransactionId,
+        transactionNo: sourceReceipt.sourceTransactionNo,
+        customerId: sourceReceipt.customerId,
+      });
+      openedBasketNo = basket.transaction_no;
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${basket.transaction_no} was opened as a receipt-linked ${transactionType === "RETURN" ? "return" : "exchange"} basket from ${sourceReceipt.sourceTransactionNo}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message:
+        transactionType === "RETURN"
+          ? `Flash ERP opened return basket ${openedBasketNo} from receipt ${sourceReceipt.sourceTransactionNo}.`
+          : `Flash ERP opened exchange basket ${openedBasketNo} from receipt ${sourceReceipt.sourceTransactionNo}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  startReturnFromReceipt(transactionNo: string): StoreSyncActionResult {
+    return this.startReceiptLinkedBasket(transactionNo, "RETURN");
+  }
+
+  startExchangeFromReceipt(transactionNo: string): StoreSyncActionResult {
+    return this.startReceiptLinkedBasket(transactionNo, "EXCHANGE");
+  }
+
+  addReceiptLineToBasket(
+    input: StoreReceiptLineReturnRequest,
+  ): StoreSyncActionResult {
+    const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+    const activeBasket = this.getActiveBasketSummary();
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        activeBasket?.transactionType === "EXCHANGE"
+          ? "pos.exchange.process"
+          : "pos.return.process",
+      ],
+      purpose: "adding a receipt line to the current correction basket",
+    });
+
+    if (!Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
+      throw new Error(
+        "Flash ERP needs a receipt return quantity greater than zero.",
+      );
+    }
+
+    const timestamp = isoNow();
+    let productName = "Receipt line";
+    let sourceTransactionNo = "";
+    let isExchangeBasket = false;
+
+    this.withTransaction(() => {
+      const basket = this.requireActiveBasket();
+      isExchangeBasket = basket.transaction_type === "EXCHANGE";
+
+      if (
+        !basket.source_transaction_id ||
+        basket.source_transaction_id !== input.sourceTransactionId
+      ) {
+        throw new Error(
+          "Flash ERP could not match that receipt line to the currently active correction basket.",
+        );
+      }
+
+      if (
+        basket.transaction_type !== "RETURN" &&
+        basket.transaction_type !== "EXCHANGE"
+      ) {
+        throw new Error(
+          "Flash ERP only allows receipt-linked lines on return or exchange baskets.",
+        );
+      }
+
+      const sourceHeader = this.getReceiptHeaderById(input.sourceTransactionId);
+
+      if (!sourceHeader) {
+        throw new Error(
+          "Flash ERP could not reopen the original receipt locally. Sync the store node first if this sale came from enterprise.",
+        );
+      }
+
+      sourceTransactionNo = sourceHeader.transaction_no;
+      const sourceLine = this.getReceiptLookupLineRows(sourceHeader).find(
+        (line) => line.source_line_id === input.sourceLineId,
+      );
+
+      if (!sourceLine) {
+        throw new Error(
+          "Flash ERP could not find that original receipt line or it is not eligible for correction.",
+        );
+      }
+
+      productName = sourceLine.product_name_snapshot;
+      const product = this.requireBasketProductLookup(
+        sourceLine.product_code_snapshot,
+      );
+      const isSerialized =
+        asBooleanFlag(product.is_serialized) ||
+        readSerializedLineNumbers(sourceLine.serial_numbers_json).length > 0;
+
+      const existingLine = this.getBasketLineBySourceLine(
+        basket.id,
+        sourceLine.source_line_id,
+      );
+      const currentQuantity = existingLine
+        ? Number(asNumber(existingLine.quantity).toFixed(3))
+        : 0;
+      const quantityAvailableToReturn = Number(
+        Math.max(
+          0,
+          asNumber(sourceLine.quantity_sold) -
+            asNumber(sourceLine.quantity_returned) -
+            asNumber(sourceLine.quantity_pending),
+        ).toFixed(3),
+      );
+      const maximumAllowedQuantity = Number(
+        (quantityAvailableToReturn + currentQuantity).toFixed(3),
+      );
+      const requestedQuantity = Number(
+        (currentQuantity + normalizedQuantity).toFixed(3),
+      );
+
+      if (requestedQuantity > maximumAllowedQuantity) {
+        throw new Error(
+          `Only ${maximumAllowedQuantity.toFixed(3)} unit(s) of ${sourceLine.product_name_snapshot} remain eligible to return from receipt ${sourceHeader.transaction_no}.`,
+        );
+      }
+
+      const nextSerialNumbers = validateSerializedLineInput({
+        isSerialized,
+        productName: sourceLine.product_name_snapshot,
+        quantity: requestedQuantity,
+        serialNumbers: [
+          ...readSerializedLineNumbers(existingLine?.serial_numbers_json),
+          ...(input.serialNumbers ?? []),
+        ],
+      });
+
+      if (isSerialized && nextSerialNumbers.length > 0) {
+        ensureSerialSelectionWithinAllowedSet({
+          productName: sourceLine.product_name_snapshot,
+          selectedSerialNumbers: nextSerialNumbers,
+          allowedSerialNumbers: this.getReceiptLineAvailableSerialNumbers(
+            sourceHeader,
+            sourceLine.source_line_id,
+            existingLine?.id,
+          ),
+        });
+      }
+
+      const nextAmounts = buildSourceLineAmounts(sourceLine, requestedQuantity);
+
+      if (existingLine) {
+        this.db
+          .prepare(
+            "UPDATE pos_transaction_line SET serial_numbers_json = ?, quantity = ?, unit_price = ?, applied_promotion_code = ?, applied_promotion_name = ?, discount_amount = ?, tax_amount = ?, line_total = ? WHERE id = ?",
+          )
+          .run(
+            writeSerializedLineNumbers(nextSerialNumbers),
+            nextAmounts.quantity,
+            nextAmounts.unitPrice,
+            sourceLine.applied_promotion_code,
+            sourceLine.applied_promotion_name,
+            nextAmounts.discountAmount,
+            nextAmounts.taxAmount,
+            nextAmounts.lineTotal,
+            existingLine.id,
+          );
+      } else {
+        const insertedAmounts = buildSourceLineAmounts(
+          sourceLine,
+          normalizedQuantity,
+        );
+
+        this.db
+          .prepare(
+            "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_name_snapshot, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total) VALUES (?, ?, ?, 'RETURN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            basket.id,
+            product.id,
+            sourceLine.source_line_id,
+            sourceLine.applied_promotion_code,
+            sourceLine.applied_promotion_name,
+            sourceLine.product_code_snapshot,
+            sourceLine.product_name_snapshot,
+            writeSerializedLineNumbers(nextSerialNumbers),
+            insertedAmounts.quantity,
+            insertedAmounts.unitPrice,
+            insertedAmounts.discountAmount,
+            insertedAmounts.taxAmount,
+            insertedAmounts.lineTotal,
+          );
+      }
+
+      this.refreshBasketTotals(basket.id, timestamp);
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${sourceLine.product_name_snapshot} was added from receipt ${sourceHeader.transaction_no} into the active correction basket locally.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: isExchangeBasket
+        ? `Flash ERP added ${productName} as a returned item from receipt ${sourceTransactionNo}.`
+        : `Flash ERP added ${productName} from receipt ${sourceTransactionNo} into the return basket.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  updateBasketLine(input: StoreBasketLineUpdateRequest): StoreSyncActionResult {
+    const activeBasket = this.getActiveBasketSummary();
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        activeBasket?.transactionType === "RETURN"
+          ? "pos.return.process"
+          : activeBasket?.transactionType === "EXCHANGE"
+            ? "pos.exchange.process"
+            : "pos.sale.process",
+      ],
+      purpose: "updating the active basket",
+    });
+    const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+
+    if (!Number.isFinite(normalizedQuantity)) {
+      throw new Error(
+        "Flash ERP needs a valid basket quantity before updating the line.",
+      );
+    }
+
+    if (normalizedQuantity <= 0) {
+      return this.removeBasketLine(input.lineId);
+    }
+
+    const requestedOverrideUnitPrice =
+      typeof input.overrideUnitPrice === "number" &&
+      Number.isFinite(input.overrideUnitPrice)
+        ? Number(input.overrideUnitPrice.toFixed(2))
+        : undefined;
+    const requestedOverrideDiscountAmount =
+      typeof input.overrideDiscountAmount === "number" &&
+      Number.isFinite(input.overrideDiscountAmount)
+        ? Number(input.overrideDiscountAmount.toFixed(2))
+        : undefined;
+    const requestedConfiguredDiscountRate =
+      typeof input.configuredDiscountRate === "number" &&
+      Number.isFinite(input.configuredDiscountRate) &&
+      input.configuredDiscountRate > 0
+        ? Number(input.configuredDiscountRate.toFixed(2))
+        : null;
+    const shouldClearPricingOverride = input.clearPricingOverride === true;
+
+    if (
+      typeof requestedOverrideUnitPrice === "number" &&
+      requestedOverrideUnitPrice <= 0
+    ) {
+      throw new Error("Flash ERP needs a manual unit price greater than zero.");
+    }
+
+    if (
+      typeof requestedOverrideDiscountAmount === "number" &&
+      requestedOverrideDiscountAmount < 0
+    ) {
+      throw new Error("Flash ERP needs a manual discount of zero or greater.");
+    }
+
+    const timestamp = isoNow();
+    let productName = "Basket line";
+
+    this.withTransaction(() => {
+      const basket = this.requireActiveBasket();
+      const line = this.getBasketLine(input.lineId);
+
+      if (!line || line.pos_transaction_id !== basket.id) {
+        throw new Error(
+          "Flash ERP could not find that line in the active basket.",
+        );
+      }
+
+      productName = line.product_name_snapshot;
+
+      if (line.source_line_id && basket.source_transaction_id) {
+        if (
+          shouldClearPricingOverride ||
+          typeof requestedOverrideUnitPrice === "number" ||
+          typeof requestedOverrideDiscountAmount === "number"
+        ) {
+          throw new Error(
+            "Receipt-linked return lines must keep the original sale price and discount on this desktop.",
+          );
+        }
+
+        const sourceHeader = this.getReceiptHeaderById(
+          basket.source_transaction_id,
+        );
+
+        if (!sourceHeader) {
+          throw new Error(
+            "Flash ERP could not reopen the original receipt for this correction basket.",
+          );
+        }
+
+        const sourceLine = this.getReceiptLookupLineRows(sourceHeader).find(
+          (candidate) => candidate.source_line_id === line.source_line_id,
+        );
+
+        if (!sourceLine) {
+          throw new Error(
+            "Flash ERP could not find the original receipt line for this returned item anymore.",
+          );
+        }
+
+        const currentQuantity = Number(asNumber(line.quantity).toFixed(3));
+        const quantityAvailableToReturn = Number(
+          Math.max(
+            0,
+            asNumber(sourceLine.quantity_sold) -
+              asNumber(sourceLine.quantity_returned) -
+              asNumber(sourceLine.quantity_pending),
+          ).toFixed(3),
+        );
+        const maximumAllowedQuantity = Number(
+          (quantityAvailableToReturn + currentQuantity).toFixed(3),
+        );
+
+        if (normalizedQuantity > maximumAllowedQuantity) {
+          throw new Error(
+            `Only ${maximumAllowedQuantity.toFixed(3)} unit(s) of ${sourceLine.product_name_snapshot} remain eligible to return from receipt ${sourceHeader.transaction_no}.`,
+          );
+        }
+
+        const product = this.requireBasketProductLookup(
+          line.product_code_snapshot,
+        );
+        const nextSerialNumbers = validateSerializedLineInput({
+          isSerialized:
+            asBooleanFlag(product.is_serialized) ||
+            readSerializedLineNumbers(sourceLine.serial_numbers_json).length >
+              0,
+          productName: line.product_name_snapshot,
+          quantity: normalizedQuantity,
+          serialNumbers:
+            input.serialNumbers ??
+            readSerializedLineNumbers(line.serial_numbers_json),
+        });
+
+        if (nextSerialNumbers.length > 0) {
+          ensureSerialSelectionWithinAllowedSet({
+            productName: line.product_name_snapshot,
+            selectedSerialNumbers: nextSerialNumbers,
+            allowedSerialNumbers: this.getReceiptLineAvailableSerialNumbers(
+              sourceHeader,
+              sourceLine.source_line_id,
+              line.id,
+            ),
+          });
+        }
+
+        const nextAmounts = buildSourceLineAmounts(
+          sourceLine,
+          normalizedQuantity,
+        );
+
+        this.db
+          .prepare(
+            "UPDATE pos_transaction_line SET serial_numbers_json = ?, quantity = ?, unit_price = ?, applied_promotion_code = ?, applied_promotion_name = ?, discount_amount = ?, tax_amount = ?, line_total = ?, manual_price_override = 0, manual_discount_override = 0 WHERE id = ?",
+          )
+          .run(
+            writeSerializedLineNumbers(nextSerialNumbers),
+            nextAmounts.quantity,
+            nextAmounts.unitPrice,
+            sourceLine.applied_promotion_code,
+            sourceLine.applied_promotion_name,
+            nextAmounts.discountAmount,
+            nextAmounts.taxAmount,
+            nextAmounts.lineTotal,
+            line.id,
+          );
+
+        this.refreshBasketTotals(basket.id, timestamp);
+        this.setMetadata("last_local_write_at", timestamp);
+        this.insertRunLog({
+          runKind: "LOCAL_WRITE",
+          result: "SUCCESS",
+          summary: `${line.product_name_snapshot} was updated in the active basket.`,
+          upstreamProcessed: 0,
+          downstreamApplied: 0,
+          startedAt: timestamp,
+          finishedAt: timestamp,
+        });
+
+        return;
+      }
+
+      const match = this.requireBasketProductLookup(line.product_code_snapshot);
+      const tracksInventory = asBooleanFlag(match.track_inventory);
+      const isSerialized = asBooleanFlag(match.is_serialized);
+      const currentUnitPrice = Number(asNumber(line.unit_price).toFixed(2));
+      const currentDiscountAmount = Number(
+        asNumber(line.discount_amount).toFixed(2),
+      );
+      const hasManualPriceOverride = asBooleanFlag(line.manual_price_override);
+      const hasManualDiscountOverride = asBooleanFlag(
+        line.manual_discount_override,
+      );
+      const hasPricingOverrideInputs =
+        typeof requestedOverrideUnitPrice === "number" ||
+        typeof requestedOverrideDiscountAmount === "number";
+      const priceOverrideChanged =
+        typeof requestedOverrideUnitPrice === "number" &&
+        requestedOverrideUnitPrice !== currentUnitPrice;
+      const discountOverrideChanged =
+        typeof requestedOverrideDiscountAmount === "number" &&
+        requestedOverrideDiscountAmount !== currentDiscountAmount;
+      const nextSerialNumbers = validateSerializedLineInput({
+        isSerialized,
+        productName: line.product_name_snapshot,
+        quantity: normalizedQuantity,
+        serialNumbers:
+          input.serialNumbers ??
+          readSerializedLineNumbers(line.serial_numbers_json),
+      });
+
+      if (isSerialized && nextSerialNumbers.length > 0) {
+        const allowedSerialNumbers =
+          line.line_intent === "RETURN"
+            ? this.listLocallyReturnableSerialNumbers(
+                line.product_code_snapshot,
+                line.id,
+              )
+            : this.listAvailableSaleSerialNumbers(
+                line.product_code_snapshot,
+                match.sales_location_code ?? this.getDefaultSalesLocationCode(),
+                line.id,
+              );
+
+        ensureSerialSelectionWithinAllowedSet({
+          productName: line.product_name_snapshot,
+          selectedSerialNumbers: nextSerialNumbers,
+          allowedSerialNumbers,
+        });
+      }
+
+      if (
+        (hasPricingOverrideInputs || shouldClearPricingOverride) &&
+        (line.line_intent !== "SALE" || Boolean(line.source_line_id))
+      ) {
+        throw new Error(
+          "Flash ERP only allows manual price or discount overrides on locally built sale lines.",
+        );
+      }
+
+      if (line.line_intent === "SALE" && tracksInventory) {
+        const availableQuantity =
+          match.sales_location_quantity ??
+          Number(asNumber(match.quantity_on_hand).toFixed(3));
+        const basketProductQuantity = Number(
+          this.getBasketLines(basket.id)
+            .filter(
+              (candidate) =>
+                candidate.id !== line.id &&
+                candidate.product_code_snapshot ===
+                  line.product_code_snapshot &&
+                candidate.line_intent === line.line_intent &&
+                candidate.source_line_id === null,
+            )
+            .reduce(
+              (sum, candidate) => sum + asNumber(candidate.quantity),
+              normalizedQuantity,
+            )
+            .toFixed(3),
+        );
+
+        if (availableQuantity < basketProductQuantity) {
+          throw new Error(
+            `Only ${availableQuantity.toFixed(3)} unit(s) of ${line.product_name_snapshot} are available in the local sales position.`,
+          );
+        }
+      }
+
+      let nextUnitPrice = currentUnitPrice;
+      let nextDiscountAmount = currentDiscountAmount;
+      let nextManualPriceOverride = hasManualPriceOverride;
+      let nextManualDiscountOverride = hasManualDiscountOverride;
+      let nextAppliedPromotionCode = line.applied_promotion_code;
+      let nextAppliedPromotionName = line.applied_promotion_name;
+
+      if (shouldClearPricingOverride) {
+        nextUnitPrice = Number(asNumber(match.unit_price).toFixed(2));
+        nextDiscountAmount = 0;
+        nextManualPriceOverride = false;
+        nextManualDiscountOverride = false;
+        nextAppliedPromotionCode = null;
+        nextAppliedPromotionName = null;
+      } else if (hasPricingOverrideInputs) {
+        if (priceOverrideChanged) {
+          nextUnitPrice = requestedOverrideUnitPrice!;
+          nextManualPriceOverride = true;
+        }
+
+        if (discountOverrideChanged) {
+          nextDiscountAmount = requestedOverrideDiscountAmount!;
+          nextManualDiscountOverride = requestedOverrideDiscountAmount! > 0;
+        } else if (
+          typeof requestedOverrideUnitPrice === "number" &&
+          !hasManualDiscountOverride
+        ) {
+          nextDiscountAmount = 0;
+        }
+
+        if (priceOverrideChanged || discountOverrideChanged) {
+          const overrideParts: string[] = [];
+          const configuredDiscountRates = readPosDiscountRatesMetadata(
+            this.metadata("pos_discount_rates_json"),
+          );
+          const configuredDiscountRateAllowed =
+            requestedConfiguredDiscountRate !== null &&
+            configuredDiscountRates.some(
+              (rate) => rate.toFixed(2) === requestedConfiguredDiscountRate.toFixed(2),
+            );
+          const configuredDiscountAmountMatches =
+            requestedConfiguredDiscountRate !== null &&
+            Math.abs(
+              nextDiscountAmount -
+                Number(
+                  (
+                    nextUnitPrice *
+                    normalizedQuantity *
+                    (requestedConfiguredDiscountRate / 100)
+                  ).toFixed(2),
+                ),
+            ) < 0.01;
+          const configuredDiscountOverride =
+            discountOverrideChanged &&
+            !priceOverrideChanged &&
+            ((configuredDiscountRateAllowed && configuredDiscountAmountMatches) ||
+              requestedOverrideDiscountAmount === 0);
+
+          if (priceOverrideChanged) {
+            overrideParts.push(
+              `unit price ${currentUnitPrice.toFixed(2)} -> ${nextUnitPrice.toFixed(2)}`,
+            );
+          }
+
+          if (discountOverrideChanged) {
+            overrideParts.push(
+              `discount ${currentDiscountAmount.toFixed(2)} -> ${nextDiscountAmount.toFixed(2)}`,
+            );
+          }
+
+          if (configuredDiscountOverride) {
+            if (requestedConfiguredDiscountRate !== null) {
+              nextAppliedPromotionName = `POS discount ${formatDiscountRate(requestedConfiguredDiscountRate)}%`;
+            }
+
+            this.appendBasketAuditNote(
+              basket.id,
+              `Configured POS discount on ${line.product_code_snapshot} (${overrideParts.join(", ")}).${input.overrideNote?.trim() ? ` Note: ${input.overrideNote.trim()}` : ""}`,
+              timestamp,
+            );
+          } else {
+            const supervisor = this.requireSupervisorApproval({
+              supervisorCode: input.supervisorCode?.trim() ?? "",
+              supervisorPassword: input.supervisorPassword?.trim() ?? "",
+              permissionCodes: [
+                ...(priceOverrideChanged ? ["pos.override.price"] : []),
+                ...(discountOverrideChanged ? ["pos.override.discount"] : []),
+              ],
+              purpose:
+                priceOverrideChanged && discountOverrideChanged
+                  ? "approving manual price and discount overrides"
+                  : priceOverrideChanged
+                    ? "approving a manual price override"
+                    : "approving a manual discount override",
+            });
+
+            this.appendBasketAuditNote(
+              basket.id,
+              `Pricing override on ${line.product_code_snapshot} approved by ${this.formatOperatorLabel(supervisor)} (${overrideParts.join(", ")}).${input.overrideNote?.trim() ? ` Note: ${input.overrideNote.trim()}` : ""}`,
+              timestamp,
+            );
+          }
+        }
+
+        nextAppliedPromotionCode = null;
+        if (requestedConfiguredDiscountRate === null) {
+          nextAppliedPromotionName = null;
+        }
+      }
+
+      if (
+        nextDiscountAmount >
+        Number((nextUnitPrice * normalizedQuantity).toFixed(2))
+      ) {
+        throw new Error(
+          `The manual discount for ${line.product_name_snapshot} cannot exceed the extended line value.`,
+        );
+      }
+
+      const lineAmounts = calculateSaleLineAmounts({
+        unitPrice: nextUnitPrice,
+        quantity: normalizedQuantity,
+        discountAmount: nextDiscountAmount,
+        taxable: asBooleanFlag(match.taxable),
+        taxRatePercent: asNullableNumber(match.tax_rate_percent),
+        taxInclusive: asBooleanFlag(match.tax_inclusive),
+      });
+
+      this.db
+        .prepare(
+          "UPDATE pos_transaction_line SET serial_numbers_json = ?, quantity = ?, unit_price = ?, applied_promotion_code = ?, applied_promotion_name = ?, discount_amount = ?, tax_amount = ?, line_total = ?, manual_price_override = ?, manual_discount_override = ? WHERE id = ?",
+        )
+        .run(
+          writeSerializedLineNumbers(nextSerialNumbers),
+          normalizedQuantity,
+          nextUnitPrice,
+          nextAppliedPromotionCode,
+          nextAppliedPromotionName,
+          lineAmounts.discountAmount,
+          lineAmounts.taxAmount,
+          lineAmounts.lineTotal,
+          nextManualPriceOverride ? 1 : 0,
+          nextManualDiscountOverride ? 1 : 0,
+          line.id,
+        );
+
+      if (
+        shouldClearPricingOverride &&
+        (hasManualPriceOverride || hasManualDiscountOverride)
+      ) {
+        this.appendBasketAuditNote(
+          basket.id,
+          `Pricing override on ${line.product_code_snapshot} was cleared and reset to standard pricing.${input.overrideNote?.trim() ? ` Note: ${input.overrideNote.trim()}` : ""}`,
+          timestamp,
+        );
+      }
+
+      this.refreshBasketTotals(basket.id, timestamp);
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${line.product_name_snapshot} was updated in the active basket.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `Flash ERP updated ${productName} in the active basket.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  removeBasketLine(lineId: string): StoreSyncActionResult {
+    const activeBasket = this.getActiveBasketSummary();
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        activeBasket?.transactionType === "RETURN"
+          ? "pos.return.process"
+          : activeBasket?.transactionType === "EXCHANGE"
+            ? "pos.exchange.process"
+            : "pos.sale.process",
+      ],
+      purpose: "removing a line from the active basket",
+    });
+    const timestamp = isoNow();
+    let productName = "Basket line";
+
+    this.withTransaction(() => {
+      const basket = this.requireActiveBasket();
+      const line = this.getBasketLine(lineId);
+
+      if (!line || line.pos_transaction_id !== basket.id) {
+        throw new Error(
+          "Flash ERP could not find that line in the active basket.",
+        );
+      }
+
+      productName = line.product_name_snapshot;
+
+      this.db
+        .prepare("DELETE FROM pos_transaction_line WHERE id = ?")
+        .run(lineId);
+      this.refreshBasketTotals(basket.id, timestamp);
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${line.product_name_snapshot} was removed from the active basket.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `Flash ERP removed ${productName} from the active basket.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  discardActiveBasket(): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      purpose: "clearing the active POS screen",
+    });
+    const basket = this.requireActiveBasket();
+    const lines = this.getBasketLines(basket.id);
+
+    if (lines.length > 0) {
+      throw new Error(
+        "Clear every basket line before resetting the active POS screen.",
+      );
+    }
+
+    const timestamp = isoNow();
+    const linkedOrder = this.db
+      .prepare(
+        "SELECT order_no FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
+      )
+      .get(basket.id) as { order_no: string } | undefined;
+    const basketLabel =
+      (linkedOrder?.order_no ?? basket.source_transaction_no)
+        ? `${basket.transaction_no} for ${linkedOrder?.order_no ?? basket.source_transaction_no}`
+        : basket.transaction_no;
+
+    this.withTransaction(() => {
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+
+      if (!linkedOrder) {
+        this.db
+          .prepare(
+            "DELETE FROM pos_transaction WHERE id = ? AND status = 'PARKED'",
+          )
+          .run(basket.id);
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: linkedOrder
+          ? `${basket.transaction_no} was removed from the sell lane and ${linkedOrder.order_no} remains available for fulfilment.`
+          : `${basket.transaction_no} was discarded from the active POS lane before completion.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: linkedOrder
+        ? `${linkedOrder.order_no} was returned to pending orders.`
+        : `Flash ERP cleared basket ${basketLabel} from the POS screen.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  checkoutActiveBasket(
+    input?: StoreBasketCheckoutRequest,
+  ): StoreSyncActionResult {
+    const activeBasket = this.getActiveBasketSummary();
+
+    const { session } = this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        activeBasket?.transactionType === "RETURN"
+          ? "pos.return.process"
+          : activeBasket?.transactionType === "EXCHANGE"
+            ? "pos.exchange.process"
+            : "pos.sale.process",
+      ],
+      purpose: "checking out the active basket",
+    });
+    const result = this.completeActiveBasket(input, session.loginId);
+    const basketLabel = (
+      {
+        SALE: "basket",
+        RETURN: "return basket",
+        EXCHANGE: "exchange basket",
+      } satisfies Record<BasketHeaderRow["transaction_type"], string>
+    )[result.transactionType];
+
+    return {
+      message: `Flash ERP completed ${basketLabel} ${result.transactionNo} locally and queued it for enterprise sync.`,
+      snapshot: result.snapshot,
+    };
+  }
+
+  parkActiveBasket(): StoreSyncActionResult {
+    const activeBasket = this.getActiveBasketSummary();
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        activeBasket?.transactionType === "RETURN"
+          ? "pos.return.process"
+          : activeBasket?.transactionType === "EXCHANGE"
+            ? "pos.exchange.process"
+            : "pos.sale.process",
+      ],
+      purpose: "parking the active basket",
+    });
+    const basket = this.requireActiveBasket();
+    const timestamp = isoNow();
+    const basketLabel = (
+      {
+        SALE: "basket",
+        RETURN: "return basket",
+        EXCHANGE: "exchange basket",
+      } satisfies Record<BasketHeaderRow["transaction_type"], string>
+    )[basket.transaction_type];
+
+    this.withTransaction(() => {
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${basket.transaction_no} was parked as a ${basketLabel} and can be resumed later on this desktop.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `Flash ERP parked ${basketLabel} ${basket.transaction_no}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  resumeParkedBasket(transactionId: string): StoreSyncActionResult {
+    const basket = this.getBasketHeader(transactionId);
+
+    if (!basket || basket.status !== "PARKED") {
+      throw new Error("Flash ERP could not find that parked basket locally.");
+    }
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: [
+        basket.transaction_type === "RETURN"
+          ? "pos.return.process"
+          : basket.transaction_type === "EXCHANGE"
+            ? "pos.exchange.process"
+            : "pos.sale.process",
+      ],
+      purpose: "resuming a parked basket",
+    });
+
+    const timestamp = isoNow();
+    const laneLabel = (
+      {
+        SALE: "sell lane",
+        RETURN: "return lane",
+        EXCHANGE: "exchange lane",
+      } satisfies Record<BasketHeaderRow["transaction_type"], string>
+    )[basket.transaction_type];
+    const basketLabel = (
+      {
+        SALE: "basket",
+        RETURN: "return basket",
+        EXCHANGE: "exchange basket",
+      } satisfies Record<BasketHeaderRow["transaction_type"], string>
+    )[basket.transaction_type];
+
+    this.withTransaction(() => {
+      this.setMetadata(this.getActiveBasketMetadataKey(), basket.id);
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${basket.transaction_no} was resumed into the active ${laneLabel}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `Flash ERP resumed ${basketLabel} ${basket.transaction_no}.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  createSalesOrderFromActiveBasket(
+    input: StoreCreateSalesOrderRequest = {},
+  ): StoreSyncActionResult {
+    const activeBasket = this.getActiveBasketSummary();
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.sale.process"],
+      purpose: "creating a sales order from the active basket",
+    });
+
+    if (activeBasket?.transactionType !== "SALE") {
+      throw new Error(
+        "Flash ERP can only create sales orders from sale baskets.",
+      );
+    }
+
+    const timestamp = isoNow();
+    let orderNo = "";
+
+    this.withTransaction(() => {
+      const basket = this.requireActiveBasket();
+
+      if (basket.transaction_type !== "SALE") {
+        throw new Error(
+          "Flash ERP can only create sales orders from sale baskets.",
+        );
+      }
+
+      this.refreshBasketTotals(basket.id, timestamp);
+      const refreshedBasket = this.getBasketHeader(basket.id);
+
+      if (!refreshedBasket) {
+        throw new Error(
+          "Flash ERP could not reload the basket before creating the sales order.",
+        );
+      }
+
+      if (!refreshedBasket.customer_id) {
+        throw new Error(
+          "Select a registered customer before creating a sales order.",
+        );
+      }
+
+      const lines = this.getBasketLines(refreshedBasket.id);
+
+      if (lines.length === 0) {
+        throw new Error("Add at least one item before saving a sales order.");
+      }
+
+      const headerReference =
+        input.headerReference === undefined
+          ? refreshedBasket.header_reference ?? null
+          : input.headerReference?.trim() || null;
+      const additionalDetails =
+        input.additionalDetails === undefined
+          ? refreshedBasket.additional_details ?? null
+          : input.additionalDetails?.trim() || null;
+
+      const existingOrder = this.db
+        .prepare(
+          "SELECT id, order_no FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
+        )
+        .get(refreshedBasket.id) as
+        | { id: string; order_no: string }
+        | undefined;
+
+      if (existingOrder) {
+        orderNo = existingOrder.order_no;
+        this.db
+          .prepare(
+            "UPDATE pos_transaction SET status = 'PARKED', header_reference = ?, additional_details = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(headerReference, additionalDetails, timestamp, refreshedBasket.id);
+        this.recordTransactionReferenceCapture({
+          reference: headerReference,
+          details: additionalDetails,
+          transactionNo: refreshedBasket.transaction_no,
+          capturedAt: timestamp,
+        });
+        this.deleteMetadata(this.getActiveBasketMetadataKey());
+        this.setMetadata("last_local_write_at", timestamp);
+        this.insertRunLog({
+          runKind: "LOCAL_WRITE",
+          result: "IDLE",
+          summary: `${orderNo} was already saved from basket ${refreshedBasket.transaction_no}.`,
+          upstreamProcessed: 0,
+          downstreamApplied: 0,
+          startedAt: timestamp,
+          finishedAt: timestamp,
+        });
+        return;
+      }
+
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const terminalCode = this.getTerminalCode();
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const orderId = randomUUID();
+      orderNo = buildLocalSalesOrderNo(
+        storeCode,
+        this.nextSequence("sales_order_sequence"),
+        timestamp,
+      );
+      const note = input.note?.trim() || null;
+      const operatorName = input.operatorName?.trim() || null;
+      const totalAmount = Number(
+        asNumber(refreshedBasket.total_amount).toFixed(2),
+      );
+      const requestedDepositAmount = Number(
+        Number(input.depositAmount ?? 0).toFixed(2),
+      );
+
+      if (
+        !Number.isFinite(requestedDepositAmount) ||
+        requestedDepositAmount < 0
+      ) {
+        throw new Error(
+          "Enter a sales order deposit amount of zero or more.",
+        );
+      }
+
+      if (requestedDepositAmount > totalAmount) {
+        throw new Error(
+          "A sales order deposit cannot be greater than the order total.",
+        );
+      }
+
+      const depositAmount = requestedDepositAmount;
+      const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
+      const depositReference = input.depositReference?.trim() || null;
+      const depositTender =
+        depositAmount > 0
+          ? this.getTenderMethodByCode(
+              input.depositTenderMethodCode?.trim().toUpperCase() ?? "",
+            )
+          : null;
+
+      if (depositAmount > 0 && !depositTender) {
+        throw new Error(
+          "Choose an active tender method before taking a sales order deposit.",
+        );
+      }
+
+      if (depositTender?.requiresReference && !depositReference) {
+        throw new Error(
+          `Flash ERP needs a reference for ${depositTender.tenderMethodName}.`,
+        );
+      }
+
+      const payload: StoreSalesOrderRecordedPayload = {
+        orderId,
+        orderNo,
+        storeCode,
+        terminalCode,
+        sourceTransactionId: refreshedBasket.id,
+        sourceTransactionNo: refreshedBasket.transaction_no,
+        customerId: refreshedBasket.customer_id,
+        customerNo: refreshedBasket.customer_no,
+        customerName: refreshedBasket.customer_name,
+        totalAmount,
+        depositAmount,
+        balanceAmount,
+        depositTenderMethodCode: depositTender?.tenderMethodCode ?? null,
+        depositTenderMethodName: depositTender?.tenderMethodName ?? null,
+        depositPaymentMethod: depositTender?.paymentMethod ?? null,
+        depositReference,
+        depositPaidAt: depositAmount > 0 ? timestamp : null,
+        status: "OPEN",
+        operatorName,
+        note,
+        createdAt: timestamp,
+        fulfilledTransactionId: null,
+        fulfilledTransactionNo: null,
+        fulfilledAt: null,
+        cancelledAt: null,
+      };
+
+      this.db
+        .prepare(
+          "INSERT INTO sales_order (id, order_no, source_transaction_id, source_transaction_no, customer_id, customer_no, customer_name, status, total_amount, deposit_amount, balance_amount, deposit_tender_method_code, deposit_tender_method_name, deposit_payment_method, deposit_reference, deposit_paid_at, operator_name, note, fulfilled_transaction_id, fulfilled_transaction_no, synced_at, created_at, fulfilled_at, cancelled_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?)",
+        )
+        .run(
+          orderId,
+          orderNo,
+          refreshedBasket.id,
+          refreshedBasket.transaction_no,
+          refreshedBasket.customer_id,
+          refreshedBasket.customer_no,
+          refreshedBasket.customer_name,
+          totalAmount,
+          depositAmount,
+          balanceAmount,
+          depositTender?.tenderMethodCode ?? null,
+          depositTender?.tenderMethodName ?? null,
+          depositTender?.paymentMethod ?? null,
+          depositReference,
+          depositAmount > 0 ? timestamp : null,
+          operatorName,
+          note,
+          timestamp,
+          timestamp,
+        );
+      if (depositAmount > 0 && depositTender) {
+        this.db
+          .prepare(
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            refreshedBasket.id,
+            depositTender.tenderMethodCode,
+            depositTender.tenderMethodName,
+            depositTender.paymentMethod,
+            depositAmount,
+            depositReference ?? `DEP-${orderNo}`,
+            timestamp,
+          );
+        this.db
+          .prepare(
+            "UPDATE pos_transaction SET paid_amount = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(depositAmount, timestamp, refreshedBasket.id);
+      }
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'salesOrder', ?, 'sales-order.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            orderId,
+            ENTERPRISE_NODE_CODE,
+            orderId,
+            `${nodeCode}:salesOrder:${orderNo}:recorded`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET status = 'PARKED', paid_amount = ?, header_reference = ?, additional_details = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(depositAmount, headerReference, additionalDetails, timestamp, refreshedBasket.id);
+      this.recordTransactionReferenceCapture({
+        reference: headerReference,
+        details: additionalDetails,
+        transactionNo: refreshedBasket.transaction_no,
+        capturedAt: timestamp,
+      });
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${orderNo} was created from basket ${refreshedBasket.transaction_no} and queued for enterprise sync.`
+          : `${orderNo} was created from basket ${refreshedBasket.transaction_no} for standalone fulfilment.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+      return {
+        message: `${orderNo} was saved as a local sales order for fulfilment.`,
+        snapshot: this.getSyncSnapshot(),
+        salesOrderNo: orderNo,
+      };
+  }
+
+  resumeSalesOrder(orderId: string): StoreSyncActionResult {
+    const order = this.getSalesOrderRow(orderId);
+
+    if (!order || order.status !== "OPEN") {
+      throw new Error(
+        "Flash ERP could not find that open sales order locally.",
+      );
+    }
+
+    this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.sale.process"],
+      purpose: "fulfilling a sales order",
+    });
+
+    const basket = this.getBasketHeader(order.source_transaction_id);
+
+    if (!basket || basket.status !== "PARKED") {
+      throw new Error(
+        "The basket behind this sales order is no longer available locally.",
+      );
+    }
+
+    const activeBasketId = this.getActiveBasketId();
+
+    if (activeBasketId && activeBasketId !== basket.id) {
+      throw new Error(
+        "Complete or park the active basket before fulfilling a sales order.",
+      );
+    }
+
+    const timestamp = isoNow();
+
+    this.withTransaction(() => {
+      this.setMetadata(this.getActiveBasketMetadataKey(), basket.id);
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${order.order_no} was opened in the sell lane for fulfilment.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `${order.order_no} is ready in the sell lane for fulfilment.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  cancelSalesOrder(input: StoreCancelSalesOrderRequest): StoreSyncActionResult {
+    const order = this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN") {
+      throw new Error(
+        "Flash ERP could not find that open sales order locally.",
+      );
+    }
+
+    this.requireActiveOperatorSession({
+      permissionCodes: ["pos.sale.process"],
+      purpose: "cancelling a sales order",
+    });
+
+    const timestamp = isoNow();
+
+    this.withTransaction(() => {
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const terminalCode = this.getTerminalCode();
+      const eventId = randomUUID();
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const operatorName = input.operatorName?.trim() || order.operator_name;
+      const note = input.note?.trim() || order.note;
+      const payload: StoreSalesOrderRecordedPayload = {
+        orderId: order.id,
+        orderNo: order.order_no,
+        storeCode,
+        terminalCode,
+        sourceTransactionId: order.source_transaction_id,
+        sourceTransactionNo: order.source_transaction_no,
+        customerId: order.customer_id,
+        customerNo: order.customer_no,
+        customerName: order.customer_name,
+        totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
+        depositAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
+        balanceAmount: Number(asNumber(order.balance_amount).toFixed(2)),
+        depositTenderMethodCode: order.deposit_tender_method_code,
+        depositTenderMethodName: order.deposit_tender_method_name,
+        depositPaymentMethod: order.deposit_payment_method,
+        depositReference: order.deposit_reference,
+        depositPaidAt: order.deposit_paid_at,
+        status: "CANCELLED",
+        operatorName,
+        note,
+        createdAt: order.created_at,
+        fulfilledTransactionId: null,
+        fulfilledTransactionNo: null,
+        fulfilledAt: null,
+        cancelledAt: timestamp,
+      };
+
+      this.db
+        .prepare(
+          "UPDATE sales_order SET status = 'CANCELLED', operator_name = ?, note = ?, cancelled_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(operatorName, note, timestamp, timestamp, order.id);
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+        )
+        .run(timestamp, order.source_transaction_id);
+
+      if (this.getActiveBasketId() === order.source_transaction_id) {
+        this.deleteMetadata(this.getActiveBasketMetadataKey());
+      }
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'salesOrder', ?, 'sales-order.cancelled', ?, ?, 'PENDING', 0, 2, ?, ?)",
+          )
+          .run(
+            eventId,
+            ENTERPRISE_NODE_CODE,
+            order.id,
+            `${nodeCode}:salesOrder:${order.order_no}:cancelled`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${order.order_no} was cancelled locally and queued for enterprise sync.`
+          : `${order.order_no} was cancelled locally for standalone sales orders.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `${order.order_no} was cancelled locally.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  recordEodReconciliation(
+    input: StoreRecordEodReconciliationRequest,
+  ): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      purpose: "recording end-of-day reconciliation",
+    });
+    const declaredCashAmount = Number(
+      Number(input.declaredCashAmount).toFixed(2),
+    );
+
+    if (!Number.isFinite(declaredCashAmount) || declaredCashAmount < 0) {
+      throw new Error(
+        "Enter a declared cash amount of zero or more for EOD reconciliation.",
+      );
+    }
+
+    const timestamp = isoNow();
+    let reconciliationNo = "";
+
+    this.withTransaction(() => {
+      const shift = this.resolveShiftForReconciliation(input.shiftId);
+      const shiftSummary = this.toShiftSummary(shift);
+      const existing = this.db
+        .prepare("SELECT id FROM eod_reconciliation WHERE shift_id = ? LIMIT 1")
+        .get(shift.id) as { id: string } | undefined;
+
+      if (existing) {
+        throw new Error(
+          `${shift.shift_no} has already been reconciled locally.`,
+        );
+      }
+
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const terminalCode = this.getTerminalCode();
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const reconciliationId = randomUUID();
+      reconciliationNo = buildLocalReconciliationNo(
+        storeCode,
+        this.nextSequence("eod_reconciliation_sequence"),
+        timestamp,
+      );
+      const varianceAmount = Number(
+        (declaredCashAmount - shiftSummary.expectedCashAmount).toFixed(2),
+      );
+      const note = input.note?.trim() || null;
+      const operatorName = input.operatorName?.trim() || null;
+      const payload: StoreEodReconciliationRecordedPayload = {
+        reconciliationId,
+        reconciliationNo,
+        storeCode,
+        terminalCode,
+        shiftId: shiftSummary.shiftId,
+        shiftNo: shiftSummary.shiftNo,
+        cashierCode: shiftSummary.cashierCode,
+        expectedCashAmount: shiftSummary.expectedCashAmount,
+        declaredCashAmount,
+        varianceAmount,
+        netSalesAmount: shiftSummary.netSalesAmount,
+        cashTenderedAmount: shiftSummary.cashTenderedAmount,
+        nonCashTenderedAmount: shiftSummary.nonCashTenderedAmount,
+        transactionCount: shiftSummary.transactionCount,
+        operatorName,
+        note,
+        reconciledAt: timestamp,
+      };
+
+      this.db
+        .prepare(
+          "INSERT INTO eod_reconciliation (id, reconciliation_no, shift_id, shift_no, cashier_code, expected_cash_amount, declared_cash_amount, variance_amount, net_sales_amount, cash_tendered_amount, non_cash_tendered_amount, transaction_count, operator_name, note, synced_at, reconciled_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .run(
+          reconciliationId,
+          reconciliationNo,
+          shiftSummary.shiftId,
+          shiftSummary.shiftNo,
+          shiftSummary.cashierCode,
+          shiftSummary.expectedCashAmount,
+          declaredCashAmount,
+          varianceAmount,
+          shiftSummary.netSalesAmount,
+          shiftSummary.cashTenderedAmount,
+          shiftSummary.nonCashTenderedAmount,
+          shiftSummary.transactionCount,
+          operatorName,
+          note,
+          timestamp,
+          timestamp,
+        );
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'eodReconciliation', ?, 'eod-reconciliation.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            reconciliationId,
+            ENTERPRISE_NODE_CODE,
+            reconciliationId,
+            `${nodeCode}:eodReconciliation:${reconciliationNo}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${reconciliationNo} reconciled ${shiftSummary.shiftNo} with a cash variance of ${varianceAmount.toFixed(2)}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: this.isStandaloneDeployment()
+        ? `${reconciliationNo} was recorded locally for standalone EOD.`
+        : `${reconciliationNo} was recorded locally and queued for enterprise sync.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  recordBankingDeposit(
+    input: StoreRecordBankingDepositRequest,
+  ): StoreSyncActionResult {
+    this.requireActiveOperatorSession({
+      purpose: "recording a banking deposit",
+    });
+    const amount = Number(Number(input.amount).toFixed(2));
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("Enter a banking deposit amount greater than zero.");
+    }
+
+    const timestamp = isoNow();
+    let depositNo = "";
+
+    this.withTransaction(() => {
+      const reconciliation = this.getEodReconciliationRow(
+        input.reconciliationId,
+      );
+
+      if (!reconciliation) {
+        throw new Error(
+          "Choose a recorded EOD reconciliation before banking cash.",
+        );
+      }
+
+      const alreadyDeposited = this.scalar(
+        "SELECT COALESCE(sum(amount), 0) AS value FROM banking_deposit WHERE reconciliation_id = ?",
+        reconciliation.id,
+      );
+      const remainingCash = Number(
+        (
+          asNumber(reconciliation.declared_cash_amount) - alreadyDeposited
+        ).toFixed(2),
+      );
+
+      if (amount > remainingCash) {
+        throw new Error(
+          `Flash ERP cannot bank more than the remaining declared cash balance of ${remainingCash.toFixed(2)}.`,
+        );
+      }
+
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const terminalCode = this.getTerminalCode();
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const bankAccount = this.getBankAccountById(input.bankAccountId);
+
+      if (this.listActiveBankAccounts().length > 0 && !bankAccount) {
+        throw new Error(
+          "Select the bank, branch, and account number before recording the banking deposit.",
+        );
+      }
+
+      const depositId = randomUUID();
+      depositNo = buildLocalBankingDepositNo(
+        storeCode,
+        this.nextSequence("banking_deposit_sequence"),
+        timestamp,
+      );
+      const bankName = bankAccount?.bankName ?? input.bankName?.trim() ?? null;
+      const reference = input.reference?.trim() || null;
+      const operatorName = input.operatorName?.trim() || null;
+      const note = input.note?.trim() || null;
+      const payload: StoreBankingDepositRecordedPayload = {
+        depositId,
+        depositNo,
+        storeCode,
+        terminalCode,
+        reconciliationId: reconciliation.id,
+        reconciliationNo: reconciliation.reconciliation_no,
+        shiftId: reconciliation.shift_id,
+        shiftNo: reconciliation.shift_no,
+        amount,
+        bankName,
+        bankAccountId: bankAccount?.bankAccountId ?? null,
+        bankCode: bankAccount?.bankCode ?? null,
+        bankBranchCode: bankAccount?.branchCode ?? null,
+        bankBranchName: bankAccount?.branchName ?? null,
+        bankAccountNumber: bankAccount?.accountNumber ?? null,
+        bankAccountName: bankAccount?.accountName ?? null,
+        reference,
+        operatorName,
+        note,
+        depositedAt: timestamp,
+      };
+
+      this.db
+        .prepare(
+          "INSERT INTO banking_deposit (id, deposit_no, reconciliation_id, reconciliation_no, shift_id, shift_no, amount, bank_account_id, bank_name, bank_code, bank_branch_code, bank_branch_name, bank_account_number, bank_account_name, reference, operator_name, note, synced_at, deposited_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .run(
+          depositId,
+          depositNo,
+          reconciliation.id,
+          reconciliation.reconciliation_no,
+          reconciliation.shift_id,
+          reconciliation.shift_no,
+          amount,
+          bankAccount?.bankAccountId ?? null,
+          bankName,
+          bankAccount?.bankCode ?? null,
+          bankAccount?.branchCode ?? null,
+          bankAccount?.branchName ?? null,
+          bankAccount?.accountNumber ?? null,
+          bankAccount?.accountName ?? null,
+          reference,
+          operatorName,
+          note,
+          timestamp,
+          timestamp,
+        );
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'bankingDeposit', ?, 'banking-deposit.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            depositId,
+            ENTERPRISE_NODE_CODE,
+            depositId,
+            `${nodeCode}:bankingDeposit:${depositNo}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${depositNo} banked ${amount.toFixed(2)} against ${reconciliation.reconciliation_no}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: this.isStandaloneDeployment()
+        ? `${depositNo} was recorded locally for standalone banking.`
+        : `${depositNo} was recorded locally and queued for enterprise sync.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  captureScannedSale(input: StoreSellCaptureRequest): StoreSyncActionResult {
+    const { session } = this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.sale.process"],
+      purpose: "capturing a scanned sale",
+    });
+    const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+
+    if (!Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
+      throw new Error("Flash ERP needs a sale quantity greater than zero.");
+    }
+
+    const match = this.findCatalogLookup(input.lookupValue);
+
+    if (!match) {
+      throw new Error(
+        `Flash ERP could not find a local catalog item for "${input.lookupValue.trim()}".`,
+      );
+    }
+
+    const availableQuantity =
+      match.sales_location_quantity ?? asNumber(match.quantity_on_hand);
+
+    if (availableQuantity < normalizedQuantity) {
+      throw new Error(
+        `Only ${availableQuantity.toFixed(3)} unit(s) of ${match.product_name} are available in the local sales position.`,
+      );
+    }
+
+    const nextSerialNumbers = validateSerializedLineInput({
+      isSerialized: asBooleanFlag(match.is_serialized),
+      productName: match.product_name,
+      quantity: normalizedQuantity,
+      serialNumbers: input.serialNumbers,
+    });
+
+    if (nextSerialNumbers.length > 0) {
+      ensureSerialSelectionWithinAllowedSet({
+        productName: match.product_name,
+        selectedSerialNumbers: nextSerialNumbers,
+        allowedSerialNumbers: this.listAvailableSaleSerialNumbers(
+          match.product_code,
+          match.sales_location_code ?? this.getDefaultSalesLocationCode(),
+        ),
+      });
+    }
+
+    const result = this.captureLocalSale(match, {
+      quantity: normalizedQuantity,
+      serialNumbers: nextSerialNumbers,
+      variantSize: input.variantSize ?? null,
+      variantColor: input.variantColor ?? null,
+      note:
+        match.matched_on === "barcode" && match.barcode_code
+          ? `Captured locally from barcode ${match.barcode_code}.`
+          : "Captured locally from the Flash ERP sell lane.",
+      message:
+        this.isStandaloneDeployment()
+          ? match.matched_on === "barcode" && match.barcode_code
+            ? `${match.product_name} was captured locally from barcode ${match.barcode_code}.`
+            : `${match.product_name} was captured locally from the sell lane.`
+          : match.matched_on === "barcode" && match.barcode_code
+            ? `${match.product_name} was captured locally from barcode ${match.barcode_code} and queued for enterprise sync.`
+            : `${match.product_name} was captured locally from the sell lane and queued for enterprise sync.`,
+      cashierCode: session.loginId,
+    });
+
+    return {
+      message:
+        this.isStandaloneDeployment()
+          ? match.matched_on === "barcode" && match.barcode_code
+            ? `Flash ERP captured ${match.product_name} from barcode ${match.barcode_code} locally.`
+            : `Flash ERP captured ${match.product_name} locally.`
+          : match.matched_on === "barcode" && match.barcode_code
+            ? `Flash ERP captured ${match.product_name} from barcode ${match.barcode_code} and queued the sale for enterprise sync.`
+            : `Flash ERP captured ${match.product_name} locally and queued the sale for enterprise sync.`,
+      snapshot: result.snapshot,
+    };
+  }
+
+  captureDemoSale(): StoreSyncActionResult {
+    const { session } = this.requireActiveCashierLaneSession({
+      permissionCodes: ["pos.sale.process"],
+      purpose: "capturing a demo sale",
+    });
+    const products = this.db
+      .prepare(
+        `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE COALESCE(catalog_membership_active, 1) = 1 ORDER BY COALESCE(catalog_sort_order, 2147483647), product_code ASC`,
+      )
+      .all() as ProductRow[];
+    const nextTransactionSequence =
+      asNumber(this.metadata("transaction_sequence")) + 1;
+    const product = products[(nextTransactionSequence - 1) % products.length];
+    const representativeBarcode = this.getRepresentativeBarcode(
+      product.product_code,
+    );
+    const salesLocationCode = this.getDefaultSalesLocationCode();
+    const availableSerialNumbers = asBooleanFlag(product.is_serialized)
+      ? this.listAvailableSaleSerialNumbers(
+          product.product_code,
+          salesLocationCode,
+        )
+      : [];
+    const quantity = asBooleanFlag(product.is_serialized)
+      ? 1
+      : (nextTransactionSequence % 3) + 1;
+
+    if (
+      asBooleanFlag(product.is_serialized) &&
+      availableSerialNumbers.length === 0
+    ) {
+      throw new Error(
+        `Flash ERP could not find an available serial number for ${product.product_name} in the local store registry.`,
+      );
+    }
+
+    const result = this.captureLocalSale(
+      {
+        id: product.id,
+        product_code: product.product_code,
+        product_name: product.product_name,
+        department_code: product.department_code,
+        category_code: product.category_code,
+        taxable: product.taxable,
+        tax_rate_percent: product.tax_rate_percent,
+        tax_inclusive: product.tax_inclusive,
+        track_inventory: product.track_inventory,
+        is_serialized: product.is_serialized,
+        track_size: product.track_size,
+        track_color: product.track_color,
+        unit_price: product.unit_price,
+        quantity_on_hand: product.quantity_on_hand,
+        barcode_code: representativeBarcode?.barcode_code ?? null,
+        sales_location_code: salesLocationCode,
+      },
+      {
+        quantity,
+        serialNumbers: availableSerialNumbers.slice(0, quantity),
+        variantSize: null,
+        variantColor: null,
+        note: "Captured locally from the Flash ERP demo lane.",
+        message: this.isStandaloneDeployment()
+          ? `${product.product_name} was captured locally from the Flash ERP demo lane.`
+          : `${product.product_name} was captured locally from the Flash ERP demo lane and queued for upstream sync.`,
+        cashierCode: session.loginId,
+      },
+    );
+
+    return {
+      message: this.isStandaloneDeployment()
+        ? "A local sale was captured."
+        : "A local sale was captured and queued for enterprise sync.",
+      snapshot: result.snapshot,
+    };
+  }
+
+  private findCatalogLookup(query: string) {
+    const normalizedQuery = query.trim();
+
+    if (!normalizedQuery) {
+      return null;
+    }
+
+    const normalizedVariantLookup = normalizedQuery.toUpperCase();
+    const variantMatch = this.db
+      .prepare(
+        `SELECT
+          ${qualifiedProductSnapshotWithoutStockSelectSql},
+          variant.unit_price AS unit_price,
+          variant.quantity_on_hand AS quantity_on_hand,
+          variant.barcode AS barcode_code,
+          'MATRIX_VARIANT' AS barcode_type,
+          'productCode' AS matched_on,
+          variant.variant_code AS product_variant_code
+        FROM product_variant_snapshot AS variant
+        INNER JOIN product_snapshot AS product
+          ON product.product_code = variant.product_code
+        WHERE (
+            upper(variant.variant_code) = ?
+            OR upper(COALESCE(variant.sku, '')) = ?
+            OR variant.barcode = ?
+          )
+          AND variant.status = 'ACTIVE'
+          AND COALESCE(product.catalog_membership_active, 1) = 1
+        LIMIT 1`,
+      )
+      .get(
+        normalizedVariantLookup,
+        normalizedVariantLookup,
+        normalizedQuery,
+      ) as CatalogLookupRow | undefined;
+
+    if (variantMatch) {
+      const salesLocationCode = this.getDefaultSalesLocationCode();
+      return {
+        ...variantMatch,
+        unit_price: variantMatch.unit_price,
+        quantity_on_hand: variantMatch.quantity_on_hand,
+        sales_location_code: salesLocationCode,
+        sales_location_quantity: null,
+      };
+    }
+
+    const barcodeMatch = this.db
+      .prepare(
+        `SELECT
+          ${qualifiedProductSnapshotSelectSql},
+          barcode.barcode_code AS barcode_code,
+          barcode.barcode_type AS barcode_type,
+          'barcode' AS matched_on,
+          NULL AS product_variant_code
+        FROM barcode_snapshot AS barcode
+        INNER JOIN product_snapshot AS product
+          ON product.product_code = barcode.product_code
+        WHERE barcode.barcode_code = ?
+          AND COALESCE(product.catalog_membership_active, 1) = 1
+        LIMIT 1`,
+      )
+      .get(normalizedQuery) as CatalogLookupRow | undefined;
+
+    if (barcodeMatch) {
+      const salesLocationCode = this.getDefaultSalesLocationCode();
+
+      return {
+        ...barcodeMatch,
+        sales_location_code: salesLocationCode,
+        sales_location_quantity:
+          salesLocationCode !== null
+            ? this.getOptionalLocationQuantity(
+                salesLocationCode,
+                barcodeMatch.product_code,
+              )
+            : null,
+      };
+    }
+
+    const normalizedProductCode = normalizedQuery.toUpperCase();
+    const productMatch = this.db
+      .prepare(
+        `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? AND COALESCE(catalog_membership_active, 1) = 1 LIMIT 1`,
+      )
+      .get(normalizedProductCode) as ProductRow | undefined;
+
+    if (!productMatch) {
+      return null;
+    }
+
+    const representativeBarcode = this.getRepresentativeBarcode(
+      productMatch.product_code,
+    );
+    const salesLocationCode = this.getDefaultSalesLocationCode();
+
+    return {
+      ...productMatch,
+      barcode_code: representativeBarcode?.barcode_code ?? null,
+      barcode_type: representativeBarcode?.barcode_type ?? null,
+      matched_on: "productCode" as const,
+      product_variant_code: null,
+      sales_location_code: salesLocationCode,
+      sales_location_quantity:
+        salesLocationCode !== null
+          ? this.getOptionalLocationQuantity(
+              salesLocationCode,
+              productMatch.product_code,
+            )
+          : null,
+    };
+  }
+
+  private toCatalogLookupResult(
+    match: ReturnType<LocalStoreService["findCatalogLookup"]>,
+    query: string,
+  ) {
+    if (!match) {
+      return null;
+    }
+
+    return {
+      query,
+      matchedOn: match.matched_on,
+      productCode: match.product_code,
+      productVariantCode: match.product_variant_code,
+      productName: match.product_name,
+      productType: match.product_type,
+      primaryImageUrl: match.primary_image_url,
+      departmentCode: match.department_code,
+      departmentName: this.getDepartmentName(match.department_code),
+      categoryCode: match.category_code,
+      categoryName: this.getCategoryName(match.category_code),
+      subcategory: match.subcategory,
+      isSerialized: asBooleanFlag(match.is_serialized),
+      trackSize: asBooleanFlag(match.track_size),
+      trackColor: asBooleanFlag(match.track_color),
+      mustEnterPriceAtPos: asBooleanFlag(match.must_enter_price_at_pos),
+      availableSerialNumbers: asBooleanFlag(match.is_serialized)
+        ? this.listAvailableSaleSerialNumbers(
+            match.product_code,
+            match.sales_location_code ?? this.getDefaultSalesLocationCode(),
+          )
+        : [],
+      unitPrice: Number(asNumber(match.unit_price).toFixed(2)),
+      quantityOnHand: Number(asNumber(match.quantity_on_hand).toFixed(3)),
+      barcode: match.barcode_code,
+      barcodeType: match.barcode_type,
+      salesLocationCode: match.sales_location_code,
+      salesLocationQuantity:
+        match.sales_location_quantity !== null
+          ? Number(match.sales_location_quantity.toFixed(3))
+          : null,
+      matrixVariants: this.getMatrixVariantsForProduct(match.product_code),
+    } satisfies StoreCatalogLookupResult;
+  }
+
+  private toCatalogMatrixVariant(
+    row: ProductVariantSnapshotRow,
+  ): StoreCatalogMatrixVariant {
+    return {
+      variantCode: row.variant_code,
+      sku: row.sku,
+      displayName: row.display_name,
+      unitPrice: Number(asNumber(row.unit_price).toFixed(2)),
+      quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+      barcode: row.barcode,
+      status: row.status,
+      attributes: readMatrixVariantAttributes(row.attributes_json),
+    };
+  }
+
+  private getMatrixVariantsForProduct(productCode: string) {
+    return (
+      this.db
+        .prepare(
+          "SELECT id, product_code, variant_code, sku, display_name, unit_price, quantity_on_hand, barcode, status, attributes_json, updated_at FROM product_variant_snapshot WHERE product_code = ? AND status = 'ACTIVE' ORDER BY variant_code ASC",
+        )
+        .all(productCode) as ProductVariantSnapshotRow[]
+    ).map((row) => this.toCatalogMatrixVariant(row));
+  }
+
+  private getMatrixVariantByCode(productCode: string, variantCode: string) {
+    const row = this.db
+      .prepare(
+        "SELECT id, product_code, variant_code, sku, display_name, unit_price, quantity_on_hand, barcode, status, attributes_json, updated_at FROM product_variant_snapshot WHERE product_code = ? AND variant_code = ? LIMIT 1",
+      )
+      .get(productCode, variantCode) as ProductVariantSnapshotRow | undefined;
+
+    return row ?? null;
+  }
+
+  private getDepartmentName(departmentCode: string | null) {
+    if (!departmentCode) {
+      return null;
+    }
+
+    return (
+      (
+        this.db
+          .prepare(
+            "SELECT department_name FROM product_department_snapshot WHERE department_code = ? LIMIT 1",
+          )
+          .get(departmentCode) as { department_name: string } | undefined
+      )?.department_name ?? null
+    );
+  }
+
+  private getCategoryName(categoryCode: string | null) {
+    if (!categoryCode) {
+      return null;
+    }
+
+    return (
+      (
+        this.db
+          .prepare(
+            "SELECT category_name FROM product_category_snapshot WHERE category_code = ? LIMIT 1",
+          )
+          .get(categoryCode) as { category_name: string } | undefined
+      )?.category_name ?? null
+    );
+  }
+
+  private listAvailableSaleSerialNumbers(
+    productCode: string,
+    salesLocationCode: string | null,
+    currentLineId?: string | null,
+  ) {
+    const rows = (
+      salesLocationCode
+        ? this.db
+            .prepare(
+              "SELECT id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at FROM serial_registry WHERE product_code = ? AND status = 'AVAILABLE' AND (inventory_location_code = ? OR inventory_location_code IS NULL) ORDER BY serial_number ASC",
+            )
+            .all(productCode, salesLocationCode)
+        : this.db
+            .prepare(
+              "SELECT id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at FROM serial_registry WHERE product_code = ? AND status = 'AVAILABLE' ORDER BY serial_number ASC",
+            )
+            .all(productCode)
+    ) as SerialRegistryRow[];
+    const reservedKeys = this.getReservedSaleSerialKeys(
+      productCode,
+      currentLineId,
+    );
+
+    return normalizeSerialNumbers(rows.map((row) => row.serial_number)).filter(
+      (serialNumber) => !reservedKeys.has(serialNumber.toUpperCase()),
+    );
+  }
+
+  private listLocallyReturnableSerialNumbers(
+    productCode: string,
+    currentLineId?: string | null,
+  ) {
+    const rows = this.db
+      .prepare(
+        "SELECT id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at FROM serial_registry WHERE product_code = ? AND status = 'SOLD' ORDER BY serial_number ASC",
+      )
+      .all(productCode) as SerialRegistryRow[];
+    const reservedKeys = this.getReservedManualReturnSerialKeys(
+      productCode,
+      currentLineId,
+    );
+
+    return normalizeSerialNumbers(rows.map((row) => row.serial_number)).filter(
+      (serialNumber) => !reservedKeys.has(serialNumber.toUpperCase()),
+    );
+  }
+
+  private getReservedSaleSerialKeys(
+    productCode: string,
+    currentLineId?: string | null,
+  ) {
+    const rows = this.db
+      .prepare(
+        `SELECT line.id AS id, line.serial_numbers_json AS serial_numbers_json
+        FROM pos_transaction_line AS line
+        INNER JOIN pos_transaction AS transaction_header
+          ON transaction_header.id = line.pos_transaction_id
+        WHERE transaction_header.status = 'PARKED'
+          AND line.product_code_snapshot = ?
+          AND line.line_intent = 'SALE'
+        ORDER BY line.id ASC`,
+      )
+      .all(productCode) as Array<{
+      id: string;
+      serial_numbers_json: string | null;
+    }>;
+    const reservedKeys = new Set<string>();
+
+    for (const row of rows) {
+      if (currentLineId && row.id === currentLineId) {
+        continue;
+      }
+
+      for (const serialNumber of readSerializedLineNumbers(
+        row.serial_numbers_json,
+      )) {
+        reservedKeys.add(serialNumber.toUpperCase());
+      }
+    }
+
+    return reservedKeys;
+  }
+
+  private getReservedManualReturnSerialKeys(
+    productCode: string,
+    currentLineId?: string | null,
+  ) {
+    const rows = this.db
+      .prepare(
+        `SELECT line.id AS id, line.serial_numbers_json AS serial_numbers_json
+        FROM pos_transaction_line AS line
+        INNER JOIN pos_transaction AS transaction_header
+          ON transaction_header.id = line.pos_transaction_id
+        WHERE transaction_header.status = 'PARKED'
+          AND line.product_code_snapshot = ?
+          AND line.line_intent = 'RETURN'
+          AND line.source_line_id IS NULL
+        ORDER BY line.id ASC`,
+      )
+      .all(productCode) as Array<{
+      id: string;
+      serial_numbers_json: string | null;
+    }>;
+    const reservedKeys = new Set<string>();
+
+    for (const row of rows) {
+      if (currentLineId && row.id === currentLineId) {
+        continue;
+      }
+
+      for (const serialNumber of readSerializedLineNumbers(
+        row.serial_numbers_json,
+      )) {
+        reservedKeys.add(serialNumber.toUpperCase());
+      }
+    }
+
+    return reservedKeys;
+  }
+
+  private listSerialRegistryEntries(productCode: string) {
+    return this.db
+      .prepare(
+        "SELECT id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at FROM serial_registry WHERE product_code = ? ORDER BY updated_at DESC, serial_number ASC",
+      )
+      .all(productCode) as SerialRegistryRow[];
+  }
+
+  private getSerialRegistryEntry(productCode: string, serialNumber: string) {
+    return this.db
+      .prepare(
+        "SELECT id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at FROM serial_registry WHERE product_code = ? AND UPPER(serial_number) = ? LIMIT 1",
+      )
+      .get(productCode, serialNumber.toUpperCase()) as
+      | SerialRegistryRow
+      | undefined;
+  }
+
+  private listAvailableRegistrySerialNumbers(
+    productCode: string,
+    locationCode?: string | null,
+  ) {
+    const rows =
+      typeof locationCode === "string"
+        ? (this.db
+            .prepare(
+              "SELECT id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at FROM serial_registry WHERE product_code = ? AND status = 'AVAILABLE' AND inventory_location_code = ? ORDER BY serial_number ASC",
+            )
+            .all(productCode, locationCode) as SerialRegistryRow[])
+        : this.listSerialRegistryEntries(productCode).filter(
+            (row) => row.status === "AVAILABLE",
+          );
+
+    return normalizeSerialNumbers(rows.map((row) => row.serial_number));
+  }
+
+  private getReservedInventoryTaskSerialKeys(productCode: string) {
+    return new Set<string>([
+      ...this.getReservedSaleSerialKeys(productCode),
+      ...this.getReservedManualReturnSerialKeys(productCode),
+    ]);
+  }
+
+  private ensureInventoryTaskSerialNumbersNotReserved(
+    productCode: string,
+    productName: string,
+    serialNumbers: string[],
+  ) {
+    const reservedKeys = this.getReservedInventoryTaskSerialKeys(productCode);
+    const conflictedSerials = normalizeSerialNumbers(serialNumbers).filter(
+      (serialNumber) => reservedKeys.has(serialNumber.toUpperCase()),
+    );
+
+    if (conflictedSerials.length > 0) {
+      throw new Error(
+        `Flash ERP cannot update reserved serial number(s) ${conflictedSerials.join(", ")} for ${productName} while parked baskets still reference them.`,
+      );
+    }
+  }
+
+  private applyInventoryTaskSerialRegistryChange(input: {
+    productCode: string;
+    serialNumbers: string[];
+    inventoryLocationCode: string | null;
+    status: SerialRegistryStatus;
+    sourceReferenceId: string;
+    sourceReferenceLabel: string | null;
+    updatedAt: string;
+  }) {
+    for (const serialNumber of normalizeSerialNumbers(input.serialNumbers)) {
+      this.upsertSerialRegistryEntry({
+        productCode: input.productCode,
+        serialNumber,
+        inventoryLocationCode: input.inventoryLocationCode,
+        status: input.status,
+        sourceTransactionId: input.sourceReferenceId,
+        sourceTransactionNo: input.sourceReferenceLabel,
+        updatedAt: input.updatedAt,
+      });
+    }
+  }
+
+  private applyLocalCountVariance(input: {
+    referenceId: string;
+    referenceLabel: string | null;
+    productCode: string;
+    locationCode: string;
+    countedQuantity: number;
+    countedSerialNumbers: string[];
+    updatedAt: string;
+  }) {
+    const product = this.db
+      .prepare(
+        "SELECT id, product_code, product_name, unit_price, quantity_on_hand, is_serialized FROM product_snapshot WHERE product_code = ? LIMIT 1",
+      )
+      .get(input.productCode) as ProductRow | undefined;
+
+    if (!product) {
+      throw new Error(
+        `Flash ERP could not find local product "${input.productCode}" while committing this stock count.`,
+      );
+    }
+
+    const normalizedCountedQuantity = Number(input.countedQuantity.toFixed(3));
+    const normalizedCountedSerialNumbers = normalizeSerialNumbers(
+      input.countedSerialNumbers,
+    );
+
+    if (asBooleanFlag(product.is_serialized)) {
+      const countedSerialNumbers = validateSerializedLineInput({
+        isSerialized: true,
+        productName: product.product_name,
+        quantity: normalizedCountedQuantity,
+        serialNumbers: normalizedCountedSerialNumbers,
+      });
+      const currentAvailableSerialNumbers =
+        this.listAvailableRegistrySerialNumbers(
+          input.productCode,
+          input.locationCode,
+        );
+      const currentAvailableKeys = new Set(
+        currentAvailableSerialNumbers.map((serialNumber) =>
+          serialNumber.toUpperCase(),
+        ),
+      );
+      const countedKeys = new Set(
+        countedSerialNumbers.map((serialNumber) => serialNumber.toUpperCase()),
+      );
+      const serialNumbersToRemove = currentAvailableSerialNumbers.filter(
+        (serialNumber) => !countedKeys.has(serialNumber.toUpperCase()),
+      );
+      const serialNumbersToAdd = countedSerialNumbers.filter(
+        (serialNumber) => !currentAvailableKeys.has(serialNumber.toUpperCase()),
+      );
+
+      this.ensureInventoryTaskSerialNumbersNotReserved(
+        input.productCode,
+        product.product_name,
+        [...serialNumbersToRemove, ...serialNumbersToAdd],
+      );
+
+      const conflictingLocationSerials = serialNumbersToAdd.filter(
+        (serialNumber) => {
+          const row = this.getSerialRegistryEntry(
+            input.productCode,
+            serialNumber,
+          );
+
+          return (
+            row?.status === "AVAILABLE" &&
+            row.inventory_location_code !== null &&
+            row.inventory_location_code !== input.locationCode
+          );
+        },
+      );
+
+      if (conflictingLocationSerials.length > 0) {
+        throw new Error(
+          `Flash ERP cannot count serialized unit(s) ${conflictingLocationSerials.join(", ")} into ${input.locationCode} because they are currently available in another local location. Queue a transfer instead.`,
+        );
+      }
+
+      if (serialNumbersToRemove.length > 0) {
+        this.applyInventoryTaskSerialRegistryChange({
+          productCode: input.productCode,
+          serialNumbers: serialNumbersToRemove,
+          inventoryLocationCode: input.locationCode,
+          status: "ADJUSTED_OUT",
+          sourceReferenceId: input.referenceId,
+          sourceReferenceLabel: input.referenceLabel,
+          updatedAt: input.updatedAt,
+        });
+      }
+
+      if (serialNumbersToAdd.length > 0) {
+        this.applyInventoryTaskSerialRegistryChange({
+          productCode: input.productCode,
+          serialNumbers: serialNumbersToAdd,
+          inventoryLocationCode: input.locationCode,
+          status: "AVAILABLE",
+          sourceReferenceId: input.referenceId,
+          sourceReferenceLabel: input.referenceLabel,
+          updatedAt: input.updatedAt,
+        });
+      }
+    } else if (normalizedCountedSerialNumbers.length > 0) {
+      throw new Error(
+        `${product.product_name} is not serialized, so this stock count should not include serial numbers.`,
+      );
+    }
+
+    const previousLocationQuantity = this.getLocationQuantity(
+      input.locationCode,
+      input.productCode,
+    );
+    const varianceQuantity = Number(
+      (normalizedCountedQuantity - previousLocationQuantity).toFixed(3),
+    );
+
+    this.db
+      .prepare(
+        "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + ?, updated_at = ? WHERE id = ?",
+      )
+      .run(varianceQuantity, input.updatedAt, product.id);
+    this.setLocationBalanceQuantity(
+      input.locationCode,
+      input.productCode,
+      normalizedCountedQuantity,
+      input.updatedAt,
+    );
+
+    return {
+      product,
+      previousLocationQuantity,
+      countedQuantity: normalizedCountedQuantity,
+      varianceQuantity,
+      countedSerialNumbers: normalizedCountedSerialNumbers,
+    };
+  }
+
+  private getBasketLineAvailableSerialNumbers(
+    header: BasketHeaderRow,
+    line: BasketLineRow,
+  ) {
+    const product = this.requireBasketProductLookup(line.product_code_snapshot);
+
+    if (!asBooleanFlag(product.is_serialized)) {
+      return [] as string[];
+    }
+
+    if (line.source_line_id && header.source_transaction_id) {
+      const sourceHeader = this.getReceiptHeaderById(
+        header.source_transaction_id,
+      );
+
+      return sourceHeader
+        ? this.getReceiptLineAvailableSerialNumbers(
+            sourceHeader,
+            line.source_line_id,
+            line.id,
+          )
+        : [];
+    }
+
+    if (
+      getLineIntentForBasket(header.transaction_type, line.line_intent) ===
+      "RETURN"
+    ) {
+      return this.listLocallyReturnableSerialNumbers(
+        line.product_code_snapshot,
+        line.id,
+      );
+    }
+
+    const salesLocationCode = this.isOpenSalesOrderBasket(header.id)
+      ? this.getDefaultSalesOrderLocationCode()
+      : product.sales_location_code ?? this.getDefaultSalesLocationCode();
+
+    return this.listAvailableSaleSerialNumbers(
+      line.product_code_snapshot,
+      salesLocationCode,
+      line.id,
+    );
+  }
+
+  private upsertSerialRegistryEntry(input: {
+    productCode: string;
+    serialNumber: string;
+    inventoryLocationCode: string | null;
+    status: SerialRegistryStatus;
+    sourceTransactionId: string | null;
+    sourceTransactionNo: string | null;
+    updatedAt: string;
+  }) {
+    const existingEntry = this.db
+      .prepare(
+        "SELECT id FROM serial_registry WHERE product_code = ? AND UPPER(serial_number) = ? LIMIT 1",
+      )
+      .get(input.productCode, input.serialNumber.toUpperCase()) as
+      | { id: string }
+      | undefined;
+
+    if (existingEntry) {
+      this.db
+        .prepare(
+          "UPDATE serial_registry SET serial_number = ?, inventory_location_code = ?, status = ?, source_transaction_id = ?, source_transaction_no = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          input.serialNumber,
+          input.inventoryLocationCode,
+          input.status,
+          input.sourceTransactionId,
+          input.sourceTransactionNo,
+          input.updatedAt,
+          existingEntry.id,
+        );
+      return;
+    }
+
+    this.db
+      .prepare(
+        "INSERT INTO serial_registry (id, product_code, serial_number, inventory_location_code, status, source_transaction_id, source_transaction_no, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        randomUUID(),
+        input.productCode,
+        input.serialNumber,
+        input.inventoryLocationCode,
+        input.status,
+        input.sourceTransactionId,
+        input.sourceTransactionNo,
+        input.updatedAt,
+      );
+  }
+
+  private replaceSerializedProductSnapshot(input: {
+    productCode: string;
+    serialItems: EnterpriseInventorySerialSnapshotPublishedPayload["serialItems"];
+    updatedAt: string;
+  }) {
+    const product = this.db
+      .prepare("SELECT id FROM product_snapshot WHERE product_code = ? LIMIT 1")
+      .get(input.productCode) as { id: string } | undefined;
+
+    if (!product) {
+      throw new Error(
+        `Flash ERP could not apply serialized snapshot data for unknown product "${input.productCode}" locally.`,
+      );
+    }
+
+    this.db
+      .prepare("DELETE FROM serial_registry WHERE product_code = ?")
+      .run(input.productCode);
+
+    const locationQuantities = new Map<string, number>();
+    let availableQuantity = 0;
+
+    for (const serialItem of input.serialItems) {
+      this.upsertSerialRegistryEntry({
+        productCode: input.productCode,
+        serialNumber: serialItem.serialNumber,
+        inventoryLocationCode: serialItem.locationCode,
+        status: serialItem.status,
+        sourceTransactionId: serialItem.sourceReferenceId,
+        sourceTransactionNo: serialItem.sourceReferenceLabel,
+        updatedAt:
+          typeof serialItem.updatedAt === "string" &&
+          serialItem.updatedAt.trim().length > 0
+            ? serialItem.updatedAt
+            : input.updatedAt,
+      });
+
+      if (serialItem.status !== "AVAILABLE") {
+        continue;
+      }
+
+      availableQuantity += 1;
+
+      if (serialItem.locationCode) {
+        locationQuantities.set(
+          serialItem.locationCode,
+          (locationQuantities.get(serialItem.locationCode) ?? 0) + 1,
+        );
+      }
+    }
+
+    this.db
+      .prepare(
+        "UPDATE product_snapshot SET quantity_on_hand = ?, updated_at = ? WHERE product_code = ?",
+      )
+      .run(availableQuantity, input.updatedAt, input.productCode);
+
+    const existingLocationRows = this.db
+      .prepare(
+        "SELECT location_code FROM inventory_location_balance WHERE product_code = ?",
+      )
+      .all(input.productCode) as Array<{
+      location_code: string;
+    }>;
+    const touchedLocationCodes = new Set<string>([
+      ...existingLocationRows.map((row) => row.location_code),
+      ...locationQuantities.keys(),
+    ]);
+
+    for (const locationCode of touchedLocationCodes) {
+      this.setLocationBalanceQuantity(
+        locationCode,
+        input.productCode,
+        locationQuantities.get(locationCode) ?? 0,
+        input.updatedAt,
+      );
+    }
+  }
+
+  private applyPublishedInventoryLedgerSerials(input: {
+    productCode: string;
+    serialNumbers: string[];
+    movementType: StoreInventoryLedgerRecordedPayload["movementType"];
+    inventoryLocationCode: string | null;
+    referenceId: string;
+    referenceLabel: string | null;
+    updatedAt: string;
+  }) {
+    const nextStatus: SerialRegistryStatus =
+      input.movementType === "SALE"
+        ? "SOLD"
+        : input.movementType === "STOCK_TRANSFER_OUT"
+          ? "IN_TRANSIT"
+          : input.movementType === "ADJUSTMENT_NEGATIVE" ||
+              input.movementType === "RETURN_TO_VENDOR"
+            ? "ADJUSTED_OUT"
+            : "AVAILABLE";
+
+    for (const serialNumber of normalizeSerialNumbers(input.serialNumbers)) {
+      this.upsertSerialRegistryEntry({
+        productCode: input.productCode,
+        serialNumber,
+        inventoryLocationCode: input.inventoryLocationCode,
+        status: nextStatus,
+        sourceTransactionId: input.referenceId,
+        sourceTransactionNo: input.referenceLabel,
+        updatedAt: input.updatedAt,
+      });
+    }
+  }
+
+  private applySerialRegistryChangeForLine(input: {
+    productCode: string;
+    serialNumbers: string[];
+    inventoryLocationCode: string | null;
+    lineIntent: SyncPosLineIntent;
+    sourceTransactionId: string;
+    sourceTransactionNo: string;
+    updatedAt: string;
+  }) {
+    const nextStatus: SerialRegistryStatus =
+      input.lineIntent === "RETURN" ? "AVAILABLE" : "SOLD";
+
+    for (const serialNumber of normalizeSerialNumbers(input.serialNumbers)) {
+      this.upsertSerialRegistryEntry({
+        productCode: input.productCode,
+        serialNumber,
+        inventoryLocationCode: input.inventoryLocationCode,
+        status: nextStatus,
+        sourceTransactionId: input.sourceTransactionId,
+        sourceTransactionNo: input.sourceTransactionNo,
+        updatedAt: input.updatedAt,
+      });
+    }
+  }
+
+  private isCorrectionEligibleReceiptTransactionType(
+    transactionType: BasketTransactionType,
+  ) {
+    return transactionType === "SALE" || transactionType === "EXCHANGE";
+  }
+
+  private matchesReceiptSearchTransactionFilter(
+    transactionType: BasketTransactionType,
+    transactionFilter: NonNullable<
+      StoreReceiptSearchRequest["transactionFilter"]
+    >,
+  ) {
+    if (transactionFilter === "ALL") {
+      return true;
+    }
+
+    if (transactionFilter === "CORRECTABLE") {
+      return this.isCorrectionEligibleReceiptTransactionType(transactionType);
+    }
+
+    return transactionType === transactionFilter;
+  }
+
+  private getReceiptSearchHeaders(completedCutoffIso: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          receipt_txn.id AS id,
+          receipt_txn.transaction_no AS transaction_no,
+          receipt_txn.source_transaction_no AS source_transaction_no,
+          receipt_txn.transaction_type AS transaction_type,
+          receipt_txn.status AS status,
+          receipt_txn.total_amount AS total_amount,
+          receipt_txn.completed_at AS completed_at,
+          receipt_txn.updated_at AS updated_at,
+          receipt_txn.notes AS notes,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          COALESCE(receipt_txn.cashier_code, shift.cashier_code) AS cashier_code,
+          shift.shift_no AS shift_no
+        FROM pos_transaction AS receipt_txn
+        LEFT JOIN customer
+          ON customer.id = receipt_txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = receipt_txn.shift_id
+        WHERE receipt_txn.status = 'COMPLETED'
+          AND receipt_txn.transaction_type IN ('SALE', 'RETURN', 'EXCHANGE')
+          AND COALESCE(receipt_txn.completed_at, receipt_txn.updated_at) >= ?
+        ORDER BY COALESCE(receipt_txn.completed_at, receipt_txn.updated_at) DESC, receipt_txn.transaction_no DESC`,
+      )
+      .all(completedCutoffIso) as ReceiptSearchHeaderRow[];
+  }
+
+  private getReceiptSearchLineRowsByTransaction(transactionIds: string[]) {
+    if (transactionIds.length === 0) {
+      return new Map<string, ReceiptSearchLineRow[]>();
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+          line.pos_transaction_id AS pos_transaction_id,
+          line.product_code_snapshot AS product_code_snapshot,
+          line.product_name_snapshot AS product_name_snapshot,
+          (
+            SELECT barcode.barcode_code
+            FROM barcode_snapshot AS barcode
+            WHERE barcode.product_code = line.product_code_snapshot
+            ORDER BY barcode.updated_at DESC, barcode.barcode_code ASC
+            LIMIT 1
+          ) AS barcode_code
+        FROM pos_transaction_line AS line
+        WHERE line.pos_transaction_id IN (${transactionIds.map(() => "?").join(", ")})
+        ORDER BY line.pos_transaction_id ASC, line.product_name_snapshot ASC, line.id ASC`,
+      )
+      .all(...transactionIds) as ReceiptSearchLineRow[];
+
+    const rowsByTransactionId = new Map<string, ReceiptSearchLineRow[]>();
+
+    for (const row of rows) {
+      const currentRows = rowsByTransactionId.get(row.pos_transaction_id) ?? [];
+      currentRows.push(row);
+      rowsByTransactionId.set(row.pos_transaction_id, currentRows);
+    }
+
+    return rowsByTransactionId;
+  }
+
+  private getAccountPaymentReceiptSearchRows(occurredCutoffIso: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          entry.id AS id,
+          entry.entry_no AS entry_no,
+          entry.amount AS amount,
+          entry.occurred_at AS occurred_at,
+          entry.note AS note,
+          entry.customer_no AS customer_no,
+          entry.customer_name AS customer_name,
+          entry.cashier_code AS cashier_code,
+          entry.shift_no AS shift_no,
+          entry.payment_method AS payment_method,
+          entry.tender_method_name AS tender_method_name,
+          entry.reference AS reference
+        FROM customer_account_entry AS entry
+        WHERE entry.entry_type = 'ACCOUNT_PAYMENT'
+          AND entry.occurred_at >= ?
+        ORDER BY entry.occurred_at DESC, entry.entry_no DESC`,
+      )
+      .all(occurredCutoffIso) as AccountPaymentReceiptSearchRow[];
+  }
+
+  private getSalesOrderReceiptSearchRows(completedCutoffIso: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          sales_order.id AS id,
+          sales_order.order_no AS order_no,
+          sales_order.source_transaction_id AS source_transaction_id,
+          sales_order.source_transaction_no AS source_transaction_no,
+          sales_order.customer_id AS customer_id,
+          sales_order.customer_no AS customer_no,
+          sales_order.customer_name AS customer_name,
+          sales_order.status AS status,
+          sales_order.total_amount AS total_amount,
+          sales_order.deposit_amount AS deposit_amount,
+          sales_order.balance_amount AS balance_amount,
+          sales_order.deposit_tender_method_code AS deposit_tender_method_code,
+          sales_order.deposit_tender_method_name AS deposit_tender_method_name,
+          sales_order.deposit_payment_method AS deposit_payment_method,
+          sales_order.deposit_reference AS deposit_reference,
+          sales_order.deposit_paid_at AS deposit_paid_at,
+          COUNT(line.id) AS line_count,
+          COALESCE(SUM(line.quantity), 0) AS item_count,
+          sales_order.operator_name AS operator_name,
+          sales_order.note AS note,
+          sales_order.fulfilled_transaction_id AS fulfilled_transaction_id,
+          sales_order.fulfilled_transaction_no AS fulfilled_transaction_no,
+          sales_order.synced_at AS synced_at,
+          sales_order.created_at AS created_at,
+          sales_order.fulfilled_at AS fulfilled_at,
+          sales_order.cancelled_at AS cancelled_at,
+          sales_order.updated_at AS updated_at
+        FROM sales_order
+        LEFT JOIN pos_transaction_line AS line
+          ON line.pos_transaction_id = sales_order.source_transaction_id
+        WHERE COALESCE(sales_order.fulfilled_at, sales_order.created_at) >= ?
+        GROUP BY
+          sales_order.id,
+          sales_order.order_no,
+          sales_order.source_transaction_id,
+          sales_order.source_transaction_no,
+          sales_order.customer_id,
+          sales_order.customer_no,
+          sales_order.customer_name,
+          sales_order.status,
+          sales_order.total_amount,
+          sales_order.deposit_amount,
+          sales_order.balance_amount,
+          sales_order.deposit_tender_method_code,
+          sales_order.deposit_tender_method_name,
+          sales_order.deposit_payment_method,
+          sales_order.deposit_reference,
+          sales_order.deposit_paid_at,
+          sales_order.operator_name,
+          sales_order.note,
+          sales_order.fulfilled_transaction_id,
+          sales_order.fulfilled_transaction_no,
+          sales_order.synced_at,
+          sales_order.created_at,
+          sales_order.fulfilled_at,
+          sales_order.cancelled_at,
+          sales_order.updated_at
+        ORDER BY COALESCE(sales_order.fulfilled_at, sales_order.created_at) DESC, sales_order.order_no DESC`,
+      )
+      .all(completedCutoffIso) as SalesOrderRow[];
+  }
+
+  private rankReceiptSearchResult(
+    header: ReceiptSearchHeaderRow,
+    lineRows: ReceiptSearchLineRow[],
+    normalizedQuery: string,
+  ) {
+    if (!normalizedQuery) {
+      return 5;
+    }
+
+    const exactHeaderHaystacks = [
+      header.transaction_no,
+      header.source_transaction_no,
+      header.customer_no,
+      header.customer_name,
+      header.cashier_code,
+      header.shift_no,
+    ];
+
+    if (
+      exactHeaderHaystacks.some(
+        (value) => value?.toUpperCase() === normalizedQuery,
+      )
+    ) {
+      return 0;
+    }
+
+    if (
+      lineRows.some(
+        (line) =>
+          line.product_code_snapshot.toUpperCase() === normalizedQuery ||
+          line.product_name_snapshot.toUpperCase() === normalizedQuery ||
+          (line.barcode_code?.toUpperCase() ?? "") === normalizedQuery,
+      )
+    ) {
+      return 1;
+    }
+
+    const headerHaystacks = [...exactHeaderHaystacks, header.notes];
+
+    if (
+      headerHaystacks.some((value) =>
+        value?.toUpperCase().startsWith(normalizedQuery),
+      )
+    ) {
+      return 2;
+    }
+
+    if (
+      lineRows.some(
+        (line) =>
+          line.product_code_snapshot
+            .toUpperCase()
+            .startsWith(normalizedQuery) ||
+          line.product_name_snapshot
+            .toUpperCase()
+            .startsWith(normalizedQuery) ||
+          (line.barcode_code?.toUpperCase() ?? "").startsWith(normalizedQuery),
+      )
+    ) {
+      return 3;
+    }
+
+    if (
+      headerHaystacks.some((value) =>
+        value?.toUpperCase().includes(normalizedQuery),
+      ) ||
+      lineRows.some(
+        (line) =>
+          line.product_code_snapshot.toUpperCase().includes(normalizedQuery) ||
+          line.product_name_snapshot.toUpperCase().includes(normalizedQuery) ||
+          (line.barcode_code?.toUpperCase() ?? "").includes(normalizedQuery),
+      )
+    ) {
+      return 4;
+    }
+
+    return Number.POSITIVE_INFINITY;
+  }
+
+  private rankSalesOrderReceiptSearchResult(
+    order: SalesOrderRow,
+    lineRows: ReceiptSearchLineRow[],
+    normalizedQuery: string,
+  ) {
+    if (!normalizedQuery) {
+      return 5;
+    }
+
+    const exactHeaderHaystacks = [
+      order.order_no,
+      order.source_transaction_no,
+      order.customer_no,
+      order.customer_name,
+      order.status,
+      order.operator_name,
+    ];
+
+    if (
+      exactHeaderHaystacks.some(
+        (value) => value?.toUpperCase() === normalizedQuery,
+      )
+    ) {
+      return 0;
+    }
+
+    if (
+      lineRows.some(
+        (line) =>
+          line.product_code_snapshot.toUpperCase() === normalizedQuery ||
+          line.product_name_snapshot.toUpperCase() === normalizedQuery ||
+          (line.barcode_code?.toUpperCase() ?? "") === normalizedQuery,
+      )
+    ) {
+      return 1;
+    }
+
+    const headerHaystacks = [...exactHeaderHaystacks, order.note];
+
+    if (
+      headerHaystacks.some((value) =>
+        value?.toUpperCase().startsWith(normalizedQuery),
+      )
+    ) {
+      return 2;
+    }
+
+    if (
+      lineRows.some(
+        (line) =>
+          line.product_code_snapshot
+            .toUpperCase()
+            .startsWith(normalizedQuery) ||
+          line.product_name_snapshot
+            .toUpperCase()
+            .startsWith(normalizedQuery) ||
+          (line.barcode_code?.toUpperCase() ?? "").startsWith(normalizedQuery),
+      )
+    ) {
+      return 3;
+    }
+
+    if (
+      headerHaystacks.some((value) =>
+        value?.toUpperCase().includes(normalizedQuery),
+      ) ||
+      lineRows.some(
+        (line) =>
+          line.product_code_snapshot.toUpperCase().includes(normalizedQuery) ||
+          line.product_name_snapshot.toUpperCase().includes(normalizedQuery) ||
+          (line.barcode_code?.toUpperCase() ?? "").includes(normalizedQuery),
+      )
+    ) {
+      return 4;
+    }
+
+    return Number.POSITIVE_INFINITY;
+  }
+
+  private rankAccountPaymentReceiptSearchResult(
+    row: AccountPaymentReceiptSearchRow,
+    normalizedQuery: string,
+  ) {
+    if (!normalizedQuery) {
+      return 5;
+    }
+
+    const exactHaystacks = [
+      row.entry_no,
+      row.customer_no,
+      row.customer_name,
+      row.cashier_code,
+      row.shift_no,
+      row.reference,
+      row.tender_method_name,
+      row.payment_method,
+    ];
+
+    if (
+      exactHaystacks.some((value) => value?.toUpperCase() === normalizedQuery)
+    ) {
+      return 0;
+    }
+
+    const fuzzyHaystacks = [...exactHaystacks, row.note];
+
+    if (
+      fuzzyHaystacks.some((value) =>
+        value?.toUpperCase().startsWith(normalizedQuery),
+      )
+    ) {
+      return 1;
+    }
+
+    if (
+      fuzzyHaystacks.some((value) =>
+        value?.toUpperCase().includes(normalizedQuery),
+      )
+    ) {
+      return 2;
+    }
+
+    return Number.POSITIVE_INFINITY;
+  }
+
+  private getReceiptHeaderByTransactionNo(transactionNo: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          receipt_txn.id AS id,
+          receipt_txn.transaction_no AS transaction_no,
+          receipt_txn.customer_id AS customer_id,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          receipt_txn.transaction_type AS transaction_type,
+          receipt_txn.status AS status,
+          receipt_txn.total_amount AS total_amount,
+          receipt_txn.header_reference AS header_reference,
+          receipt_txn.additional_details AS additional_details,
+          receipt_txn.completed_at AS completed_at
+        FROM pos_transaction AS receipt_txn
+        LEFT JOIN customer
+          ON customer.id = receipt_txn.customer_id
+        WHERE UPPER(receipt_txn.transaction_no) = ?
+          AND receipt_txn.status = 'COMPLETED'
+          AND receipt_txn.transaction_type IN ('SALE', 'EXCHANGE')
+        LIMIT 1`,
+      )
+      .get(transactionNo) as ReceiptLookupHeaderRow | undefined;
+  }
+
+  private getReceiptHeaderById(transactionId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          receipt_txn.id AS id,
+          receipt_txn.transaction_no AS transaction_no,
+          receipt_txn.customer_id AS customer_id,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          receipt_txn.transaction_type AS transaction_type,
+          receipt_txn.status AS status,
+          receipt_txn.total_amount AS total_amount,
+          receipt_txn.header_reference AS header_reference,
+          receipt_txn.additional_details AS additional_details,
+          receipt_txn.completed_at AS completed_at
+        FROM pos_transaction AS receipt_txn
+        LEFT JOIN customer
+          ON customer.id = receipt_txn.customer_id
+        WHERE receipt_txn.id = ?
+          AND receipt_txn.status = 'COMPLETED'
+          AND receipt_txn.transaction_type IN ('SALE', 'EXCHANGE')
+        LIMIT 1`,
+      )
+      .get(transactionId) as ReceiptLookupHeaderRow | undefined;
+  }
+
+  private getReceiptPrintHeaderByTransactionNo(transactionNo: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          receipt_txn.id AS id,
+          receipt_txn.transaction_no AS transaction_no,
+          receipt_txn.source_transaction_no AS source_transaction_no,
+          receipt_txn.transaction_type AS transaction_type,
+          receipt_txn.status AS status,
+          receipt_txn.subtotal_amount AS subtotal_amount,
+          receipt_txn.discount_amount AS discount_amount,
+          receipt_txn.loyalty_redemption_points AS loyalty_redemption_points,
+          receipt_txn.loyalty_redemption_amount AS loyalty_redemption_amount,
+          receipt_txn.tax_amount AS tax_amount,
+          receipt_txn.total_amount AS total_amount,
+          receipt_txn.paid_amount AS paid_amount,
+          receipt_txn.change_amount AS change_amount,
+          receipt_txn.notes AS notes,
+          receipt_txn.header_reference AS header_reference,
+          receipt_txn.additional_details AS additional_details,
+          receipt_txn.completed_at AS completed_at,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          shift.shift_no AS shift_no,
+          COALESCE(receipt_txn.cashier_code, shift.cashier_code) AS cashier_code
+        FROM pos_transaction AS receipt_txn
+        LEFT JOIN customer
+          ON customer.id = receipt_txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = receipt_txn.shift_id
+        WHERE UPPER(receipt_txn.transaction_no) = ?
+          AND receipt_txn.status = 'COMPLETED'
+          AND receipt_txn.transaction_type IN ('SALE', 'RETURN', 'EXCHANGE')
+        LIMIT 1`,
+      )
+      .get(transactionNo) as ReceiptPrintHeaderRow | undefined;
+  }
+
+  private getReceiptPrintLineRows(transactionId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          line_intent,
+          source_line_id,
+          applied_promotion_code,
+          applied_promotion_name,
+          product_code_snapshot,
+          product_name_snapshot,
+          variant_size,
+          variant_color,
+          line_note,
+          serial_numbers_json,
+          quantity,
+          unit_price,
+          discount_amount,
+          tax_amount,
+          line_total
+        FROM pos_transaction_line
+        WHERE pos_transaction_id = ?
+        ORDER BY line_intent DESC, product_name_snapshot ASC, id ASC`,
+      )
+      .all(transactionId) as ReceiptPrintLineRow[];
+  }
+
+  private getReceiptPrintPaymentRows(transactionId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          tender_method_code,
+          tender_method_name,
+          bank_account_id,
+          bank_code,
+          bank_name,
+          bank_branch_code,
+          bank_branch_name,
+          bank_account_number,
+          bank_account_name,
+          method,
+          amount,
+          reference,
+          received_at
+        FROM pos_payment
+        WHERE pos_transaction_id = ?
+        ORDER BY received_at ASC, id ASC`,
+      )
+      .all(transactionId) as ReceiptPrintPaymentRow[];
+  }
+
+  private getReceiptLookupLineRows(header: ReceiptLookupHeaderRow) {
+    return this.db
+      .prepare(
+        `SELECT
+          line.id AS source_line_id,
+          line.applied_promotion_code AS applied_promotion_code,
+          line.applied_promotion_name AS applied_promotion_name,
+          line.product_code_snapshot AS product_code_snapshot,
+          line.product_name_snapshot AS product_name_snapshot,
+          line.serial_numbers_json AS serial_numbers_json,
+          line.quantity AS quantity_sold,
+          COALESCE(line.discount_amount, 0) AS discount_amount,
+          COALESCE((
+            SELECT SUM(correction_line.quantity)
+            FROM pos_transaction_line AS correction_line
+            INNER JOIN pos_transaction AS correction_transaction
+              ON correction_transaction.id = correction_line.pos_transaction_id
+            WHERE correction_line.source_line_id = line.id
+              AND correction_line.line_intent = 'RETURN'
+              AND correction_transaction.source_transaction_id = ?
+              AND correction_transaction.status = 'COMPLETED'
+          ), 0) AS quantity_returned,
+          COALESCE((
+            SELECT SUM(correction_line.quantity)
+            FROM pos_transaction_line AS correction_line
+            INNER JOIN pos_transaction AS correction_transaction
+              ON correction_transaction.id = correction_line.pos_transaction_id
+            WHERE correction_line.source_line_id = line.id
+              AND correction_line.line_intent = 'RETURN'
+              AND correction_transaction.source_transaction_id = ?
+              AND correction_transaction.status = 'PARKED'
+          ), 0) AS quantity_pending,
+          line.unit_price AS unit_price,
+          line.tax_amount AS tax_amount,
+          line.line_total AS line_total
+        FROM pos_transaction_line AS line
+        WHERE line.pos_transaction_id = ?
+          AND (? != 'EXCHANGE' OR line.line_intent = 'SALE')
+        ORDER BY line.product_name_snapshot ASC, line.id ASC`,
+      )
+      .all(
+        header.id,
+        header.id,
+        header.id,
+        header.transaction_type,
+      ) as ReceiptLookupLineRow[];
+  }
+
+  private getReceiptLineAvailableSerialNumbers(
+    header: ReceiptLookupHeaderRow,
+    sourceLineId: string,
+    currentLineId?: string | null,
+  ) {
+    const sourceLine = this.getReceiptLookupLineRows(header).find(
+      (line) => line.source_line_id === sourceLineId,
+    );
+
+    if (!sourceLine) {
+      return [] as string[];
+    }
+
+    const soldSerialNumbers = readSerializedLineNumbers(
+      sourceLine.serial_numbers_json,
+    );
+
+    if (soldSerialNumbers.length === 0) {
+      return [];
+    }
+
+    const correctionLines = this.db
+      .prepare(
+        "SELECT id, serial_numbers_json FROM pos_transaction_line WHERE source_line_id = ? ORDER BY id ASC",
+      )
+      .all(sourceLineId) as Array<{
+      id: string;
+      serial_numbers_json: string | null;
+    }>;
+    const consumedKeys = new Set<string>();
+
+    for (const correctionLine of correctionLines) {
+      if (currentLineId && correctionLine.id === currentLineId) {
+        continue;
+      }
+
+      for (const serialNumber of readSerializedLineNumbers(
+        correctionLine.serial_numbers_json,
+      )) {
+        consumedKeys.add(serialNumber.toUpperCase());
+      }
+    }
+
+    return soldSerialNumbers.filter(
+      (serialNumber) => !consumedKeys.has(serialNumber.toUpperCase()),
+    );
+  }
+
+  private buildReceiptLookupResult(
+    header: ReceiptLookupHeaderRow,
+  ): StoreReceiptLookupResult {
+    const lines = this.getReceiptLookupLineRows(
+      header,
+    ).map<StoreReceiptLookupLine>((line) => {
+      const quantitySold = Number(asNumber(line.quantity_sold).toFixed(3));
+      const quantityReturned = Number(
+        asNumber(line.quantity_returned).toFixed(3),
+      );
+      const quantityPending = Number(
+        asNumber(line.quantity_pending).toFixed(3),
+      );
+      const serialNumbers = readSerializedLineNumbers(line.serial_numbers_json);
+      const availableSerialNumbersToReturn =
+        this.getReceiptLineAvailableSerialNumbers(header, line.source_line_id);
+      const quantityAvailableToReturn = Number(
+        Math.max(0, quantitySold - quantityReturned - quantityPending).toFixed(
+          3,
+        ),
+      );
+
+      return {
+        sourceLineId: line.source_line_id,
+        productCode: line.product_code_snapshot,
+        productName: line.product_name_snapshot,
+        barcode:
+          this.getRepresentativeBarcode(line.product_code_snapshot)
+            ?.barcode_code ?? null,
+        serialNumbers,
+        availableSerialNumbersToReturn,
+        quantitySold,
+        quantityReturned,
+        quantityPending,
+        quantityAvailableToReturn,
+        unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+        taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+        lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+      };
+    });
+    const eligibleLineCount = lines.filter(
+      (line) => line.quantityAvailableToReturn > 0,
+    ).length;
+    const payments = this.getReceiptPrintPaymentRows(header.id);
+
+    return {
+      sourceTransactionId: header.id,
+      sourceTransactionNo: header.transaction_no,
+      customerId: header.customer_id,
+      transactionType: header.transaction_type,
+      status: header.status,
+      totalAmount: Number(asNumber(header.total_amount).toFixed(2)),
+      completedAt: header.completed_at,
+      customerNo: header.customer_no,
+      customerName: header.customer_name,
+      headerReference: header.header_reference ?? null,
+      additionalDetails: header.additional_details ?? null,
+      eligibleLineCount,
+      canStartReturn: eligibleLineCount > 0,
+      canStartExchange: eligibleLineCount > 0,
+      lines,
+      payments: payments.map((payment) => ({
+        paymentId: payment.id,
+        tenderMethodCode: payment.tender_method_code,
+        tenderMethodName: payment.tender_method_name,
+        bankAccountId: payment.bank_account_id,
+        method: payment.method,
+        amount: Number(asNumber(payment.amount).toFixed(2)),
+        reference: payment.reference,
+        receivedAt: payment.received_at,
+      })),
+    };
+  }
+
+  private getRepresentativeBarcode(productCode: string) {
+    return this.db
+      .prepare(
+        "SELECT id, barcode_code, product_code, barcode_type, updated_at FROM barcode_snapshot WHERE product_code = ? ORDER BY updated_at DESC, barcode_code ASC LIMIT 1",
+      )
+      .get(productCode) as BarcodeSnapshotRow | undefined;
+  }
+
+  private getOpenShiftRow() {
+    return this.db
+      .prepare(
+        "SELECT id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version FROM pos_shift WHERE status = 'OPEN' AND terminal_code = ? ORDER BY opened_at ASC LIMIT 1",
+      )
+      .get(this.getTerminalCode()) as PosShiftRow | undefined;
+  }
+
+  private getOpenShiftRows() {
+    return this.db
+      .prepare(
+        "SELECT id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version FROM pos_shift WHERE status = 'OPEN' ORDER BY terminal_code ASC, opened_at ASC",
+      )
+      .all() as PosShiftRow[];
+  }
+
+  private getRecentClosedShiftRows(limit = 4) {
+    return this.db
+      .prepare(
+        "SELECT id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version FROM pos_shift WHERE status = 'CLOSED' AND terminal_code = ? ORDER BY closed_at DESC, opened_at DESC LIMIT ?",
+      )
+      .all(this.getTerminalCode(), limit) as PosShiftRow[];
+  }
+
+  private getRecentStoreShiftRows(limit = 12) {
+    return this.db
+      .prepare(
+        "SELECT id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version FROM pos_shift ORDER BY COALESCE(closed_at, opened_at) DESC, terminal_code ASC, shift_no DESC LIMIT ?",
+      )
+      .all(limit) as PosShiftRow[];
+  }
+
+  private getShiftTransactionSummaryRows(shiftId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          txn.id AS id,
+          txn.transaction_type AS transaction_type,
+          txn.total_amount AS total_amount,
+          txn.change_amount AS change_amount,
+          CASE
+            WHEN EXISTS(
+              SELECT 1
+              FROM pos_payment AS payment
+              WHERE payment.pos_transaction_id = txn.id
+                AND payment.method = 'CASH'
+            ) THEN 1
+            ELSE 0
+          END AS has_cash_payment
+        FROM pos_transaction AS txn
+        WHERE txn.shift_id = ?
+          AND txn.status = 'COMPLETED'
+        ORDER BY txn.completed_at ASC, txn.transaction_no ASC`,
+      )
+      .all(shiftId) as ShiftTransactionSummaryRow[];
+  }
+
+  private getShiftPaymentSummaryRows(shiftId: string) {
+    return this.db
+      .prepare(
+        `SELECT *
+        FROM (
+          SELECT
+            payment.pos_transaction_id AS pos_transaction_id,
+            txn.transaction_type AS transaction_type,
+            txn.total_amount AS total_amount,
+            payment.method AS method,
+            payment.tender_method_code AS tender_method_code,
+            payment.tender_method_name AS tender_method_name,
+            payment.amount AS amount,
+            payment.received_at AS sort_occurred_at,
+            payment.id AS sort_id
+          FROM pos_payment AS payment
+          INNER JOIN pos_transaction AS txn
+            ON txn.id = payment.pos_transaction_id
+          WHERE txn.shift_id = ?
+            AND txn.status = 'COMPLETED'
+          UNION ALL
+          SELECT
+            entry.id AS pos_transaction_id,
+            'ACCOUNT_PAYMENT' AS transaction_type,
+            entry.amount AS total_amount,
+            entry.payment_method AS method,
+            entry.tender_method_code AS tender_method_code,
+            entry.tender_method_name AS tender_method_name,
+            entry.amount AS amount,
+            entry.occurred_at AS sort_occurred_at,
+            entry.id AS sort_id
+          FROM customer_account_entry AS entry
+          WHERE entry.shift_id = ?
+        )
+        ORDER BY sort_occurred_at ASC, sort_id ASC`,
+      )
+      .all(shiftId, shiftId) as ShiftPaymentSummaryRow[];
+  }
+
+  private toShiftSummary(shift: PosShiftRow): StoreShiftSummary {
+    const transactionRows = this.getShiftTransactionSummaryRows(shift.id);
+    const paymentRows = this.getShiftPaymentSummaryRows(shift.id);
+    const tenderTotalsByKey = new Map<string, StoreShiftTenderSummary>();
+
+    let expectedCashAmount = Number(
+      asNumber(shift.opening_float_amount).toFixed(2),
+    );
+    let netSalesAmount = 0;
+    let cashTenderedAmount = 0;
+    let nonCashTenderedAmount = 0;
+    let accountPaymentsAmount = 0;
+    let salesCount = 0;
+    let returnCount = 0;
+    let exchangeCount = 0;
+
+    for (const transaction of transactionRows) {
+      const totalAmount = Number(asNumber(transaction.total_amount).toFixed(2));
+      const isRefundSettlement =
+        transaction.transaction_type === "RETURN" ||
+        (transaction.transaction_type === "EXCHANGE" && totalAmount < 0);
+
+      netSalesAmount += totalAmount;
+
+      if (transaction.transaction_type === "SALE") {
+        salesCount += 1;
+      } else if (transaction.transaction_type === "RETURN") {
+        returnCount += 1;
+      } else {
+        exchangeCount += 1;
+      }
+
+      if (asBooleanFlag(transaction.has_cash_payment) && !isRefundSettlement) {
+        expectedCashAmount = Number(
+          (expectedCashAmount - asNumber(transaction.change_amount)).toFixed(2),
+        );
+      }
+    }
+
+    for (const payment of paymentRows) {
+      const totalAmount = Number(asNumber(payment.total_amount).toFixed(2));
+      const signedAmount =
+        payment.transaction_type === "RETURN" ||
+        (payment.transaction_type === "EXCHANGE" && totalAmount < 0)
+          ? Number((asNumber(payment.amount) * -1).toFixed(2))
+          : Number(asNumber(payment.amount).toFixed(2));
+
+      const tenderKey = `${payment.method}:${payment.tender_method_code ?? payment.tender_method_name ?? "unmapped"}`;
+      const currentTender = tenderTotalsByKey.get(tenderKey) ?? {
+        method: payment.method,
+        tenderMethodCode: payment.tender_method_code,
+        tenderMethodName: payment.tender_method_name,
+        netAmount: 0,
+        transactionCount: 0,
+      };
+
+      currentTender.netAmount = Number(
+        (currentTender.netAmount + signedAmount).toFixed(2),
+      );
+      currentTender.transactionCount += 1;
+      tenderTotalsByKey.set(tenderKey, currentTender);
+
+      if (payment.transaction_type === "ACCOUNT_PAYMENT") {
+        accountPaymentsAmount = Number(
+          (accountPaymentsAmount + signedAmount).toFixed(2),
+        );
+      }
+
+      if (payment.method === "CASH") {
+        cashTenderedAmount = Number(
+          (cashTenderedAmount + signedAmount).toFixed(2),
+        );
+        expectedCashAmount = Number(
+          (expectedCashAmount + signedAmount).toFixed(2),
+        );
+      } else {
+        nonCashTenderedAmount = Number(
+          (nonCashTenderedAmount + signedAmount).toFixed(2),
+        );
+      }
+    }
+
+    return {
+      shiftId: shift.id,
+      shiftNo: shift.shift_no,
+      terminalCode: shift.terminal_code,
+      cashierCode: shift.cashier_code,
+      status: shift.status,
+      openingFloatAmount: Number(
+        asNumber(shift.opening_float_amount).toFixed(2),
+      ),
+      expectedCashAmount: Number(expectedCashAmount.toFixed(2)),
+      declaredCashAmount:
+        shift.closing_declared_cash === null
+          ? null
+          : Number(asNumber(shift.closing_declared_cash).toFixed(2)),
+      varianceAmount:
+        shift.closing_variance === null
+          ? null
+          : Number(asNumber(shift.closing_variance).toFixed(2)),
+      transactionCount: transactionRows.length,
+      salesCount,
+      returnCount,
+      exchangeCount,
+      netSalesAmount: Number(netSalesAmount.toFixed(2)),
+      cashTenderedAmount: Number(cashTenderedAmount.toFixed(2)),
+      nonCashTenderedAmount: Number(nonCashTenderedAmount.toFixed(2)),
+      accountPaymentsAmount: Number(accountPaymentsAmount.toFixed(2)),
+      openedAt: shift.opened_at,
+      closedAt: shift.closed_at,
+      tenderTotals: [...tenderTotalsByKey.values()].sort((left, right) =>
+        left.method.localeCompare(right.method),
+      ),
+    };
+  }
+
+  private getActiveShiftSummary() {
+    const shift = this.getOpenShiftRow();
+    return shift ? this.toShiftSummary(shift) : null;
+  }
+
+  private getOpenShiftSummaries() {
+    return this.getOpenShiftRows().map((shift) => this.toShiftSummary(shift));
+  }
+
+  private getRecentClosedShiftSummaries() {
+    return this.getRecentClosedShiftRows().map((shift) =>
+      this.toShiftSummary(shift),
+    );
+  }
+
+  private getRecentStoreShiftSummaries() {
+    return this.getRecentStoreShiftRows().map((shift) =>
+      this.toShiftSummary(shift),
+    );
+  }
+
+  private resolveShiftForReconciliation(shiftId?: string | null) {
+    if (shiftId?.trim()) {
+      const shift = this.db
+        .prepare(
+          "SELECT id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version FROM pos_shift WHERE id = ? LIMIT 1",
+        )
+        .get(shiftId.trim()) as PosShiftRow | undefined;
+
+      if (!shift) {
+        throw new Error(
+          "Flash ERP could not find that shift for reconciliation.",
+        );
+      }
+
+      return shift;
+    }
+
+    const recentClosedShift = this.getRecentClosedShiftRows(1)[0];
+
+    if (recentClosedShift) {
+      return recentClosedShift;
+    }
+
+    const openShift = this.getOpenShiftRow();
+
+    if (openShift) {
+      return openShift;
+    }
+
+    throw new Error(
+      "Open and trade a cashier shift before recording EOD reconciliation.",
+    );
+  }
+
+  private getOpenShiftContext(): ShiftContext {
+    const shift = this.db
+      .prepare(
+        "SELECT id, shift_no, cashier_code FROM pos_shift WHERE status = 'OPEN' AND terminal_code = ? ORDER BY opened_at ASC LIMIT 1",
+      )
+      .get(this.getTerminalCode()) as ShiftContext | undefined;
+
+    if (!shift) {
+      throw new Error(
+        `Open a cashier shift on terminal ${this.getTerminalCode()} before Flash ERP can start or complete POS baskets.`,
+      );
+    }
+
+    return shift;
+  }
+
+  private getActiveBasketId() {
+    const key = this.getActiveBasketMetadataKey();
+    const value = this.metadata(key)?.trim();
+
+    if (value) {
+      return value;
+    }
+
+    const legacyValue = this.metadata("active_basket_id")?.trim();
+
+    if (legacyValue) {
+      this.setMetadata(key, legacyValue);
+      this.deleteMetadata("active_basket_id");
+      return legacyValue;
+    }
+
+    return null;
+  }
+
+  private getBasketHeader(transactionId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          txn.id AS id,
+          txn.transaction_no AS transaction_no,
+          txn.customer_id AS customer_id,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          customer.loyalty_enrolled AS customer_loyalty_enrolled,
+          customer.loyalty_tier AS customer_loyalty_tier,
+          customer.loyalty_points_balance AS customer_loyalty_points_balance,
+          txn.source_transaction_id AS source_transaction_id,
+          txn.source_transaction_no AS source_transaction_no,
+          txn.transaction_type AS transaction_type,
+          txn.status AS status,
+          txn.subtotal_amount AS subtotal_amount,
+          txn.discount_amount AS discount_amount,
+          txn.loyalty_redemption_points AS loyalty_redemption_points,
+          txn.loyalty_redemption_amount AS loyalty_redemption_amount,
+          txn.tax_amount AS tax_amount,
+          txn.total_amount AS total_amount,
+          txn.paid_amount AS paid_amount,
+          txn.change_amount AS change_amount,
+          txn.notes AS notes,
+          txn.header_reference AS header_reference,
+          txn.additional_details AS additional_details,
+          txn.updated_at AS updated_at,
+          txn.completed_at AS completed_at,
+          txn.record_version AS record_version
+        FROM pos_transaction AS txn
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        WHERE txn.id = ?
+        LIMIT 1`,
+      )
+      .get(transactionId) as BasketHeaderRow | undefined;
+  }
+
+  private getBasketLine(lineId: string) {
+    return this.db
+      .prepare(
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE id = ? LIMIT 1",
+      )
+      .get(lineId) as BasketLineRow | undefined;
+  }
+
+  private getBasketLineByProduct(
+    transactionId: string,
+    productCode: string,
+    lineIntent: SyncPosLineIntent,
+  ) {
+    return this.db
+      .prepare(
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? AND product_code_snapshot = ? AND line_intent = ? AND source_line_id IS NULL LIMIT 1",
+      )
+      .get(transactionId, productCode, lineIntent) as BasketLineRow | undefined;
+  }
+
+  private getBasketLineBySourceLine(
+    transactionId: string,
+    sourceLineId: string,
+  ) {
+    return this.db
+      .prepare(
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? AND source_line_id = ? LIMIT 1",
+      )
+      .get(transactionId, sourceLineId) as BasketLineRow | undefined;
+  }
+
+  private getBasketLines(transactionId: string) {
+    return this.db
+      .prepare(
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? ORDER BY line_intent DESC, product_name_snapshot ASC, id ASC",
+      )
+      .all(transactionId) as BasketLineRow[];
+  }
+
+  private appendBasketAuditNote(
+    transactionId: string,
+    note: string,
+    updatedAt: string,
+  ) {
+    const existingHeader = this.getBasketHeader(transactionId);
+
+    if (!existingHeader) {
+      return;
+    }
+
+    const currentNote = existingHeader.notes?.trim() ?? "";
+    const nextNote = currentNote ? `${currentNote}\n${note}` : note;
+
+    this.db
+      .prepare(
+        "UPDATE pos_transaction SET notes = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(nextNote, updatedAt, transactionId);
+  }
+
+  private toBasketLineSummary(
+    header: BasketHeaderRow,
+    line: BasketLineRow,
+  ): StoreBasketLineSummary {
+    const product = this.requireBasketProductLookup(line.product_code_snapshot);
+
+    return {
+      lineId: line.id,
+      lineIntent: line.line_intent,
+      sourceLineId: line.source_line_id,
+      productCode: line.product_code_snapshot,
+      productVariantCode: line.product_variant_code_snapshot,
+      productName: line.product_name_snapshot,
+      variantSize: line.variant_size,
+      variantColor: line.variant_color,
+      variantAttributesSnapshot: line.variant_attributes_snapshot,
+      lineNote: line.line_note,
+      barcode:
+        this.getRepresentativeBarcode(line.product_code_snapshot)
+          ?.barcode_code ?? null,
+      isSerialized: asBooleanFlag(product.is_serialized),
+      serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+      availableSerialNumbers: this.getBasketLineAvailableSerialNumbers(
+        header,
+        line,
+      ),
+      quantity: Number(asNumber(line.quantity).toFixed(3)),
+      unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+      discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+      taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+      lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+      hasManualPriceOverride: asBooleanFlag(line.manual_price_override),
+      hasManualDiscountOverride: asBooleanFlag(line.manual_discount_override),
+      appliedPromotionCode: line.applied_promotion_code,
+      appliedPromotionName: line.applied_promotion_name,
+    };
+  }
+
+  private promotionMatchesBasketLine(
+    promotion: AutomaticPromotionPolicy,
+    line: BasketLineRow,
+  ) {
+    const product = this.requireBasketProductLookup(line.product_code_snapshot);
+    const minimumLineQuantity = asNumber(promotion.minimumLineQuantity);
+
+    if (
+      minimumLineQuantity > 0 &&
+      asNumber(line.quantity) < minimumLineQuantity
+    ) {
+      return false;
+    }
+
+    switch (promotion.targetScope) {
+      case "DEPARTMENT":
+        return (
+          normalizePromotionCode(product.department_code) ===
+          normalizePromotionCode(promotion.targetDepartmentCode)
+        );
+      case "CATEGORY":
+        return (
+          normalizePromotionCode(product.category_code) ===
+          normalizePromotionCode(promotion.targetCategoryCode)
+        );
+      case "PRODUCT":
+        return (
+          normalizePromotionCode(line.product_code_snapshot) ===
+          normalizePromotionCode(promotion.targetProductCode)
+        );
+      case "ALL_ITEMS":
+      default:
+        return true;
+    }
+  }
+
+  private basketLineGrossAmount(line: BasketLineRow) {
+    const product = this.requireBasketProductLookup(line.product_code_snapshot);
+    const amounts = calculateSaleLineAmounts({
+      unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+      quantity: Number(asNumber(line.quantity).toFixed(3)),
+      taxable: asBooleanFlag(product.taxable),
+      taxRatePercent: asNullableNumber(product.tax_rate_percent),
+      taxInclusive: asBooleanFlag(product.tax_inclusive),
+    });
+
+    return amounts.lineTotal;
+  }
+
+  private promotionWouldDiscountLine(
+    promotion: AutomaticPromotionPolicy,
+    line: BasketLineRow,
+  ) {
+    const grossAmount = this.basketLineGrossAmount(line);
+    const unitPrice = asNumber(line.unit_price);
+    const quantity = asNumber(line.quantity);
+    const discountValue = Math.max(0, promotion.discountValue);
+
+    if (grossAmount <= 0 || discountValue <= 0) {
+      return false;
+    }
+
+    if (
+      asNumber(promotion.buyQuantity) > 0 &&
+      asNumber(promotion.rewardQuantity) > 0 &&
+      quantity >=
+        asNumber(promotion.buyQuantity) + asNumber(promotion.rewardQuantity)
+    ) {
+      return true;
+    }
+
+    switch (promotion.discountType) {
+      case "PERCENT":
+      case "AMOUNT":
+        return true;
+      case "FIXED_PRICE":
+        return discountValue < unitPrice && quantity > 0;
+      default:
+        return false;
+    }
+  }
+
+  private describeBasketPromotionStatus(
+    header: BasketHeaderRow,
+    basketLines: BasketLineRow[],
+    appliedPromotions: StoreBasketAppliedPromotionSummary[],
+  ) {
+    if (appliedPromotions.length > 0) {
+      return null;
+    }
+
+    if (header.transaction_type !== "SALE") {
+      return "Promotions apply to sale baskets only.";
+    }
+
+    const saleLines = basketLines.filter(
+      (line) => line.line_intent === "SALE" && !line.source_line_id,
+    );
+
+    if (saleLines.length === 0) {
+      return "Add sale items to check automatic promotions.";
+    }
+
+    const automaticLines = saleLines.filter(
+      (line) =>
+        !asBooleanFlag(line.manual_price_override) &&
+        !asBooleanFlag(line.manual_discount_override),
+    );
+
+    if (automaticLines.length === 0) {
+      return "Automatic promotions are blocked because all sale lines have manual price or discount overrides.";
+    }
+
+    const policies = this.listAutomaticPromotionPolicies(isoNow());
+
+    if (policies.length === 0) {
+      return "No active promotion has synced to this store for the current date and time.";
+    }
+
+    const reasons: string[] = [];
+
+    for (const promotion of policies.slice(0, 4)) {
+      if (promotion.discountValue <= 0) {
+        reasons.push(
+          `${promotion.promotionName} is active but has a zero discount value.`,
+        );
+        continue;
+      }
+
+      const eligibleLines = automaticLines.filter((line) =>
+        this.promotionMatchesBasketLine(promotion, line),
+      );
+
+      if (eligibleLines.length === 0) {
+        reasons.push(
+          `${promotion.promotionName} does not match the items in this basket.`,
+        );
+        continue;
+      }
+
+      const eligibleAmount = Number(
+        eligibleLines
+          .reduce((sum, line) => sum + this.basketLineGrossAmount(line), 0)
+          .toFixed(2),
+      );
+
+      if (
+        promotion.minimumBasketAmount !== null &&
+        promotion.minimumBasketAmount > 0 &&
+        eligibleAmount < promotion.minimumBasketAmount
+      ) {
+        reasons.push(
+          `${promotion.promotionName} needs ${promotion.minimumBasketAmount.toFixed(2)} minimum spend; this basket has ${eligibleAmount.toFixed(2)} eligible.`,
+        );
+        continue;
+      }
+
+      if (
+        !eligibleLines.some((line) =>
+          this.promotionWouldDiscountLine(promotion, line),
+        )
+      ) {
+        reasons.push(
+          `${promotion.promotionName} is eligible but its rule calculates no discount for these prices.`,
+        );
+        continue;
+      }
+
+      reasons.push(
+        `${promotion.promotionName} is eligible. Re-run sync or update the item quantity if it is not applied.`,
+      );
+    }
+
+    return reasons.slice(0, 2).join(" ");
+  }
+
+  private toBasketSummary(header: BasketHeaderRow): StoreBasketSummary {
+    const basketLines = this.getBasketLines(header.id);
+    const lines = basketLines.map((line) =>
+      this.toBasketLineSummary(header, line),
+    );
+    const appliedPromotions =
+      this.getPublicAppliedPromotionSummaries(basketLines);
+    const grossTotalAmount = Number(
+      (asNumber(header.subtotal_amount) + asNumber(header.tax_amount)).toFixed(
+        2,
+      ),
+    );
+    const customerLoyaltyEnrolled = hasLocalLoyaltyAccount({
+      loyalty_enrolled: header.customer_loyalty_enrolled,
+      loyalty_tier: header.customer_loyalty_tier,
+      loyalty_points_balance: header.customer_loyalty_points_balance,
+    });
+    const loyaltyRedemption = this.calculateBasketLoyaltyRedemption(
+      header,
+      grossTotalAmount,
+      appliedPromotions,
+    );
+
+    return {
+      transactionId: header.id,
+      transactionNo: header.transaction_no,
+      transactionType: header.transaction_type,
+      sourceTransactionId: header.source_transaction_id,
+      sourceTransactionNo: header.source_transaction_no,
+      customerId: header.customer_id,
+      customerNo: header.customer_no,
+      customerName: header.customer_name,
+      status: header.status,
+      itemCount: Number(
+        lines.reduce((sum, line) => sum + line.quantity, 0).toFixed(3),
+      ),
+      lineCount: lines.length,
+      subtotalAmount: Number(asNumber(header.subtotal_amount).toFixed(2)),
+      discountAmount: Number(asNumber(header.discount_amount).toFixed(2)),
+      taxAmount: Number(asNumber(header.tax_amount).toFixed(2)),
+      totalAmount: Number(asNumber(header.total_amount).toFixed(2)),
+      customerLoyaltyEnrolled,
+      customerLoyaltyTier: header.customer_loyalty_tier,
+      customerLoyaltyPointsBalance: header.customer_id
+        ? Math.max(
+            0,
+            Math.trunc(asNumber(header.customer_loyalty_points_balance)),
+          )
+        : null,
+      loyaltyRedemptionAllowed: loyaltyRedemption.canRedeem,
+      loyaltyRedemptionMessage: loyaltyRedemption.message,
+      loyaltyRedemptionPoints: Number(
+        asNumber(header.loyalty_redemption_points).toFixed(0),
+      ),
+      loyaltyRedemptionAmount: Number(
+        asNumber(header.loyalty_redemption_amount).toFixed(2),
+      ),
+      maxLoyaltyRedemptionPoints: loyaltyRedemption.maxRedeemablePoints,
+      maxLoyaltyRedemptionAmount: loyaltyRedemption.maxRedeemableAmount,
+      appliedPromotions,
+      promotionStatusMessage: this.describeBasketPromotionStatus(
+        header,
+        basketLines,
+        appliedPromotions,
+      ),
+      updatedAt: header.updated_at,
+      lines,
+    };
+  }
+
+  private getActiveBasketSummary() {
+    const basketId = this.getActiveBasketId();
+
+    if (!basketId) {
+      return null;
+    }
+
+    const basket = this.getBasketHeader(basketId);
+
+    if (!basket || basket.status !== "PARKED") {
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+      return null;
+    }
+
+    return this.toBasketSummary(basket);
+  }
+
+  private getParkedBasketSummaries(excludeTransactionId: string | null) {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          txn.id AS id,
+          txn.transaction_no AS transaction_no,
+          txn.customer_id AS customer_id,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          customer.loyalty_enrolled AS customer_loyalty_enrolled,
+          customer.loyalty_tier AS customer_loyalty_tier,
+          customer.loyalty_points_balance AS customer_loyalty_points_balance,
+          txn.source_transaction_id AS source_transaction_id,
+          txn.source_transaction_no AS source_transaction_no,
+          txn.transaction_type AS transaction_type,
+          txn.status AS status,
+          txn.subtotal_amount AS subtotal_amount,
+          txn.discount_amount AS discount_amount,
+          txn.loyalty_redemption_points AS loyalty_redemption_points,
+          txn.loyalty_redemption_amount AS loyalty_redemption_amount,
+          txn.tax_amount AS tax_amount,
+          txn.total_amount AS total_amount,
+          txn.paid_amount AS paid_amount,
+          txn.change_amount AS change_amount,
+          txn.notes AS notes,
+          txn.updated_at AS updated_at,
+          txn.completed_at AS completed_at,
+          txn.record_version AS record_version
+        FROM pos_transaction AS txn
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        WHERE txn.status = 'PARKED'
+        ORDER BY txn.updated_at DESC
+        LIMIT 8`,
+      )
+      .all() as BasketHeaderRow[];
+
+    return rows
+      .filter((row) => row.id !== excludeTransactionId)
+      .map<StoreParkedBasketSummary>((row) => {
+        const lines = this.getBasketLines(row.id);
+
+        return {
+          transactionId: row.id,
+          transactionNo: row.transaction_no,
+          transactionType: row.transaction_type,
+          sourceTransactionNo: row.source_transaction_no,
+          customerNo: row.customer_no,
+          customerName: row.customer_name,
+          itemCount: Number(
+            lines
+              .reduce((sum, line) => sum + asNumber(line.quantity), 0)
+              .toFixed(3),
+          ),
+          lineCount: lines.length,
+          totalAmount: Number(asNumber(row.total_amount).toFixed(2)),
+          updatedAt: row.updated_at,
+        };
+      });
+  }
+
+  private refreshBasketTotals(transactionId: string, updatedAt: string) {
+    const header = this.getBasketHeader(transactionId);
+    const transactionType = header?.transaction_type ?? "SALE";
+    let lines = this.getBasketLines(transactionId);
+
+    if (header) {
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const promotionCustomerProfile = this.getPromotionCustomerProfile(
+        header.customer_id,
+      );
+      const automaticPromotionLines = lines.filter(
+        (line) =>
+          line.line_intent === "SALE" &&
+          !line.source_line_id &&
+          !asBooleanFlag(line.manual_price_override) &&
+          !asBooleanFlag(line.manual_discount_override),
+      );
+
+      for (const line of lines.filter(
+        (candidate) =>
+          candidate.line_intent === "SALE" &&
+          !candidate.source_line_id &&
+          (asBooleanFlag(candidate.manual_price_override) ||
+            asBooleanFlag(candidate.manual_discount_override)),
+      )) {
+        this.db
+          .prepare(
+            "UPDATE pos_transaction_line SET applied_promotion_code = NULL, applied_promotion_name = NULL WHERE id = ?",
+          )
+          .run(line.id);
+      }
+
+      const promotionPricing = applyAutomaticPromotions({
+        promotions: this.listAutomaticPromotionPolicies(updatedAt),
+        storeCode,
+        customerType: promotionCustomerProfile.customerType,
+        loyaltyTier:
+          promotionCustomerProfile.loyaltyTier ?? header.customer_loyalty_tier,
+        lines: automaticPromotionLines.map((line) => {
+          const product = this.requireBasketProductLookup(
+            line.product_code_snapshot,
+          );
+
+          return {
+            lineId: line.id,
+            lineIntent: line.line_intent,
+            sourceLineId: line.source_line_id,
+            productCode: line.product_code_snapshot,
+            departmentCode: product.department_code,
+            categoryCode: product.category_code,
+            quantity: Number(asNumber(line.quantity).toFixed(3)),
+            unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+            taxable: asBooleanFlag(product.taxable),
+            taxRatePercent: asNullableNumber(product.tax_rate_percent),
+            taxInclusive: asBooleanFlag(product.tax_inclusive),
+          };
+        }),
+        evaluatedAt: updatedAt,
+      });
+
+      for (const lineResult of promotionPricing.lineResults) {
+        this.db
+          .prepare(
+            "UPDATE pos_transaction_line SET applied_promotion_code = ?, applied_promotion_name = ?, discount_amount = ?, tax_amount = ?, line_total = ? WHERE id = ?",
+          )
+          .run(
+            lineResult.appliedPromotionCode,
+            lineResult.appliedPromotionName,
+            lineResult.discountAmount,
+            lineResult.taxAmount,
+            lineResult.lineTotal,
+            lineResult.lineId,
+          );
+      }
+
+      lines = this.getBasketLines(transactionId);
+    }
+
+    const subtotal = Number(
+      lines
+        .reduce(
+          (sum, line) =>
+            sum +
+            (asNumber(line.line_total) - asNumber(line.tax_amount)) *
+              getLineDirection(transactionType, line.line_intent),
+          0,
+        )
+        .toFixed(2),
+    );
+    const discountAmount = Number(
+      lines
+        .reduce(
+          (sum, line) =>
+            sum +
+            asNumber(line.discount_amount) *
+              getLineDirection(transactionType, line.line_intent),
+          0,
+        )
+        .toFixed(2),
+    );
+    const taxAmount = Number(
+      lines
+        .reduce(
+          (sum, line) =>
+            sum +
+            asNumber(line.tax_amount) *
+              getLineDirection(transactionType, line.line_intent),
+          0,
+        )
+        .toFixed(2),
+    );
+    const grossTotalAmount = Number((subtotal + taxAmount).toFixed(2));
+    const appliedPromotions = this.getPublicAppliedPromotionSummaries(lines);
+    const loyaltyRedemption = header
+      ? this.calculateBasketLoyaltyRedemption(
+          header,
+          grossTotalAmount,
+          appliedPromotions,
+        )
+      : {
+          canRedeem: false,
+          message: null,
+          appliedPoints: 0,
+          appliedAmount: 0,
+          maxRedeemablePoints: 0,
+          maxRedeemableAmount: 0,
+        };
+    const totalAmount = Number(
+      (grossTotalAmount - loyaltyRedemption.appliedAmount).toFixed(2),
+    );
+
+    this.db
+      .prepare(
+        "UPDATE pos_transaction SET subtotal_amount = ?, discount_amount = ?, loyalty_redemption_points = ?, loyalty_redemption_amount = ?, tax_amount = ?, total_amount = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(
+        subtotal,
+        discountAmount,
+        loyaltyRedemption.appliedPoints,
+        loyaltyRedemption.appliedAmount,
+        taxAmount,
+        totalAmount,
+        updatedAt,
+        transactionId,
+      );
+  }
+
+  private ensureActiveBasket(
+    timestamp: string,
+    transactionType: BasketHeaderRow["transaction_type"] = "SALE",
+    sourceTransaction?: {
+      id: string;
+      transactionNo: string;
+      customerId?: string | null;
+    } | null,
+  ): BasketHeaderRow {
+    const existingBasketId = this.getActiveBasketId();
+
+    if (existingBasketId) {
+      const existingBasket = this.getBasketHeader(existingBasketId);
+
+      if (existingBasket && existingBasket.status === "PARKED") {
+        return existingBasket;
+      }
+
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+    }
+
+    const shift = this.getOpenShiftContext();
+    const transactionSequence = this.nextSequence("transaction_sequence");
+    const transactionId = randomUUID();
+    const transactionNo = `POS-ACC-${String(transactionSequence).padStart(4, "0")}`;
+
+    this.db
+      .prepare(
+        "INSERT INTO pos_transaction (id, transaction_no, shift_id, customer_id, source_transaction_id, source_transaction_no, transaction_type, status, subtotal_amount, discount_amount, loyalty_redemption_points, loyalty_redemption_amount, tax_amount, total_amount, paid_amount, change_amount, notes, completed_at, record_version, deleted_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'PARKED', 0, 0, 0, 0, 0, 0, 0, 0, ?, NULL, 1, NULL, ?)",
+      )
+      .run(
+        transactionId,
+        transactionNo,
+        shift.id,
+        sourceTransaction?.customerId ?? null,
+        sourceTransaction?.id ?? null,
+        sourceTransaction?.transactionNo ?? null,
+        transactionType,
+        transactionType === "RETURN"
+          ? sourceTransaction
+            ? `Receipt-linked return basket in progress from ${sourceTransaction.transactionNo}.`
+            : "Local return basket in progress on the Flash ERP return lane."
+          : transactionType === "EXCHANGE"
+            ? sourceTransaction
+              ? `Receipt-linked exchange basket in progress from ${sourceTransaction.transactionNo}.`
+              : "Local exchange basket in progress on the Flash ERP exchange lane."
+            : "Local basket in progress on the Flash ERP sell lane.",
+        timestamp,
+      );
+    this.setMetadata(this.getActiveBasketMetadataKey(), transactionId);
+
+    return this.getBasketHeader(transactionId) as BasketHeaderRow;
+  }
+
+  private requireActiveBasket() {
+    const basketId = this.getActiveBasketId();
+
+    if (!basketId) {
+      throw new Error("Flash ERP does not have an active basket yet.");
+    }
+
+    const basket = this.getBasketHeader(basketId);
+
+    if (!basket || basket.status !== "PARKED") {
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+      throw new Error("Flash ERP could not reopen the active basket.");
+    }
+
+    return basket;
+  }
+
+  private requireBasketProductLookup(productCode: string) {
+    const match = this.findCatalogLookup(productCode);
+
+    if (!match) {
+      throw new Error(
+        `Flash ERP could not find local product "${productCode}" anymore.`,
+      );
+    }
+
+    return match;
+  }
+
+  private normalizeCheckoutPayments(
+    input: StoreBasketCheckoutRequest | undefined,
+    totalAmount: number,
+    transactionNo: string,
+    timestamp: string,
+    transactionType: BasketHeaderRow["transaction_type"],
+  ) {
+    const settlementAmount = Number(Math.abs(totalAmount).toFixed(2));
+    const availableTenderMethods = this.listActiveTenderMethods();
+    const isRefundSettlement =
+      transactionType === "RETURN" ||
+      (transactionType === "EXCHANGE" && totalAmount < 0);
+    const defaultTenderMethod =
+      (isRefundSettlement
+        ? (availableTenderMethods.find(
+            (method) => method.paymentMethod === "CASH" && method.allowRefund,
+          ) ?? availableTenderMethods.find((method) => method.allowRefund))
+        : null) ??
+      availableTenderMethods.find(
+        (method) => method.paymentMethod === "CASH",
+      ) ??
+      availableTenderMethods[0] ??
+      null;
+
+    if (settlementAmount === 0) {
+      return {
+        payments: [] as NormalizedCheckoutPayment[],
+        paidAmount: 0,
+        changeAmount: 0,
+      };
+    }
+
+    const rawPayments =
+      input?.payments && input.payments.length > 0
+        ? input.payments
+        : [
+            {
+              method: defaultTenderMethod?.paymentMethod ?? ("CASH" as const),
+              tenderMethodCode: defaultTenderMethod?.tenderMethodCode ?? null,
+              tenderMethodName: defaultTenderMethod?.tenderMethodName ?? null,
+              amount: settlementAmount,
+              reference:
+                defaultTenderMethod?.paymentMethod === "CASH" ||
+                !defaultTenderMethod
+                  ? `CASH-${transactionNo}`
+                  : "",
+            },
+          ];
+    const normalizedPayments = rawPayments.map<NormalizedCheckoutPayment>(
+      (payment, index) => {
+        const selectedTenderMethod = payment.tenderMethodCode
+          ? this.getTenderMethodByCode(payment.tenderMethodCode)
+          : (availableTenderMethods.find(
+              (method) => method.paymentMethod === payment.method,
+            ) ?? null);
+        const method = selectedTenderMethod?.paymentMethod ?? payment.method;
+        const amount = Number(Number(payment.amount).toFixed(2));
+        const reference = payment.reference?.trim()
+          ? payment.reference.trim()
+          : null;
+        const selectedBankAccount = this.getBankAccountById(
+          payment.bankAccountId,
+        );
+        const requiresBankAccount =
+          this.tenderRequiresBankAccount(selectedTenderMethod);
+
+        if (!syncPaymentMethods.has(method)) {
+          throw new Error(
+            `Flash ERP does not recognise "${method}" as a supported payment method.`,
+          );
+        }
+
+        if (availableTenderMethods.length > 0 && !selectedTenderMethod) {
+          throw new Error(
+            "Flash ERP needs each checkout payment to use an active enterprise tender method.",
+          );
+        }
+
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new Error(
+            "Every checkout payment needs an amount greater than zero.",
+          );
+        }
+
+        if (selectedTenderMethod?.requiresReference && !reference) {
+          throw new Error(
+            `Flash ERP needs a reference for ${selectedTenderMethod.tenderMethodName}.`,
+          );
+        }
+
+        if (requiresBankAccount && !selectedBankAccount) {
+          throw new Error(
+            `Select the bank, branch, and account number for ${selectedTenderMethod?.tenderMethodName ?? method}.`,
+          );
+        }
+
+        if (
+          isRefundSettlement &&
+          selectedTenderMethod &&
+          !selectedTenderMethod.allowRefund
+        ) {
+          throw new Error(
+            `${selectedTenderMethod.tenderMethodName} cannot be used to refund this ${
+              transactionType === "EXCHANGE" ? "exchange" : "return"
+            } in Flash ERP.`,
+          );
+        }
+
+        return {
+          paymentId: randomUUID(),
+          method,
+          tenderMethodCode:
+            selectedTenderMethod?.tenderMethodCode ??
+            payment.tenderMethodCode ??
+            null,
+          tenderMethodName:
+            selectedTenderMethod?.tenderMethodName ??
+            payment.tenderMethodName ??
+            null,
+          bankAccountId: selectedBankAccount?.bankAccountId ?? null,
+          bankCode: selectedBankAccount?.bankCode ?? null,
+          bankName: selectedBankAccount?.bankName ?? null,
+          bankBranchCode: selectedBankAccount?.branchCode ?? null,
+          bankBranchName: selectedBankAccount?.branchName ?? null,
+          bankAccountNumber: selectedBankAccount?.accountNumber ?? null,
+          bankAccountName: selectedBankAccount?.accountName ?? null,
+          allowChange: selectedTenderMethod?.allowChange ?? method === "CASH",
+          allowRefund: selectedTenderMethod?.allowRefund ?? true,
+          requiresReference: selectedTenderMethod?.requiresReference ?? false,
+          amount,
+          reference:
+            reference ??
+            (method === "CASH"
+              ? `CASH-${transactionNo}`
+              : `${method}-${transactionNo}-${index + 1}`),
+          receivedAt: timestamp,
+        };
+      },
+    );
+    const paidAmount = Number(
+      normalizedPayments
+        .reduce((sum, payment) => sum + payment.amount, 0)
+        .toFixed(2),
+    );
+    const rawDifference = Number((paidAmount - settlementAmount).toFixed(2));
+    let changeAmount = 0;
+
+    if (isRefundSettlement) {
+      if (rawDifference < 0) {
+        throw new Error(
+          `Flash ERP still needs ${Number(Math.abs(rawDifference).toFixed(2)).toFixed(2)} more in refund tenders before the ${
+            transactionType === "EXCHANGE" ? "exchange" : "return"
+          } can complete.`,
+        );
+      }
+
+      if (rawDifference > 0) {
+        throw new Error(
+          `Flash ERP cannot refund more than the ${
+            transactionType === "EXCHANGE" ? "exchange" : "return"
+          } total. Adjust the refund tenders before completing the basket.`,
+        );
+      }
+    } else {
+      const hasChangeCapableTender = normalizedPayments.some(
+        (payment) => payment.allowChange,
+      );
+
+      if (rawDifference < 0) {
+        throw new Error(
+          `Flash ERP still needs ${Number(Math.abs(rawDifference).toFixed(2)).toFixed(2)} more before checkout can complete.`,
+        );
+      }
+
+      if (rawDifference > 0 && !hasChangeCapableTender) {
+        throw new Error(
+          "Flash ERP can only return change when at least one selected tender method allows change.",
+        );
+      }
+
+      changeAmount = Math.max(0, rawDifference);
+    }
+
+    return {
+      payments: normalizedPayments,
+      paidAmount,
+      changeAmount,
+    };
+  }
+
+  private completeActiveBasket(
+    input?: StoreBasketCheckoutRequest,
+    cashierCode?: string,
+  ) {
+    const timestamp = isoNow();
+    let transactionNo = "";
+    let transactionType: BasketHeaderRow["transaction_type"] = "SALE";
+
+    this.withTransaction(() => {
+      const basket = this.requireActiveBasket();
+      this.refreshBasketTotals(basket.id, timestamp);
+
+      const refreshedBasket = this.getBasketHeader(basket.id);
+
+      if (!refreshedBasket) {
+        throw new Error(
+          "Flash ERP could not reload the active basket before checkout.",
+        );
+      }
+
+      const lines = this.getBasketLines(refreshedBasket.id);
+
+      if (lines.length === 0) {
+        throw new Error(
+          "Add at least one item before checking out the active basket.",
+        );
+      }
+
+      const shift = this.getOpenShiftContext();
+      const saleCashierCode = cashierCode?.trim() || shift.cashier_code;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const terminalCode = this.getTerminalCode();
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const loyaltySettings = this.getLoyaltySettingsSummary(
+        this.getMetadata(),
+      );
+      const saleRecordVersion = Math.max(
+        1,
+        asNumber(refreshedBasket.record_version) + 1,
+      );
+      transactionNo = refreshedBasket.transaction_no;
+      transactionType = refreshedBasket.transaction_type;
+      const totalAmount = Number(
+        asNumber(refreshedBasket.total_amount).toFixed(2),
+      );
+      const openSalesOrder = this.db
+        .prepare(
+          "SELECT id, order_no, source_transaction_id, source_transaction_no, customer_id, customer_no, customer_name, status, total_amount, deposit_amount, balance_amount, deposit_tender_method_code, deposit_tender_method_name, deposit_payment_method, deposit_reference, deposit_paid_at, 0 AS line_count, 0 AS item_count, operator_name, note, fulfilled_transaction_id, fulfilled_transaction_no, synced_at, created_at, fulfilled_at, cancelled_at, updated_at FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
+        )
+        .get(refreshedBasket.id) as SalesOrderRow | undefined;
+      const salesLocationCode = openSalesOrder
+        ? this.getDefaultSalesOrderLocationCode()
+        : this.getDefaultSalesLocationCode();
+      const depositCreditAmount = openSalesOrder
+        ? Number(asNumber(openSalesOrder.deposit_amount).toFixed(2))
+        : 0;
+      const settlementAmount = openSalesOrder
+        ? Number(Math.max(0, totalAmount - depositCreditAmount).toFixed(2))
+        : totalAmount;
+      const checkoutPayments = this.normalizeCheckoutPayments(
+        input,
+        settlementAmount,
+        transactionNo,
+        timestamp,
+        transactionType,
+      );
+      const existingPaymentRows = this.getReceiptPrintPaymentRows(
+        refreshedBasket.id,
+      );
+      const existingPaymentPayloads: StorePosTransactionCompletedPayload["payments"] =
+        existingPaymentRows.map((payment) => ({
+          paymentId: payment.id,
+          method: payment.method,
+          tenderMethodCode: payment.tender_method_code,
+          tenderMethodName: payment.tender_method_name,
+          bankAccountId: payment.bank_account_id,
+          bankCode: payment.bank_code,
+          bankName: payment.bank_name,
+          bankBranchCode: payment.bank_branch_code,
+          bankBranchName: payment.bank_branch_name,
+          bankAccountNumber: payment.bank_account_number,
+          bankAccountName: payment.bank_account_name,
+          amount: Number(asNumber(payment.amount).toFixed(2)),
+          reference: payment.reference,
+          receivedAt: payment.received_at,
+        }));
+      const combinedPaymentPayloads: StorePosTransactionCompletedPayload["payments"] =
+        [
+          ...existingPaymentPayloads,
+          ...checkoutPayments.payments.map((payment) => ({
+            paymentId: payment.paymentId,
+            method: payment.method,
+            tenderMethodCode: payment.tenderMethodCode,
+            tenderMethodName: payment.tenderMethodName,
+            bankAccountId: payment.bankAccountId,
+            bankCode: payment.bankCode,
+            bankName: payment.bankName,
+            bankBranchCode: payment.bankBranchCode,
+            bankBranchName: payment.bankBranchName,
+            bankAccountNumber: payment.bankAccountNumber,
+            bankAccountName: payment.bankAccountName,
+            amount: payment.amount,
+            reference: payment.reference,
+            receivedAt: payment.receivedAt,
+          })),
+        ];
+      const paidAmount = Number(
+        combinedPaymentPayloads
+          .reduce((sum, payment) => sum + payment.amount, 0)
+          .toFixed(2),
+      );
+      const attachedCustomer =
+        refreshedBasket.customer_id !== null
+          ? ((this.db
+              .prepare(
+                "SELECT id, customer_no, full_name, customer_type, phone, email, home_store_code, home_store_name, city, country_code, loyalty_enrolled, loyalty_tier, loyalty_points_balance, allow_credit_sales, credit_limit_amount, receivable_balance_amount, note, status, updated_at FROM customer WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+              )
+              .get(refreshedBasket.customer_id) as CustomerRow | undefined) ??
+            null)
+          : null;
+
+      if (attachedCustomer && attachedCustomer.status !== "ACTIVE") {
+        throw new Error(
+          `Flash ERP cannot complete ${transactionNo} because attached customer ${attachedCustomer.full_name} is ${attachedCustomer.status.toLowerCase()}.`,
+        );
+      }
+
+      const customerPostingCustomer = attachedCustomer
+        ? this.toCustomerAccountPostingCustomer(attachedCustomer)
+        : null;
+      const customerAccountEffect: CustomerAccountPostingEffect =
+        deriveCustomerAccountPostingEffect({
+          customer: customerPostingCustomer,
+          transactionType,
+          totalAmount,
+          loyaltyPolicy: loyaltySettings,
+          loyaltyPointsRedeemed: Math.max(
+            0,
+            Math.trunc(asNumber(refreshedBasket.loyalty_redemption_points)),
+          ),
+          loyaltyRedemptionAmount: Number(
+            asNumber(refreshedBasket.loyalty_redemption_amount).toFixed(2),
+          ),
+          payments: combinedPaymentPayloads.map((payment) => ({
+            method: payment.method,
+            amount: payment.amount,
+          })),
+        });
+      const completedBasketNotes = this.buildBasketNotesWithLoyaltyRedemption({
+        existingNotes: refreshedBasket.notes,
+        loyaltyPointsRedeemed: customerAccountEffect.loyaltyPointsRedeemed,
+        loyaltyRedemptionAmount: customerAccountEffect.loyaltyRedemptionAmount,
+      });
+      const headerReference = input?.headerReference?.trim() || null;
+      const additionalDetails = input?.additionalDetails?.trim() || null;
+
+      const salePayloadLines: StorePosTransactionCompletedPayload["lines"] = [];
+      const serialRegistryChanges: Array<{
+        productCode: string;
+        serialNumbers: string[];
+        inventoryLocationCode: string | null;
+        lineIntent: SyncPosLineIntent;
+      }> = [];
+      const saleQuantityByProduct = new Map<string, number>();
+
+      for (const line of lines) {
+        const product = this.db
+          .prepare(
+            `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? LIMIT 1`,
+          )
+          .get(line.product_code_snapshot) as ProductRow | undefined;
+
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${line.product_code_snapshot}" during basket checkout.`,
+          );
+        }
+        const selectedVariant = line.product_variant_code_snapshot
+          ? this.getMatrixVariantByCode(
+              line.product_code_snapshot,
+              line.product_variant_code_snapshot,
+            )
+          : null;
+
+        if (line.product_variant_code_snapshot && !selectedVariant) {
+          throw new Error(
+            `Flash ERP could not find local variant "${line.product_variant_code_snapshot}" for ${line.product_name_snapshot} during basket checkout.`,
+          );
+        }
+
+        const quantity = Number(asNumber(line.quantity).toFixed(3));
+        const lineIntent = getLineIntentForBasket(
+          transactionType,
+          line.line_intent,
+        );
+        const inventoryMovementType = getInventoryMovementTypeForLine(
+          transactionType,
+          lineIntent,
+        );
+        const tracksInventory = asBooleanFlag(product.track_inventory);
+        const selectedSerialNumbers = validateSerializedLineInput({
+          isSerialized: asBooleanFlag(product.is_serialized),
+          productName: line.product_name_snapshot,
+          quantity,
+          serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+        });
+
+        if (selectedSerialNumbers.length > 0) {
+          ensureSerialSelectionWithinAllowedSet({
+            productName: line.product_name_snapshot,
+            selectedSerialNumbers,
+            allowedSerialNumbers: this.getBasketLineAvailableSerialNumbers(
+              refreshedBasket,
+              line,
+            ),
+          });
+        }
+
+        if (lineIntent === "SALE" && tracksInventory) {
+          const quantityKey = selectedVariant
+            ? `${line.product_code_snapshot}:${selectedVariant.variant_code}`
+            : line.product_code_snapshot;
+          const availableQuantity =
+            selectedVariant !== null
+              ? Number(asNumber(selectedVariant.quantity_on_hand).toFixed(3))
+              : salesLocationCode !== null
+              ? (this.getOptionalLocationQuantity(
+                  salesLocationCode,
+                  line.product_code_snapshot,
+                ) ?? Number(asNumber(product.quantity_on_hand).toFixed(3)))
+              : Number(asNumber(product.quantity_on_hand).toFixed(3));
+          const nextProductQuantity = Number(
+            (
+              (saleQuantityByProduct.get(quantityKey) ?? 0) +
+              quantity
+            ).toFixed(3),
+          );
+
+          if (availableQuantity < nextProductQuantity) {
+            throw new Error(
+              `Only ${availableQuantity.toFixed(3)} unit(s) of ${line.product_name_snapshot} are available for checkout.`,
+            );
+          }
+
+          saleQuantityByProduct.set(quantityKey, nextProductQuantity);
+        }
+
+        this.db
+          .prepare(
+            "UPDATE pos_transaction_line SET inventory_location_code = ? WHERE id = ?",
+          )
+          .run(salesLocationCode, line.id);
+
+        salePayloadLines.push({
+          lineId: line.id,
+          lineIntent,
+          sourceLineId: line.source_line_id,
+          productCode: line.product_code_snapshot,
+          productVariantCode: selectedVariant?.variant_code ?? null,
+          productName: line.product_name_snapshot,
+          barcode:
+            selectedVariant?.barcode ??
+            this.getRepresentativeBarcode(line.product_code_snapshot)
+              ?.barcode_code ??
+            null,
+          variantSize: line.variant_size,
+          variantColor: line.variant_color,
+          variantAttributesSnapshot: line.variant_attributes_snapshot,
+          lineNote: line.line_note,
+          serialNumbers: selectedSerialNumbers,
+          quantity,
+          unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+          discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+          taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+          lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+          appliedPromotionCode: line.applied_promotion_code,
+          appliedPromotionName: line.applied_promotion_name,
+        });
+
+        if (tracksInventory) {
+          this.db
+            .prepare(
+              `UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand ${
+                lineIntent === "RETURN" ? "+" : "-"
+              } ?, updated_at = ? WHERE id = ?`,
+            )
+            .run(quantity, timestamp, product.id);
+
+          if (selectedVariant) {
+            this.db
+              .prepare(
+                `UPDATE product_variant_snapshot SET quantity_on_hand = quantity_on_hand ${
+                  lineIntent === "RETURN" ? "+" : "-"
+                } ?, updated_at = ? WHERE id = ?`,
+              )
+              .run(quantity, timestamp, selectedVariant.id);
+          }
+        }
+
+        if (tracksInventory && salesLocationCode) {
+          if (
+            !this.hasLocationBalance(
+              salesLocationCode,
+              line.product_code_snapshot,
+            )
+          ) {
+            this.setLocationBalanceQuantity(
+              salesLocationCode,
+              line.product_code_snapshot,
+              asNumber(product.quantity_on_hand),
+              timestamp,
+            );
+          }
+
+          this.applyLocationBalanceDelta(
+            salesLocationCode,
+            line.product_code_snapshot,
+            lineIntent === "RETURN" ? quantity : quantity * -1,
+            timestamp,
+          );
+        }
+
+        if (selectedSerialNumbers.length > 0) {
+          serialRegistryChanges.push({
+            productCode: line.product_code_snapshot,
+            serialNumbers: selectedSerialNumbers,
+            inventoryLocationCode: salesLocationCode,
+            lineIntent,
+          });
+        }
+
+        if (tracksInventory) {
+          const ledgerEntryId = randomUUID();
+          const inventoryEventId = randomUUID();
+          const inventoryPayload: StoreInventoryLedgerRecordedPayload = {
+            ledgerEntryId,
+            storeCode,
+            terminalCode,
+            inventoryLocationCode: salesLocationCode,
+            productCode: line.product_code_snapshot,
+            movementType: inventoryMovementType,
+            quantity,
+            ...(selectedSerialNumbers.length > 0
+              ? { serialNumbers: selectedSerialNumbers }
+              : {}),
+            unitCost: null,
+            referenceType: "POS_TRANSACTION",
+            referenceId: refreshedBasket.id,
+            externalReference: transactionNo,
+            occurredAt: timestamp,
+          };
+
+          if (shouldQueueEnterprise) {
+            this.db
+              .prepare(
+                "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'inventoryLedgerEntry', ?, 'inventory.ledger.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+              )
+              .run(
+                inventoryEventId,
+                ENTERPRISE_NODE_CODE,
+                ledgerEntryId,
+                `${nodeCode}:inventoryLedgerEntry:${ledgerEntryId}`,
+                JSON.stringify(inventoryPayload),
+                timestamp,
+                timestamp,
+              );
+          }
+        }
+      }
+
+      for (const serialRegistryChange of serialRegistryChanges) {
+        this.applySerialRegistryChangeForLine({
+          ...serialRegistryChange,
+          sourceTransactionId: refreshedBasket.id,
+          sourceTransactionNo: transactionNo,
+          updatedAt: timestamp,
+        });
+      }
+
+      const salePayload: StorePosTransactionCompletedPayload = {
+        transactionId: refreshedBasket.id,
+        transactionNo,
+        sourceTransactionId: refreshedBasket.source_transaction_id,
+        sourceTransactionNo: refreshedBasket.source_transaction_no,
+        storeCode,
+        terminalCode,
+        shiftId: shift.id,
+        shiftNo: shift.shift_no,
+        cashierCode: saleCashierCode,
+        customerId: attachedCustomer?.id ?? null,
+        customerNo:
+          attachedCustomer?.customer_no ?? refreshedBasket.customer_no,
+        customerName:
+          attachedCustomer?.full_name ?? refreshedBasket.customer_name,
+        transactionType,
+        status: "COMPLETED",
+        subtotalAmount: Number(
+          asNumber(refreshedBasket.subtotal_amount).toFixed(2),
+        ),
+        discountAmount: Number(
+          asNumber(refreshedBasket.discount_amount).toFixed(2),
+        ),
+        loyaltyPointsRedeemed: customerAccountEffect.loyaltyPointsRedeemed,
+        loyaltyRedemptionAmount: customerAccountEffect.loyaltyRedemptionAmount,
+        taxAmount: Number(asNumber(refreshedBasket.tax_amount).toFixed(2)),
+        totalAmount,
+        paidAmount,
+        changeAmount: checkoutPayments.changeAmount,
+        notes: completedBasketNotes,
+        headerReference,
+        additionalDetails,
+        completedAt: timestamp,
+        lines: salePayloadLines,
+        payments: combinedPaymentPayloads,
+      };
+
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET shift_id = ?, cashier_code = ?, status = 'COMPLETED', paid_amount = ?, change_amount = ?, notes = ?, header_reference = ?, additional_details = ?, completed_at = ?, record_version = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          shift.id,
+          saleCashierCode,
+          paidAmount,
+          checkoutPayments.changeAmount,
+          completedBasketNotes,
+          headerReference,
+          additionalDetails,
+          timestamp,
+          saleRecordVersion,
+          timestamp,
+          refreshedBasket.id,
+        );
+      this.recordTransactionReferenceCapture({
+        reference: headerReference,
+        details: additionalDetails,
+        transactionNo,
+        capturedAt: timestamp,
+      });
+      if (
+        attachedCustomer &&
+        (customerAccountEffect.receivableDeltaAmount !== 0 ||
+          customerAccountEffect.loyaltyPointsDelta !== 0)
+      ) {
+        this.db
+          .prepare(
+            "UPDATE customer SET loyalty_points_balance = ?, receivable_balance_amount = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(
+            customerAccountEffect.nextLoyaltyPointsBalance ?? 0,
+            customerAccountEffect.nextReceivableBalanceAmount ?? 0,
+            timestamp,
+            attachedCustomer.id,
+          );
+      }
+      for (const payment of checkoutPayments.payments) {
+        this.db
+          .prepare(
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, bank_account_id, bank_code, bank_name, bank_branch_code, bank_branch_name, bank_account_number, bank_account_name, method, amount, reference, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            payment.paymentId,
+            refreshedBasket.id,
+            payment.tenderMethodCode,
+            payment.tenderMethodName,
+            payment.bankAccountId,
+            payment.bankCode,
+            payment.bankName,
+            payment.bankBranchCode,
+            payment.bankBranchName,
+            payment.bankAccountNumber,
+            payment.bankAccountName,
+            payment.method,
+            payment.amount,
+            payment.reference,
+            payment.receivedAt,
+          );
+      }
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'posTransaction', ?, 'pos.transaction.completed', ?, ?, 'PENDING', 0, ?, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            refreshedBasket.id,
+            `${nodeCode}:posTransaction:${transactionNo}`,
+            JSON.stringify(salePayload),
+            saleRecordVersion,
+            timestamp,
+            timestamp,
+          );
+      }
+      const fulfilledSalesOrder = this.db
+        .prepare(
+          "SELECT id, order_no, source_transaction_id, source_transaction_no, customer_id, customer_no, customer_name, status, total_amount, deposit_amount, balance_amount, deposit_tender_method_code, deposit_tender_method_name, deposit_payment_method, deposit_reference, deposit_paid_at, 0 AS line_count, 0 AS item_count, operator_name, note, fulfilled_transaction_id, fulfilled_transaction_no, synced_at, created_at, fulfilled_at, cancelled_at, updated_at FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
+        )
+        .get(refreshedBasket.id) as SalesOrderRow | undefined;
+
+      if (fulfilledSalesOrder) {
+        const salesOrderEventId = randomUUID();
+        const salesOrderPayload: StoreSalesOrderRecordedPayload = {
+          orderId: fulfilledSalesOrder.id,
+          orderNo: fulfilledSalesOrder.order_no,
+          storeCode,
+          terminalCode,
+          sourceTransactionId: fulfilledSalesOrder.source_transaction_id,
+          sourceTransactionNo: fulfilledSalesOrder.source_transaction_no,
+          customerId: fulfilledSalesOrder.customer_id,
+          customerNo: fulfilledSalesOrder.customer_no,
+          customerName: fulfilledSalesOrder.customer_name,
+          totalAmount: Number(
+            asNumber(fulfilledSalesOrder.total_amount).toFixed(2),
+          ),
+          depositAmount: Number(
+            asNumber(fulfilledSalesOrder.deposit_amount).toFixed(2),
+          ),
+          balanceAmount: 0,
+          depositTenderMethodCode:
+            fulfilledSalesOrder.deposit_tender_method_code,
+          depositTenderMethodName:
+            fulfilledSalesOrder.deposit_tender_method_name,
+          depositPaymentMethod: fulfilledSalesOrder.deposit_payment_method,
+          depositReference: fulfilledSalesOrder.deposit_reference,
+          depositPaidAt: fulfilledSalesOrder.deposit_paid_at,
+          status: "FULFILLED",
+          operatorName: fulfilledSalesOrder.operator_name,
+          note: fulfilledSalesOrder.note,
+          createdAt: fulfilledSalesOrder.created_at,
+          fulfilledTransactionId: refreshedBasket.id,
+          fulfilledTransactionNo: transactionNo,
+          fulfilledAt: timestamp,
+          cancelledAt: null,
+        };
+
+        this.db
+          .prepare(
+            "UPDATE sales_order SET status = 'FULFILLED', balance_amount = 0, fulfilled_transaction_id = ?, fulfilled_transaction_no = ?, fulfilled_at = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(
+            refreshedBasket.id,
+            transactionNo,
+            timestamp,
+            timestamp,
+            fulfilledSalesOrder.id,
+          );
+        if (shouldQueueEnterprise) {
+          this.db
+            .prepare(
+              "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'salesOrder', ?, 'sales-order.fulfilled', ?, ?, 'PENDING', 0, 2, ?, ?)",
+            )
+            .run(
+              salesOrderEventId,
+              ENTERPRISE_NODE_CODE,
+              fulfilledSalesOrder.id,
+              `${nodeCode}:salesOrder:${fulfilledSalesOrder.order_no}:fulfilled`,
+              JSON.stringify(salesOrderPayload),
+              timestamp,
+              timestamp,
+            );
+        }
+      }
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary:
+          this.isStandaloneDeployment()
+            ? transactionType === "RETURN"
+              ? `${transactionNo} was completed from the active return basket locally.`
+              : transactionType === "EXCHANGE"
+                ? `${transactionNo} was completed from the active exchange basket locally.`
+                : `${transactionNo} was completed from the active basket locally.`
+            : transactionType === "RETURN"
+              ? `${transactionNo} was completed from the active return basket and queued for enterprise sync.`
+              : transactionType === "EXCHANGE"
+                ? `${transactionNo} was completed from the active exchange basket and queued for enterprise sync.`
+                : `${transactionNo} was completed from the active basket and queued for enterprise sync.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      transactionNo,
+      transactionType,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  private captureLocalSale(
+    match: {
+      id: string;
+      product_code: string;
+      product_name: string;
+      department_code: string | null;
+      category_code: string | null;
+      taxable: number | string;
+      tax_rate_percent: number | string | null;
+      tax_inclusive: number | string;
+      track_inventory: number | string;
+      is_serialized: number | string;
+      track_size: number | string;
+      track_color: number | string;
+      unit_price: number | string;
+      quantity_on_hand: number | string;
+      barcode_code: string | null;
+      sales_location_code: string | null;
+    },
+    input: {
+      quantity: number;
+      serialNumbers: string[];
+      variantSize: string | null;
+      variantColor: string | null;
+      note: string;
+      message: string;
+      cashierCode: string;
+    },
+  ) {
+    const timestamp = isoNow();
+    let transactionNo = "";
+
+    this.withTransaction(() => {
+      const transactionSequence = this.nextSequence("transaction_sequence");
+      const shift = this.getOpenShiftContext();
+      const saleCashierCode = input.cashierCode.trim() || shift.cashier_code;
+      const quantity = Number(input.quantity.toFixed(3));
+      const unitPrice = asNumber(match.unit_price);
+      const variantSize = optionalSetupText(input.variantSize);
+      const variantColor = optionalSetupText(input.variantColor);
+
+      const lineId = randomUUID();
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+      const promotionPricing = applyAutomaticPromotions({
+        promotions: this.listAutomaticPromotionPolicies(timestamp),
+        storeCode,
+        lines: [
+          {
+            lineId,
+            lineIntent: "SALE",
+            sourceLineId: null,
+            productCode: match.product_code,
+            departmentCode: match.department_code,
+            categoryCode: match.category_code,
+            quantity,
+            unitPrice,
+            taxable: asBooleanFlag(match.taxable),
+            taxRatePercent: asNullableNumber(match.tax_rate_percent),
+            taxInclusive: asBooleanFlag(match.tax_inclusive),
+          },
+        ],
+        evaluatedAt: timestamp,
+      });
+      const linePricing =
+        promotionPricing.lineResults[0] ??
+        (() => {
+          const lineAmounts = calculateSaleLineAmounts({
+            unitPrice,
+            quantity,
+            taxable: asBooleanFlag(match.taxable),
+            taxRatePercent: asNullableNumber(match.tax_rate_percent),
+            taxInclusive: asBooleanFlag(match.tax_inclusive),
+          });
+
+          return {
+            lineId,
+            discountAmount: 0,
+            subtotalAmount: lineAmounts.subtotal,
+            taxAmount: lineAmounts.taxAmount,
+            lineTotal: lineAmounts.lineTotal,
+            appliedPromotionCode: null,
+            appliedPromotionName: null,
+            allowWithLoyalty: true,
+          };
+        })();
+      const defaultTenderMethod =
+        this.listActiveTenderMethods().find(
+          (method) => method.paymentMethod === "CASH",
+        ) ?? null;
+      const transactionId = randomUUID();
+      transactionNo = `POS-ACC-${String(transactionSequence).padStart(4, "0")}`;
+      const paymentId = randomUUID();
+      const saleEventId = randomUUID();
+      const ledgerEntryId = randomUUID();
+      const inventoryEventId = randomUUID();
+      const terminalCode = this.getTerminalCode();
+      const nodeCode =
+        this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const salePayload: StorePosTransactionCompletedPayload = {
+        transactionId,
+        transactionNo,
+        sourceTransactionId: null,
+        sourceTransactionNo: null,
+        storeCode,
+        terminalCode,
+        shiftId: shift.id,
+        shiftNo: shift.shift_no,
+        cashierCode: saleCashierCode,
+        customerId: null,
+        customerNo: null,
+        customerName: null,
+        transactionType: "SALE",
+        status: "COMPLETED",
+        subtotalAmount: linePricing.subtotalAmount,
+        discountAmount: linePricing.discountAmount,
+        loyaltyPointsRedeemed: 0,
+        loyaltyRedemptionAmount: 0,
+        taxAmount: linePricing.taxAmount,
+        totalAmount: linePricing.lineTotal,
+        paidAmount: linePricing.lineTotal,
+        changeAmount: 0,
+        notes: input.note,
+        completedAt: timestamp,
+        lines: [
+          {
+            lineId,
+            lineIntent: "SALE",
+            sourceLineId: null,
+            productCode: match.product_code,
+            productName: match.product_name,
+            barcode: match.barcode_code,
+            variantSize,
+            variantColor,
+            serialNumbers: input.serialNumbers,
+            quantity,
+            unitPrice,
+            discountAmount: linePricing.discountAmount,
+            taxAmount: linePricing.taxAmount,
+            lineTotal: linePricing.lineTotal,
+            appliedPromotionCode: linePricing.appliedPromotionCode,
+            appliedPromotionName: linePricing.appliedPromotionName,
+          },
+        ],
+        payments: [
+          {
+            paymentId,
+            method: defaultTenderMethod?.paymentMethod ?? "CASH",
+            tenderMethodCode: defaultTenderMethod?.tenderMethodCode ?? null,
+            tenderMethodName: defaultTenderMethod?.tenderMethodName ?? null,
+            amount: linePricing.lineTotal,
+            reference: `CASH-${transactionNo}`,
+            receivedAt: timestamp,
+          },
+        ],
+      };
+      const inventoryPayload: StoreInventoryLedgerRecordedPayload = {
+        ledgerEntryId,
+        storeCode,
+        terminalCode,
+        inventoryLocationCode: match.sales_location_code,
+        productCode: match.product_code,
+        movementType: "SALE",
+        quantity,
+        ...(input.serialNumbers.length > 0
+          ? { serialNumbers: input.serialNumbers }
+          : {}),
+        unitCost: null,
+        referenceType: "POS_TRANSACTION",
+        referenceId: transactionId,
+        externalReference: transactionNo,
+        occurredAt: timestamp,
+      };
+
+      this.db
+        .prepare(
+          "INSERT INTO pos_transaction (id, transaction_no, shift_id, cashier_code, customer_id, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, completed_at, record_version, deleted_at, updated_at) VALUES (?, ?, ?, ?, ?, 'SALE', 'COMPLETED', ?, ?, ?, ?, ?, 0, ?, ?, 1, NULL, ?)",
+        )
+        .run(
+          transactionId,
+          transactionNo,
+          shift.id,
+          saleCashierCode,
+          null,
+          linePricing.subtotalAmount,
+          linePricing.discountAmount,
+          linePricing.taxAmount,
+          linePricing.lineTotal,
+          linePricing.lineTotal,
+          input.note,
+          timestamp,
+          timestamp,
+        );
+      this.db
+        .prepare(
+          "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_name_snapshot, variant_size, variant_color, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total) VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          lineId,
+          transactionId,
+          match.id,
+          linePricing.appliedPromotionCode,
+          linePricing.appliedPromotionName,
+          match.product_code,
+          match.product_name,
+          variantSize,
+          variantColor,
+          writeSerializedLineNumbers(input.serialNumbers),
+          quantity,
+          unitPrice,
+          linePricing.discountAmount,
+          linePricing.taxAmount,
+          linePricing.lineTotal,
+        );
+      this.db
+        .prepare(
+          "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          paymentId,
+          transactionId,
+          defaultTenderMethod?.tenderMethodCode ?? null,
+          defaultTenderMethod?.tenderMethodName ?? null,
+          defaultTenderMethod?.paymentMethod ?? "CASH",
+          linePricing.lineTotal,
+          `CASH-${transactionNo}`,
+          timestamp,
+        );
+      if (asBooleanFlag(match.track_inventory)) {
+        if (
+          match.sales_location_code &&
+          !this.hasLocationBalance(
+            match.sales_location_code,
+            match.product_code,
+          )
+        ) {
+          this.setLocationBalanceQuantity(
+            match.sales_location_code,
+            match.product_code,
+            asNumber(match.quantity_on_hand),
+            timestamp,
+          );
+        }
+        this.db
+          .prepare(
+            "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand - ?, updated_at = ? WHERE id = ?",
+          )
+          .run(quantity, timestamp, match.id);
+        if (match.sales_location_code) {
+          this.applyLocationBalanceDelta(
+            match.sales_location_code,
+            match.product_code,
+            quantity * -1,
+            timestamp,
+          );
+        }
+        if (input.serialNumbers.length > 0) {
+          this.applySerialRegistryChangeForLine({
+            productCode: match.product_code,
+            serialNumbers: input.serialNumbers,
+            inventoryLocationCode: match.sales_location_code,
+            lineIntent: "SALE",
+            sourceTransactionId: transactionId,
+            sourceTransactionNo: transactionNo,
+            updatedAt: timestamp,
+          });
+        }
+        if (shouldQueueEnterprise) {
+          this.db
+            .prepare(
+              "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'inventoryLedgerEntry', ?, 'inventory.ledger.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+            )
+            .run(
+              inventoryEventId,
+              ENTERPRISE_NODE_CODE,
+              ledgerEntryId,
+              `${nodeCode}:inventoryLedgerEntry:${ledgerEntryId}`,
+              JSON.stringify(inventoryPayload),
+              timestamp,
+              timestamp,
+            );
+        }
+      } else if (input.serialNumbers.length > 0) {
+        this.applySerialRegistryChangeForLine({
+          productCode: match.product_code,
+          serialNumbers: input.serialNumbers,
+          inventoryLocationCode: match.sales_location_code,
+          lineIntent: "SALE",
+          sourceTransactionId: transactionId,
+          sourceTransactionNo: transactionNo,
+          updatedAt: timestamp,
+        });
+      }
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'posTransaction', ?, 'pos.transaction.completed', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            saleEventId,
+            ENTERPRISE_NODE_CODE,
+            transactionId,
+            `${nodeCode}:posTransaction:${transactionNo}`,
+            JSON.stringify(salePayload),
+            timestamp,
+            timestamp,
+          );
+      }
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: input.message,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      transactionNo,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  receivePurchaseOrder(
+    input: StorePurchaseOrderReceiptRequest,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.grn.receive"],
+      purpose: "receiving goods against a purchase order",
+    });
+    const timestamp = isoNow();
+    const requestedLines =
+      input.lines?.map((line) => ({
+        purchaseOrderLineId: line.purchaseOrderLineId?.trim(),
+        quantity: Number(line.quantity),
+        serialNumbers: normalizeSerialNumbers(line.serialNumbers),
+      })) ?? [];
+    const requestedExceptionLines =
+      input.exceptionLines?.map((line) => ({
+        purchaseOrderLineId: line.purchaseOrderLineId?.trim(),
+        quantity: Number(line.quantity),
+        reason: line.reason,
+        note: line.note?.trim() || null,
+      })) ?? [];
+    const allowedExceptionReasons = new Set([
+      "SHORT_SUPPLIED",
+      "REJECTED_AT_RECEIPT",
+      "DAMAGED_INBOUND",
+      "WRONG_ITEM",
+      "OTHER",
+    ]);
+
+    if (!input.purchaseOrderId?.trim()) {
+      throw new Error(
+        "Select a purchase order before recording a local goods receipt.",
+      );
+    }
+
+    if (requestedLines.length === 0 && requestedExceptionLines.length === 0) {
+      throw new Error(
+        "Add at least one received or exception line before posting the local goods receipt.",
+      );
+    }
+
+    const duplicateLineIds = new Set<string>();
+    const seenLineIds = new Set<string>();
+    const duplicateExceptionLineIds = new Set<string>();
+    const seenExceptionLineIds = new Set<string>();
+
+    for (const line of requestedLines) {
+      if (!line.purchaseOrderLineId) {
+        throw new Error(
+          "Each goods-receipt line must target a purchase-order line.",
+        );
+      }
+
+      if (seenLineIds.has(line.purchaseOrderLineId)) {
+        duplicateLineIds.add(line.purchaseOrderLineId);
+      }
+
+      seenLineIds.add(line.purchaseOrderLineId);
+    }
+
+    if (duplicateLineIds.size > 0) {
+      throw new Error(
+        `Flash ERP received duplicate purchase-order lines in the same receipt: ${[...duplicateLineIds].join(", ")}.`,
+      );
+    }
+
+    const purchaseOrder = this.db
+      .prepare(
+        `SELECT
+          id,
+          purchase_order_no,
+          status,
+          inventory_location_code,
+          inventory_location_name,
+          supplier_no,
+          supplier_name,
+          ordered_quantity,
+          exception_quantity,
+          received_quantity,
+          outstanding_quantity
+        FROM purchase_order_snapshot
+        WHERE id = ?
+        LIMIT 1`,
+      )
+      .get(input.purchaseOrderId) as PurchaseOrderSnapshotRow | undefined;
+
+    if (!purchaseOrder) {
+      throw new Error(
+        "Flash ERP could not find that purchase order in the local desktop snapshot.",
+      );
+    }
+
+    if (
+      purchaseOrder.status !== "COMMITTED" &&
+      purchaseOrder.status !== "PART_RECEIVED"
+    ) {
+      throw new Error(
+        `Purchase order ${purchaseOrder.purchase_order_no} is ${purchaseOrder.status.toLowerCase().replace(/_/g, " ")} and is not open for local receiving.`,
+      );
+    }
+
+    for (const line of requestedExceptionLines) {
+      if (!line.purchaseOrderLineId) {
+        throw new Error(
+          "Each receipt exception must target a purchase-order line.",
+        );
+      }
+
+      if (!allowedExceptionReasons.has(line.reason)) {
+        throw new Error(
+          "Choose a valid receipt-exception reason before posting this GRN locally.",
+        );
+      }
+
+      if (seenExceptionLineIds.has(line.purchaseOrderLineId)) {
+        duplicateExceptionLineIds.add(line.purchaseOrderLineId);
+      }
+
+      seenExceptionLineIds.add(line.purchaseOrderLineId);
+    }
+
+    if (duplicateExceptionLineIds.size > 0) {
+      throw new Error(
+        `Flash ERP received duplicate exception lines in the same receipt: ${[
+          ...duplicateExceptionLineIds,
+        ].join(", ")}.`,
+      );
+    }
+
+    const lineRows = this.db
+      .prepare(
+        `SELECT
+          line.id AS id,
+          line.purchase_order_id AS purchase_order_id,
+          line.line_no AS line_no,
+          line.product_code AS product_code,
+          line.product_name AS product_name,
+          line.department_code AS department_code,
+          department.department_name AS department_name,
+          line.category_code AS category_code,
+          category.category_name AS category_name,
+          line.subcategory AS subcategory,
+          line.is_serialized AS is_serialized,
+          line.ordered_quantity AS ordered_quantity,
+          line.received_quantity AS received_quantity,
+          line.exception_quantity AS exception_quantity,
+          line.outstanding_quantity AS outstanding_quantity,
+          line.unit_cost AS unit_cost,
+          line.updated_at AS updated_at
+        FROM purchase_order_line_snapshot AS line
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = line.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = line.category_code
+        WHERE line.purchase_order_id = ?
+        ORDER BY line.line_no ASC`,
+      )
+      .all(input.purchaseOrderId) as PurchaseOrderLineSnapshotRow[];
+    const lineById = new Map(lineRows.map((line) => [line.id, line] as const));
+    const requestedLineById = new Map(
+      requestedLines.map(
+        (line) => [line.purchaseOrderLineId as string, line] as const,
+      ),
+    );
+    const requestedExceptionLineById = new Map(
+      requestedExceptionLines.map(
+        (line) => [line.purchaseOrderLineId as string, line] as const,
+      ),
+    );
+    const touchedLineIds = [
+      ...new Set([
+        ...requestedLines.map((line) => line.purchaseOrderLineId as string),
+        ...requestedExceptionLines.map(
+          (line) => line.purchaseOrderLineId as string,
+        ),
+      ]),
+    ];
+    const productRowsByCode = new Map<string, ProductRow>();
+    let totalQuantity = 0;
+    let totalExceptionQuantity = 0;
+
+    for (const lineId of touchedLineIds) {
+      const line = lineById.get(lineId);
+      const requestedLine = requestedLineById.get(lineId) ?? null;
+      const requestedExceptionLine =
+        requestedExceptionLineById.get(lineId) ?? null;
+
+      if (!line) {
+        throw new Error(
+          `Flash ERP could not find purchase-order line "${lineId}" locally.`,
+        );
+      }
+
+      const quantity = requestedLine ? Number(requestedLine.quantity) : 0;
+      const exceptionQuantity = requestedExceptionLine
+        ? Number(requestedExceptionLine.quantity)
+        : 0;
+
+      const outstandingQuantity = Number(
+        asNumber(line.outstanding_quantity).toFixed(3),
+      );
+
+      if (requestedLine && (!Number.isFinite(quantity) || quantity <= 0)) {
+        throw new Error(
+          `Goods-receipt line ${asNumber(line.line_no)} for ${line.product_name} needs a quantity greater than zero.`,
+        );
+      }
+
+      if (
+        requestedExceptionLine &&
+        (!Number.isFinite(exceptionQuantity) || exceptionQuantity <= 0)
+      ) {
+        throw new Error(
+          `Receipt exception line ${asNumber(line.line_no)} for ${line.product_name} needs a quantity greater than zero.`,
+        );
+      }
+
+      if (quantity + exceptionQuantity - outstandingQuantity > 0.0001) {
+        throw new Error(
+          `Only ${outstandingQuantity.toFixed(3)} unit(s) of ${line.product_name} are still outstanding on ${purchaseOrder.purchase_order_no}.`,
+        );
+      }
+
+      const product =
+        productRowsByCode.get(line.product_code) ??
+        (this.db
+          .prepare(
+            `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? LIMIT 1`,
+          )
+          .get(line.product_code) as ProductRow | undefined) ??
+        null;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not find local product "${line.product_code}" while posting the goods receipt.`,
+        );
+      }
+
+      productRowsByCode.set(line.product_code, product);
+
+      if (requestedLine && asBooleanFlag(line.is_serialized)) {
+        if (!Number.isInteger(quantity)) {
+          throw new Error(
+            `Serialized product ${line.product_name} needs a whole-number receipt quantity.`,
+          );
+        }
+
+        if (requestedLine.serialNumbers.length !== quantity) {
+          throw new Error(
+            `Serialized product ${line.product_name} needs ${quantity} serial number(s) before Flash ERP can post this receipt locally.`,
+          );
+        }
+
+        this.ensureInventoryTaskSerialNumbersNotReserved(
+          line.product_code,
+          line.product_name,
+          requestedLine.serialNumbers,
+        );
+
+        const duplicateSerials = requestedLine.serialNumbers.filter(
+          (serialNumber) =>
+            this.getSerialRegistryEntry(line.product_code, serialNumber) !==
+            undefined,
+        );
+
+        if (duplicateSerials.length > 0) {
+          throw new Error(
+            `Flash ERP already has serial number(s) ${duplicateSerials.join(", ")} for ${line.product_name} in the local registry.`,
+          );
+        }
+      } else if (requestedLine && requestedLine.serialNumbers.length > 0) {
+        throw new Error(
+          `${line.product_name} is not serialized, so this receipt line cannot include serial numbers.`,
+        );
+      }
+
+      if (
+        requestedExceptionLine &&
+        asBooleanFlag(line.is_serialized) &&
+        !Number.isInteger(exceptionQuantity)
+      ) {
+        throw new Error(
+          `Serialized product ${line.product_name} needs a whole-number exception quantity.`,
+        );
+      }
+
+      totalQuantity = Number((totalQuantity + quantity).toFixed(3));
+      totalExceptionQuantity = Number(
+        (totalExceptionQuantity + exceptionQuantity).toFixed(3),
+      );
+    }
+
+    const supplierNo =
+      input.supplierNo?.trim().toUpperCase() ||
+      purchaseOrder.supplier_no ||
+      null;
+
+    if (totalExceptionQuantity > 0 && !supplierNo) {
+      throw new Error(
+        `Purchase order ${purchaseOrder.purchase_order_no} needs a supplier before Flash ERP can raise supplier claims for receipt exceptions.`,
+      );
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    const goodsReceiptId = randomUUID();
+    const goodsReceiptNo = buildLocalGoodsReceiptNo(
+      storeCode,
+      this.nextSequence("goods_receipt_sequence"),
+      timestamp,
+    );
+    const supplierName = purchaseOrder.supplier_name ?? null;
+    const externalReference =
+      input.externalReference?.trim() ||
+      purchaseOrder.purchase_order_no ||
+      goodsReceiptNo;
+    const operatorName = this.formatOperatorLabel(operatorSession);
+    const note =
+      input.note?.trim() ||
+      `Receiving stock for ${purchaseOrder.purchase_order_no} into ${purchaseOrder.inventory_location_name} from the Flash ERP store desktop.`;
+    const payloadLines: StoreGoodsReceiptRecordedPayload["lines"] = [];
+    const payloadExceptions: StoreGoodsReceiptRecordedPayload["exceptions"] =
+      [];
+
+    this.withTransaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO local_goods_receipt (id, goods_receipt_no, purchase_order_id, purchase_order_no, inventory_location_code, supplier_no, supplier_name, external_reference, note, operator_name, total_quantity, exception_quantity, synced_at, received_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .run(
+          goodsReceiptId,
+          goodsReceiptNo,
+          purchaseOrder.id,
+          purchaseOrder.purchase_order_no,
+          purchaseOrder.inventory_location_code,
+          supplierNo,
+          supplierName,
+          externalReference,
+          note,
+          operatorName,
+          totalQuantity,
+          totalExceptionQuantity,
+          timestamp,
+          timestamp,
+        );
+
+      for (const lineId of touchedLineIds) {
+        const line = lineById.get(lineId);
+        const requestedLine = requestedLineById.get(lineId) ?? null;
+        const requestedExceptionLine =
+          requestedExceptionLineById.get(lineId) ?? null;
+
+        if (!line) {
+          throw new Error(
+            `Flash ERP could not find purchase-order line "${lineId}" locally.`,
+          );
+        }
+
+        const product = productRowsByCode.get(line.product_code);
+        const receivedQuantity = requestedLine
+          ? Number(requestedLine.quantity.toFixed(3))
+          : 0;
+        const exceptionQuantity = requestedExceptionLine
+          ? Number(requestedExceptionLine.quantity.toFixed(3))
+          : 0;
+
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${line.product_code}" while applying the goods receipt.`,
+          );
+        }
+
+        const nextReceivedQuantity = Number(
+          (asNumber(line.received_quantity) + receivedQuantity).toFixed(3),
+        );
+        const nextExceptionQuantity = Number(
+          (asNumber(line.exception_quantity) + exceptionQuantity).toFixed(3),
+        );
+        const nextOutstandingQuantity = Number(
+          Math.max(
+            0,
+            asNumber(line.ordered_quantity) -
+              nextReceivedQuantity -
+              nextExceptionQuantity,
+          ).toFixed(3),
+        );
+
+        if (requestedLine && receivedQuantity > 0) {
+          const goodsReceiptLineId = randomUUID();
+
+          this.db
+            .prepare(
+              "INSERT INTO local_goods_receipt_line (id, local_goods_receipt_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              goodsReceiptLineId,
+              goodsReceiptId,
+              line.id,
+              asNumber(line.line_no),
+              line.product_code,
+              line.product_name,
+              receivedQuantity,
+              asNullableNumber(line.unit_cost),
+              writeSerializedLineNumbers(requestedLine.serialNumbers),
+              timestamp,
+            );
+
+          this.db
+            .prepare(
+              "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + ?, updated_at = ? WHERE id = ?",
+            )
+            .run(receivedQuantity, timestamp, product.id);
+
+          if (
+            !this.hasLocationBalance(
+              purchaseOrder.inventory_location_code,
+              line.product_code,
+            )
+          ) {
+            this.setLocationBalanceQuantity(
+              purchaseOrder.inventory_location_code,
+              line.product_code,
+              asNumber(product.quantity_on_hand),
+              timestamp,
+            );
+          }
+
+          this.applyLocationBalanceDelta(
+            purchaseOrder.inventory_location_code,
+            line.product_code,
+            receivedQuantity,
+            timestamp,
+          );
+
+          if (requestedLine.serialNumbers.length > 0) {
+            for (const serialNumber of requestedLine.serialNumbers) {
+              this.upsertSerialRegistryEntry({
+                productCode: line.product_code,
+                serialNumber,
+                inventoryLocationCode: purchaseOrder.inventory_location_code,
+                status: "AVAILABLE",
+                sourceTransactionId: goodsReceiptId,
+                sourceTransactionNo: goodsReceiptNo,
+                updatedAt: timestamp,
+              });
+            }
+          }
+
+          payloadLines.push({
+            goodsReceiptLineId,
+            purchaseOrderLineId: line.id,
+            lineNo: asNumber(line.line_no),
+            productCode: line.product_code,
+            productName: line.product_name,
+            quantity: receivedQuantity,
+            unitCost: asNullableNumber(line.unit_cost),
+            serialNumbers: requestedLine.serialNumbers,
+          });
+        }
+
+        if (requestedExceptionLine && exceptionQuantity > 0) {
+          const receiptExceptionId = randomUUID();
+
+          this.db
+            .prepare(
+              "INSERT INTO local_goods_receipt_exception (id, local_goods_receipt_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, reason, note, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              receiptExceptionId,
+              goodsReceiptId,
+              line.id,
+              asNumber(line.line_no),
+              line.product_code,
+              line.product_name,
+              exceptionQuantity,
+              asNullableNumber(line.unit_cost),
+              requestedExceptionLine.reason,
+              requestedExceptionLine.note,
+              timestamp,
+            );
+
+          payloadExceptions.push({
+            receiptExceptionId,
+            purchaseOrderLineId: line.id,
+            lineNo: asNumber(line.line_no),
+            productCode: line.product_code,
+            productName: line.product_name,
+            quantity: exceptionQuantity,
+            unitCost: asNullableNumber(line.unit_cost),
+            reason: requestedExceptionLine.reason,
+            note: requestedExceptionLine.note,
+          });
+        }
+
+        this.db
+          .prepare(
+            "UPDATE purchase_order_line_snapshot SET received_quantity = ?, exception_quantity = ?, outstanding_quantity = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(
+            nextReceivedQuantity,
+            nextExceptionQuantity,
+            nextOutstandingQuantity,
+            timestamp,
+            line.id,
+          );
+      }
+
+      const nextReceivedQuantity = Number(
+        (asNumber(purchaseOrder.received_quantity) + totalQuantity).toFixed(3),
+      );
+      const nextExceptionQuantity = Number(
+        (
+          asNumber(purchaseOrder.exception_quantity) + totalExceptionQuantity
+        ).toFixed(3),
+      );
+      const nextOutstandingQuantity = Number(
+        Math.max(
+          0,
+          asNumber(purchaseOrder.ordered_quantity) -
+            nextReceivedQuantity -
+            nextExceptionQuantity,
+        ).toFixed(3),
+      );
+      const nextStatus =
+        nextOutstandingQuantity <= 0.0001 && nextExceptionQuantity <= 0.0001
+          ? "RECEIVED"
+          : "PART_RECEIVED";
+
+      this.db
+        .prepare(
+          "UPDATE purchase_order_snapshot SET supplier_no = ?, ordered_quantity = ?, received_quantity = ?, exception_quantity = ?, outstanding_quantity = ?, status = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          supplierNo,
+          asNumber(purchaseOrder.ordered_quantity),
+          nextReceivedQuantity,
+          nextExceptionQuantity,
+          nextOutstandingQuantity,
+          nextStatus,
+          timestamp,
+          purchaseOrder.id,
+        );
+
+      const goodsReceiptPayload: StoreGoodsReceiptRecordedPayload = {
+        goodsReceiptId,
+        goodsReceiptNo,
+        purchaseOrderId: purchaseOrder.id,
+        purchaseOrderNo: purchaseOrder.purchase_order_no,
+        storeCode,
+        terminalCode,
+        inventoryLocationCode: purchaseOrder.inventory_location_code,
+        supplierNo,
+        supplierName,
+        externalReference,
+        note,
+        operatorName,
+        receivedAt: timestamp,
+        lines: payloadLines,
+        exceptions: payloadExceptions,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'goodsReceipt', ?, 'goods-receipt.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            goodsReceiptId,
+            ENTERPRISE_NODE_CODE,
+            goodsReceiptId,
+            `${nodeCode}:goodsReceipt:${goodsReceiptNo}`,
+            JSON.stringify(goodsReceiptPayload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary:
+          totalExceptionQuantity > 0
+            ? shouldQueueEnterprise
+              ? `${goodsReceiptNo} was posted locally against ${purchaseOrder.purchase_order_no} with ${totalExceptionQuantity.toFixed(3)} unit(s) marked as supplier exceptions and queued for enterprise sync.`
+              : `${goodsReceiptNo} was posted locally against ${purchaseOrder.purchase_order_no} with ${totalExceptionQuantity.toFixed(3)} unit(s) marked as supplier exceptions.`
+            : shouldQueueEnterprise
+              ? `${goodsReceiptNo} was received locally against ${purchaseOrder.purchase_order_no} and queued for enterprise sync.`
+              : `${goodsReceiptNo} was received locally against ${purchaseOrder.purchase_order_no}.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message:
+        totalExceptionQuantity > 0
+          ? shouldQueueEnterprise
+            ? `${goodsReceiptNo} was posted locally with receipt exceptions and queued for enterprise projection.`
+            : `${goodsReceiptNo} was posted locally with receipt exceptions.`
+          : shouldQueueEnterprise
+            ? `${goodsReceiptNo} was received locally and queued for enterprise projection.`
+            : `${goodsReceiptNo} was received locally for standalone purchasing.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  recordSupplierReturn(
+    input: StoreSupplierReturnRequest,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.supplier-return.manage"],
+      purpose: "posting a supplier return",
+    });
+    const timestamp = isoNow();
+    const requestedLines =
+      input.lines?.map((line) => ({
+        goodsReceiptLineId: line.goodsReceiptLineId?.trim(),
+        quantity: Number(line.quantity),
+        serialNumbers: normalizeSerialNumbers(line.serialNumbers),
+      })) ?? [];
+    const allowedReasons = new Set([
+      "DAMAGED",
+      "REJECTED_AT_RECEIPT",
+      "QUALITY_HOLD",
+      "SHORT_EXPIRY",
+      "WRONG_ITEM",
+      "OTHER",
+    ]);
+
+    if (!input.goodsReceiptId?.trim()) {
+      throw new Error(
+        "Select the original goods receipt before recording a supplier return.",
+      );
+    }
+
+    if (!allowedReasons.has(input.reason)) {
+      throw new Error(
+        "Choose a valid supplier-return reason before posting the RTV locally.",
+      );
+    }
+
+    if (requestedLines.length === 0) {
+      throw new Error(
+        "Add at least one return line before posting the supplier return locally.",
+      );
+    }
+
+    const duplicateLineIds = new Set<string>();
+    const seenLineIds = new Set<string>();
+
+    for (const line of requestedLines) {
+      if (!line.goodsReceiptLineId) {
+        throw new Error(
+          "Each supplier-return line must target an original goods-receipt line.",
+        );
+      }
+
+      if (seenLineIds.has(line.goodsReceiptLineId)) {
+        duplicateLineIds.add(line.goodsReceiptLineId);
+      }
+
+      seenLineIds.add(line.goodsReceiptLineId);
+    }
+
+    if (duplicateLineIds.size > 0) {
+      throw new Error(
+        `Flash ERP received duplicate goods-receipt lines in the same supplier return: ${[
+          ...duplicateLineIds,
+        ].join(", ")}.`,
+      );
+    }
+
+    const goodsReceipt = this.db
+      .prepare(
+        `SELECT
+          receipt.id AS id,
+          receipt.goods_receipt_no AS goods_receipt_no,
+          receipt.purchase_order_id AS purchase_order_id,
+          receipt.purchase_order_no AS purchase_order_no,
+          receipt.inventory_location_code AS inventory_location_code,
+          location.location_name AS inventory_location_name,
+          receipt.supplier_no AS supplier_no,
+          receipt.supplier_name AS supplier_name,
+          receipt.external_reference AS external_reference
+        FROM local_goods_receipt AS receipt
+        LEFT JOIN inventory_location_snapshot AS location
+          ON location.location_code = receipt.inventory_location_code
+        WHERE receipt.id = ?
+        LIMIT 1`,
+      )
+      .get(input.goodsReceiptId) as
+      | (Pick<
+          LocalGoodsReceiptRow,
+          | "id"
+          | "goods_receipt_no"
+          | "purchase_order_id"
+          | "purchase_order_no"
+          | "inventory_location_code"
+          | "supplier_no"
+          | "supplier_name"
+          | "external_reference"
+        > & {
+          inventory_location_name: string | null;
+        })
+      | undefined;
+
+    if (!goodsReceipt) {
+      throw new Error("Flash ERP could not find that local goods receipt.");
+    }
+
+    if (!goodsReceipt.supplier_no || !goodsReceipt.supplier_name) {
+      throw new Error(
+        `Goods receipt ${goodsReceipt.goods_receipt_no} is not linked to a supplier, so Flash ERP cannot post a supplier return from it.`,
+      );
+    }
+
+    const goodsReceiptLineRows = this.db
+      .prepare(
+        `SELECT
+          id,
+          local_goods_receipt_id,
+          purchase_order_line_id,
+          line_no,
+          product_code,
+          product_name,
+          quantity,
+          unit_cost,
+          serial_numbers_json
+        FROM local_goods_receipt_line
+        WHERE local_goods_receipt_id = ?
+        ORDER BY line_no ASC`,
+      )
+      .all(input.goodsReceiptId) as LocalGoodsReceiptLineRow[];
+    const goodsReceiptLineById = new Map(
+      goodsReceiptLineRows.map((line) => [line.id, line] as const),
+    );
+    const priorReturnLineRows =
+      requestedLines.length === 0
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT
+                goods_receipt_line_id,
+                quantity,
+                serial_numbers_json
+              FROM local_supplier_return_line
+              WHERE goods_receipt_line_id IN (${requestedLines.map(() => "?").join(", ")})`,
+            )
+            .all(
+              ...requestedLines.map(
+                (line) => line.goodsReceiptLineId as string,
+              ),
+            ) as Array<{
+            goods_receipt_line_id: string;
+            quantity: number | string;
+            serial_numbers_json: string | null;
+          }>);
+    const returnedQuantityByReceiptLine = new Map<string, number>();
+    const returnedSerialKeysByReceiptLine = new Map<string, Set<string>>();
+
+    for (const line of priorReturnLineRows) {
+      returnedQuantityByReceiptLine.set(
+        line.goods_receipt_line_id,
+        Number(
+          (
+            (returnedQuantityByReceiptLine.get(line.goods_receipt_line_id) ??
+              0) + asNumber(line.quantity)
+          ).toFixed(3),
+        ),
+      );
+      const serialKeys =
+        returnedSerialKeysByReceiptLine.get(line.goods_receipt_line_id) ??
+        new Set<string>();
+
+      for (const serialNumber of readSerializedLineNumbers(
+        line.serial_numbers_json,
+      )) {
+        serialKeys.add(serialNumber.toUpperCase());
+      }
+
+      returnedSerialKeysByReceiptLine.set(
+        line.goods_receipt_line_id,
+        serialKeys,
+      );
+    }
+
+    const productRowsByCode = new Map<string, ProductRow>();
+    let totalQuantity = 0;
+
+    for (const requestedLine of requestedLines) {
+      const goodsReceiptLine = goodsReceiptLineById.get(
+        requestedLine.goodsReceiptLineId as string,
+      );
+
+      if (!goodsReceiptLine) {
+        throw new Error(
+          `Flash ERP could not find goods-receipt line "${requestedLine.goodsReceiptLineId}" locally.`,
+        );
+      }
+
+      const quantity = Number(requestedLine.quantity);
+
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        throw new Error(
+          `Supplier-return line ${asNumber(goodsReceiptLine.line_no)} for ${goodsReceiptLine.product_name} needs a quantity greater than zero.`,
+        );
+      }
+
+      const alreadyReturnedQuantity =
+        returnedQuantityByReceiptLine.get(goodsReceiptLine.id) ?? 0;
+      const availableReturnQuantity = Number(
+        Math.max(
+          0,
+          asNumber(goodsReceiptLine.quantity) - alreadyReturnedQuantity,
+        ).toFixed(3),
+      );
+
+      if (quantity - availableReturnQuantity > 0.0001) {
+        throw new Error(
+          `Only ${availableReturnQuantity.toFixed(3)} unit(s) of ${goodsReceiptLine.product_name} remain returnable from ${goodsReceipt.goods_receipt_no}.`,
+        );
+      }
+
+      const product =
+        productRowsByCode.get(goodsReceiptLine.product_code) ??
+        (this.db
+          .prepare(
+            `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? LIMIT 1`,
+          )
+          .get(goodsReceiptLine.product_code) as ProductRow | undefined) ??
+        null;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not find local product "${goodsReceiptLine.product_code}" while posting this supplier return.`,
+        );
+      }
+
+      productRowsByCode.set(goodsReceiptLine.product_code, product);
+
+      const currentLocationQuantity = this.getLocationQuantity(
+        goodsReceipt.inventory_location_code,
+        goodsReceiptLine.product_code,
+      );
+
+      if (quantity - currentLocationQuantity > 0.0001) {
+        throw new Error(
+          `${goodsReceiptLine.product_name} only has ${currentLocationQuantity.toFixed(3)} unit(s) available in ${goodsReceipt.inventory_location_name ?? goodsReceipt.inventory_location_code} for return to vendor.`,
+        );
+      }
+
+      if (asBooleanFlag(product.is_serialized)) {
+        if (!Number.isInteger(quantity)) {
+          throw new Error(
+            `Serialized product ${goodsReceiptLine.product_name} needs a whole-number supplier-return quantity.`,
+          );
+        }
+
+        if (requestedLine.serialNumbers.length !== quantity) {
+          throw new Error(
+            `Serialized product ${goodsReceiptLine.product_name} needs ${quantity} serial number(s) before Flash ERP can post this supplier return locally.`,
+          );
+        }
+
+        const receiptSerialNumbers = readSerializedLineNumbers(
+          goodsReceiptLine.serial_numbers_json,
+        );
+        const receiptSerialKeys = new Set(
+          receiptSerialNumbers.map((serialNumber) =>
+            serialNumber.toUpperCase(),
+          ),
+        );
+        const alreadyReturnedSerialKeys =
+          returnedSerialKeysByReceiptLine.get(goodsReceiptLine.id) ??
+          new Set<string>();
+        const unknownSerialNumbers = requestedLine.serialNumbers.filter(
+          (serialNumber) => !receiptSerialKeys.has(serialNumber.toUpperCase()),
+        );
+
+        if (unknownSerialNumbers.length > 0) {
+          throw new Error(
+            `Serial number(s) ${unknownSerialNumbers.join(", ")} were not received on ${goodsReceipt.goods_receipt_no} for ${goodsReceiptLine.product_name}.`,
+          );
+        }
+
+        const alreadyReturnedSerialNumbers = requestedLine.serialNumbers.filter(
+          (serialNumber) =>
+            alreadyReturnedSerialKeys.has(serialNumber.toUpperCase()),
+        );
+
+        if (alreadyReturnedSerialNumbers.length > 0) {
+          throw new Error(
+            `Serial number(s) ${alreadyReturnedSerialNumbers.join(", ")} were already returned from ${goodsReceipt.goods_receipt_no}.`,
+          );
+        }
+
+        this.ensureInventoryTaskSerialNumbersNotReserved(
+          goodsReceiptLine.product_code,
+          goodsReceiptLine.product_name,
+          requestedLine.serialNumbers,
+        );
+
+        const unavailableSerialNumbers = requestedLine.serialNumbers.filter(
+          (serialNumber) => {
+            const row = this.getSerialRegistryEntry(
+              goodsReceiptLine.product_code,
+              serialNumber,
+            );
+
+            return (
+              !row ||
+              row.status !== "AVAILABLE" ||
+              row.inventory_location_code !==
+                goodsReceipt.inventory_location_code
+            );
+          },
+        );
+
+        if (unavailableSerialNumbers.length > 0) {
+          throw new Error(
+            `Flash ERP could not find serial number(s) ${unavailableSerialNumbers.join(", ")} as available in ${goodsReceipt.inventory_location_name ?? goodsReceipt.inventory_location_code}.`,
+          );
+        }
+      } else if (requestedLine.serialNumbers.length > 0) {
+        throw new Error(
+          `${goodsReceiptLine.product_name} is not serialized, so this supplier-return line cannot include serial numbers.`,
+        );
+      }
+
+      totalQuantity = Number((totalQuantity + quantity).toFixed(3));
+    }
+
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    const supplierReturnId = randomUUID();
+    const supplierReturnNo = buildLocalSupplierReturnNo(
+      storeCode,
+      this.nextSequence("supplier_return_sequence"),
+      timestamp,
+    );
+    const supplierNo = goodsReceipt.supplier_no;
+    const supplierName = goodsReceipt.supplier_name;
+    const externalReference =
+      input.externalReference?.trim() || supplierReturnNo;
+    const operatorName = this.formatOperatorLabel(operatorSession);
+    const note =
+      input.note?.trim() ||
+      `Returning stock from ${goodsReceipt.goods_receipt_no} back to supplier ${supplierName}.`;
+    const payloadLines: StoreSupplierReturnRecordedPayload["lines"] = [];
+
+    this.withTransaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO local_supplier_return (id, supplier_return_no, purchase_order_id, purchase_order_no, goods_receipt_id, goods_receipt_no, inventory_location_code, supplier_no, supplier_name, external_reference, reason, status, note, operator_name, total_quantity, synced_at, returned_at, cancelled_at, cancellation_note, cancellation_operator_name, cancellation_acknowledged_at, cancellation_acknowledged_by, cancellation_acknowledgement_note, cancellation_ack_synced_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'POSTED', ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)",
+        )
+        .run(
+          supplierReturnId,
+          supplierReturnNo,
+          goodsReceipt.purchase_order_id,
+          goodsReceipt.purchase_order_no,
+          goodsReceipt.id,
+          goodsReceipt.goods_receipt_no,
+          goodsReceipt.inventory_location_code,
+          supplierNo,
+          supplierName,
+          externalReference,
+          input.reason,
+          note,
+          operatorName,
+          totalQuantity,
+          timestamp,
+          timestamp,
+        );
+
+      for (const requestedLine of requestedLines) {
+        const goodsReceiptLine = goodsReceiptLineById.get(
+          requestedLine.goodsReceiptLineId as string,
+        );
+        const quantity = Number(requestedLine.quantity.toFixed(3));
+
+        if (!goodsReceiptLine) {
+          throw new Error(
+            `Flash ERP could not find goods-receipt line "${requestedLine.goodsReceiptLineId}" locally.`,
+          );
+        }
+
+        const product = productRowsByCode.get(goodsReceiptLine.product_code);
+
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${goodsReceiptLine.product_code}" while applying the supplier return.`,
+          );
+        }
+
+        const supplierReturnLineId = randomUUID();
+
+        this.db
+          .prepare(
+            "INSERT INTO local_supplier_return_line (id, local_supplier_return_id, goods_receipt_line_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            supplierReturnLineId,
+            supplierReturnId,
+            goodsReceiptLine.id,
+            goodsReceiptLine.purchase_order_line_id,
+            asNumber(goodsReceiptLine.line_no),
+            goodsReceiptLine.product_code,
+            goodsReceiptLine.product_name,
+            quantity,
+            asNullableNumber(goodsReceiptLine.unit_cost),
+            writeSerializedLineNumbers(requestedLine.serialNumbers),
+            timestamp,
+          );
+
+        this.db
+          .prepare(
+            "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand - ?, updated_at = ? WHERE id = ?",
+          )
+          .run(quantity, timestamp, product.id);
+
+        if (
+          !this.hasLocationBalance(
+            goodsReceipt.inventory_location_code,
+            goodsReceiptLine.product_code,
+          )
+        ) {
+          this.setLocationBalanceQuantity(
+            goodsReceipt.inventory_location_code,
+            goodsReceiptLine.product_code,
+            asNumber(product.quantity_on_hand),
+            timestamp,
+          );
+        }
+
+        this.applyLocationBalanceDelta(
+          goodsReceipt.inventory_location_code,
+          goodsReceiptLine.product_code,
+          quantity * -1,
+          timestamp,
+        );
+
+        if (requestedLine.serialNumbers.length > 0) {
+          for (const serialNumber of requestedLine.serialNumbers) {
+            this.upsertSerialRegistryEntry({
+              productCode: goodsReceiptLine.product_code,
+              serialNumber,
+              inventoryLocationCode: goodsReceipt.inventory_location_code,
+              status: "ADJUSTED_OUT",
+              sourceTransactionId: supplierReturnId,
+              sourceTransactionNo: supplierReturnNo,
+              updatedAt: timestamp,
+            });
+          }
+        }
+
+        payloadLines.push({
+          supplierReturnLineId,
+          goodsReceiptLineId: goodsReceiptLine.id,
+          purchaseOrderLineId: goodsReceiptLine.purchase_order_line_id,
+          lineNo: asNumber(goodsReceiptLine.line_no),
+          productCode: goodsReceiptLine.product_code,
+          productName: goodsReceiptLine.product_name,
+          quantity,
+          unitCost: asNullableNumber(goodsReceiptLine.unit_cost),
+          serialNumbers: requestedLine.serialNumbers,
+        });
+      }
+
+      const supplierReturnPayload: StoreSupplierReturnRecordedPayload = {
+        supplierReturnId,
+        supplierReturnNo,
+        purchaseOrderId: goodsReceipt.purchase_order_id,
+        purchaseOrderNo: goodsReceipt.purchase_order_no,
+        goodsReceiptId: goodsReceipt.id,
+        goodsReceiptNo: goodsReceipt.goods_receipt_no,
+        storeCode,
+        terminalCode,
+        inventoryLocationCode: goodsReceipt.inventory_location_code,
+        supplierNo,
+        supplierName,
+        externalReference,
+        reason: input.reason,
+        note,
+        operatorName,
+        returnedAt: timestamp,
+        lines: payloadLines,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'supplierReturn', ?, 'supplier-return.recorded', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            supplierReturnId,
+            ENTERPRISE_NODE_CODE,
+            supplierReturnId,
+            `${nodeCode}:supplierReturn:${supplierReturnNo}`,
+            JSON.stringify(supplierReturnPayload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${supplierReturnNo} was posted locally against ${goodsReceipt.goods_receipt_no} and queued for enterprise sync.`
+          : `${supplierReturnNo} was posted locally against ${goodsReceipt.goods_receipt_no} for standalone purchasing.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: shouldQueueEnterprise
+        ? `${supplierReturnNo} was posted locally and queued for enterprise projection.`
+        : `${supplierReturnNo} was posted locally for standalone supplier returns.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  acknowledgeSupplierReturnCancellation(
+    input: StoreSupplierReturnCancellationAcknowledgementRequest,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.supplier-return.manage"],
+      purpose: "acknowledging supplier-return stock rehydration",
+    });
+    const supplierReturnId = input.supplierReturnId?.trim();
+
+    if (!supplierReturnId) {
+      throw new Error(
+        "Select the cancelled supplier return before acknowledging rehydrated stock.",
+      );
+    }
+
+    const supplierReturn = this.db
+      .prepare(
+        `SELECT
+          id,
+          supplier_return_no,
+          inventory_location_code,
+          supplier_name,
+          total_quantity,
+          status,
+          cancelled_at,
+          cancellation_acknowledged_at
+        FROM local_supplier_return
+        WHERE id = ?
+        LIMIT 1`,
+      )
+      .get(supplierReturnId) as
+      | {
+          id: string;
+          supplier_return_no: string;
+          inventory_location_code: string;
+          supplier_name: string;
+          total_quantity: number | string;
+          status: "POSTED" | "CANCELLED";
+          cancelled_at: string | null;
+          cancellation_acknowledged_at: string | null;
+        }
+      | undefined;
+
+    if (!supplierReturn) {
+      throw new Error("Flash ERP could not find that local supplier return.");
+    }
+
+    if (supplierReturn.status !== "CANCELLED" || !supplierReturn.cancelled_at) {
+      throw new Error(
+        `Supplier return ${supplierReturn.supplier_return_no} has not been cancelled in enterprise yet.`,
+      );
+    }
+
+    if (supplierReturn.cancellation_acknowledged_at) {
+      throw new Error(
+        `Rehydrated stock for ${supplierReturn.supplier_return_no} has already been acknowledged locally.`,
+      );
+    }
+
+    const timestamp = isoNow();
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    const operatorName = this.formatOperatorLabel(operatorSession);
+    const note =
+      input.note?.trim() ||
+      `Rehydrated stock from ${supplierReturn.supplier_return_no} was physically confirmed back in ${supplierReturn.inventory_location_code}.`;
+    const payload: StoreSupplierReturnCancellationAcknowledgedPayload = {
+      supplierReturnId: supplierReturn.id,
+      supplierReturnNo: supplierReturn.supplier_return_no,
+      storeCode,
+      terminalCode,
+      acknowledgedAt: timestamp,
+      operatorName,
+      note,
+    };
+
+    this.withTransaction(() => {
+      this.db
+        .prepare(
+          "UPDATE local_supplier_return SET cancellation_acknowledged_at = ?, cancellation_acknowledged_by = ?, cancellation_acknowledgement_note = ?, cancellation_ack_synced_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run(timestamp, operatorName, note, timestamp, supplierReturn.id);
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'supplierReturn', ?, 'supplier-return.cancellation-acknowledged', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            supplierReturn.id,
+            `${nodeCode}:supplierReturn:${supplierReturn.supplier_return_no}:cancellation-ack`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${supplierReturn.supplier_return_no} rehydrated stock was acknowledged locally and queued for enterprise confirmation.`
+          : `${supplierReturn.supplier_return_no} rehydrated stock was acknowledged locally for standalone supplier returns.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: shouldQueueEnterprise
+        ? `${supplierReturn.supplier_return_no} stock rehydration was acknowledged locally and queued for enterprise sync.`
+        : `${supplierReturn.supplier_return_no} stock rehydration was acknowledged locally for standalone supplier returns.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  issueInterStoreTransfer(
+    input: StoreInterStoreTransferIssueRequest,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.transfer.issue"],
+      purpose: "issuing an inter-store transfer",
+    });
+    const timestamp = isoNow();
+    const quantity = Number(Number(input.quantity).toFixed(3));
+
+    if (!input.transferId?.trim()) {
+      throw new Error(
+        "Select an inter-store transfer before issuing stock locally.",
+      );
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error(
+        "Enter an issued quantity greater than zero before syncing the transfer.",
+      );
+    }
+
+    const serialNumbers = normalizeSerialNumbers(input.serialNumbers);
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let message = "";
+
+    this.withTransaction(() => {
+      const transfer = this.db
+        .prepare(
+          `SELECT
+            id,
+            transfer_no,
+            role,
+            status,
+            source_location_code,
+            destination_location_code,
+            product_code,
+            product_name,
+            is_serialized,
+            requested_quantity,
+            issued_quantity,
+            received_quantity,
+            outstanding_issue_quantity,
+            issued_serial_numbers_json,
+            closed_at
+          FROM inter_store_transfer_snapshot
+          WHERE id = ?
+          LIMIT 1`,
+        )
+        .get(input.transferId) as InterStoreTransferSnapshotRow | undefined;
+
+      if (!transfer) {
+        throw new Error(
+          "Flash ERP could not find that inter-store transfer in the local snapshot.",
+        );
+      }
+
+      if (transfer.role !== "SOURCE") {
+        throw new Error(
+          `Inter-store transfer ${transfer.transfer_no} is not waiting for source issue on this desktop.`,
+        );
+      }
+
+      if (
+        transfer.status !== "REQUESTED" &&
+        transfer.status !== "PART_ISSUED" &&
+        transfer.status !== "PART_RECEIVED"
+      ) {
+        throw new Error(
+          `Inter-store transfer ${transfer.transfer_no} is ${transfer.status.toLowerCase().replace(/_/g, " ")} and cannot issue more stock locally.`,
+        );
+      }
+
+      const outstandingIssueQuantity = Number(
+        asNumber(transfer.outstanding_issue_quantity).toFixed(3),
+      );
+
+      if (quantity - outstandingIssueQuantity > 0.0001) {
+        throw new Error(
+          `Only ${outstandingIssueQuantity.toFixed(3)} unit(s) remain to issue on ${transfer.transfer_no}.`,
+        );
+      }
+
+      const product = this.db
+        .prepare(
+          `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? LIMIT 1`,
+        )
+        .get(transfer.product_code) as ProductRow | undefined;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not find local product "${transfer.product_code}" while issuing ${transfer.transfer_no}.`,
+        );
+      }
+
+      const sourceLocationQuantity = this.getLocationQuantity(
+        transfer.source_location_code,
+        transfer.product_code,
+      );
+
+      if (quantity - sourceLocationQuantity > 0.0001) {
+        throw new Error(
+          `Only ${sourceLocationQuantity.toFixed(3)} unit(s) of ${transfer.product_name} are currently available in ${transfer.source_location_code}.`,
+        );
+      }
+
+      if (asBooleanFlag(transfer.is_serialized)) {
+        if (!Number.isInteger(quantity)) {
+          throw new Error(
+            `Serialized transfer ${transfer.transfer_no} needs a whole-number issued quantity.`,
+          );
+        }
+
+        if (serialNumbers.length !== quantity) {
+          throw new Error(
+            `Serialized transfer ${transfer.transfer_no} needs ${quantity} serial number(s) before issue.`,
+          );
+        }
+
+        this.ensureInventoryTaskSerialNumbersNotReserved(
+          transfer.product_code,
+          transfer.product_name,
+          serialNumbers,
+        );
+        ensureSerialSelectionWithinAllowedSet({
+          productName: transfer.product_name,
+          selectedSerialNumbers: serialNumbers,
+          allowedSerialNumbers: this.listAvailableRegistrySerialNumbers(
+            transfer.product_code,
+            transfer.source_location_code,
+          ),
+        });
+
+        this.applyInventoryTaskSerialRegistryChange({
+          productCode: transfer.product_code,
+          serialNumbers,
+          inventoryLocationCode: null,
+          status: "IN_TRANSIT",
+          sourceReferenceId: transfer.id,
+          sourceReferenceLabel: transfer.transfer_no,
+          updatedAt: timestamp,
+        });
+      } else if (serialNumbers.length > 0) {
+        throw new Error(
+          `${transfer.product_name} is not serialized, so this issue should not include serial numbers.`,
+        );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand - ?, updated_at = ? WHERE id = ?",
+        )
+        .run(quantity, timestamp, product.id);
+      this.applyLocationBalanceDelta(
+        transfer.source_location_code,
+        transfer.product_code,
+        quantity * -1,
+        timestamp,
+      );
+
+      const nextIssuedQuantity = Number(
+        (asNumber(transfer.issued_quantity) + quantity).toFixed(3),
+      );
+      const nextReceivedQuantity = Number(
+        asNumber(transfer.received_quantity).toFixed(3),
+      );
+      const nextStatus = deriveLocalInterStoreTransferStatus({
+        requestedQuantity: asNumber(transfer.requested_quantity),
+        issuedQuantity: nextIssuedQuantity,
+        receivedQuantity: nextReceivedQuantity,
+        closedAt: transfer.closed_at,
+      });
+      const nextIssuedSerialNumbers = normalizeSerialNumbers([
+        ...readSerializedLineNumbers(transfer.issued_serial_numbers_json),
+        ...serialNumbers,
+      ]);
+      const issueNote =
+        input.note?.trim() ||
+        `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${transfer.source_location_code} toward ${transfer.destination_location_code}.`;
+      const operatorName = this.formatOperatorLabel(operatorSession);
+
+      this.db
+        .prepare(
+          `UPDATE inter_store_transfer_snapshot
+           SET status = ?,
+               issued_quantity = ?,
+               outstanding_issue_quantity = ?,
+               outstanding_receipt_quantity = ?,
+               issued_serial_numbers_json = ?,
+               issue_note = ?,
+               issue_operator_name = ?,
+               source_node_code = ?,
+               issued_at = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          nextStatus,
+          nextIssuedQuantity,
+          Number(
+            Math.max(
+              0,
+              asNumber(transfer.requested_quantity) - nextIssuedQuantity,
+            ).toFixed(3),
+          ),
+          Number(
+            Math.max(0, nextIssuedQuantity - nextReceivedQuantity).toFixed(3),
+          ),
+          writeSerializedLineNumbers(nextIssuedSerialNumbers),
+          issueNote,
+          operatorName,
+          nodeCode,
+          timestamp,
+          timestamp,
+          transfer.id,
+        );
+
+      const payload: StoreInterStoreTransferIssuedPayload = {
+        transferId: transfer.id,
+        transferNo: transfer.transfer_no,
+        storeCode,
+        terminalCode,
+        sourceLocationCode: transfer.source_location_code,
+        destinationLocationCode: transfer.destination_location_code,
+        productCode: transfer.product_code,
+        quantity,
+        ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        operatorName,
+        note: issueNote,
+        occurredAt: timestamp,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'interStoreTransfer', ?, 'inter-store-transfer.issued', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            transfer.id,
+            `${nodeCode}:interStoreTransfer:${transfer.id}:issued:${timestamp}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${transfer.transfer_no} was issued locally from ${transfer.source_location_code} and queued for enterprise sync.`
+          : `${transfer.transfer_no} was issued locally from ${transfer.source_location_code} for standalone transfer tracking.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = shouldQueueEnterprise
+        ? `${transfer.transfer_no} was issued locally and queued for enterprise projection.`
+        : `${transfer.transfer_no} was issued locally for standalone transfer tracking.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  receiveInterStoreTransfer(
+    input: StoreInterStoreTransferReceiveRequest,
+  ): StoreSyncActionResult {
+    const operatorSession = this.requireActiveOperatorSession({
+      permissionCodes: ["inventory.transfer.receive"],
+      purpose: "receiving an inter-store transfer",
+    });
+    const timestamp = isoNow();
+    const quantity = Number(Number(input.quantity).toFixed(3));
+
+    if (!input.transferId?.trim()) {
+      throw new Error(
+        "Select an inter-store transfer before receiving stock locally.",
+      );
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error(
+        "Enter a received quantity greater than zero before syncing the transfer.",
+      );
+    }
+
+    const serialNumbers = normalizeSerialNumbers(input.serialNumbers);
+    const storeCode =
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let message = "";
+
+    this.withTransaction(() => {
+      const transfer = this.db
+        .prepare(
+          `SELECT
+            id,
+            transfer_no,
+            role,
+            status,
+            source_location_code,
+            destination_location_code,
+            product_code,
+            product_name,
+            is_serialized,
+            requested_quantity,
+            issued_quantity,
+            received_quantity,
+            outstanding_receipt_quantity,
+            issued_serial_numbers_json,
+            received_serial_numbers_json,
+            closed_at
+          FROM inter_store_transfer_snapshot
+          WHERE id = ?
+          LIMIT 1`,
+        )
+        .get(input.transferId) as InterStoreTransferSnapshotRow | undefined;
+
+      if (!transfer) {
+        throw new Error(
+          "Flash ERP could not find that inter-store transfer in the local snapshot.",
+        );
+      }
+
+      if (transfer.role !== "DESTINATION") {
+        throw new Error(
+          `Inter-store transfer ${transfer.transfer_no} is not waiting for destination receipt on this desktop.`,
+        );
+      }
+
+      if (
+        transfer.status !== "PART_ISSUED" &&
+        transfer.status !== "ISSUED" &&
+        transfer.status !== "PART_RECEIVED"
+      ) {
+        throw new Error(
+          `Inter-store transfer ${transfer.transfer_no} is ${transfer.status.toLowerCase().replace(/_/g, " ")} and cannot be received locally yet.`,
+        );
+      }
+
+      const outstandingReceiptQuantity = Number(
+        asNumber(transfer.outstanding_receipt_quantity).toFixed(3),
+      );
+
+      if (quantity - outstandingReceiptQuantity > 0.0001) {
+        throw new Error(
+          `Only ${outstandingReceiptQuantity.toFixed(3)} unit(s) remain to receive on ${transfer.transfer_no}.`,
+        );
+      }
+
+      const product = this.db
+        .prepare(
+          `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? LIMIT 1`,
+        )
+        .get(transfer.product_code) as ProductRow | undefined;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not find local product "${transfer.product_code}" while receiving ${transfer.transfer_no}.`,
+        );
+      }
+
+      if (asBooleanFlag(transfer.is_serialized)) {
+        if (!Number.isInteger(quantity)) {
+          throw new Error(
+            `Serialized transfer ${transfer.transfer_no} needs a whole-number received quantity.`,
+          );
+        }
+
+        if (serialNumbers.length !== quantity) {
+          throw new Error(
+            `Serialized transfer ${transfer.transfer_no} needs ${quantity} serial number(s) before receipt.`,
+          );
+        }
+
+        const issuedSerialKeys = new Set(
+          readSerializedLineNumbers(transfer.issued_serial_numbers_json).map(
+            (serialNumber) => serialNumber.toUpperCase(),
+          ),
+        );
+        const receivedSerialKeys = new Set(
+          readSerializedLineNumbers(transfer.received_serial_numbers_json).map(
+            (serialNumber) => serialNumber.toUpperCase(),
+          ),
+        );
+        const invalidSerialNumbers = serialNumbers.filter(
+          (serialNumber) =>
+            !issuedSerialKeys.has(serialNumber.toUpperCase()) ||
+            receivedSerialKeys.has(serialNumber.toUpperCase()),
+        );
+
+        if (invalidSerialNumbers.length > 0) {
+          throw new Error(
+            `Serial number(s) ${invalidSerialNumbers.join(", ")} are not currently outstanding on ${transfer.transfer_no}.`,
+          );
+        }
+
+        this.ensureInventoryTaskSerialNumbersNotReserved(
+          transfer.product_code,
+          transfer.product_name,
+          serialNumbers,
+        );
+
+        this.applyInventoryTaskSerialRegistryChange({
+          productCode: transfer.product_code,
+          serialNumbers,
+          inventoryLocationCode: transfer.destination_location_code,
+          status: "AVAILABLE",
+          sourceReferenceId: transfer.id,
+          sourceReferenceLabel: transfer.transfer_no,
+          updatedAt: timestamp,
+        });
+      } else if (serialNumbers.length > 0) {
+        throw new Error(
+          `${transfer.product_name} is not serialized, so this receipt should not include serial numbers.`,
+        );
+      }
+
+      this.db
+        .prepare(
+          "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + ?, updated_at = ? WHERE id = ?",
+        )
+        .run(quantity, timestamp, product.id);
+      this.applyLocationBalanceDelta(
+        transfer.destination_location_code,
+        transfer.product_code,
+        quantity,
+        timestamp,
+      );
+
+      const nextIssuedQuantity = Number(
+        asNumber(transfer.issued_quantity).toFixed(3),
+      );
+      const nextReceivedQuantity = Number(
+        (asNumber(transfer.received_quantity) + quantity).toFixed(3),
+      );
+      const nextStatus = deriveLocalInterStoreTransferStatus({
+        requestedQuantity: asNumber(transfer.requested_quantity),
+        issuedQuantity: nextIssuedQuantity,
+        receivedQuantity: nextReceivedQuantity,
+        closedAt: transfer.closed_at,
+      });
+      const nextReceivedSerialNumbers = normalizeSerialNumbers([
+        ...readSerializedLineNumbers(transfer.received_serial_numbers_json),
+        ...serialNumbers,
+      ]);
+      const receiptNote =
+        input.note?.trim() ||
+        `Received ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} into ${transfer.destination_location_code}.`;
+      const operatorName = this.formatOperatorLabel(operatorSession);
+
+      this.db
+        .prepare(
+          `UPDATE inter_store_transfer_snapshot
+           SET status = ?,
+               received_quantity = ?,
+               outstanding_receipt_quantity = ?,
+               received_serial_numbers_json = ?,
+               receipt_note = ?,
+               receipt_operator_name = ?,
+               destination_node_code = ?,
+               received_at = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          nextStatus,
+          nextReceivedQuantity,
+          Number(
+            Math.max(0, nextIssuedQuantity - nextReceivedQuantity).toFixed(3),
+          ),
+          writeSerializedLineNumbers(nextReceivedSerialNumbers),
+          receiptNote,
+          operatorName,
+          nodeCode,
+          timestamp,
+          timestamp,
+          transfer.id,
+        );
+
+      const payload: StoreInterStoreTransferReceivedPayload = {
+        transferId: transfer.id,
+        transferNo: transfer.transfer_no,
+        storeCode,
+        terminalCode,
+        sourceLocationCode: transfer.source_location_code,
+        destinationLocationCode: transfer.destination_location_code,
+        productCode: transfer.product_code,
+        quantity,
+        ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        operatorName,
+        note: receiptNote,
+        occurredAt: timestamp,
+      };
+
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'interStoreTransfer', ?, 'inter-store-transfer.received', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            transfer.id,
+            `${nodeCode}:interStoreTransfer:${transfer.id}:received:${timestamp}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: shouldQueueEnterprise
+          ? `${transfer.transfer_no} was received locally into ${transfer.destination_location_code} and queued for enterprise sync.`
+          : `${transfer.transfer_no} was received locally into ${transfer.destination_location_code} for standalone transfer tracking.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+
+      message = shouldQueueEnterprise
+        ? `${transfer.transfer_no} was received locally and queued for enterprise projection.`
+        : `${transfer.transfer_no} was received locally for standalone transfer tracking.`;
+    });
+
+    return {
+      message,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  private persistRemoteSyncPolicy(
+    policy:
+      | StoreNodePushResponse["syncPolicy"]
+      | StoreNodePullResponse["syncPolicy"]
+      | null
+      | undefined,
+  ) {
+    if (!policy) {
+      return;
+    }
+
+    for (const [key, value] of storeSyncPolicyToMetadataEntries(policy)) {
+      if (value) {
+        this.setMetadata(key, value);
+      } else {
+        this.deleteMetadata(key);
+      }
+    }
+  }
+
+  private recordSyncSchedule(
+    trigger: StoreSyncRunOptions["trigger"],
+    timestamp: string,
+    failed: boolean,
+  ) {
+    const metadata = this.getMetadata();
+    const currentPolicy = readStoreSyncPolicyFromMetadata(metadata);
+    const failureCount = failed
+      ? Math.trunc(asNumber(metadata.sync_failure_count)) + 1
+      : 0;
+    const nextPolicy = {
+      ...currentPolicy,
+      lastManualSyncAt:
+        trigger === "manual" || trigger === "tray"
+          ? timestamp
+          : currentPolicy.lastManualSyncAt,
+      lastAutoSyncAt:
+        trigger === "scheduled" ? timestamp : currentPolicy.lastAutoSyncAt,
+      nextScheduledSyncAt: currentPolicy.autoSyncEnabled
+        ? computeNextStoreSyncAt({
+            policy: currentPolicy,
+            baseAt: timestamp,
+            failureCount,
+          })
+        : null,
+    };
+
+    for (const [key, value] of storeSyncPolicyToMetadataEntries(nextPolicy)) {
+      if (value) {
+        this.setMetadata(key, value);
+      } else {
+        this.deleteMetadata(key);
+      }
+    }
+
+    this.setMetadata("sync_failure_count", String(failureCount));
+  }
+
+  async runSyncCycle(
+    input?: StoreSyncRunOptions,
+  ): Promise<StoreSyncActionResult> {
+    const startedAt = isoNow();
+    const snapshotMode = input?.snapshotMode ?? "full";
+    const trigger =
+      input?.trigger === "scheduled"
+        ? "scheduled"
+        : input?.trigger === "tray"
+          ? "tray"
+          : input?.trigger === "startup"
+            ? "startup"
+            : "manual";
+    const logContext = this.getSyncLogContext();
+
+    console.info("Store Desktop SQLite sync action requested.", {
+      ...logContext,
+      trigger,
+      snapshotMode,
+      drainDownstream: input?.drainDownstream === true,
+      scheduledFor: input?.scheduledFor ?? null,
+      startedAt,
+    });
+
+    if (trigger === "manual") {
+      if (this.isStandaloneDeployment()) {
+        this.requireActiveOperatorSession({
+          purpose: "checking standalone store status",
+        });
+      } else {
+        this.requireActiveOperatorSession({
+          permissionCodes: ["sync.store.operate"],
+        });
+      }
+    }
+
+    if (this.isStandaloneDeployment()) {
+      const finishedAt = isoNow();
+      this.recordSyncSchedule(trigger, finishedAt, false);
+      this.insertRunLog({
+        runKind: "SYNC_CYCLE",
+        result: "IDLE",
+        summary:
+          "Standalone mode is active; no HQ sync was required for this desktop.",
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt,
+        finishedAt,
+      });
+      console.info("Store Desktop SQLite sync action skipped for standalone mode.", {
+        ...logContext,
+        trigger,
+        snapshotMode,
+        startedAt,
+        finishedAt,
+      });
+
+      return {
+        message:
+          "Standalone mode is active. No HQ sync is required; local store data is ready.",
+        snapshot: this.getSyncActionSnapshot(snapshotMode),
+      };
+    }
+
+    if (!this.syncBaseUrl) {
+      const finishedAt = isoNow();
+      const message =
+        "HQ Managed mode is selected, but no HQ sync URL is configured. Open Desktop setup, enter the HQ sync URL, save, and restart before running upload/download sync.";
+
+      this.recordSyncSchedule(trigger, finishedAt, true);
+      this.insertRunLog({
+        runKind: "SYNC_CYCLE",
+        result: "WARNING",
+        summary: message,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt,
+        finishedAt,
+      });
+      console.warn("Store Desktop SQLite sync action blocked by missing HQ URL.", {
+        ...logContext,
+        trigger,
+        snapshotMode,
+        startedAt,
+        finishedAt,
+      });
+      throw new Error(message);
+    }
+
+    if (this.syncCycleInFlight) {
+      console.info("Store Desktop SQLite sync action reused existing in-flight cycle.", {
+        ...logContext,
+        trigger,
+        snapshotMode,
+        startedAt,
+      });
+      return {
+        message:
+          "A store sync is already running. Flash ERP is keeping that existing sync cycle active instead of starting a second one.",
+        snapshot: this.getSyncActionSnapshot(snapshotMode),
+      };
+    }
+
+    const syncCycle = this.runRemoteSyncCycle(
+      startedAt,
+      trigger,
+      input?.drainDownstream === true,
+      snapshotMode,
+    );
+    this.syncCycleInFlight = syncCycle;
+
+    try {
+      return await syncCycle;
+    } catch (error) {
+      const finishedAt = isoNow();
+      const message =
+        error instanceof Error
+          ? error.message
+          : "The enterprise sync cycle was unavailable, so local queues were preserved.";
+      const actionMessage =
+        error instanceof StoreSyncTransportError
+          ? `${message} Flash ERP kept every local queue item intact.`
+          : "Enterprise sync was unavailable. Flash ERP kept every local queue item intact.";
+      this.recordSyncSchedule(trigger, finishedAt, true);
+
+      this.insertRunLog({
+        runKind: "SYNC_CYCLE",
+        result: "WARNING",
+        summary: `The enterprise sync cycle could not complete: ${message}`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt,
+        finishedAt,
+      });
+      console.error("Store Desktop SQLite sync action failed.", {
+        ...logContext,
+        trigger,
+        snapshotMode,
+        startedAt,
+        finishedAt,
+        error: this.describeSyncLogError(error),
+      });
+
+      return {
+        message: actionMessage,
+        snapshot: this.getSyncActionSnapshot(snapshotMode),
+      };
+    } finally {
+      if (this.syncCycleInFlight === syncCycle) {
+        this.syncCycleInFlight = null;
+      }
+    }
+  }
+
+  private ensureLicenseAllowsSync() {
+    if (this.isStandaloneDeployment()) {
+      return;
+    }
+
+    const metadata = this.getMetadata();
+    const now = Date.now();
+    const isUsableStatus = (status: string | undefined) => {
+      const normalized = status?.trim().toUpperCase() || "LICENSED";
+      return normalized === "LICENSED" || normalized === "TRIAL";
+    };
+    const isExpired = (value: string | undefined) => {
+      if (!value) {
+        return false;
+      }
+
+      const parsed = new Date(value).getTime();
+      return Number.isFinite(parsed) && parsed < now;
+    };
+
+    if (
+      !isUsableStatus(metadata.store_license_status) ||
+      isExpired(metadata.store_licensed_until)
+    ) {
+      throw new Error(
+        "This shop license is expired or inactive. Renew it at HQ before the desktop can sync.",
+      );
+    }
+
+    if (
+      !isUsableStatus(metadata.terminal_license_status) ||
+      isExpired(metadata.terminal_licensed_until)
+    ) {
+      throw new Error(
+        "This terminal license is expired or inactive. Renew it at HQ before this terminal can sync.",
+      );
+    }
+  }
+
+  private runLocalSyncSimulation(
+    startedAt: string,
+    fallbackReason?: string,
+    trigger: StoreSyncRunOptions["trigger"] = "manual",
+  ): StoreSyncActionResult {
+    let upstreamProcessed = 0;
+    let downstreamApplied = 0;
+
+    this.withTransaction(() => {
+      this.expireExhaustedOutboxRetries(startedAt);
+      const upstreamRows = this.db
+        .prepare(
+          "SELECT id, attempt_count FROM sync_outbox WHERE status IN ('PENDING', 'IN_FLIGHT', 'FAILED') AND attempt_count < ? AND (next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY created_at ASC LIMIT 3",
+        )
+        .all(MAX_SYNC_RETRY_ATTEMPTS, startedAt) as Array<{
+        id: string;
+        attempt_count: number | string;
+      }>;
+      const downstreamRows = this.db
+        .prepare(
+          "SELECT id FROM sync_inbox WHERE status IN ('RECEIVED', 'PENDING') ORDER BY received_at ASC LIMIT 2",
+        )
+        .all() as Array<{ id: string }>;
+      const finishedAt = isoNow();
+
+      for (const row of upstreamRows) {
+        this.db
+          .prepare(
+            "UPDATE sync_outbox SET status = 'ACKNOWLEDGED', attempt_count = ?, last_attempt_at = ?, next_retry_at = NULL, failure_kind = NULL, last_http_status = NULL, error_message = NULL, acknowledged_at = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(
+            asNumber(row.attempt_count) + 1,
+            finishedAt,
+            finishedAt,
+            finishedAt,
+            row.id,
+          );
+      }
+
+      for (const row of downstreamRows) {
+        this.db
+          .prepare(
+            "UPDATE sync_inbox SET status = 'APPLIED', applied_at = ?, acknowledged_at = ?, error_message = NULL WHERE id = ?",
+          )
+          .run(finishedAt, finishedAt, row.id);
+      }
+
+      upstreamProcessed = upstreamRows.length;
+      downstreamApplied = downstreamRows.length;
+
+      this.upsertCheckpoint(
+        ENTERPRISE_NODE_CODE,
+        `enterprise-event-${Date.now()}`,
+        `cursor-${Date.now()}`,
+        finishedAt,
+        finishedAt,
+      );
+
+      if (upstreamProcessed > 0 || downstreamApplied > 0) {
+        this.setMetadata("last_sync_at", finishedAt);
+      }
+      this.recordSyncSchedule(trigger, finishedAt, false);
+
+      this.refreshActiveBasketIfPresent(finishedAt);
+
+      this.insertRunLog({
+        runKind: "SYNC_CYCLE",
+        result:
+          fallbackReason && (upstreamProcessed > 0 || downstreamApplied > 0)
+            ? "WARNING"
+            : upstreamProcessed > 0 || downstreamApplied > 0
+              ? "SUCCESS"
+              : "IDLE",
+        summary:
+          upstreamProcessed > 0 || downstreamApplied > 0
+            ? `${fallbackReason ? `Fallback simulation used because ${fallbackReason}. ` : ""}Applied ${downstreamApplied} downstream packet(s) and acknowledged ${upstreamProcessed} upstream event(s).`
+            : fallbackReason
+              ? `Fallback simulation was available, but there was no pending work after ${fallbackReason}.`
+              : "The sync worker ran without pending work.",
+        upstreamProcessed,
+        downstreamApplied,
+        startedAt,
+        finishedAt,
+      });
+    });
+
+    return {
+      message:
+        fallbackReason && (upstreamProcessed > 0 || downstreamApplied > 0)
+          ? "Enterprise sync is not configured, so Flash ERP used the local demo sync path."
+          : upstreamProcessed > 0 || downstreamApplied > 0
+            ? "The local sync worker processed queued work."
+            : "The local sync worker is healthy and currently idle.",
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  private async runRemoteSyncCycle(
+    startedAt: string,
+    trigger: StoreSyncRunOptions["trigger"],
+    drainDownstream = false,
+    snapshotMode: StoreSyncRunOptions["snapshotMode"] | undefined = "full",
+  ): Promise<StoreSyncActionResult> {
+    const syncRunId = randomUUID();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const logContext = this.getSyncLogContext(nodeCode);
+    const cycleStartedAtMs = Date.now();
+    const cursor = this.getCheckpointCursor(ENTERPRISE_NODE_CODE);
+    const downstreamPageLimit = readDownstreamPageLimit();
+    const maxDownstreamPullPasses = readDownstreamPullPassLimit(
+      trigger,
+      drainDownstream,
+    );
+    this.expireExhaustedOutboxRetries(startedAt);
+    const upstreamRows = this.getPendingUpstreamRows(25);
+    const replayedDownstreamIds = this.reapplyFailedDownstreamInbox(25);
+    const acknowledgedDownstreamIds =
+      this.getPendingDownstreamAcknowledgements(25);
+    let latestCursor = cursor;
+    let latestSourceNodeCode = ENTERPRISE_NODE_CODE;
+    let latestDownstreamEventId: string | null = null;
+    let downstreamApplied = replayedDownstreamIds.length;
+    const appliedDownstreamIds = [...replayedDownstreamIds];
+    let downstreamPullPasses = 0;
+    let downstreamLimitReached = false;
+
+    console.info("Store Desktop SQLite sync cycle started.", {
+      ...logContext,
+      syncRunId,
+      trigger,
+      snapshotMode,
+      drainDownstream,
+      maxDownstreamPullPasses,
+      downstreamPageLimit,
+      cursor,
+      upstreamQueued: upstreamRows.length,
+      replayedDownstream: replayedDownstreamIds.length,
+      pendingDownstreamAcknowledgements: acknowledgedDownstreamIds.length,
+    });
+
+    for (let pass = 0; pass < maxDownstreamPullPasses; pass += 1) {
+      const requestedCursor = latestCursor;
+      const pullSyncRunId = randomUUID();
+      const pullStartedAtMs = Date.now();
+      console.info("Store Desktop SQLite sync pull started.", {
+        ...logContext,
+        syncRunId,
+        pullSyncRunId,
+        trigger,
+        pass: pass + 1,
+        maxDownstreamPullPasses,
+        cursor: requestedCursor,
+        limit: downstreamPageLimit,
+      });
+      const pullPayload = {
+        sourceNodeCode: nodeCode,
+        cursor: requestedCursor,
+        limit: downstreamPageLimit,
+        syncRunId: pullSyncRunId,
+        trigger,
+        clientStartedAt: startedAt,
+      };
+      let pullResponse: StoreNodePullResponse;
+
+      try {
+        pullResponse = await this.postJson<StoreNodePullResponse>(
+          `${this.syncBaseUrl}/api/sync/store-nodes/${nodeCode}/pull`,
+          pullPayload,
+        );
+      } catch (error) {
+        if (downstreamPageLimit > 1 && isOversizedSyncResponseError(error)) {
+          console.warn(
+            "Store Desktop SQLite sync pull page was too large; retrying with a single downstream event.",
+            {
+              ...logContext,
+              syncRunId,
+              pullSyncRunId,
+              trigger,
+              pass: pass + 1,
+              originalLimit: downstreamPageLimit,
+              elapsedMs: Date.now() - pullStartedAtMs,
+            },
+          );
+          pullResponse = await this.postJson<StoreNodePullResponse>(
+            `${this.syncBaseUrl}/api/sync/store-nodes/${nodeCode}/pull`,
+            {
+              ...pullPayload,
+              limit: 1,
+            },
+          );
+        } else {
+          console.error("Store Desktop SQLite sync pull failed.", {
+            ...logContext,
+            syncRunId,
+            pullSyncRunId,
+            trigger,
+            pass: pass + 1,
+            cursor: requestedCursor,
+            limit: downstreamPageLimit,
+            elapsedMs: Date.now() - pullStartedAtMs,
+            error: this.describeSyncLogError(error),
+          });
+          throw error;
+        }
+      }
+      this.persistRemoteSyncPolicy(pullResponse.syncPolicy);
+      const batchEvents = pullResponse.batch.events;
+      downstreamPullPasses += 1;
+      console.info("Store Desktop SQLite sync pull received.", {
+        ...logContext,
+        syncRunId,
+        pullSyncRunId,
+        trigger,
+        pass: pass + 1,
+        elapsedMs: Date.now() - pullStartedAtMs,
+        eventCount: batchEvents.length,
+        sourceNodeCode: pullResponse.batch.sourceNodeCode,
+        cursor: pullResponse.batch.cursor,
+        firstEventType: batchEvents[0]?.eventType ?? null,
+        lastEventType: batchEvents[batchEvents.length - 1]?.eventType ?? null,
+      });
+      const newlyAppliedDownstreamIds = this.applyDownstreamBatch(
+        batchEvents,
+        pullResponse.batch.sourceNodeCode,
+        pullResponse.batch.cursor,
+      );
+      console.info("Store Desktop SQLite sync pull applied.", {
+        ...logContext,
+        syncRunId,
+        pullSyncRunId,
+        trigger,
+        pass: pass + 1,
+        appliedCount: newlyAppliedDownstreamIds.length,
+        elapsedMs: Date.now() - pullStartedAtMs,
+      });
+
+      latestSourceNodeCode = pullResponse.batch.sourceNodeCode;
+      latestCursor = pullResponse.batch.cursor;
+      latestDownstreamEventId =
+        batchEvents[batchEvents.length - 1]?.eventId ?? latestDownstreamEventId;
+      downstreamApplied += newlyAppliedDownstreamIds.length;
+      appliedDownstreamIds.push(...newlyAppliedDownstreamIds);
+
+      if (
+        batchEvents.length === 0 ||
+        batchEvents.length < downstreamPageLimit ||
+        requestedCursor === pullResponse.batch.cursor
+      ) {
+        break;
+      }
+
+      if (pass + 1 >= maxDownstreamPullPasses) {
+        downstreamLimitReached = true;
+      }
+    }
+
+    const pushStartedAt = isoNow();
+    const acknowledgedDownstreamIdsForPush = [
+      ...new Set([...acknowledgedDownstreamIds, ...appliedDownstreamIds]),
+    ];
+    const pushPayload: StoreNodePushRequest = {
+      sourceNodeCode: nodeCode,
+      sentAt: pushStartedAt,
+      cursor: latestCursor,
+      syncRunId,
+      trigger,
+      clientStartedAt: startedAt,
+      upstreamEvents: upstreamRows.map((row) =>
+        this.toSyncEnvelope(row, nodeCode),
+      ),
+      acknowledgedDownstreamEventIds: acknowledgedDownstreamIdsForPush,
+      telemetry: this.buildStoreNodeTelemetry(),
+    };
+    this.markOutboxAttemptStarted(
+      upstreamRows.map((row) => row.id),
+      pushStartedAt,
+      syncRunId,
+    );
+    let pushResponse: StoreNodePushResponse;
+
+    try {
+      const pushStartedAtMs = Date.now();
+      console.info("Store Desktop SQLite sync push started.", {
+        ...logContext,
+        syncRunId,
+        trigger,
+        cursor: latestCursor,
+        upstreamEvents: pushPayload.upstreamEvents.length,
+        acknowledgedDownstreamEventIds:
+          pushPayload.acknowledgedDownstreamEventIds.length,
+      });
+      pushResponse = await this.postJson<StoreNodePushResponse>(
+        `${this.syncBaseUrl}/api/sync/store-nodes/${nodeCode}/push`,
+        pushPayload,
+      );
+      console.info("Store Desktop SQLite sync push completed.", {
+        ...logContext,
+        syncRunId,
+        trigger,
+        elapsedMs: Date.now() - pushStartedAtMs,
+        accepted: pushResponse.acceptedEventIds.length,
+        duplicates: pushResponse.duplicateEventIds.length,
+        rejected: pushResponse.rejected.length,
+        acknowledgedDownstream:
+          pushResponse.acknowledgedDownstreamEventIds.length,
+      });
+    } catch (error) {
+      this.markOutboxTransportFailure(
+        upstreamRows.map((row) => row.id),
+        error,
+        isoNow(),
+      );
+      console.error("Store Desktop SQLite sync push failed.", {
+        ...logContext,
+        syncRunId,
+        trigger,
+        cursor: latestCursor,
+        upstreamEvents: pushPayload.upstreamEvents.length,
+        acknowledgedDownstreamEventIds:
+          pushPayload.acknowledgedDownstreamEventIds.length,
+        error: this.describeSyncLogError(error),
+      });
+      throw error;
+    }
+    this.persistRemoteSyncPolicy(pushResponse.syncPolicy);
+    const pushAppliedAt = pushResponse.serverReceivedAt ?? isoNow();
+
+    this.withTransaction(() => {
+      this.markOutboxAccepted(
+        [...pushResponse.acceptedEventIds, ...pushResponse.duplicateEventIds],
+        pushAppliedAt,
+      );
+      this.markOutboxRejected(pushResponse.rejected, pushAppliedAt);
+      this.markInboxAcknowledged(
+        pushResponse.acknowledgedDownstreamEventIds,
+        pushAppliedAt,
+      );
+    });
+
+    const finishedAt = isoNow();
+    const upstreamProcessed =
+      pushResponse.acceptedEventIds.length +
+      pushResponse.duplicateEventIds.length;
+
+    this.withTransaction(() => {
+      this.upsertCheckpoint(
+        latestSourceNodeCode,
+        latestDownstreamEventId,
+        latestCursor,
+        finishedAt,
+        downstreamApplied > 0
+          ? finishedAt
+          : this.currentCheckpointAppliedAt(ENTERPRISE_NODE_CODE),
+      );
+      this.setMetadata("last_sync_at", finishedAt);
+      this.recordSyncSchedule(trigger, finishedAt, false);
+      this.refreshActiveBasketIfPresent(finishedAt);
+      this.insertRunLog({
+        runKind: "SYNC_CYCLE",
+        result:
+          upstreamProcessed > 0 || downstreamApplied > 0 ? "SUCCESS" : "IDLE",
+        summary:
+          upstreamProcessed > 0 || downstreamApplied > 0
+            ? `Pushed ${upstreamProcessed} upstream event(s), applied ${downstreamApplied} downstream packet(s) across ${downstreamPullPasses} pull page(s), and refreshed the enterprise checkpoint.${downstreamLimitReached ? " More downstream packets may still be pending; run sync again to continue draining the queue." : ""}`
+            : "The enterprise sync cycle completed successfully with no pending work.",
+        upstreamProcessed,
+        downstreamApplied,
+        startedAt,
+        finishedAt,
+      });
+    });
+
+    const snapshotStartedAtMs = Date.now();
+    const snapshot = this.getSyncActionSnapshot(snapshotMode);
+
+    console.info("Store Desktop SQLite sync result snapshot prepared.", {
+      ...logContext,
+      syncRunId,
+      trigger,
+      snapshotMode,
+      elapsedMs: Date.now() - snapshotStartedAtMs,
+    });
+    console.info("Store Desktop SQLite sync cycle completed.", {
+      ...logContext,
+      syncRunId,
+      trigger,
+      snapshotMode,
+      elapsedMs: Date.now() - cycleStartedAtMs,
+      upstreamProcessed,
+      downstreamApplied,
+      downstreamPullPasses,
+      downstreamLimitReached,
+      latestCursor,
+    });
+
+    return {
+      message:
+        upstreamProcessed > 0 || downstreamApplied > 0
+          ? `Flash ERP completed a real enterprise sync cycle across ${downstreamPullPasses} pull page(s).${downstreamLimitReached ? " More downstream packets may still be pending; run sync again to continue." : ""}`
+          : "Flash ERP reached enterprise successfully and found no pending sync work.",
+      snapshot,
+      upstreamProcessed,
+      downstreamApplied,
+      downstreamPullPasses,
+      downstreamLimitReached,
+      latestCursor,
+    };
+  }
+
+  requeueDeadLetters(): StoreSyncActionResult {
+    if (this.isStandaloneDeployment()) {
+      this.requireActiveOperatorSession({
+        purpose: "reviewing standalone recovery queues",
+      });
+    } else {
+      this.requireActiveOperatorSession({
+        permissionCodes: ["sync.store.operate"],
+      });
+    }
+
+    const startedAt = isoNow();
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let upstreamRequeued = 0;
+    let downstreamRequeued = 0;
+
+    this.withTransaction(() => {
+      const finishedAt = isoNow();
+      upstreamRequeued = Number(
+        this.db
+          .prepare(
+            "UPDATE sync_outbox SET status = 'PENDING', attempt_count = 0, updated_at = ?, last_attempt_at = NULL, next_retry_at = NULL, failure_kind = NULL, last_http_status = NULL, sync_run_id = NULL, error_message = NULL WHERE status IN ('FAILED', 'DEAD_LETTER')",
+          )
+          .run(finishedAt).changes,
+      );
+      downstreamRequeued = Number(
+        this.db
+          .prepare(
+            "UPDATE sync_inbox SET status = 'RECEIVED', error_message = NULL WHERE status IN ('FAILED', 'DEAD_LETTER')",
+          )
+          .run().changes,
+      );
+      this.insertRunLog({
+        runKind: "REQUEUE",
+        result:
+          upstreamRequeued > 0 || downstreamRequeued > 0 ? "SUCCESS" : "IDLE",
+        summary:
+          upstreamRequeued > 0 || downstreamRequeued > 0
+            ? shouldQueueEnterprise
+              ? `Requeued ${upstreamRequeued + downstreamRequeued} dead-letter item(s) for another enterprise pass.`
+              : `Requeued ${upstreamRequeued + downstreamRequeued} standalone recovery item(s) for local review.`
+            : "No dead-letter items were waiting for requeue.",
+        upstreamProcessed: upstreamRequeued,
+        downstreamApplied: downstreamRequeued,
+        startedAt,
+        finishedAt,
+      });
+    });
+
+    return {
+      message:
+        upstreamRequeued > 0 || downstreamRequeued > 0
+          ? shouldQueueEnterprise
+            ? "Failed items were moved back into active queues."
+            : "Standalone recovery items were moved back into local review queues."
+          : "There were no dead-letter items to requeue.",
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  completeRecoveryTask(taskId: string): StoreSyncActionResult {
+    if (this.isStandaloneDeployment()) {
+      this.requireActiveOperatorSession({
+        purpose: "completing standalone recovery tasks",
+      });
+    } else {
+      this.requireActiveOperatorSession({
+        permissionCodes: ["sync.store.operate"],
+      });
+    }
+
+    const startedAt = isoNow();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    let taskTitle = "Enterprise task";
+
+    this.withTransaction(() => {
+      const task = this.db
+        .prepare(
+          "SELECT id, task_type, status, title, instructions, source_inbound_event_id, source_event_type, aggregate_type, aggregate_id, transaction_no, product_code, replacement_aggregate_type, replacement_aggregate_id, replacement_event_type, replacement_record_version, replacement_payload_json, operator_name, operator_note, store_note, requested_at, completed_at FROM sync_recovery_task WHERE id = ? LIMIT 1",
+        )
+        .get(taskId) as RecoveryTaskRow | undefined;
+
+      if (!task) {
+        throw new Error(
+          `Flash ERP could not find enterprise task "${taskId}" in the local store.`,
+        );
+      }
+
+      taskTitle = task.title;
+
+      if (task.status === "COMPLETED") {
+        throw new Error(
+          `Enterprise task "${task.title}" has already been completed locally.`,
+        );
+      }
+
+      if (
+        !task.replacement_aggregate_type ||
+        !task.replacement_aggregate_id ||
+        !task.replacement_event_type ||
+        !task.replacement_payload_json
+      ) {
+        throw new Error(
+          `Enterprise task "${task.title}" is missing replacement packet details locally. Pull the latest enterprise task before completing it.`,
+        );
+      }
+
+      const finishedAt = isoNow();
+      const completionQueuedAt = new Date(
+        new Date(finishedAt).getTime() + 1,
+      ).toISOString();
+      const replacementEventId = randomUUID();
+      const replacementPayload = this.parsePayloadJson(
+        task.replacement_payload_json,
+      ) as
+        | Partial<StoreInventoryLedgerRecordedPayload>
+        | Record<string, unknown>;
+      const replacementRecordVersion = Math.max(
+        1,
+        asNumber(task.replacement_record_version),
+      );
+      let replacementIdempotencyKey = `${nodeCode}:${task.replacement_aggregate_type}:${task.replacement_aggregate_id}:task:${task.id}`;
+      let storeNote =
+        "Store operator acknowledged the enterprise task locally.";
+      let taskOutcome: StoreSyncRecoveryTaskCompletedPayload["outcome"] =
+        "RESENT_QUEUED";
+      let runSummary = shouldQueueEnterprise
+        ? `${task.title} was acknowledged locally and queued both a replacement business packet and enterprise confirmation upstream.`
+        : `${task.title} was acknowledged locally for standalone recovery without HQ sync work.`;
+
+      if (task.task_type === "REQUEST_UPSTREAM_RESEND") {
+        replacementIdempotencyKey = `${nodeCode}:${task.replacement_aggregate_type}:${task.replacement_aggregate_id}:resend:${task.id}`;
+        storeNote = shouldQueueEnterprise
+          ? task.transaction_no
+            ? `Store operator reviewed ${task.transaction_no} locally and queued a clean resend follow-up from the desktop workspace.`
+            : "Store operator reviewed the enterprise resend task locally and queued a clean resend follow-up."
+          : task.transaction_no
+            ? `Store operator reviewed ${task.transaction_no} locally for standalone recovery.`
+            : "Store operator reviewed the recovery task locally for standalone mode.";
+      } else if (task.task_type === "APPLY_INVENTORY_ADJUSTMENT") {
+        const productCode =
+          typeof replacementPayload.productCode === "string"
+            ? replacementPayload.productCode
+            : task.product_code;
+        const movementType =
+          typeof replacementPayload.movementType === "string"
+            ? replacementPayload.movementType
+            : null;
+        const locationCode =
+          typeof replacementPayload.inventoryLocationCode === "string"
+            ? replacementPayload.inventoryLocationCode
+            : this.getDefaultSalesLocationCode();
+        const quantity =
+          typeof replacementPayload.quantity === "number"
+            ? replacementPayload.quantity
+            : null;
+        const taskSerialNumbers = normalizeSerialNumbers(
+          Array.isArray(
+            (replacementPayload as { serialNumbers?: unknown } | null)
+              ?.serialNumbers,
+          )
+            ? ((
+                replacementPayload as { serialNumbers?: unknown[] }
+              ).serialNumbers?.filter(
+                (entry): entry is string => typeof entry === "string",
+              ) ?? [])
+            : [],
+        );
+
+        if (
+          !productCode ||
+          !movementType ||
+          !locationCode ||
+          quantity === null
+        ) {
+          throw new Error(
+            `Inventory adjustment task "${task.title}" is missing product, location, movement, or quantity details locally.`,
+          );
+        }
+
+        const product = this.db
+          .prepare(
+            "SELECT id, product_code, product_name, unit_price, quantity_on_hand, is_serialized FROM product_snapshot WHERE product_code = ? LIMIT 1",
+          )
+          .get(productCode) as ProductRow | undefined;
+
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${productCode}" for inventory adjustment task "${task.title}".`,
+          );
+        }
+
+        if (asBooleanFlag(product.is_serialized)) {
+          const selectedSerialNumbers = validateSerializedLineInput({
+            isSerialized: true,
+            productName: product.product_name,
+            quantity: Math.abs(quantity),
+            serialNumbers: taskSerialNumbers,
+          });
+
+          this.ensureInventoryTaskSerialNumbersNotReserved(
+            productCode,
+            product.product_name,
+            selectedSerialNumbers,
+          );
+
+          if (movementType === "ADJUSTMENT_NEGATIVE") {
+            ensureSerialSelectionWithinAllowedSet({
+              productName: product.product_name,
+              selectedSerialNumbers,
+              allowedSerialNumbers: this.listAvailableRegistrySerialNumbers(
+                productCode,
+                locationCode,
+              ),
+            });
+            this.applyInventoryTaskSerialRegistryChange({
+              productCode,
+              serialNumbers: selectedSerialNumbers,
+              inventoryLocationCode: locationCode,
+              status: "ADJUSTED_OUT",
+              sourceReferenceId: task.id,
+              sourceReferenceLabel: task.title,
+              updatedAt: finishedAt,
+            });
+          } else {
+            const conflictingSerials = selectedSerialNumbers.filter(
+              (serialNumber) => {
+                const row = this.getSerialRegistryEntry(
+                  productCode,
+                  serialNumber,
+                );
+
+                return row?.status === "AVAILABLE";
+              },
+            );
+
+            if (conflictingSerials.length > 0) {
+              throw new Error(
+                `Flash ERP cannot add serialized unit(s) ${conflictingSerials.join(", ")} for ${product.product_name} because they are already available in the local registry.`,
+              );
+            }
+
+            this.applyInventoryTaskSerialRegistryChange({
+              productCode,
+              serialNumbers: selectedSerialNumbers,
+              inventoryLocationCode: locationCode,
+              status: "AVAILABLE",
+              sourceReferenceId: task.id,
+              sourceReferenceLabel: task.title,
+              updatedAt: finishedAt,
+            });
+          }
+        }
+
+        const signedDelta = signedInventoryQuantity(
+          movementType as StoreInventoryLedgerRecordedPayload["movementType"],
+          quantity,
+        );
+
+        this.db
+          .prepare(
+            "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + ?, updated_at = ? WHERE id = ?",
+          )
+          .run(signedDelta, finishedAt, product.id);
+        this.applyLocationBalanceDelta(
+          locationCode,
+          productCode,
+          signedDelta,
+          finishedAt,
+        );
+
+        replacementIdempotencyKey = `${nodeCode}:${task.replacement_aggregate_type}:${task.replacement_aggregate_id}:adjustment:${task.id}`;
+        storeNote = `Store operator applied ${Math.abs(quantity).toFixed(3)} units of ${movementType.toLowerCase().replace(/_/g, " ")} for ${productCode} in ${locationCode} locally${
+          taskSerialNumbers.length > 0
+            ? ` using serials ${taskSerialNumbers.join(", ")}`
+            : ""
+        }${
+          shouldQueueEnterprise
+            ? " and queued the stock movement upstream."
+            : " for standalone inventory recovery."
+        }`;
+        taskOutcome = "ADJUSTMENT_QUEUED";
+        runSummary = shouldQueueEnterprise
+          ? `${task.title} was applied locally, the product snapshot and location balance were updated, and the resulting inventory movement plus enterprise confirmation were queued upstream.`
+          : `${task.title} was applied locally for standalone inventory recovery.`;
+      } else if (task.task_type === "APPLY_COUNT_VARIANCE") {
+        const productCode =
+          typeof replacementPayload.productCode === "string"
+            ? replacementPayload.productCode
+            : task.product_code;
+        const movementType =
+          typeof replacementPayload.movementType === "string"
+            ? replacementPayload.movementType
+            : null;
+        const locationCode =
+          typeof replacementPayload.inventoryLocationCode === "string"
+            ? replacementPayload.inventoryLocationCode
+            : this.getDefaultSalesLocationCode();
+        const countedQuantity =
+          typeof (replacementPayload as { countedQuantity?: unknown })
+            .countedQuantity === "number"
+            ? (replacementPayload as { countedQuantity: number })
+                .countedQuantity
+            : typeof replacementPayload.quantity === "number"
+              ? replacementPayload.quantity
+              : null;
+        const taskSerialNumbers = normalizeSerialNumbers(
+          Array.isArray(
+            (replacementPayload as { serialNumbers?: unknown } | null)
+              ?.serialNumbers,
+          )
+            ? ((
+                replacementPayload as { serialNumbers?: unknown[] }
+              ).serialNumbers?.filter(
+                (entry): entry is string => typeof entry === "string",
+              ) ?? [])
+            : [],
+        );
+
+        if (
+          !productCode ||
+          !locationCode ||
+          movementType !== "COUNT_VARIANCE" ||
+          countedQuantity === null
+        ) {
+          throw new Error(
+            `Count variance task "${task.title}" is missing product, location, movement, or counted quantity details locally.`,
+          );
+        }
+        const appliedCount = this.applyLocalCountVariance({
+          referenceId: task.id,
+          referenceLabel: task.title,
+          productCode,
+          locationCode,
+          countedQuantity,
+          countedSerialNumbers: taskSerialNumbers,
+          updatedAt: finishedAt,
+        });
+        const outboundReplacementPayload = {
+          ...(replacementPayload as Record<string, unknown>),
+          quantity: appliedCount.varianceQuantity,
+        };
+
+        replacementIdempotencyKey = `${nodeCode}:${task.replacement_aggregate_type}:${task.replacement_aggregate_id}:count-variance:${task.id}`;
+        storeNote = `Store operator confirmed ${countedQuantity.toFixed(3)} units for ${productCode} in ${locationCode} locally${
+          taskSerialNumbers.length > 0
+            ? ` using serials ${taskSerialNumbers.join(", ")}`
+            : ""
+        }${
+          shouldQueueEnterprise
+            ? ` and queued a count variance of ${appliedCount.varianceQuantity.toFixed(3)} upstream.`
+            : ` with a local count variance of ${appliedCount.varianceQuantity.toFixed(3)} for standalone recovery.`
+        }`;
+        taskOutcome = "COUNT_VARIANCE_QUEUED";
+        runSummary = shouldQueueEnterprise
+          ? `${task.title} was applied locally, the counted stock replaced the previous location quantity, and the resulting count variance plus enterprise confirmation were queued upstream.`
+          : `${task.title} was applied locally and the counted stock replaced the previous standalone location quantity.`;
+        Object.assign(
+          replacementPayload as Record<string, unknown>,
+          outboundReplacementPayload,
+        );
+      } else if (task.task_type === "APPLY_STOCK_TRANSFER") {
+        const transferPayload =
+          replacementPayload as Partial<StoreInventoryTransferRecordedPayload>;
+        const productCode =
+          typeof transferPayload.productCode === "string"
+            ? transferPayload.productCode
+            : task.product_code;
+        const sourceLocationCode =
+          typeof transferPayload.sourceInventoryLocationCode === "string"
+            ? transferPayload.sourceInventoryLocationCode
+            : null;
+        const destinationLocationCode =
+          typeof transferPayload.destinationInventoryLocationCode === "string"
+            ? transferPayload.destinationInventoryLocationCode
+            : null;
+        const quantity =
+          typeof transferPayload.quantity === "number"
+            ? transferPayload.quantity
+            : null;
+        const taskSerialNumbers = normalizeSerialNumbers(
+          Array.isArray(
+            (transferPayload as { serialNumbers?: unknown } | null)
+              ?.serialNumbers,
+          )
+            ? ((
+                transferPayload as { serialNumbers?: unknown[] }
+              ).serialNumbers?.filter(
+                (entry): entry is string => typeof entry === "string",
+              ) ?? [])
+            : [],
+        );
+
+        if (
+          !productCode ||
+          !sourceLocationCode ||
+          !destinationLocationCode ||
+          sourceLocationCode === destinationLocationCode ||
+          quantity === null ||
+          quantity <= 0
+        ) {
+          throw new Error(
+            `Stock transfer task "${task.title}" is missing product, source, destination, or quantity details locally.`,
+          );
+        }
+
+        const product = this.db
+          .prepare(
+            "SELECT id, product_code, product_name, unit_price, quantity_on_hand, is_serialized FROM product_snapshot WHERE product_code = ? LIMIT 1",
+          )
+          .get(productCode) as ProductRow | undefined;
+
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${productCode}" for stock transfer task "${task.title}".`,
+          );
+        }
+
+        if (asBooleanFlag(product.is_serialized)) {
+          const selectedSerialNumbers = validateSerializedLineInput({
+            isSerialized: true,
+            productName: product.product_name,
+            quantity,
+            serialNumbers: taskSerialNumbers,
+          });
+
+          this.ensureInventoryTaskSerialNumbersNotReserved(
+            productCode,
+            product.product_name,
+            selectedSerialNumbers,
+          );
+          ensureSerialSelectionWithinAllowedSet({
+            productName: product.product_name,
+            selectedSerialNumbers,
+            allowedSerialNumbers: this.listAvailableRegistrySerialNumbers(
+              productCode,
+              sourceLocationCode,
+            ),
+          });
+          this.applyInventoryTaskSerialRegistryChange({
+            productCode,
+            serialNumbers: selectedSerialNumbers,
+            inventoryLocationCode: destinationLocationCode,
+            status: "AVAILABLE",
+            sourceReferenceId: task.id,
+            sourceReferenceLabel: task.title,
+            updatedAt: finishedAt,
+          });
+        }
+
+        this.applyLocationBalanceDelta(
+          sourceLocationCode,
+          productCode,
+          quantity * -1,
+          finishedAt,
+        );
+        this.applyLocationBalanceDelta(
+          destinationLocationCode,
+          productCode,
+          quantity,
+          finishedAt,
+        );
+
+        replacementIdempotencyKey = `${nodeCode}:${task.replacement_aggregate_type}:${task.replacement_aggregate_id}:transfer:${task.id}`;
+        storeNote = `Store operator moved ${quantity.toFixed(3)} units of ${productCode} from ${sourceLocationCode} to ${destinationLocationCode} locally${
+          taskSerialNumbers.length > 0
+            ? ` using serials ${taskSerialNumbers.join(", ")}`
+            : ""
+        }${
+          shouldQueueEnterprise
+            ? " and queued the paired transfer movement upstream."
+            : " for standalone transfer recovery."
+        }`;
+        taskOutcome = "TRANSFER_QUEUED";
+        runSummary = shouldQueueEnterprise
+          ? `${task.title} was completed locally, source and destination location balances were updated, aggregate store stock stayed unchanged, and the paired transfer movement plus enterprise confirmation were queued upstream.`
+          : `${task.title} was completed locally for standalone transfer recovery.`;
+      } else {
+        throw new Error(
+          `Flash ERP does not support enterprise task type "${task.task_type}" locally.`,
+        );
+      }
+
+      const taskCompletionPayload: StoreSyncRecoveryTaskCompletedPayload = {
+        taskId: task.id,
+        taskType:
+          task.task_type as StoreSyncRecoveryTaskCompletedPayload["taskType"],
+        sourceInboundEventId: task.source_inbound_event_id,
+        sourceEventType: task.source_event_type,
+        replacementEventId,
+        replacementIdempotencyKey,
+        completedAt: finishedAt,
+        outcome: taskOutcome,
+        storeNote,
+      };
+
+      this.db
+        .prepare(
+          "UPDATE sync_recovery_task SET status = 'COMPLETED', store_note = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(storeNote, finishedAt, finishedAt, task.id);
+      if (shouldQueueEnterprise) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)",
+          )
+          .run(
+            replacementEventId,
+            ENTERPRISE_NODE_CODE,
+            task.replacement_aggregate_type,
+            task.replacement_aggregate_id,
+            task.replacement_event_type,
+            replacementIdempotencyKey,
+            JSON.stringify(replacementPayload),
+            replacementRecordVersion,
+            finishedAt,
+            finishedAt,
+          );
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'syncTask', ?, 'sync.task.completed', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            randomUUID(),
+            ENTERPRISE_NODE_CODE,
+            task.id,
+            `${nodeCode}:syncTask:${task.id}:completed`,
+            JSON.stringify(taskCompletionPayload),
+            completionQueuedAt,
+            completionQueuedAt,
+          );
+      }
+      this.setMetadata("last_local_write_at", finishedAt);
+      this.insertRunLog({
+        runKind:
+          task.task_type === "APPLY_INVENTORY_ADJUSTMENT" ||
+          task.task_type === "APPLY_COUNT_VARIANCE" ||
+          task.task_type === "APPLY_STOCK_TRANSFER"
+            ? "INVENTORY_TASK"
+            : "RECOVERY_TASK",
+        result: "SUCCESS",
+        summary: runSummary,
+        upstreamProcessed: shouldQueueEnterprise ? 2 : 0,
+        downstreamApplied: 0,
+        startedAt,
+        finishedAt,
+      });
+    });
+
+    return {
+      message: shouldQueueEnterprise
+        ? `${taskTitle} was completed locally and queued both a replacement packet and enterprise confirmation.`
+        : `${taskTitle} was completed locally for standalone recovery.`,
+      snapshot: this.getSyncSnapshot(),
+    };
+  }
+
+  private getPendingUpstreamRows(limit: number) {
+    return this.db
+      .prepare(
+        "SELECT id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, attempt_count, record_version, created_at FROM sync_outbox WHERE status IN ('PENDING', 'IN_FLIGHT', 'FAILED') AND attempt_count < ? AND (next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY created_at ASC LIMIT ?",
+      )
+      .all(MAX_SYNC_RETRY_ATTEMPTS, isoNow(), limit) as OutboxEnvelopeRow[];
+  }
+
+  private getPendingDownstreamAcknowledgements(limit: number) {
+    return (
+      this.db
+        .prepare(
+          "SELECT id FROM sync_inbox WHERE status = 'APPLIED' AND acknowledged_at IS NULL ORDER BY received_at ASC LIMIT ?",
+        )
+        .all(limit) as Array<{ id: string }>
+    ).map((row) => row.id);
+  }
+
+  private toSyncEnvelope(
+    row: OutboxEnvelopeRow,
+    nodeCode: string,
+  ): SyncEnvelope {
+    return {
+      eventId: row.id,
+      idempotencyKey: row.idempotency_key,
+      aggregateType: row.aggregate_type as SyncEnvelope["aggregateType"],
+      aggregateId: row.aggregate_id,
+      eventType: row.event_type,
+      originatingNodeCode: nodeCode,
+      targetNodeCode: row.target_node_code,
+      recordVersion: Math.max(1, asNumber(row.record_version)),
+      occurredAt: row.created_at,
+      payload: this.parsePayloadJson(row.payload_json),
+    };
+  }
+
+  private buildStoreNodeTelemetry(): StoreNodeTelemetry {
+    const metadata = this.getMetadata();
+    const queueMetrics = this.getSyncQueueMetrics();
+    const lastSyncAt = metadata.last_sync_at ?? null;
+    const standalone = this.isStandaloneDeployment();
+    const syncPolicy = readStoreSyncPolicyFromMetadata(metadata);
+    const health =
+      !standalone && !this.syncBaseUrl
+        ? "attention"
+        : this.getHealth(queueMetrics, lastSyncAt, standalone);
+
+    return {
+      generatedAt: isoNow(),
+      health,
+      lastSyncAt,
+      lastLocalWriteAt: metadata.last_local_write_at ?? null,
+      nextScheduledSyncAt: syncPolicy.nextScheduledSyncAt,
+      lastManualSyncAt: syncPolicy.lastManualSyncAt,
+      lastAutoSyncAt: syncPolicy.lastAutoSyncAt,
+      queueMetrics,
+    };
+  }
+
+  private markOutboxAttemptStarted(
+    eventIds: string[],
+    attemptedAt: string,
+    syncRunId: string,
+  ) {
+    for (const eventId of eventIds) {
+      this.db
+        .prepare(
+          `UPDATE sync_outbox
+          SET status = 'IN_FLIGHT',
+              attempt_count = attempt_count + 1,
+              last_attempt_at = ?,
+              next_retry_at = NULL,
+              failure_kind = NULL,
+              last_http_status = NULL,
+              sync_run_id = ?,
+              updated_at = ?
+          WHERE id = ?
+            AND status IN ('PENDING', 'IN_FLIGHT', 'FAILED')`,
+        )
+        .run(attemptedAt, syncRunId, attemptedAt, eventId);
+    }
+  }
+
+  private expireExhaustedOutboxRetries(expiredAt: string) {
+    this.db
+      .prepare(
+        `UPDATE sync_outbox
+        SET status = 'DEAD_LETTER',
+            next_retry_at = NULL,
+            error_message = COALESCE(error_message, 'Retry attempts exhausted before the next enterprise sync pass.'),
+            updated_at = ?
+        WHERE status IN ('PENDING', 'IN_FLIGHT', 'FAILED')
+          AND attempt_count >= ?`,
+      )
+      .run(expiredAt, MAX_SYNC_RETRY_ATTEMPTS);
+  }
+
+  private markOutboxTransportFailure(
+    eventIds: string[],
+    error: unknown,
+    failedAt: string,
+  ) {
+    if (eventIds.length === 0) {
+      return;
+    }
+
+    const failure = classifySyncFailure(error);
+
+    for (const eventId of eventIds) {
+      const row = this.db
+        .prepare("SELECT attempt_count FROM sync_outbox WHERE id = ? LIMIT 1")
+        .get(eventId) as { attempt_count: number | string } | undefined;
+      const attemptCount = Math.trunc(asNumber(row?.attempt_count));
+      const deadLetter = shouldMoveToDeadLetter(attemptCount);
+
+      this.db
+        .prepare(
+          `UPDATE sync_outbox
+          SET status = ?,
+              error_message = ?,
+              failure_kind = ?,
+              last_http_status = ?,
+              next_retry_at = ?,
+              updated_at = ?
+          WHERE id = ?`,
+        )
+        .run(
+          deadLetter ? "DEAD_LETTER" : "FAILED",
+          `${failure.failureKind}: ${failure.message}`,
+          failure.failureKind,
+          failure.httpStatus,
+          deadLetter ? null : nextSyncRetryAt(failedAt, attemptCount),
+          failedAt,
+          eventId,
+        );
+    }
+  }
+
+  private async postJson<TResponse>(
+    url: string,
+    body: unknown,
+  ): Promise<TResponse> {
+    const timeoutMs = 20_000;
+    const timeoutMessage =
+      "Enterprise sync timed out after 20 seconds. Check that the enterprise app is running and reachable, then try again.";
+
+    try {
+      const response = await postSyncJsonRaw(url, body, {
+        maxResponseBytes: MAX_SYNC_RESPONSE_BYTES,
+        timeoutMessage,
+        timeoutMs,
+        oversizedMessage: (limitBytes, contentLength) =>
+          contentLength
+            ? `Enterprise sync returned ${formatBytes(contentLength)}, which is larger than the desktop safety limit of ${formatBytes(limitBytes)}. Flash ERP will retry with a smaller downstream pull page.`
+            : `Enterprise sync returned more than ${formatBytes(limitBytes)}. Flash ERP stopped reading that page to keep the desktop responsive and will retry with a smaller downstream pull page.`,
+      });
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        let message = `HTTP ${response.statusCode}`;
+        let schemaDrift = false;
+        let schemaDriftMessage: string | null = null;
+
+        try {
+          const payload = JSON.parse(response.body) as {
+            error?: string;
+            message?: string;
+            code?: string;
+            schemaDrift?: boolean;
+          };
+          if (payload.error || payload.message) {
+            message = payload.error ?? payload.message ?? message;
+          }
+
+          schemaDrift = isSyncSchemaDriftPayload(payload);
+          schemaDriftMessage =
+            payload.error ??
+            payload.message ??
+            enterpriseDatabaseSchemaNotReadyMessage;
+        } catch {}
+
+        if (schemaDrift) {
+          throw new StoreSyncTransportError(
+            schemaDriftMessage ?? enterpriseDatabaseSchemaNotReadyMessage,
+            "SCHEMA",
+            response.statusCode,
+          );
+        }
+
+        throw new StoreSyncTransportError(
+          message,
+          response.statusCode >= 500 ? "SERVER" : "HTTP",
+          response.statusCode,
+        );
+      }
+
+      return JSON.parse(response.body) as TResponse;
+    } catch (error) {
+      if (error instanceof StoreSyncTransportError) {
+        throw error;
+      }
+
+      if (error instanceof SyncHttpClientError) {
+        if (error.failureKind === "TIMEOUT") {
+          throw new StoreSyncTransportError(timeoutMessage, "TIMEOUT");
+        }
+
+        if (error.failureKind === "OVERSIZED") {
+          throw new StoreSyncTransportError(
+            error.message,
+            "SERVER",
+            error.httpStatus ?? 413,
+          );
+        }
+      }
+
+      if (error instanceof Error) {
+        throw new StoreSyncTransportError(
+          "Enterprise sync could not reach the network endpoint. Flash ERP preserved the local queue for a retry.",
+          "NETWORK",
+        );
+      }
+
+      throw error;
+    }
+  }
+
+  private async readBoundedResponseText(response: Response) {
+    const contentLength = Number(response.headers.get("content-length"));
+
+    if (Number.isFinite(contentLength) && contentLength > MAX_SYNC_RESPONSE_BYTES) {
+      throw new StoreSyncTransportError(
+        `Enterprise sync returned ${formatBytes(contentLength)}, which is larger than the desktop safety limit of ${formatBytes(MAX_SYNC_RESPONSE_BYTES)}. Flash ERP will retry with a smaller downstream pull page.`,
+        "SERVER",
+        413,
+      );
+    }
+
+    if (!response.body) {
+      return response.text();
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let receivedBytes = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        if (!value) {
+          continue;
+        }
+
+        receivedBytes += value.byteLength;
+
+        if (receivedBytes > MAX_SYNC_RESPONSE_BYTES) {
+          await reader.cancel();
+          throw new StoreSyncTransportError(
+            `Enterprise sync returned more than ${formatBytes(MAX_SYNC_RESPONSE_BYTES)}. Flash ERP stopped reading that page to keep the desktop responsive and will retry with a smaller downstream pull page.`,
+            "SERVER",
+            413,
+          );
+        }
+
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return new TextDecoder().decode(Buffer.concat(chunks));
+  }
+
+  private markOutboxAccepted(eventIds: string[], acknowledgedAt: string) {
+    for (const eventId of eventIds) {
+      this.db
+        .prepare(
+          "UPDATE sync_outbox SET status = 'ACKNOWLEDGED', acknowledged_at = ?, last_attempt_at = ?, next_retry_at = NULL, failure_kind = NULL, last_http_status = NULL, error_message = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run(acknowledgedAt, acknowledgedAt, acknowledgedAt, eventId);
+      this.db
+        .prepare(
+          "UPDATE local_goods_receipt SET synced_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId);
+      this.db
+        .prepare(
+          "UPDATE local_supplier_return SET synced_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId);
+      this.db
+        .prepare(
+          "UPDATE customer_account_entry SET synced_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId);
+      this.db
+        .prepare(
+          `UPDATE sales_order
+          SET synced_at = ?, updated_at = ?
+          WHERE id = COALESCE(
+            (
+              SELECT aggregate_id
+              FROM sync_outbox
+              WHERE id = ?
+                AND aggregate_type = 'salesOrder'
+              LIMIT 1
+            ),
+            ?
+          )`,
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId, eventId);
+      this.db
+        .prepare(
+          `UPDATE eod_reconciliation
+          SET synced_at = ?, updated_at = ?
+          WHERE id = COALESCE(
+            (
+              SELECT aggregate_id
+              FROM sync_outbox
+              WHERE id = ?
+                AND aggregate_type = 'eodReconciliation'
+              LIMIT 1
+            ),
+            ?
+          )`,
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId, eventId);
+      this.db
+        .prepare(
+          `UPDATE banking_deposit
+          SET synced_at = ?, updated_at = ?
+          WHERE id = COALESCE(
+            (
+              SELECT aggregate_id
+              FROM sync_outbox
+              WHERE id = ?
+                AND aggregate_type = 'bankingDeposit'
+              LIMIT 1
+            ),
+            ?
+          )`,
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId, eventId);
+      this.db
+        .prepare(
+          `UPDATE local_supplier_return
+          SET cancellation_ack_synced_at = ?, updated_at = ?
+          WHERE id = (
+            SELECT aggregate_id
+            FROM sync_outbox
+            WHERE id = ?
+              AND aggregate_type = 'supplierReturn'
+              AND event_type = 'supplier-return.cancellation-acknowledged'
+            LIMIT 1
+          )`,
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId);
+    }
+  }
+
+  private markOutboxRejected(
+    rejected: SyncRejectedEnvelope[],
+    rejectedAt: string,
+  ) {
+    for (const item of rejected) {
+      const row = this.db
+        .prepare("SELECT attempt_count FROM sync_outbox WHERE id = ? LIMIT 1")
+        .get(item.eventId) as { attempt_count: number | string } | undefined;
+      const attemptCount = Math.trunc(asNumber(row?.attempt_count));
+      const deadLetter =
+        !item.retryable || shouldMoveToDeadLetter(attemptCount);
+
+      this.db
+        .prepare(
+          "UPDATE sync_outbox SET status = ?, error_message = ?, failure_kind = ?, next_retry_at = ?, last_http_status = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          deadLetter ? "DEAD_LETTER" : "FAILED",
+          `${item.reasonCode}: ${item.message}`,
+          item.reasonCode,
+          deadLetter ? null : nextSyncRetryAt(rejectedAt, attemptCount),
+          rejectedAt,
+          item.eventId,
+        );
+    }
+  }
+
+  private markInboxAcknowledged(eventIds: string[], acknowledgedAt: string) {
+    for (const eventId of eventIds) {
+      this.db
+        .prepare(
+          "UPDATE sync_inbox SET acknowledged_at = ?, error_message = NULL WHERE id = ?",
+        )
+        .run(acknowledgedAt, eventId);
+    }
+  }
+
+  private reapplyFailedDownstreamInbox(limit: number) {
+    const rows = this.db
+      .prepare(
+        `SELECT id, source_node_code, aggregate_type, aggregate_id, event_type, payload_json, status, received_at, acknowledged_at
+         FROM sync_inbox
+         WHERE status IN ('FAILED', 'DEAD_LETTER')
+         ORDER BY CASE event_type
+           WHEN 'security.user.published' THEN 0
+           WHEN 'security.role.published' THEN 1
+           WHEN 'security.permission.published' THEN 2
+           ELSE 3
+         END, received_at ASC
+         LIMIT ?`,
+      )
+      .all(limit) as InboxEnvelopeRow[];
+    const appliedIds: string[] = [];
+    const appliedAt = isoNow();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+
+    this.withTransaction(() => {
+      for (const row of rows) {
+        const event: SyncEnvelope = {
+          eventId: row.id,
+          idempotencyKey: row.id,
+          aggregateType: row.aggregate_type as SyncEnvelope["aggregateType"],
+          aggregateId: row.aggregate_id,
+          eventType: row.event_type,
+          originatingNodeCode: row.source_node_code,
+          targetNodeCode: nodeCode,
+          recordVersion: 1,
+          occurredAt: row.received_at,
+          payload: this.parsePayloadJson(row.payload_json),
+        };
+
+        try {
+          this.applyDownstreamPayload(event, appliedAt);
+          this.db
+            .prepare(
+              "UPDATE sync_inbox SET status = 'APPLIED', applied_at = ?, error_message = NULL WHERE id = ?",
+            )
+            .run(appliedAt, row.id);
+          appliedIds.push(row.id);
+        } catch (error) {
+          this.db
+            .prepare(
+              "UPDATE sync_inbox SET status = 'FAILED', error_message = ? WHERE id = ?",
+            )
+            .run(
+              error instanceof Error
+                ? error.message
+                : "Flash ERP could not apply the downstream packet locally.",
+              row.id,
+            );
+        }
+      }
+    });
+
+    return appliedIds;
+  }
+
+  private applyDownstreamBatch(
+    events: SyncEnvelope[],
+    remoteNodeCode: string,
+    cursor: string | null,
+  ) {
+    const receivedAt = isoNow();
+    const acknowledgedIds: string[] = [];
+
+    this.withTransaction(() => {
+      for (const event of events) {
+        const existing = this.db
+          .prepare(
+            "SELECT id, source_node_code, aggregate_type, aggregate_id, event_type, payload_json, status, acknowledged_at FROM sync_inbox WHERE id = ? LIMIT 1",
+          )
+          .get(event.eventId) as InboxEnvelopeRow | undefined;
+
+        if (existing?.acknowledged_at) {
+          acknowledgedIds.push(event.eventId);
+          continue;
+        }
+
+        if (existing?.status === "APPLIED") {
+          acknowledgedIds.push(event.eventId);
+          continue;
+        }
+
+        this.db
+          .prepare(
+            "INSERT INTO sync_inbox (id, source_node_code, aggregate_type, aggregate_id, event_type, payload_json, status, received_at, applied_at, acknowledged_at, error_message) VALUES (?, ?, ?, ?, ?, ?, 'RECEIVED', ?, NULL, NULL, NULL) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, status = 'RECEIVED', error_message = NULL",
+          )
+          .run(
+            event.eventId,
+            remoteNodeCode,
+            event.aggregateType,
+            event.aggregateId,
+            event.eventType,
+            JSON.stringify(event.payload),
+            receivedAt,
+          );
+
+        try {
+          this.applyDownstreamPayload(event, receivedAt);
+          this.db
+            .prepare(
+              "UPDATE sync_inbox SET status = 'APPLIED', applied_at = ?, error_message = NULL WHERE id = ?",
+            )
+            .run(receivedAt, event.eventId);
+          acknowledgedIds.push(event.eventId);
+        } catch (error) {
+          this.db
+            .prepare(
+              "UPDATE sync_inbox SET status = 'FAILED', error_message = ? WHERE id = ?",
+            )
+            .run(
+              error instanceof Error
+                ? error.message
+                : "Flash ERP could not apply the downstream packet locally.",
+              event.eventId,
+            );
+        }
+      }
+
+      if (events.length > 0) {
+        this.upsertCheckpoint(
+          remoteNodeCode,
+          events[events.length - 1]?.eventId ?? null,
+          cursor,
+          receivedAt,
+          acknowledgedIds.length > 0
+            ? receivedAt
+            : this.currentCheckpointAppliedAt(remoteNodeCode),
+        );
+      }
+    });
+
+    return acknowledgedIds;
+  }
+
+  private applyCatalogProductPolicy(
+    policy: NonNullable<ReturnType<typeof readCatalogProductPolicy>>,
+    appliedAt: string,
+  ) {
+    if (policy.productCodes === null) {
+      this.db
+        .prepare(
+          "UPDATE product_snapshot SET catalog_membership_active = 1, catalog_sort_order = NULL, updated_at = ?",
+        )
+        .run(appliedAt);
+      return;
+    }
+
+    this.db
+      .prepare(
+        "UPDATE product_snapshot SET catalog_membership_active = 0, catalog_sort_order = NULL, updated_at = ?",
+      )
+      .run(appliedAt);
+
+    const updateProductPolicy = this.db.prepare(
+      "UPDATE product_snapshot SET catalog_membership_active = 1, catalog_sort_order = ?, updated_at = ? WHERE product_code = ?",
+    );
+
+    for (const productCode of policy.productCodes) {
+      updateProductPolicy.run(
+        policy.productSortOrders.get(productCode) ?? null,
+        appliedAt,
+        productCode,
+      );
+    }
+  }
+
+  private applyDownstreamPayload(event: SyncEnvelope, appliedAt: string) {
+    const payload = this.parsePayloadRecord(event.payload);
+
+    if (
+      event.aggregateType === "syncTask" &&
+      event.eventType === "sync.task.requested"
+    ) {
+      const taskPayload = payload as Partial<EnterpriseSyncTaskPayload>;
+      const hasReplacementPayload = Object.prototype.hasOwnProperty.call(
+        taskPayload,
+        "replacementPayload",
+      );
+
+      if (
+        typeof taskPayload.taskId !== "string" ||
+        (taskPayload.taskType !== "REQUEST_UPSTREAM_RESEND" &&
+          taskPayload.taskType !== "APPLY_INVENTORY_ADJUSTMENT" &&
+          taskPayload.taskType !== "APPLY_COUNT_VARIANCE" &&
+          taskPayload.taskType !== "APPLY_STOCK_TRANSFER" &&
+          taskPayload.taskType !== "RUN_DATABASE_MAINTENANCE") ||
+        typeof taskPayload.title !== "string" ||
+        typeof taskPayload.instructions !== "string" ||
+        typeof taskPayload.sourceInboundEventId !== "string" ||
+        typeof taskPayload.sourceEventType !== "string" ||
+        typeof taskPayload.aggregateType !== "string" ||
+        typeof taskPayload.aggregateId !== "string" ||
+        typeof taskPayload.replacementAggregateType !== "string" ||
+        typeof taskPayload.replacementAggregateId !== "string" ||
+        typeof taskPayload.replacementEventType !== "string" ||
+        typeof taskPayload.replacementRecordVersion !== "number" ||
+        !Number.isFinite(taskPayload.replacementRecordVersion) ||
+        !hasReplacementPayload ||
+        typeof taskPayload.operatorName !== "string" ||
+        typeof taskPayload.note !== "string" ||
+        typeof taskPayload.requestedAt !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid enterprise task payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO sync_recovery_task (id, task_type, status, title, instructions, source_inbound_event_id, source_event_type, aggregate_type, aggregate_id, transaction_no, product_code, replacement_aggregate_type, replacement_aggregate_id, replacement_event_type, replacement_record_version, replacement_payload_json, operator_name, operator_note, store_note, requested_at, completed_at, created_at, updated_at) VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET status = 'OPEN', title = excluded.title, instructions = excluded.instructions, source_inbound_event_id = excluded.source_inbound_event_id, source_event_type = excluded.source_event_type, aggregate_type = excluded.aggregate_type, aggregate_id = excluded.aggregate_id, transaction_no = excluded.transaction_no, product_code = excluded.product_code, replacement_aggregate_type = excluded.replacement_aggregate_type, replacement_aggregate_id = excluded.replacement_aggregate_id, replacement_event_type = excluded.replacement_event_type, replacement_record_version = excluded.replacement_record_version, replacement_payload_json = excluded.replacement_payload_json, operator_name = excluded.operator_name, operator_note = excluded.operator_note, requested_at = excluded.requested_at, updated_at = excluded.updated_at",
+        )
+        .run(
+          taskPayload.taskId,
+          taskPayload.taskType,
+          taskPayload.title,
+          taskPayload.instructions,
+          taskPayload.sourceInboundEventId,
+          taskPayload.sourceEventType,
+          taskPayload.aggregateType,
+          taskPayload.aggregateId,
+          taskPayload.transactionNo ?? null,
+          taskPayload.productCode ?? null,
+          taskPayload.replacementAggregateType,
+          taskPayload.replacementAggregateId,
+          taskPayload.replacementEventType,
+          Math.max(1, taskPayload.replacementRecordVersion),
+          JSON.stringify(taskPayload.replacementPayload),
+          taskPayload.operatorName,
+          taskPayload.note,
+          taskPayload.requestedAt,
+          appliedAt,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "store" &&
+      event.eventType === "store.settings.published"
+    ) {
+      const storePayload =
+        payload as Partial<EnterpriseStoreSettingsPublishedPayload>;
+      const storeCode = this.expectedInboundStoreCode(storePayload.storeCode);
+
+      if (
+        typeof storePayload.retailOrgName !== "string" ||
+        typeof storePayload.storeCode !== "string" ||
+        storePayload.storeCode !== storeCode ||
+        typeof storePayload.storeName !== "string" ||
+        typeof storePayload.timezone !== "string" ||
+        typeof storePayload.currencyCode !== "string" ||
+        typeof storePayload.salesEnabled !== "boolean" ||
+        typeof storePayload.warehouseEnabled !== "boolean" ||
+        (storePayload.shiftFloatPromptAmount !== undefined &&
+          typeof storePayload.shiftFloatPromptAmount !== "number") ||
+        (storePayload.showCriticalStocksOnStartup !== undefined &&
+          typeof storePayload.showCriticalStocksOnStartup !== "boolean") ||
+        typeof storePayload.loyaltyProgramEnabled !== "boolean" ||
+        typeof storePayload.loyaltyPointsPerCurrencyUnit !== "number" ||
+        typeof storePayload.loyaltyRedemptionEnabled !== "boolean" ||
+        typeof storePayload.loyaltyRedemptionPointsStep !== "number" ||
+        typeof storePayload.loyaltyRedemptionValueAmount !== "number" ||
+        typeof storePayload.loyaltyMinimumRedeemPoints !== "number" ||
+        typeof storePayload.loyaltyMaximumRedeemPercentOfSale !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid store settings publication payload.",
+        );
+      }
+
+      this.rememberInboundStoreCode(storePayload.storeCode);
+      this.setMetadata("retail_org_name", storePayload.retailOrgName);
+      this.setMetadata("store_name", storePayload.storeName);
+      if (typeof storePayload.storePhone === "string" && storePayload.storePhone.trim()) {
+        this.setMetadata("store_phone", storePayload.storePhone.trim());
+      } else {
+        this.deleteMetadata("store_phone");
+      }
+      if (
+        typeof storePayload.storeAddressLine1 === "string" &&
+        storePayload.storeAddressLine1.trim()
+      ) {
+        this.setMetadata("store_address_line1", storePayload.storeAddressLine1.trim());
+      } else {
+        this.deleteMetadata("store_address_line1");
+      }
+      if (
+        typeof storePayload.storeAddressLine2 === "string" &&
+        storePayload.storeAddressLine2.trim()
+      ) {
+        this.setMetadata("store_address_line2", storePayload.storeAddressLine2.trim());
+      } else {
+        this.deleteMetadata("store_address_line2");
+      }
+      this.setMetadata("timezone", storePayload.timezone);
+      this.setMetadata("currency_code", storePayload.currencyCode);
+      this.setMetadata("sales_enabled", storePayload.salesEnabled ? "1" : "0");
+      this.setMetadata(
+        "warehouse_enabled",
+        storePayload.warehouseEnabled ? "1" : "0",
+      );
+      this.setMetadata(
+        "store_license_status",
+        storePayload.licenseStatus ?? "LICENSED",
+      );
+      this.setMetadata(
+        "terminal_license_status",
+        storePayload.terminalLicenseStatus ?? "LICENSED",
+      );
+      this.setMetadata(
+        "touch_mode_enabled",
+        storePayload.touchModeEnabled === false ? "0" : "1",
+      );
+      this.setMetadata(
+        "shift_float_prompt_amount",
+        String(
+          Number(
+            Math.max(0, storePayload.shiftFloatPromptAmount ?? 0).toFixed(2),
+          ),
+        ),
+      );
+      this.setMetadata(
+        "show_critical_stocks_on_startup",
+        storePayload.showCriticalStocksOnStartup ? "1" : "0",
+      );
+      this.setMetadata(
+        "loyalty_program_enabled",
+        storePayload.loyaltyProgramEnabled ? "1" : "0",
+      );
+      this.setMetadata(
+        "loyalty_points_per_currency_unit",
+        String(Number(storePayload.loyaltyPointsPerCurrencyUnit.toFixed(4))),
+      );
+      this.setMetadata(
+        "loyalty_redemption_enabled",
+        storePayload.loyaltyRedemptionEnabled ? "1" : "0",
+      );
+      this.setMetadata(
+        "loyalty_redemption_points_step",
+        String(
+          Math.max(1, Math.trunc(storePayload.loyaltyRedemptionPointsStep)),
+        ),
+      );
+      this.setMetadata(
+        "loyalty_redemption_value_amount",
+        String(Number(storePayload.loyaltyRedemptionValueAmount.toFixed(2))),
+      );
+      this.setMetadata(
+        "loyalty_minimum_redeem_points",
+        String(
+          Math.max(1, Math.trunc(storePayload.loyaltyMinimumRedeemPoints)),
+        ),
+      );
+      this.setMetadata(
+        "loyalty_maximum_redeem_percent_of_sale",
+        String(
+          Number(storePayload.loyaltyMaximumRedeemPercentOfSale.toFixed(2)),
+        ),
+      );
+
+      if (
+        typeof storePayload.shortName === "string" &&
+        storePayload.shortName.trim()
+      ) {
+        this.setMetadata("store_short_name", storePayload.shortName.trim());
+      } else {
+        this.deleteMetadata("store_short_name");
+      }
+
+      if (
+        typeof storePayload.storeGroupCode === "string" &&
+        storePayload.storeGroupCode.trim()
+      ) {
+        this.setMetadata(
+          "store_group_code",
+          storePayload.storeGroupCode.trim(),
+        );
+      } else {
+        this.deleteMetadata("store_group_code");
+      }
+
+      if (
+        typeof storePayload.storeGroupName === "string" &&
+        storePayload.storeGroupName.trim()
+      ) {
+        this.setMetadata(
+          "store_group_name",
+          storePayload.storeGroupName.trim(),
+        );
+      } else {
+        this.deleteMetadata("store_group_name");
+      }
+
+      if (
+        typeof storePayload.storeGroupType === "string" &&
+        storePayload.storeGroupType.trim()
+      ) {
+        this.setMetadata(
+          "store_group_type",
+          storePayload.storeGroupType.trim(),
+        );
+      } else {
+        this.deleteMetadata("store_group_type");
+      }
+
+      if (
+        typeof storePayload.licenseKey === "string" &&
+        storePayload.licenseKey.trim()
+      ) {
+        this.setMetadata("store_license_key", storePayload.licenseKey.trim());
+      } else {
+        this.deleteMetadata("store_license_key");
+      }
+
+      if (
+        typeof storePayload.licensedUntil === "string" &&
+        storePayload.licensedUntil.trim()
+      ) {
+        this.setMetadata("store_licensed_until", storePayload.licensedUntil);
+      } else {
+        this.deleteMetadata("store_licensed_until");
+      }
+
+      if (
+        typeof storePayload.terminalLicenseKey === "string" &&
+        storePayload.terminalLicenseKey.trim()
+      ) {
+        this.setMetadata(
+          "terminal_license_key",
+          storePayload.terminalLicenseKey.trim(),
+        );
+      } else {
+        this.deleteMetadata("terminal_license_key");
+      }
+
+      if (
+        typeof storePayload.terminalLicensedUntil === "string" &&
+        storePayload.terminalLicensedUntil.trim()
+      ) {
+        this.setMetadata(
+          "terminal_licensed_until",
+          storePayload.terminalLicensedUntil,
+        );
+      } else {
+        this.deleteMetadata("terminal_licensed_until");
+      }
+
+      if (
+        storePayload.catalogPolicy &&
+        typeof storePayload.catalogPolicy === "object"
+      ) {
+        this.setMetadata(
+          "catalog_policy_json",
+          JSON.stringify(storePayload.catalogPolicy),
+        );
+        this.applyCatalogProductPolicy(
+          readCatalogProductPolicy(storePayload.catalogPolicy) ?? {
+            productCodes: null,
+            productSortOrders: new Map<string, number>(),
+          },
+          appliedAt,
+        );
+      } else {
+        this.deleteMetadata("catalog_policy_json");
+        this.applyCatalogProductPolicy(
+          {
+            productCodes: null,
+            productSortOrders: new Map<string, number>(),
+          },
+          appliedAt,
+        );
+      }
+
+      if (Array.isArray(storePayload.productSizes)) {
+        this.setMetadata(
+          "product_sizes_json",
+          JSON.stringify(optionalSetupStringList(storePayload.productSizes) ?? []),
+        );
+      } else {
+        this.deleteMetadata("product_sizes_json");
+      }
+
+      if (Array.isArray(storePayload.posDiscountRates)) {
+        this.setMetadata(
+          "pos_discount_rates_json",
+          JSON.stringify(optionalSetupNumberList(storePayload.posDiscountRates) ?? []),
+        );
+      } else {
+        this.deleteMetadata("pos_discount_rates_json");
+      }
+
+      if (
+        typeof storePayload.receiptHeader === "string" &&
+        storePayload.receiptHeader.trim()
+      ) {
+        this.setMetadata("receipt_header", storePayload.receiptHeader);
+      } else {
+        this.deleteMetadata("receipt_header");
+      }
+
+      if (
+        typeof storePayload.receiptFooter === "string" &&
+        storePayload.receiptFooter.trim()
+      ) {
+        this.setMetadata("receipt_footer", storePayload.receiptFooter);
+      } else {
+        this.deleteMetadata("receipt_footer");
+      }
+
+      if (
+        typeof storePayload.companyLogoUrl === "string" &&
+        storePayload.companyLogoUrl.trim()
+      ) {
+        this.setMetadata("company_logo_url", storePayload.companyLogoUrl);
+      } else {
+        this.deleteMetadata("company_logo_url");
+      }
+
+      if (
+        typeof storePayload.loginBackgroundImageUrl === "string" &&
+        storePayload.loginBackgroundImageUrl.trim()
+      ) {
+        this.setMetadata(
+          "login_background_image_url",
+          storePayload.loginBackgroundImageUrl,
+        );
+      } else {
+        this.deleteMetadata("login_background_image_url");
+      }
+
+      if (
+        storePayload.documentNumberFormats &&
+        typeof storePayload.documentNumberFormats === "object" &&
+        !Array.isArray(storePayload.documentNumberFormats)
+      ) {
+        this.setMetadata(
+          "document_number_formats_json",
+          JSON.stringify(storePayload.documentNumberFormats),
+        );
+      } else {
+        this.deleteMetadata("document_number_formats_json");
+      }
+
+      if (
+        typeof storePayload.salesReceiptTemplateHtml === "string" &&
+        storePayload.salesReceiptTemplateHtml.trim()
+      ) {
+        this.setMetadata(
+          "sales_receipt_template_html",
+          storePayload.salesReceiptTemplateHtml,
+        );
+      } else {
+        this.deleteMetadata("sales_receipt_template_html");
+      }
+
+      if (
+        typeof storePayload.salesReceiptTemplateCode === "string" &&
+        storePayload.salesReceiptTemplateCode.trim()
+      ) {
+        this.setMetadata(
+          "sales_receipt_template_code",
+          storePayload.salesReceiptTemplateCode,
+        );
+      } else {
+        this.deleteMetadata("sales_receipt_template_code");
+      }
+
+      if (
+        typeof storePayload.salesReceiptTemplateName === "string" &&
+        storePayload.salesReceiptTemplateName.trim()
+      ) {
+        this.setMetadata(
+          "sales_receipt_template_name",
+          storePayload.salesReceiptTemplateName,
+        );
+      } else {
+        this.deleteMetadata("sales_receipt_template_name");
+      }
+
+      if (
+        storePayload.salesReceiptTemplateMode === "default" ||
+        storePayload.salesReceiptTemplateMode === "linked" ||
+        storePayload.salesReceiptTemplateMode === "legacy"
+      ) {
+        this.setMetadata(
+          "sales_receipt_template_mode",
+          storePayload.salesReceiptTemplateMode,
+        );
+      } else {
+        this.deleteMetadata("sales_receipt_template_mode");
+      }
+
+      const accountPaymentTemplateHtml = (
+        storePayload as {
+          accountPaymentReceiptTemplateHtml?: unknown;
+        }
+      ).accountPaymentReceiptTemplateHtml;
+
+      if (
+        typeof accountPaymentTemplateHtml === "string" &&
+        accountPaymentTemplateHtml.trim()
+      ) {
+        this.setMetadata(
+          "account_payment_receipt_template_html",
+          accountPaymentTemplateHtml,
+        );
+      } else {
+        this.deleteMetadata("account_payment_receipt_template_html");
+      }
+
+      const goodsReceiptTemplateHtml = (
+        storePayload as {
+          goodsReceiptTemplateHtml?: unknown;
+        }
+      ).goodsReceiptTemplateHtml;
+      const goodsReceiptTemplateCode = (
+        storePayload as {
+          goodsReceiptTemplateCode?: unknown;
+        }
+      ).goodsReceiptTemplateCode;
+      const goodsReceiptTemplateName = (
+        storePayload as {
+          goodsReceiptTemplateName?: unknown;
+        }
+      ).goodsReceiptTemplateName;
+
+      if (
+        typeof goodsReceiptTemplateHtml === "string" &&
+        goodsReceiptTemplateHtml.trim()
+      ) {
+        this.setMetadata(
+          "goods_receipt_template_html",
+          goodsReceiptTemplateHtml,
+        );
+      } else {
+        this.deleteMetadata("goods_receipt_template_html");
+      }
+
+      if (
+        typeof goodsReceiptTemplateCode === "string" &&
+        goodsReceiptTemplateCode.trim()
+      ) {
+        this.setMetadata(
+          "goods_receipt_template_code",
+          goodsReceiptTemplateCode,
+        );
+      } else {
+        this.deleteMetadata("goods_receipt_template_code");
+      }
+
+      if (
+        typeof goodsReceiptTemplateName === "string" &&
+        goodsReceiptTemplateName.trim()
+      ) {
+        this.setMetadata(
+          "goods_receipt_template_name",
+          goodsReceiptTemplateName,
+        );
+      } else {
+        this.deleteMetadata("goods_receipt_template_name");
+      }
+
+      this.refreshActiveBasketIfPresent(appliedAt);
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "product" &&
+      event.eventType === "catalog.product.published"
+    ) {
+      const productPayload =
+        payload as Partial<EnterpriseCatalogProductPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof productPayload.storeCode !== "string" ||
+        productPayload.storeCode !== storeCode ||
+        typeof productPayload.productCode !== "string" ||
+        typeof productPayload.productName !== "string" ||
+        typeof productPayload.unitPrice !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid catalog product publication payload.",
+        );
+      }
+
+      const matrixVariants = Array.isArray(productPayload.matrixVariants)
+        ? productPayload.matrixVariants.filter(
+            (variant) =>
+              typeof variant === "object" &&
+              variant !== null &&
+              typeof variant.variantCode === "string" &&
+              typeof variant.unitPrice === "number",
+          )
+        : [];
+      const isMatrixProduct =
+        productPayload.productType === "MATRIX" && matrixVariants.length > 0;
+      const existingQuantity =
+        (
+          this.db
+            .prepare(
+              "SELECT quantity_on_hand FROM product_snapshot WHERE product_code = ? LIMIT 1",
+            )
+            .get(productPayload.productCode) as
+            | { quantity_on_hand: number | string }
+            | undefined
+        )?.quantity_on_hand ?? null;
+      const nextQuantity =
+        isMatrixProduct
+          ? matrixVariants.reduce(
+              (total, variant) =>
+                total +
+                (typeof variant.quantityOnHand === "number"
+                  ? variant.quantityOnHand
+                  : 0),
+              0,
+            )
+          : typeof productPayload.quantityOnHand === "number"
+          ? productPayload.quantityOnHand
+          : existingQuantity === null
+            ? 0
+            : asNumber(existingQuantity);
+
+      this.db
+        .prepare(
+          "INSERT INTO product_snapshot (id, product_code, product_name, product_type, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, is_serialized, track_size, track_color, must_enter_price_at_pos, min_stock_level, reorder_point, safety_stock_level, catalog_membership_active, catalog_sort_order, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(product_code) DO UPDATE SET product_name = excluded.product_name, product_type = excluded.product_type, short_name = excluded.short_name, description = excluded.description, primary_image_url = excluded.primary_image_url, department_code = excluded.department_code, category_code = excluded.category_code, subcategory = excluded.subcategory, unit_of_measure = excluded.unit_of_measure, taxable = excluded.taxable, tax_profile_code = excluded.tax_profile_code, tax_profile_name = excluded.tax_profile_name, tax_rate_percent = excluded.tax_rate_percent, tax_inclusive = excluded.tax_inclusive, track_inventory = excluded.track_inventory, is_serialized = excluded.is_serialized, track_size = excluded.track_size, track_color = excluded.track_color, must_enter_price_at_pos = excluded.must_enter_price_at_pos, min_stock_level = excluded.min_stock_level, reorder_point = excluded.reorder_point, safety_stock_level = excluded.safety_stock_level, catalog_membership_active = excluded.catalog_membership_active, catalog_sort_order = excluded.catalog_sort_order, unit_price = excluded.unit_price, quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          productPayload.productCode,
+          productPayload.productName,
+          typeof productPayload.productType === "string"
+            ? productPayload.productType
+            : "STANDARD",
+          typeof productPayload.shortName === "string"
+            ? productPayload.shortName
+            : null,
+          typeof productPayload.description === "string"
+            ? productPayload.description
+            : null,
+          typeof productPayload.primaryImageUrl === "string"
+            ? productPayload.primaryImageUrl
+            : null,
+          typeof productPayload.department === "string"
+            ? productPayload.department
+            : null,
+          typeof productPayload.category === "string"
+            ? productPayload.category
+            : null,
+          typeof productPayload.subcategory === "string"
+            ? productPayload.subcategory
+            : null,
+          typeof productPayload.unitOfMeasure === "string"
+            ? productPayload.unitOfMeasure
+            : "EA",
+          productPayload.taxable === false ? 0 : 1,
+          typeof productPayload.taxProfileCode === "string"
+            ? productPayload.taxProfileCode
+            : null,
+          typeof productPayload.taxProfileName === "string"
+            ? productPayload.taxProfileName
+            : null,
+          typeof productPayload.taxRatePercent === "number"
+            ? productPayload.taxRatePercent
+            : null,
+          productPayload.taxInclusive ? 1 : 0,
+          productPayload.trackInventory === false ? 0 : 1,
+          productPayload.isSerialized ? 1 : 0,
+          productPayload.trackSize ? 1 : 0,
+          productPayload.trackColor ? 1 : 0,
+          productPayload.mustEnterPriceAtPos ? 1 : 0,
+          typeof productPayload.minStockLevel === "number"
+            ? productPayload.minStockLevel
+            : null,
+          typeof productPayload.reorderPoint === "number"
+            ? productPayload.reorderPoint
+            : null,
+          typeof productPayload.safetyStockLevel === "number"
+            ? productPayload.safetyStockLevel
+            : null,
+          1,
+          typeof productPayload.catalogSortOrder === "number"
+            ? Math.trunc(productPayload.catalogSortOrder)
+            : null,
+          productPayload.unitPrice,
+          nextQuantity,
+          appliedAt,
+        );
+
+      this.db
+        .prepare("DELETE FROM product_variant_snapshot WHERE product_code = ?")
+        .run(productPayload.productCode);
+
+      const insertVariant = this.db.prepare(
+        "INSERT INTO product_variant_snapshot (id, product_code, variant_code, sku, display_name, unit_price, quantity_on_hand, barcode, status, attributes_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+
+      for (const variant of matrixVariants) {
+        insertVariant.run(
+          typeof variant.variantId === "string"
+            ? variant.variantId
+            : randomUUID(),
+          productPayload.productCode,
+          variant.variantCode.toUpperCase(),
+          typeof variant.sku === "string" ? variant.sku : null,
+          typeof variant.displayName === "string" ? variant.displayName : null,
+          variant.unitPrice,
+          typeof variant.quantityOnHand === "number"
+            ? variant.quantityOnHand
+            : 0,
+          typeof variant.barcode === "string" ? variant.barcode : null,
+          typeof variant.status === "string" ? variant.status : "ACTIVE",
+          writeMatrixVariantAttributes(
+            Array.isArray(variant.attributes) ? variant.attributes : [],
+          ),
+          appliedAt,
+        );
+      }
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "inventorySerialSnapshot" &&
+      event.eventType === "inventory.serial-snapshot.published"
+    ) {
+      const serialPayload =
+        payload as Partial<EnterpriseInventorySerialSnapshotPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof serialPayload.storeCode !== "string" ||
+        serialPayload.storeCode !== storeCode ||
+        typeof serialPayload.productCode !== "string" ||
+        typeof serialPayload.productName !== "string" ||
+        !Array.isArray(serialPayload.serialItems)
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid serialized product snapshot payload.",
+        );
+      }
+
+      const serialItems = serialPayload.serialItems
+        .filter(
+          (
+            serialItem,
+          ): serialItem is EnterpriseInventorySerialSnapshotPublishedPayload["serialItems"][number] =>
+            typeof serialItem === "object" &&
+            serialItem !== null &&
+            typeof serialItem.serialNumber === "string" &&
+            (serialItem.locationCode === null ||
+              typeof serialItem.locationCode === "string") &&
+            (serialItem.status === "AVAILABLE" ||
+              serialItem.status === "IN_TRANSIT" ||
+              serialItem.status === "SOLD" ||
+              serialItem.status === "ADJUSTED_OUT"),
+        )
+        .map((serialItem) => ({
+          serialNumber: serialItem.serialNumber,
+          locationCode: serialItem.locationCode,
+          status: serialItem.status,
+          sourceReferenceType:
+            typeof serialItem.sourceReferenceType === "string"
+              ? serialItem.sourceReferenceType
+              : null,
+          sourceReferenceId:
+            typeof serialItem.sourceReferenceId === "string"
+              ? serialItem.sourceReferenceId
+              : null,
+          sourceReferenceLabel:
+            typeof serialItem.sourceReferenceLabel === "string"
+              ? serialItem.sourceReferenceLabel
+              : null,
+          updatedAt:
+            typeof serialItem.updatedAt === "string"
+              ? serialItem.updatedAt
+              : appliedAt,
+        }));
+
+      this.replaceSerializedProductSnapshot({
+        productCode: serialPayload.productCode,
+        serialItems,
+        updatedAt: appliedAt,
+      });
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "inventoryLedgerEntry" &&
+      event.eventType === "inventory.ledger.published"
+    ) {
+      const ledgerPayload =
+        payload as Partial<StoreInventoryLedgerRecordedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof ledgerPayload.storeCode !== "string" ||
+        ledgerPayload.storeCode !== storeCode ||
+        typeof ledgerPayload.productCode !== "string" ||
+        typeof ledgerPayload.movementType !== "string" ||
+        typeof ledgerPayload.quantity !== "number" ||
+        typeof ledgerPayload.referenceId !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid inventory ledger publication payload.",
+        );
+      }
+
+      const product = this.db
+        .prepare(
+          "SELECT id, product_code, product_name, quantity_on_hand, is_serialized FROM product_snapshot WHERE product_code = ? LIMIT 1",
+        )
+        .get(ledgerPayload.productCode) as ProductRow | undefined;
+
+      if (!product) {
+        throw new Error(
+          `Flash ERP could not apply the enterprise inventory ledger publication for unknown product "${ledgerPayload.productCode}".`,
+        );
+      }
+
+      const locationCode =
+        typeof ledgerPayload.inventoryLocationCode === "string"
+          ? ledgerPayload.inventoryLocationCode
+          : ledgerPayload.movementType === "GOODS_RECEIPT"
+            ? (this.getDefaultReceivingLocationCode() ??
+              this.getDefaultSalesLocationCode())
+            : this.getDefaultSalesLocationCode();
+      const signedDelta = signedInventoryQuantity(
+        ledgerPayload.movementType,
+        ledgerPayload.quantity,
+      );
+
+      this.db
+        .prepare(
+          "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + ?, updated_at = ? WHERE id = ?",
+        )
+        .run(signedDelta, appliedAt, product.id);
+
+      if (locationCode) {
+        this.applyLocationBalanceDelta(
+          locationCode,
+          ledgerPayload.productCode,
+          signedDelta,
+          appliedAt,
+        );
+      }
+
+      if (
+        asBooleanFlag(product.is_serialized) &&
+        Array.isArray(ledgerPayload.serialNumbers) &&
+        ledgerPayload.serialNumbers.length > 0
+      ) {
+        this.applyPublishedInventoryLedgerSerials({
+          productCode: ledgerPayload.productCode,
+          serialNumbers: ledgerPayload.serialNumbers,
+          movementType: ledgerPayload.movementType,
+          inventoryLocationCode: locationCode,
+          referenceId: ledgerPayload.referenceId,
+          referenceLabel:
+            typeof ledgerPayload.externalReference === "string"
+              ? ledgerPayload.externalReference
+              : null,
+          updatedAt: appliedAt,
+        });
+      }
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "supplierReturn" &&
+      event.eventType === "supplier-return.published"
+    ) {
+      const supplierReturnPayload =
+        payload as Partial<EnterpriseSupplierReturnPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof supplierReturnPayload.storeCode !== "string" ||
+        supplierReturnPayload.storeCode !== storeCode ||
+        typeof supplierReturnPayload.supplierReturnId !== "string" ||
+        typeof supplierReturnPayload.supplierReturnNo !== "string" ||
+        typeof supplierReturnPayload.goodsReceiptId !== "string" ||
+        typeof supplierReturnPayload.goodsReceiptNo !== "string" ||
+        typeof supplierReturnPayload.inventoryLocationCode !== "string" ||
+        typeof supplierReturnPayload.supplierNo !== "string" ||
+        typeof supplierReturnPayload.supplierName !== "string" ||
+        typeof supplierReturnPayload.reason !== "string" ||
+        (supplierReturnPayload.status !== "POSTED" &&
+          supplierReturnPayload.status !== "CANCELLED") ||
+        typeof supplierReturnPayload.operatorName !== "string" ||
+        typeof supplierReturnPayload.returnedAt !== "string" ||
+        typeof supplierReturnPayload.postedAt !== "string" ||
+        !Array.isArray(supplierReturnPayload.lines)
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid supplier-return publication payload.",
+        );
+      }
+
+      const lineRows = supplierReturnPayload.lines.map((rawLine) => {
+        if (
+          typeof rawLine !== "object" ||
+          rawLine === null ||
+          typeof rawLine.supplierReturnLineId !== "string" ||
+          (rawLine.goodsReceiptLineId !== null &&
+            typeof rawLine.goodsReceiptLineId !== "string") ||
+          (rawLine.purchaseOrderLineId !== null &&
+            typeof rawLine.purchaseOrderLineId !== "string") ||
+          typeof rawLine.lineNo !== "number" ||
+          typeof rawLine.productCode !== "string" ||
+          typeof rawLine.productName !== "string" ||
+          typeof rawLine.quantity !== "number" ||
+          (rawLine.unitCost !== null && typeof rawLine.unitCost !== "number") ||
+          !Array.isArray(rawLine.serialNumbers)
+        ) {
+          throw new Error(
+            "Flash ERP received an invalid supplier-return line payload.",
+          );
+        }
+
+        return {
+          supplierReturnLineId: rawLine.supplierReturnLineId,
+          goodsReceiptLineId: rawLine.goodsReceiptLineId,
+          purchaseOrderLineId: rawLine.purchaseOrderLineId,
+          lineNo: rawLine.lineNo,
+          productCode: rawLine.productCode,
+          productName: rawLine.productName,
+          quantity: rawLine.quantity,
+          unitCost: rawLine.unitCost,
+          serialNumbers: normalizeSerialNumbers(rawLine.serialNumbers),
+        };
+      });
+      const totalQuantity =
+        typeof supplierReturnPayload.totalQuantity === "number"
+          ? supplierReturnPayload.totalQuantity
+          : Number(
+              lineRows.reduce((sum, line) => sum + line.quantity, 0).toFixed(3),
+            );
+
+      this.db
+        .prepare(
+          "INSERT INTO local_supplier_return (id, supplier_return_no, purchase_order_id, purchase_order_no, goods_receipt_id, goods_receipt_no, inventory_location_code, supplier_no, supplier_name, external_reference, reason, status, note, operator_name, total_quantity, synced_at, returned_at, cancelled_at, cancellation_note, cancellation_operator_name, cancellation_acknowledged_at, cancellation_acknowledged_by, cancellation_acknowledgement_note, cancellation_ack_synced_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET supplier_return_no = excluded.supplier_return_no, purchase_order_id = excluded.purchase_order_id, purchase_order_no = excluded.purchase_order_no, goods_receipt_id = excluded.goods_receipt_id, goods_receipt_no = excluded.goods_receipt_no, inventory_location_code = excluded.inventory_location_code, supplier_no = excluded.supplier_no, supplier_name = excluded.supplier_name, external_reference = excluded.external_reference, reason = excluded.reason, status = excluded.status, note = excluded.note, operator_name = excluded.operator_name, total_quantity = excluded.total_quantity, synced_at = COALESCE(local_supplier_return.synced_at, excluded.synced_at), returned_at = excluded.returned_at, cancelled_at = excluded.cancelled_at, cancellation_note = excluded.cancellation_note, cancellation_operator_name = excluded.cancellation_operator_name, cancellation_acknowledged_at = excluded.cancellation_acknowledged_at, cancellation_acknowledged_by = excluded.cancellation_acknowledged_by, cancellation_acknowledgement_note = excluded.cancellation_acknowledgement_note, cancellation_ack_synced_at = COALESCE(local_supplier_return.cancellation_ack_synced_at, excluded.cancellation_ack_synced_at), updated_at = excluded.updated_at",
+        )
+        .run(
+          supplierReturnPayload.supplierReturnId,
+          supplierReturnPayload.supplierReturnNo,
+          typeof supplierReturnPayload.purchaseOrderId === "string"
+            ? supplierReturnPayload.purchaseOrderId
+            : null,
+          typeof supplierReturnPayload.purchaseOrderNo === "string"
+            ? supplierReturnPayload.purchaseOrderNo
+            : null,
+          supplierReturnPayload.goodsReceiptId,
+          supplierReturnPayload.goodsReceiptNo,
+          supplierReturnPayload.inventoryLocationCode,
+          supplierReturnPayload.supplierNo,
+          supplierReturnPayload.supplierName,
+          typeof supplierReturnPayload.externalReference === "string"
+            ? supplierReturnPayload.externalReference
+            : null,
+          supplierReturnPayload.reason,
+          supplierReturnPayload.status,
+          typeof supplierReturnPayload.note === "string"
+            ? supplierReturnPayload.note
+            : null,
+          supplierReturnPayload.operatorName,
+          totalQuantity,
+          appliedAt,
+          supplierReturnPayload.returnedAt,
+          typeof supplierReturnPayload.cancelledAt === "string"
+            ? supplierReturnPayload.cancelledAt
+            : null,
+          typeof supplierReturnPayload.cancellationNote === "string"
+            ? supplierReturnPayload.cancellationNote
+            : null,
+          typeof supplierReturnPayload.cancellationOperatorName === "string"
+            ? supplierReturnPayload.cancellationOperatorName
+            : null,
+          typeof supplierReturnPayload.cancellationAcknowledgedAt === "string"
+            ? supplierReturnPayload.cancellationAcknowledgedAt
+            : null,
+          typeof supplierReturnPayload.cancellationAcknowledgedBy === "string"
+            ? supplierReturnPayload.cancellationAcknowledgedBy
+            : null,
+          typeof supplierReturnPayload.cancellationAcknowledgementNote ===
+            "string"
+            ? supplierReturnPayload.cancellationAcknowledgementNote
+            : null,
+          typeof supplierReturnPayload.cancellationAcknowledgedAt === "string"
+            ? appliedAt
+            : null,
+          appliedAt,
+        );
+
+      this.db
+        .prepare(
+          "DELETE FROM local_supplier_return_line WHERE local_supplier_return_id = ?",
+        )
+        .run(supplierReturnPayload.supplierReturnId);
+
+      for (const line of lineRows) {
+        this.db
+          .prepare(
+            "INSERT INTO local_supplier_return_line (id, local_supplier_return_id, goods_receipt_line_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            line.supplierReturnLineId,
+            supplierReturnPayload.supplierReturnId,
+            line.goodsReceiptLineId,
+            line.purchaseOrderLineId,
+            line.lineNo,
+            line.productCode,
+            line.productName,
+            line.quantity,
+            line.unitCost,
+            line.serialNumbers.length > 0
+              ? JSON.stringify(line.serialNumbers)
+              : null,
+            appliedAt,
+          );
+      }
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "permission" &&
+      event.eventType === "security.permission.published"
+    ) {
+      const permissionPayload =
+        payload as Partial<EnterprisePermissionPublishedPayload>;
+      const storeCode = this.expectedInboundStoreCode(
+        permissionPayload.storeCode,
+      );
+
+      if (
+        typeof permissionPayload.storeCode !== "string" ||
+        permissionPayload.storeCode !== storeCode ||
+        typeof permissionPayload.permissionCode !== "string" ||
+        typeof permissionPayload.permissionName !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid permission publication payload.",
+        );
+      }
+
+      this.rememberInboundStoreCode(permissionPayload.storeCode);
+      this.db
+        .prepare(
+          "INSERT INTO permission_snapshot (id, permission_code, permission_name, description, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET permission_code = excluded.permission_code, permission_name = excluded.permission_name, description = excluded.description, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          permissionPayload.permissionCode,
+          permissionPayload.permissionName,
+          typeof permissionPayload.description === "string"
+            ? permissionPayload.description
+            : null,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "role" &&
+      event.eventType === "security.role.published"
+    ) {
+      const rolePayload = payload as Partial<EnterpriseRolePublishedPayload>;
+      const storeCode = this.expectedInboundStoreCode(rolePayload.storeCode);
+
+      if (
+        typeof rolePayload.storeCode !== "string" ||
+        rolePayload.storeCode !== storeCode ||
+        typeof rolePayload.roleCode !== "string" ||
+        typeof rolePayload.roleName !== "string" ||
+        typeof rolePayload.status !== "string" ||
+        !Array.isArray(rolePayload.permissionCodes)
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid role publication payload.",
+        );
+      }
+
+      this.rememberInboundStoreCode(rolePayload.storeCode);
+      this.db
+        .prepare(
+          "INSERT INTO role_snapshot (id, role_code, role_name, description, status, permission_codes_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET role_code = excluded.role_code, role_name = excluded.role_name, description = excluded.description, status = excluded.status, permission_codes_json = excluded.permission_codes_json, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          rolePayload.roleCode,
+          rolePayload.roleName,
+          typeof rolePayload.description === "string"
+            ? rolePayload.description
+            : null,
+          rolePayload.status,
+          writeStringArray(
+            rolePayload.permissionCodes.filter(
+              (permissionCode): permissionCode is string =>
+                typeof permissionCode === "string",
+            ),
+          ),
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "retailUser" &&
+      event.eventType === "security.user.published"
+    ) {
+      const userPayload =
+        payload as Partial<EnterpriseRetailUserPublishedPayload>;
+      const storeCode = this.expectedInboundStoreCode(userPayload.storeCode);
+
+      if (
+        typeof userPayload.storeCode !== "string" ||
+        userPayload.storeCode !== storeCode ||
+        typeof userPayload.userId !== "string" ||
+        typeof userPayload.loginId !== "string" ||
+        typeof userPayload.displayName !== "string" ||
+        typeof userPayload.accountStatus !== "string" ||
+        !Array.isArray(userPayload.roleCodes) ||
+        !Array.isArray(userPayload.roleNames) ||
+        !Array.isArray(userPayload.permissionCodes)
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid retail-user publication payload.",
+        );
+      }
+
+      this.rememberInboundStoreCode(userPayload.storeCode);
+      const permissionCodes = userPayload.permissionCodes.filter(
+        (permissionCode): permissionCode is string =>
+          typeof permissionCode === "string",
+      );
+
+      if (
+        typeof userPayload.homeStoreCode !== "string" ||
+        normalizeLoginId(userPayload.homeStoreCode) !==
+          normalizeLoginId(storeCode)
+      ) {
+        this.db
+          .prepare(
+            "DELETE FROM retail_user_snapshot WHERE login_id = ? COLLATE NOCASE",
+          )
+          .run(userPayload.loginId);
+        return;
+      }
+
+      const derivedCapabilities = deriveRetailUserCapabilities(
+        permissionCodes,
+        userPayload.accountStatus,
+      );
+      const capabilities = buildStoreOperatorCapabilities(
+        permissionCodes,
+        userPayload.accountStatus,
+      );
+      const cashierEligible = capabilities.cashierEligible;
+      const supervisorEligible = capabilities.supervisorEligible;
+
+      this.db
+        .prepare(
+          "INSERT INTO retail_user_snapshot (id, login_id, email, display_name, account_status, home_store_code, home_store_name, role_codes_json, role_names_json, permission_codes_json, password_hash, password_updated_at, cashier_eligible, supervisor_eligible, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET login_id = excluded.login_id, email = excluded.email, display_name = excluded.display_name, account_status = excluded.account_status, home_store_code = excluded.home_store_code, home_store_name = excluded.home_store_name, role_codes_json = excluded.role_codes_json, role_names_json = excluded.role_names_json, permission_codes_json = excluded.permission_codes_json, password_hash = excluded.password_hash, password_updated_at = excluded.password_updated_at, cashier_eligible = excluded.cashier_eligible, supervisor_eligible = excluded.supervisor_eligible, updated_at = excluded.updated_at",
+        )
+        .run(
+          userPayload.userId,
+          userPayload.loginId,
+          typeof userPayload.email === "string" ? userPayload.email : null,
+          userPayload.displayName,
+          userPayload.accountStatus,
+          typeof userPayload.homeStoreCode === "string"
+            ? userPayload.homeStoreCode
+            : null,
+          typeof userPayload.homeStoreName === "string"
+            ? userPayload.homeStoreName
+            : null,
+          writeStringArray(
+            userPayload.roleCodes.filter(
+              (roleCode): roleCode is string => typeof roleCode === "string",
+            ),
+          ),
+          writeStringArray(
+            userPayload.roleNames.filter(
+              (roleName): roleName is string => typeof roleName === "string",
+            ),
+          ),
+          writeStringArray(derivedCapabilities.normalizedPermissionCodes),
+          typeof userPayload.passwordHash === "string"
+            ? userPayload.passwordHash
+            : null,
+          typeof userPayload.passwordUpdatedAt === "string"
+            ? userPayload.passwordUpdatedAt
+            : null,
+          cashierEligible ? 1 : 0,
+          supervisorEligible ? 1 : 0,
+          appliedAt,
+        );
+      this.reconcileLegacySharedShiftOwner();
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "customer" &&
+      event.eventType === "customer.published"
+    ) {
+      const customerPayload =
+        payload as Partial<EnterpriseCustomerPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof customerPayload.storeCode !== "string" ||
+        customerPayload.storeCode !== storeCode ||
+        typeof customerPayload.customerId !== "string" ||
+        typeof customerPayload.customerNo !== "string" ||
+        typeof customerPayload.fullName !== "string" ||
+        typeof customerPayload.customerType !== "string" ||
+        typeof customerPayload.loyaltyEnrolled !== "boolean" ||
+        typeof customerPayload.loyaltyPointsBalance !== "number" ||
+        typeof customerPayload.allowCreditSales !== "boolean" ||
+        typeof customerPayload.receivableBalanceAmount !== "number" ||
+        typeof customerPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid customer publication payload.",
+        );
+      }
+
+      const conflictingCustomer = this.db
+        .prepare(
+          "SELECT id FROM customer WHERE customer_no = ? COLLATE NOCASE AND id <> ? LIMIT 1",
+        )
+        .get(customerPayload.customerNo, customerPayload.customerId) as
+        | { id: string }
+        | undefined;
+
+      if (conflictingCustomer) {
+        this.db
+          .prepare(
+            "UPDATE pos_transaction SET customer_id = ? WHERE customer_id = ?",
+          )
+          .run(customerPayload.customerId, conflictingCustomer.id);
+        this.db
+          .prepare(
+            "UPDATE customer_account_entry SET customer_id = ? WHERE customer_id = ?",
+          )
+          .run(customerPayload.customerId, conflictingCustomer.id);
+        this.db
+          .prepare("DELETE FROM customer WHERE id = ?")
+          .run(conflictingCustomer.id);
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO customer (id, customer_no, full_name, customer_type, phone, email, home_store_code, home_store_name, address_line1, city, country_code, loyalty_enrolled, loyalty_tier, loyalty_points_balance, allow_credit_sales, credit_limit_amount, receivable_balance_amount, note, status, record_version, deleted_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?) ON CONFLICT(id) DO UPDATE SET customer_no = excluded.customer_no, full_name = excluded.full_name, customer_type = excluded.customer_type, phone = excluded.phone, email = excluded.email, home_store_code = excluded.home_store_code, home_store_name = excluded.home_store_name, address_line1 = excluded.address_line1, city = excluded.city, country_code = excluded.country_code, loyalty_enrolled = excluded.loyalty_enrolled, loyalty_tier = excluded.loyalty_tier, loyalty_points_balance = excluded.loyalty_points_balance, allow_credit_sales = excluded.allow_credit_sales, credit_limit_amount = excluded.credit_limit_amount, receivable_balance_amount = excluded.receivable_balance_amount, note = excluded.note, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          customerPayload.customerId,
+          customerPayload.customerNo,
+          customerPayload.fullName,
+          customerPayload.customerType,
+          typeof customerPayload.phone === "string"
+            ? customerPayload.phone
+            : null,
+          typeof customerPayload.email === "string"
+            ? customerPayload.email
+            : null,
+          typeof customerPayload.homeStoreCode === "string"
+            ? customerPayload.homeStoreCode
+            : null,
+          typeof customerPayload.homeStoreName === "string"
+            ? customerPayload.homeStoreName
+            : null,
+          typeof customerPayload.addressLine1 === "string"
+            ? customerPayload.addressLine1
+            : null,
+          typeof customerPayload.city === "string"
+            ? customerPayload.city
+            : null,
+          typeof customerPayload.countryCode === "string"
+            ? customerPayload.countryCode
+            : null,
+          customerPayload.loyaltyEnrolled ? 1 : 0,
+          typeof customerPayload.loyaltyTier === "string"
+            ? customerPayload.loyaltyTier
+            : null,
+          customerPayload.loyaltyPointsBalance,
+          customerPayload.allowCreditSales ? 1 : 0,
+          typeof customerPayload.creditLimitAmount === "number"
+            ? customerPayload.creditLimitAmount
+            : null,
+          customerPayload.receivableBalanceAmount,
+          typeof customerPayload.note === "string"
+            ? customerPayload.note
+            : null,
+          customerPayload.status,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "purchaseOrder" &&
+      event.eventType === "purchase-order.published"
+    ) {
+      const purchaseOrderPayload =
+        payload as Partial<EnterprisePurchaseOrderPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof purchaseOrderPayload.storeCode !== "string" ||
+        purchaseOrderPayload.storeCode !== storeCode ||
+        typeof purchaseOrderPayload.purchaseOrderId !== "string" ||
+        typeof purchaseOrderPayload.purchaseOrderNo !== "string" ||
+        typeof purchaseOrderPayload.locationCode !== "string" ||
+        typeof purchaseOrderPayload.locationName !== "string" ||
+        typeof purchaseOrderPayload.status !== "string" ||
+        !Array.isArray(purchaseOrderPayload.lines)
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid purchase-order publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO purchase_order_snapshot (id, purchase_order_no, status, inventory_location_code, inventory_location_name, supplier_no, supplier_name, external_reference, note, operator_name, ordered_quantity, received_quantity, exception_quantity, outstanding_quantity, committed_at, closed_at, closure_reason, closure_note, closure_operator_name, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET purchase_order_no = excluded.purchase_order_no, status = excluded.status, inventory_location_code = excluded.inventory_location_code, inventory_location_name = excluded.inventory_location_name, supplier_no = excluded.supplier_no, supplier_name = excluded.supplier_name, external_reference = excluded.external_reference, note = excluded.note, operator_name = excluded.operator_name, ordered_quantity = excluded.ordered_quantity, received_quantity = excluded.received_quantity, exception_quantity = excluded.exception_quantity, outstanding_quantity = excluded.outstanding_quantity, committed_at = excluded.committed_at, closed_at = excluded.closed_at, closure_reason = excluded.closure_reason, closure_note = excluded.closure_note, closure_operator_name = excluded.closure_operator_name, updated_at = excluded.updated_at",
+        )
+        .run(
+          purchaseOrderPayload.purchaseOrderId,
+          purchaseOrderPayload.purchaseOrderNo,
+          purchaseOrderPayload.status,
+          purchaseOrderPayload.locationCode,
+          purchaseOrderPayload.locationName,
+          typeof purchaseOrderPayload.supplierNo === "string"
+            ? purchaseOrderPayload.supplierNo
+            : null,
+          typeof purchaseOrderPayload.supplierName === "string"
+            ? purchaseOrderPayload.supplierName
+            : null,
+          typeof purchaseOrderPayload.externalReference === "string"
+            ? purchaseOrderPayload.externalReference
+            : null,
+          typeof purchaseOrderPayload.note === "string"
+            ? purchaseOrderPayload.note
+            : null,
+          typeof purchaseOrderPayload.operatorName === "string"
+            ? purchaseOrderPayload.operatorName
+            : null,
+          typeof purchaseOrderPayload.orderedQuantity === "number"
+            ? purchaseOrderPayload.orderedQuantity
+            : 0,
+          typeof purchaseOrderPayload.receivedQuantity === "number"
+            ? purchaseOrderPayload.receivedQuantity
+            : 0,
+          typeof purchaseOrderPayload.exceptionQuantity === "number"
+            ? purchaseOrderPayload.exceptionQuantity
+            : 0,
+          typeof purchaseOrderPayload.outstandingQuantity === "number"
+            ? purchaseOrderPayload.outstandingQuantity
+            : 0,
+          typeof purchaseOrderPayload.committedAt === "string"
+            ? purchaseOrderPayload.committedAt
+            : null,
+          typeof purchaseOrderPayload.closedAt === "string"
+            ? purchaseOrderPayload.closedAt
+            : null,
+          typeof purchaseOrderPayload.closureReason === "string"
+            ? purchaseOrderPayload.closureReason
+            : null,
+          typeof purchaseOrderPayload.closureNote === "string"
+            ? purchaseOrderPayload.closureNote
+            : null,
+          typeof purchaseOrderPayload.closureOperatorName === "string"
+            ? purchaseOrderPayload.closureOperatorName
+            : null,
+          appliedAt,
+        );
+
+      this.db
+        .prepare(
+          "DELETE FROM purchase_order_line_snapshot WHERE purchase_order_id = ?",
+        )
+        .run(purchaseOrderPayload.purchaseOrderId);
+
+      for (const rawLine of purchaseOrderPayload.lines) {
+        if (
+          typeof rawLine !== "object" ||
+          rawLine === null ||
+          typeof rawLine.purchaseOrderLineId !== "string" ||
+          typeof rawLine.lineNo !== "number" ||
+          typeof rawLine.productCode !== "string" ||
+          typeof rawLine.productName !== "string" ||
+          typeof rawLine.orderedQuantity !== "number" ||
+          typeof rawLine.receivedQuantity !== "number" ||
+          typeof rawLine.exceptionQuantity !== "number" ||
+          typeof rawLine.outstandingQuantity !== "number"
+        ) {
+          throw new Error(
+            "Flash ERP received an invalid purchase-order line payload.",
+          );
+        }
+
+        this.db
+          .prepare(
+            "INSERT INTO purchase_order_line_snapshot (id, purchase_order_id, line_no, product_code, product_name, department_code, category_code, subcategory, is_serialized, ordered_quantity, received_quantity, exception_quantity, outstanding_quantity, unit_cost, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            rawLine.purchaseOrderLineId,
+            purchaseOrderPayload.purchaseOrderId,
+            rawLine.lineNo,
+            rawLine.productCode,
+            rawLine.productName,
+            typeof rawLine.departmentCode === "string"
+              ? rawLine.departmentCode
+              : null,
+            typeof rawLine.categoryCode === "string"
+              ? rawLine.categoryCode
+              : null,
+            typeof rawLine.subcategory === "string"
+              ? rawLine.subcategory
+              : null,
+            rawLine.isSerialized ? 1 : 0,
+            rawLine.orderedQuantity,
+            rawLine.receivedQuantity,
+            rawLine.exceptionQuantity,
+            rawLine.outstandingQuantity,
+            typeof rawLine.unitCost === "number" ? rawLine.unitCost : null,
+            appliedAt,
+          );
+      }
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "interStoreTransfer" &&
+      event.eventType === "inter-store-transfer.published"
+    ) {
+      const transferPayload =
+        payload as Partial<EnterpriseInterStoreTransferPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof transferPayload.storeCode !== "string" ||
+        transferPayload.storeCode !== storeCode ||
+        typeof transferPayload.transferId !== "string" ||
+        typeof transferPayload.transferNo !== "string" ||
+        typeof transferPayload.role !== "string" ||
+        typeof transferPayload.origin !== "string" ||
+        typeof transferPayload.status !== "string" ||
+        typeof transferPayload.sourceStoreCode !== "string" ||
+        typeof transferPayload.sourceStoreName !== "string" ||
+        typeof transferPayload.sourceLocationCode !== "string" ||
+        typeof transferPayload.sourceLocationName !== "string" ||
+        typeof transferPayload.destinationStoreCode !== "string" ||
+        typeof transferPayload.destinationStoreName !== "string" ||
+        typeof transferPayload.destinationLocationCode !== "string" ||
+        typeof transferPayload.destinationLocationName !== "string" ||
+        typeof transferPayload.productCode !== "string" ||
+        typeof transferPayload.productName !== "string" ||
+        typeof transferPayload.requestedQuantity !== "number" ||
+        typeof transferPayload.issuedQuantity !== "number" ||
+        typeof transferPayload.receivedQuantity !== "number" ||
+        typeof transferPayload.outstandingIssueQuantity !== "number" ||
+        typeof transferPayload.outstandingReceiptQuantity !== "number" ||
+        typeof transferPayload.requestedAt !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid inter-store transfer publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO inter_store_transfer_snapshot (
+            id,
+            transfer_no,
+            transfer_batch_no,
+            line_no,
+            role,
+            origin,
+            status,
+            external_reference,
+            source_store_code,
+            source_store_name,
+            source_location_code,
+            source_location_name,
+            destination_store_code,
+            destination_store_name,
+            destination_location_code,
+            destination_location_name,
+            product_code,
+            product_name,
+            department_code,
+            category_code,
+            subcategory,
+            is_serialized,
+            requested_quantity,
+            issued_quantity,
+            received_quantity,
+            outstanding_issue_quantity,
+            outstanding_receipt_quantity,
+            unit_cost,
+            issued_serial_numbers_json,
+            received_serial_numbers_json,
+            request_note,
+            issue_note,
+            receipt_note,
+            request_operator_name,
+            issue_operator_name,
+            receipt_operator_name,
+            requested_by_node_code,
+            source_node_code,
+            destination_node_code,
+            requested_at,
+            required_at,
+            issued_at,
+            received_at,
+            closed_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            transfer_no = excluded.transfer_no,
+            transfer_batch_no = excluded.transfer_batch_no,
+            line_no = excluded.line_no,
+            role = excluded.role,
+            origin = excluded.origin,
+            status = excluded.status,
+            external_reference = excluded.external_reference,
+            source_store_code = excluded.source_store_code,
+            source_store_name = excluded.source_store_name,
+            source_location_code = excluded.source_location_code,
+            source_location_name = excluded.source_location_name,
+            destination_store_code = excluded.destination_store_code,
+            destination_store_name = excluded.destination_store_name,
+            destination_location_code = excluded.destination_location_code,
+            destination_location_name = excluded.destination_location_name,
+            product_code = excluded.product_code,
+            product_name = excluded.product_name,
+            department_code = excluded.department_code,
+            category_code = excluded.category_code,
+            subcategory = excluded.subcategory,
+            is_serialized = excluded.is_serialized,
+            requested_quantity = excluded.requested_quantity,
+            issued_quantity = excluded.issued_quantity,
+            received_quantity = excluded.received_quantity,
+            outstanding_issue_quantity = excluded.outstanding_issue_quantity,
+            outstanding_receipt_quantity = excluded.outstanding_receipt_quantity,
+            unit_cost = excluded.unit_cost,
+            issued_serial_numbers_json = excluded.issued_serial_numbers_json,
+            received_serial_numbers_json = excluded.received_serial_numbers_json,
+            request_note = excluded.request_note,
+            issue_note = excluded.issue_note,
+            receipt_note = excluded.receipt_note,
+            request_operator_name = excluded.request_operator_name,
+            issue_operator_name = excluded.issue_operator_name,
+            receipt_operator_name = excluded.receipt_operator_name,
+            requested_by_node_code = excluded.requested_by_node_code,
+            source_node_code = excluded.source_node_code,
+            destination_node_code = excluded.destination_node_code,
+            requested_at = excluded.requested_at,
+            required_at = excluded.required_at,
+            issued_at = excluded.issued_at,
+            received_at = excluded.received_at,
+            closed_at = excluded.closed_at,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          transferPayload.transferId,
+          transferPayload.transferNo,
+          typeof transferPayload.transferBatchNo === "string"
+            ? transferPayload.transferBatchNo
+            : transferPayload.transferNo,
+          typeof transferPayload.lineNo === "number"
+            ? Math.max(1, Math.trunc(transferPayload.lineNo))
+            : 1,
+          transferPayload.role,
+          transferPayload.origin,
+          transferPayload.status,
+          typeof transferPayload.externalReference === "string"
+            ? transferPayload.externalReference
+            : null,
+          transferPayload.sourceStoreCode,
+          transferPayload.sourceStoreName,
+          transferPayload.sourceLocationCode,
+          transferPayload.sourceLocationName,
+          transferPayload.destinationStoreCode,
+          transferPayload.destinationStoreName,
+          transferPayload.destinationLocationCode,
+          transferPayload.destinationLocationName,
+          transferPayload.productCode,
+          transferPayload.productName,
+          typeof transferPayload.departmentCode === "string"
+            ? transferPayload.departmentCode
+            : null,
+          typeof transferPayload.categoryCode === "string"
+            ? transferPayload.categoryCode
+            : null,
+          typeof transferPayload.subcategory === "string"
+            ? transferPayload.subcategory
+            : null,
+          transferPayload.isSerialized ? 1 : 0,
+          transferPayload.requestedQuantity,
+          transferPayload.issuedQuantity,
+          transferPayload.receivedQuantity,
+          transferPayload.outstandingIssueQuantity,
+          transferPayload.outstandingReceiptQuantity,
+          typeof transferPayload.unitCost === "number"
+            ? transferPayload.unitCost
+            : null,
+          writeSerializedLineNumbers(transferPayload.issuedSerialNumbers ?? []),
+          writeSerializedLineNumbers(
+            transferPayload.receivedSerialNumbers ?? [],
+          ),
+          typeof transferPayload.requestNote === "string"
+            ? transferPayload.requestNote
+            : null,
+          typeof transferPayload.issueNote === "string"
+            ? transferPayload.issueNote
+            : null,
+          typeof transferPayload.receiptNote === "string"
+            ? transferPayload.receiptNote
+            : null,
+          typeof transferPayload.requestOperatorName === "string"
+            ? transferPayload.requestOperatorName
+            : null,
+          typeof transferPayload.issueOperatorName === "string"
+            ? transferPayload.issueOperatorName
+            : null,
+          typeof transferPayload.receiptOperatorName === "string"
+            ? transferPayload.receiptOperatorName
+            : null,
+          typeof transferPayload.requestedByNodeCode === "string"
+            ? transferPayload.requestedByNodeCode
+            : null,
+          typeof transferPayload.sourceNodeCode === "string"
+            ? transferPayload.sourceNodeCode
+            : null,
+          typeof transferPayload.destinationNodeCode === "string"
+            ? transferPayload.destinationNodeCode
+            : null,
+          transferPayload.requestedAt,
+          typeof transferPayload.requiredAt === "string"
+            ? transferPayload.requiredAt
+            : null,
+          typeof transferPayload.issuedAt === "string"
+            ? transferPayload.issuedAt
+            : null,
+          typeof transferPayload.receivedAt === "string"
+            ? transferPayload.receivedAt
+            : null,
+          typeof transferPayload.closedAt === "string"
+            ? transferPayload.closedAt
+            : null,
+          appliedAt,
+        );
+
+      this.db
+        .prepare("DELETE FROM inter_store_transfer_request_draft WHERE id = ?")
+        .run(transferPayload.transferId);
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "productDepartment" &&
+      event.eventType === "setup.product-department.published"
+    ) {
+      const departmentPayload =
+        payload as Partial<EnterpriseProductDepartmentPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof departmentPayload.storeCode !== "string" ||
+        departmentPayload.storeCode !== storeCode ||
+        typeof departmentPayload.departmentCode !== "string" ||
+        typeof departmentPayload.departmentName !== "string" ||
+        typeof departmentPayload.status !== "string" ||
+        typeof departmentPayload.sortOrder !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid product department publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO product_department_snapshot (id, department_code, department_name, description, status, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(department_code) DO UPDATE SET department_name = excluded.department_name, description = excluded.description, status = excluded.status, sort_order = excluded.sort_order, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          departmentPayload.departmentCode,
+          departmentPayload.departmentName,
+          typeof departmentPayload.description === "string"
+            ? departmentPayload.description
+            : null,
+          departmentPayload.status,
+          departmentPayload.sortOrder,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "productCategory" &&
+      event.eventType === "setup.product-category.published"
+    ) {
+      const categoryPayload =
+        payload as Partial<EnterpriseProductCategoryPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof categoryPayload.storeCode !== "string" ||
+        categoryPayload.storeCode !== storeCode ||
+        typeof categoryPayload.categoryCode !== "string" ||
+        typeof categoryPayload.categoryName !== "string" ||
+        typeof categoryPayload.departmentCode !== "string" ||
+        typeof categoryPayload.departmentName !== "string" ||
+        typeof categoryPayload.status !== "string" ||
+        typeof categoryPayload.sortOrder !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid product category publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO product_category_snapshot (id, category_code, category_name, department_code, department_name, description, status, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(category_code) DO UPDATE SET category_name = excluded.category_name, department_code = excluded.department_code, department_name = excluded.department_name, description = excluded.description, status = excluded.status, sort_order = excluded.sort_order, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          categoryPayload.categoryCode,
+          categoryPayload.categoryName,
+          categoryPayload.departmentCode,
+          categoryPayload.departmentName,
+          typeof categoryPayload.description === "string"
+            ? categoryPayload.description
+            : null,
+          categoryPayload.status,
+          categoryPayload.sortOrder,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "unitOfMeasure" &&
+      event.eventType === "setup.unit-of-measure.published"
+    ) {
+      const uomPayload =
+        payload as Partial<EnterpriseUnitOfMeasurePublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof uomPayload.storeCode !== "string" ||
+        uomPayload.storeCode !== storeCode ||
+        typeof uomPayload.uomCode !== "string" ||
+        typeof uomPayload.uomName !== "string" ||
+        typeof uomPayload.decimalPrecision !== "number" ||
+        typeof uomPayload.allowFractionalSale !== "boolean" ||
+        typeof uomPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid unit-of-measure publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO unit_of_measure_snapshot (id, uom_code, uom_name, description, decimal_precision, allow_fractional_sale, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(uom_code) DO UPDATE SET uom_name = excluded.uom_name, description = excluded.description, decimal_precision = excluded.decimal_precision, allow_fractional_sale = excluded.allow_fractional_sale, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          uomPayload.uomCode,
+          uomPayload.uomName,
+          typeof uomPayload.description === "string"
+            ? uomPayload.description
+            : null,
+          Math.max(0, Math.trunc(uomPayload.decimalPrecision)),
+          uomPayload.allowFractionalSale ? 1 : 0,
+          uomPayload.status,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "giftCertificate" &&
+      event.eventType === "gift-certificate.published"
+    ) {
+      const certificatePayload =
+        payload as Partial<EnterpriseGiftCertificatePublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof certificatePayload.storeCode !== "string" ||
+        certificatePayload.storeCode !== storeCode ||
+        typeof certificatePayload.certificateId !== "string" ||
+        typeof certificatePayload.certificateNo !== "string" ||
+        typeof certificatePayload.originalAmount !== "number" ||
+        typeof certificatePayload.balanceAmount !== "number" ||
+        typeof certificatePayload.currencyCode !== "string" ||
+        typeof certificatePayload.issueDate !== "string" ||
+        typeof certificatePayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid gift certificate publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO gift_certificate_snapshot (id, certificate_no, recipient_name, purchaser_name, original_amount, balance_amount, currency_code, issue_date, expiry_date, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(certificate_no) DO UPDATE SET recipient_name = excluded.recipient_name, purchaser_name = excluded.purchaser_name, original_amount = excluded.original_amount, balance_amount = excluded.balance_amount, currency_code = excluded.currency_code, issue_date = excluded.issue_date, expiry_date = excluded.expiry_date, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          certificatePayload.certificateId,
+          certificatePayload.certificateNo,
+          typeof certificatePayload.recipientName === "string"
+            ? certificatePayload.recipientName
+            : null,
+          typeof certificatePayload.purchaserName === "string"
+            ? certificatePayload.purchaserName
+            : null,
+          certificatePayload.originalAmount,
+          certificatePayload.balanceAmount,
+          certificatePayload.currencyCode,
+          certificatePayload.issueDate,
+          typeof certificatePayload.expiryDate === "string"
+            ? certificatePayload.expiryDate
+            : null,
+          certificatePayload.status,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "promotion" &&
+      event.eventType === "setup.promotion.published"
+    ) {
+      const promotionPayload =
+        payload as Partial<EnterprisePromotionPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof promotionPayload.storeCode !== "string" ||
+        promotionPayload.storeCode !== storeCode ||
+        typeof promotionPayload.promotionId !== "string" ||
+        typeof promotionPayload.promotionCode !== "string" ||
+        typeof promotionPayload.promotionName !== "string" ||
+        typeof promotionPayload.discountType !== "string" ||
+        typeof promotionPayload.targetScope !== "string" ||
+        typeof promotionPayload.discountValue !== "number" ||
+        typeof promotionPayload.allowWithLoyalty !== "boolean" ||
+        typeof promotionPayload.applyOncePerBasket !== "boolean" ||
+        typeof promotionPayload.priority !== "number" ||
+        typeof promotionPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid promotion publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO promotion_snapshot (id, promotion_code, promotion_name, description, discount_type, target_scope, discount_value, minimum_basket_amount, minimum_line_quantity, buy_quantity, reward_quantity, target_department_code, target_category_code, target_product_code, eligible_store_codes_json, eligible_customer_types_json, eligible_loyalty_tiers_json, active_days_of_week_json, active_from_minutes, active_to_minutes, coupon_required, coupon_code, allow_with_loyalty, apply_once_per_basket, priority, start_at, end_at, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(promotion_code) DO UPDATE SET promotion_name = excluded.promotion_name, description = excluded.description, discount_type = excluded.discount_type, target_scope = excluded.target_scope, discount_value = excluded.discount_value, minimum_basket_amount = excluded.minimum_basket_amount, minimum_line_quantity = excluded.minimum_line_quantity, buy_quantity = excluded.buy_quantity, reward_quantity = excluded.reward_quantity, target_department_code = excluded.target_department_code, target_category_code = excluded.target_category_code, target_product_code = excluded.target_product_code, eligible_store_codes_json = excluded.eligible_store_codes_json, eligible_customer_types_json = excluded.eligible_customer_types_json, eligible_loyalty_tiers_json = excluded.eligible_loyalty_tiers_json, active_days_of_week_json = excluded.active_days_of_week_json, active_from_minutes = excluded.active_from_minutes, active_to_minutes = excluded.active_to_minutes, coupon_required = excluded.coupon_required, coupon_code = excluded.coupon_code, allow_with_loyalty = excluded.allow_with_loyalty, apply_once_per_basket = excluded.apply_once_per_basket, priority = excluded.priority, start_at = excluded.start_at, end_at = excluded.end_at, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          promotionPayload.promotionId,
+          promotionPayload.promotionCode,
+          promotionPayload.promotionName,
+          typeof promotionPayload.description === "string"
+            ? promotionPayload.description
+            : null,
+          promotionPayload.discountType,
+          promotionPayload.targetScope,
+          promotionPayload.discountValue,
+          typeof promotionPayload.minimumBasketAmount === "number"
+            ? promotionPayload.minimumBasketAmount
+            : null,
+          typeof promotionPayload.minimumLineQuantity === "number"
+            ? promotionPayload.minimumLineQuantity
+            : null,
+          typeof promotionPayload.buyQuantity === "number"
+            ? promotionPayload.buyQuantity
+            : null,
+          typeof promotionPayload.rewardQuantity === "number"
+            ? promotionPayload.rewardQuantity
+            : null,
+          typeof promotionPayload.targetDepartmentCode === "string"
+            ? promotionPayload.targetDepartmentCode
+            : null,
+          typeof promotionPayload.targetCategoryCode === "string"
+            ? promotionPayload.targetCategoryCode
+            : null,
+          typeof promotionPayload.targetProductCode === "string"
+            ? promotionPayload.targetProductCode
+            : null,
+          Array.isArray(promotionPayload.eligibleStoreCodes)
+            ? writeStringArray(promotionPayload.eligibleStoreCodes)
+            : null,
+          Array.isArray(promotionPayload.eligibleCustomerTypes)
+            ? writeStringArray(promotionPayload.eligibleCustomerTypes)
+            : null,
+          Array.isArray(promotionPayload.eligibleLoyaltyTiers)
+            ? writeStringArray(promotionPayload.eligibleLoyaltyTiers)
+            : null,
+          Array.isArray(promotionPayload.activeDaysOfWeek)
+            ? writeStringArray(promotionPayload.activeDaysOfWeek)
+            : null,
+          typeof promotionPayload.activeFromMinutes === "number"
+            ? Math.trunc(promotionPayload.activeFromMinutes)
+            : null,
+          typeof promotionPayload.activeToMinutes === "number"
+            ? Math.trunc(promotionPayload.activeToMinutes)
+            : null,
+          promotionPayload.couponRequired ? 1 : 0,
+          typeof promotionPayload.couponCode === "string"
+            ? promotionPayload.couponCode
+            : null,
+          promotionPayload.allowWithLoyalty ? 1 : 0,
+          promotionPayload.applyOncePerBasket ? 1 : 0,
+          Math.max(0, Math.trunc(promotionPayload.priority)),
+          typeof promotionPayload.startAt === "string"
+            ? promotionPayload.startAt
+            : null,
+          typeof promotionPayload.endAt === "string"
+            ? promotionPayload.endAt
+            : null,
+          promotionPayload.status,
+          appliedAt,
+        );
+
+      this.refreshActiveBasketIfPresent(appliedAt);
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "taxProfile" &&
+      event.eventType === "setup.tax-profile.published"
+    ) {
+      const taxPayload =
+        payload as Partial<EnterpriseTaxProfilePublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof taxPayload.storeCode !== "string" ||
+        taxPayload.storeCode !== storeCode ||
+        typeof taxPayload.taxProfileCode !== "string" ||
+        typeof taxPayload.taxProfileName !== "string" ||
+        typeof taxPayload.ratePercent !== "number" ||
+        typeof taxPayload.isDefault !== "boolean" ||
+        typeof taxPayload.isTaxInclusive !== "boolean" ||
+        typeof taxPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid tax profile publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO tax_profile_snapshot (id, tax_profile_code, tax_profile_name, description, rate_percent, is_default, is_tax_inclusive, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tax_profile_code) DO UPDATE SET tax_profile_name = excluded.tax_profile_name, description = excluded.description, rate_percent = excluded.rate_percent, is_default = excluded.is_default, is_tax_inclusive = excluded.is_tax_inclusive, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          taxPayload.taxProfileCode,
+          taxPayload.taxProfileName,
+          typeof taxPayload.description === "string"
+            ? taxPayload.description
+            : null,
+          taxPayload.ratePercent,
+          taxPayload.isDefault ? 1 : 0,
+          taxPayload.isTaxInclusive ? 1 : 0,
+          taxPayload.status,
+          appliedAt,
+        );
+
+      this.db
+        .prepare(
+          "UPDATE product_snapshot SET tax_profile_name = ?, tax_rate_percent = ?, tax_inclusive = ?, updated_at = ? WHERE tax_profile_code = ?",
+        )
+        .run(
+          taxPayload.taxProfileName,
+          taxPayload.ratePercent,
+          taxPayload.isTaxInclusive ? 1 : 0,
+          appliedAt,
+          taxPayload.taxProfileCode,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "tenderMethod" &&
+      event.eventType === "setup.tender-method.published"
+    ) {
+      const tenderPayload =
+        payload as Partial<EnterpriseTenderMethodPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof tenderPayload.storeCode !== "string" ||
+        tenderPayload.storeCode !== storeCode ||
+        typeof tenderPayload.tenderMethodCode !== "string" ||
+        typeof tenderPayload.tenderMethodName !== "string" ||
+        typeof tenderPayload.paymentMethod !== "string" ||
+        typeof tenderPayload.requiresReference !== "boolean" ||
+        typeof tenderPayload.allowChange !== "boolean" ||
+        typeof tenderPayload.allowRefund !== "boolean" ||
+        typeof tenderPayload.allowOpenCashDrawer !== "boolean" ||
+        typeof tenderPayload.status !== "string" ||
+        typeof tenderPayload.sortOrder !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid tender method publication payload.",
+        );
+      }
+
+      const publishedAt =
+        typeof tenderPayload.publishedAt === "string" &&
+        tenderPayload.publishedAt.trim()
+          ? tenderPayload.publishedAt
+          : appliedAt;
+
+      this.db
+        .prepare(
+          "INSERT INTO tender_method_snapshot (id, tender_method_code, tender_method_name, payment_method, gateway_provider, gateway_mode, gateway_merchant_id, gateway_public_key, gateway_callback_url, gateway_active, gateway_status, description, requires_reference, allow_change, allow_refund, allow_open_cash_drawer, status, sort_order, published_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tender_method_code) DO UPDATE SET tender_method_name = excluded.tender_method_name, payment_method = excluded.payment_method, gateway_provider = excluded.gateway_provider, gateway_mode = excluded.gateway_mode, gateway_merchant_id = excluded.gateway_merchant_id, gateway_public_key = excluded.gateway_public_key, gateway_callback_url = excluded.gateway_callback_url, gateway_active = excluded.gateway_active, gateway_status = excluded.gateway_status, description = excluded.description, requires_reference = excluded.requires_reference, allow_change = excluded.allow_change, allow_refund = excluded.allow_refund, allow_open_cash_drawer = excluded.allow_open_cash_drawer, status = excluded.status, sort_order = excluded.sort_order, published_at = excluded.published_at, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          tenderPayload.tenderMethodCode,
+          tenderPayload.tenderMethodName,
+          tenderPayload.paymentMethod,
+          typeof tenderPayload.gatewayProvider === "string"
+            ? tenderPayload.gatewayProvider
+            : null,
+          typeof tenderPayload.gatewayMode === "string"
+            ? tenderPayload.gatewayMode
+            : null,
+          typeof tenderPayload.gatewayMerchantId === "string"
+            ? tenderPayload.gatewayMerchantId
+            : null,
+          typeof tenderPayload.gatewayPublicKey === "string"
+            ? tenderPayload.gatewayPublicKey
+            : null,
+          typeof tenderPayload.gatewayCallbackUrl === "string"
+            ? tenderPayload.gatewayCallbackUrl
+            : null,
+          tenderPayload.gatewayActive ? 1 : 0,
+          typeof tenderPayload.gatewayStatus === "string"
+            ? tenderPayload.gatewayStatus
+            : "DISABLED",
+          typeof tenderPayload.description === "string"
+            ? tenderPayload.description
+            : null,
+          tenderPayload.requiresReference ? 1 : 0,
+          tenderPayload.allowChange ? 1 : 0,
+          tenderPayload.allowRefund ? 1 : 0,
+          tenderPayload.allowOpenCashDrawer ? 1 : 0,
+          tenderPayload.status,
+          tenderPayload.sortOrder,
+          publishedAt,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "bankAccount" &&
+      event.eventType === "setup.bank-account.published"
+    ) {
+      const bankPayload =
+        payload as Partial<EnterpriseBankAccountPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof bankPayload.storeCode !== "string" ||
+        bankPayload.storeCode !== storeCode ||
+        typeof bankPayload.bankAccountId !== "string" ||
+        typeof bankPayload.bankCode !== "string" ||
+        typeof bankPayload.bankName !== "string" ||
+        typeof bankPayload.branchCode !== "string" ||
+        typeof bankPayload.branchName !== "string" ||
+        typeof bankPayload.accountNumber !== "string" ||
+        typeof bankPayload.accountName !== "string" ||
+        typeof bankPayload.currencyCode !== "string" ||
+        typeof bankPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid bank account publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO bank_account_snapshot (id, bank_code, bank_name, branch_code, branch_name, account_number, account_name, currency_code, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET bank_code = excluded.bank_code, bank_name = excluded.bank_name, branch_code = excluded.branch_code, branch_name = excluded.branch_name, account_number = excluded.account_number, account_name = excluded.account_name, currency_code = excluded.currency_code, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          bankPayload.bankAccountId,
+          bankPayload.bankCode,
+          bankPayload.bankName,
+          bankPayload.branchCode,
+          bankPayload.branchName,
+          bankPayload.accountNumber,
+          bankPayload.accountName,
+          bankPayload.currencyCode,
+          bankPayload.status,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "barcode" &&
+      event.eventType === "catalog.barcode.published"
+    ) {
+      const barcodePayload =
+        payload as Partial<EnterpriseBarcodePublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof barcodePayload.storeCode !== "string" ||
+        barcodePayload.storeCode !== storeCode ||
+        typeof barcodePayload.productCode !== "string" ||
+        typeof barcodePayload.barcode !== "string" ||
+        typeof barcodePayload.barcodeType !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid barcode publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO barcode_snapshot (id, barcode_code, product_code, barcode_type, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(barcode_code) DO UPDATE SET product_code = excluded.product_code, barcode_type = excluded.barcode_type, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          barcodePayload.barcode,
+          barcodePayload.productCode,
+          barcodePayload.barcodeType,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "priceList" &&
+      event.eventType === "pricing.price-list.published"
+    ) {
+      const pricePayload =
+        payload as Partial<EnterprisePriceListPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof pricePayload.storeCode !== "string" ||
+        pricePayload.storeCode !== storeCode ||
+        typeof pricePayload.priceListCode !== "string" ||
+        typeof pricePayload.productCode !== "string" ||
+        typeof pricePayload.unitPrice !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid price publication payload.",
+        );
+      }
+      const priceListName =
+        typeof pricePayload.priceListName === "string"
+          ? pricePayload.priceListName
+          : pricePayload.priceListCode;
+      const currencyCode =
+        typeof pricePayload.currencyCode === "string"
+          ? pricePayload.currencyCode
+          : (this.metadata("currency_code") ?? "USD");
+      const isDefault =
+        typeof pricePayload.isDefault === "boolean"
+          ? pricePayload.isDefault
+          : pricePayload.priceListCode === "default-sell";
+      const priceStatus =
+        typeof pricePayload.status === "string"
+          ? pricePayload.status
+          : "ACTIVE";
+
+      this.db
+        .prepare(
+          "INSERT INTO price_list_entry_snapshot (id, price_list_code, price_list_name, currency_code, is_default, customer_type, loyalty_tier, product_code, unit_price, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(price_list_code, product_code) DO UPDATE SET id = excluded.id, price_list_name = excluded.price_list_name, currency_code = excluded.currency_code, is_default = excluded.is_default, customer_type = excluded.customer_type, loyalty_tier = excluded.loyalty_tier, unit_price = excluded.unit_price, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          pricePayload.priceListCode,
+          priceListName,
+          currencyCode,
+          isDefault ? 1 : 0,
+          typeof pricePayload.customerType === "string"
+            ? pricePayload.customerType
+            : null,
+          typeof pricePayload.loyaltyTier === "string"
+            ? pricePayload.loyaltyTier
+            : null,
+          pricePayload.productCode,
+          pricePayload.unitPrice,
+          priceStatus,
+          appliedAt,
+        );
+
+      if (!isDefault) {
+        return;
+      }
+
+      this.db
+        .prepare(
+          "UPDATE product_snapshot SET unit_price = ?, updated_at = ? WHERE product_code = ?",
+        )
+        .run(pricePayload.unitPrice, appliedAt, pricePayload.productCode);
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "interStoreTransferTarget" &&
+      event.eventType === "inter-store-transfer.target.published"
+    ) {
+      const targetPayload =
+        payload as Partial<EnterpriseInterStoreTransferRequestTargetPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof targetPayload.storeCode !== "string" ||
+        targetPayload.storeCode !== storeCode ||
+        typeof targetPayload.sourceStoreCode !== "string" ||
+        typeof targetPayload.sourceStoreName !== "string" ||
+        typeof targetPayload.sourceStoreSalesEnabled !== "boolean" ||
+        typeof targetPayload.sourceStoreWarehouseEnabled !== "boolean" ||
+        typeof targetPayload.sourceLocationCode !== "string" ||
+        typeof targetPayload.sourceLocationName !== "string" ||
+        typeof targetPayload.sourceLocationType !== "string" ||
+        typeof targetPayload.sourceLocationStatus !== "string" ||
+        typeof targetPayload.sourceLocationDefaults !== "string" ||
+        typeof targetPayload.useForSalesDefault !== "boolean" ||
+        typeof targetPayload.useForReceivingDefault !== "boolean"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid transfer request target payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO inter_store_transfer_request_target_snapshot (source_location_code, source_store_code, source_store_name, source_store_sales_enabled, source_store_warehouse_enabled, source_location_name, source_location_type, source_location_status, source_location_defaults, source_warehouse_code, source_warehouse_name, use_for_sales_default, use_for_receiving_default, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_location_code) DO UPDATE SET source_store_code = excluded.source_store_code, source_store_name = excluded.source_store_name, source_store_sales_enabled = excluded.source_store_sales_enabled, source_store_warehouse_enabled = excluded.source_store_warehouse_enabled, source_location_name = excluded.source_location_name, source_location_type = excluded.source_location_type, source_location_status = excluded.source_location_status, source_location_defaults = excluded.source_location_defaults, source_warehouse_code = excluded.source_warehouse_code, source_warehouse_name = excluded.source_warehouse_name, use_for_sales_default = excluded.use_for_sales_default, use_for_receiving_default = excluded.use_for_receiving_default, updated_at = excluded.updated_at",
+        )
+        .run(
+          targetPayload.sourceLocationCode,
+          targetPayload.sourceStoreCode,
+          targetPayload.sourceStoreName,
+          targetPayload.sourceStoreSalesEnabled ? 1 : 0,
+          targetPayload.sourceStoreWarehouseEnabled ? 1 : 0,
+          targetPayload.sourceLocationName,
+          targetPayload.sourceLocationType,
+          targetPayload.sourceLocationStatus,
+          targetPayload.sourceLocationDefaults,
+          typeof targetPayload.sourceWarehouseCode === "string"
+            ? targetPayload.sourceWarehouseCode
+            : null,
+          typeof targetPayload.sourceWarehouseName === "string"
+            ? targetPayload.sourceWarehouseName
+            : null,
+          targetPayload.useForSalesDefault ? 1 : 0,
+          targetPayload.useForReceivingDefault ? 1 : 0,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "inventoryLocation" &&
+      event.eventType === "inventory.location.published"
+    ) {
+      const locationPayload =
+        payload as Partial<EnterpriseInventoryLocationPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof locationPayload.storeCode !== "string" ||
+        locationPayload.storeCode !== storeCode ||
+        typeof locationPayload.locationCode !== "string" ||
+        typeof locationPayload.locationName !== "string" ||
+        typeof locationPayload.locationType !== "string" ||
+        typeof locationPayload.status !== "string" ||
+        typeof locationPayload.defaults !== "string" ||
+        typeof locationPayload.useForSalesDefault !== "boolean" ||
+        typeof locationPayload.useForSalesOrderDefault !== "boolean" ||
+        typeof locationPayload.useForReceivingDefault !== "boolean"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid inventory location publication payload.",
+        );
+      }
+
+      if (locationPayload.useForSalesDefault) {
+        this.db
+          .prepare(
+            "UPDATE inventory_location_snapshot SET is_sales_default = 0, updated_at = ? WHERE location_code != ?",
+          )
+          .run(appliedAt, locationPayload.locationCode);
+      }
+
+      if (locationPayload.useForSalesOrderDefault) {
+        this.db
+          .prepare(
+            "UPDATE inventory_location_snapshot SET is_sales_order_default = 0, updated_at = ? WHERE location_code != ?",
+          )
+          .run(appliedAt, locationPayload.locationCode);
+      }
+
+      if (locationPayload.useForReceivingDefault) {
+        this.db
+          .prepare(
+            "UPDATE inventory_location_snapshot SET is_receiving_default = 0, updated_at = ? WHERE location_code != ?",
+          )
+          .run(appliedAt, locationPayload.locationCode);
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO inventory_location_snapshot (id, location_code, location_name, location_type, status, defaults, is_sales_default, is_sales_order_default, is_receiving_default, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(location_code) DO UPDATE SET location_name = excluded.location_name, location_type = excluded.location_type, status = excluded.status, defaults = excluded.defaults, is_sales_default = excluded.is_sales_default, is_sales_order_default = excluded.is_sales_order_default, is_receiving_default = excluded.is_receiving_default, updated_at = excluded.updated_at",
+        )
+        .run(
+          event.aggregateId,
+          locationPayload.locationCode,
+          locationPayload.locationName,
+          locationPayload.locationType,
+          locationPayload.status,
+          locationPayload.defaults,
+          locationPayload.useForSalesDefault ? 1 : 0,
+          locationPayload.useForSalesOrderDefault ? 1 : 0,
+          locationPayload.useForReceivingDefault ? 1 : 0,
+          appliedAt,
+        );
+
+      return;
+    }
+  }
+
+  private parsePayloadJson(payloadJson: string) {
+    try {
+      return JSON.parse(payloadJson) as unknown;
+    } catch {
+      return payloadJson;
+    }
+  }
+
+  private parsePayloadRecord(payload: unknown): Record<string, unknown> {
+    if (typeof payload === "string") {
+      const parsed = this.parsePayloadJson(payload);
+      return parsed === payload ? {} : this.parsePayloadRecord(parsed);
+    }
+
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      !Array.isArray(payload)
+    ) {
+      return payload as Record<string, unknown>;
+    }
+
+    return {};
+  }
+
+  private describeSyncEventPayload(
+    aggregateType: string,
+    eventType: string,
+    payloadJson: string,
+  ) {
+    const payload = this.parsePayloadRecord(this.parsePayloadJson(payloadJson));
+    const readText = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = payload[key];
+
+        if (typeof value === "string" && value.trim()) {
+          return value.trim();
+        }
+      }
+
+      return null;
+    };
+    const readNumber = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = payload[key];
+
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return Number(value.toFixed(2));
+        }
+      }
+
+      return null;
+    };
+
+    if (
+      aggregateType === "promotion" ||
+      eventType === "setup.promotion.published"
+    ) {
+      const name = readText("promotionName", "name") ?? "Promotion";
+      const code = readText("promotionCode", "code");
+      const discountType = readText("discountType");
+      const discountValue = readNumber("discountValue");
+      const minimumBasketAmount = readNumber("minimumBasketAmount");
+      const status = readText("status");
+      const parts = [
+        code ? `${name} (${code})` : name,
+        discountType && discountValue !== null
+          ? `${discountType} ${discountValue}`
+          : null,
+        minimumBasketAmount !== null ? `minimum ${minimumBasketAmount}` : null,
+        status,
+      ].filter((part): part is string => Boolean(part));
+
+      return parts.join(" · ");
+    }
+
+    if (
+      aggregateType === "product" ||
+      eventType === "catalog.product.published"
+    ) {
+      const name = readText("productName", "name") ?? "Product";
+      const code = readText("productCode", "code", "sku");
+      const quantity = readNumber("quantityOnHand", "stockOnHand");
+      const price = readNumber("unitPrice", "price");
+      return [
+        code ? `${name} (${code})` : name,
+        price !== null ? `price ${price}` : null,
+        quantity !== null ? `qty ${quantity}` : null,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ");
+    }
+
+    if (aggregateType === "customer" || eventType === "customer.published") {
+      const name = readText("fullName", "customerName", "name") ?? "Customer";
+      const code = readText("customerNo", "customerCode");
+      const balance = readNumber("accountBalance");
+      return [
+        code ? `${name} (${code})` : name,
+        balance !== null ? `balance ${balance}` : null,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ");
+    }
+
+    if (
+      aggregateType === "bankAccount" ||
+      eventType === "setup.bank-account.published"
+    ) {
+      const bank = readText("bankName", "bankCode") ?? "Bank account";
+      const branch = readText("bankBranchName", "branchName", "bankBranchCode");
+      const accountNumber = readText("accountNumber", "bankAccountNumber");
+      return [bank, branch, accountNumber]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ");
+    }
+
+    const code = readText(
+      "code",
+      "customerNo",
+      "productCode",
+      "promotionCode",
+      "transactionNo",
+    );
+    const name = readText(
+      "name",
+      "displayName",
+      "fullName",
+      "productName",
+      "promotionName",
+    );
+
+    if (name && code) {
+      return `${name} (${code})`;
+    }
+
+    return name ?? code ?? eventType;
+  }
+
+  private formatPayloadPreview(payloadJson: string) {
+    const payload = this.parsePayloadJson(payloadJson);
+    const formatted =
+      typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+
+    return formatted.length > 1400
+      ? `${formatted.slice(0, 1400)}...`
+      : formatted;
+  }
+
+  private getCheckpointCursor(remoteNodeCode: string) {
+    return (
+      (
+        this.db
+          .prepare(
+            "SELECT last_received_cursor FROM sync_checkpoint WHERE remote_node_code = ? LIMIT 1",
+          )
+          .get(remoteNodeCode) as
+          | { last_received_cursor: string | null }
+          | undefined
+      )?.last_received_cursor ?? null
+    );
+  }
+
+  private currentCheckpointAppliedAt(remoteNodeCode: string) {
+    return (
+      (
+        this.db
+          .prepare(
+            "SELECT last_applied_at FROM sync_checkpoint WHERE remote_node_code = ? LIMIT 1",
+          )
+          .get(remoteNodeCode) as { last_applied_at: string | null } | undefined
+      )?.last_applied_at ?? null
+    );
+  }
+
+  private upsertCheckpoint(
+    remoteNodeCode: string,
+    lastEventId: string | null,
+    lastReceivedCursor: string | null,
+    lastReceivedAt: string | null,
+    lastAppliedAt: string | null,
+  ) {
+    this.db
+      .prepare(
+        "INSERT INTO sync_checkpoint (remote_node_code, last_event_id, last_received_cursor, last_received_at, last_applied_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(remote_node_code) DO UPDATE SET last_event_id = excluded.last_event_id, last_received_cursor = excluded.last_received_cursor, last_received_at = excluded.last_received_at, last_applied_at = excluded.last_applied_at",
+      )
+      .run(
+        remoteNodeCode,
+        lastEventId,
+        lastReceivedCursor,
+        lastReceivedAt,
+        lastAppliedAt,
+      );
+  }
+
+  private reconcileSyncSeedMode() {
+    if (!this.syncBaseUrl) {
+      return;
+    }
+
+    if (
+      this.metadata("remote_sync_cleanup_version") === remoteSyncCleanupVersion
+    ) {
+      return;
+    }
+
+    this.withTransaction(() => {
+      const deletedOutbox = Number(
+        this.db
+          .prepare(
+            `DELETE FROM sync_outbox WHERE id IN (${demoOutboxSeedIds.map(() => "?").join(", ")})`,
+          )
+          .run(...demoOutboxSeedIds).changes,
+      );
+      const deletedInbox = Number(
+        this.db
+          .prepare(
+            `DELETE FROM sync_inbox WHERE id IN (${demoInboxSeedIds.map(() => "?").join(", ")})`,
+          )
+          .run(...demoInboxSeedIds).changes,
+      );
+
+      if (deletedOutbox > 0 || deletedInbox > 0) {
+        const finishedAt = isoNow();
+
+        this.insertRunLog({
+          runKind: "BOOTSTRAP",
+          result: "SUCCESS",
+          summary: `Removed ${deletedOutbox + deletedInbox} demo sync artifact(s) so the store node reflects live enterprise traffic only.`,
+          upstreamProcessed: deletedOutbox,
+          downstreamApplied: deletedInbox,
+          startedAt: finishedAt,
+          finishedAt,
+        });
+      }
+
+      this.db
+        .prepare(
+          `DELETE FROM sync_run_log WHERE summary IN (${demoRunLogSummaries.map(() => "?").join(", ")})`,
+        )
+        .run(...demoRunLogSummaries);
+      const removedCheckpointSeed = Number(
+        this.db
+          .prepare(
+            "DELETE FROM sync_checkpoint WHERE remote_node_code = ? AND last_event_id = 'enterprise-event-seed' AND last_received_cursor = 'cursor-seed-001'",
+          )
+          .run(ENTERPRISE_NODE_CODE).changes,
+      );
+
+      if (removedCheckpointSeed > 0) {
+        this.db
+          .prepare("DELETE FROM app_metadata WHERE key = 'last_sync_at'")
+          .run();
+      }
+
+      this.setMetadata("remote_sync_cleanup_version", remoteSyncCleanupVersion);
+    });
+  }
+
+  private bootstrap() {
+    const metadata = this.getMetadata();
+    const shouldSeedDemoSyncQueues = !this.syncBaseUrl;
+    const shouldSeedInitialData = !metadata.seed_version;
+
+    if (metadata.seed_version === "flash-erp-store-v5") {
+      return;
+    }
+
+    const now = isoNow();
+
+    this.withTransaction(() => {
+      if (shouldSeedInitialData) {
+        this.setMetadata("retail_org_name", defaultStoreConfig.retailOrgName);
+        this.setMetadata("store_code", defaultStoreConfig.storeCode);
+        this.setMetadata("store_name", defaultStoreConfig.storeName);
+        this.setMetadata("terminal_code", defaultStoreConfig.terminalCode);
+        this.setMetadata("node_code", this.fallbackNodeCode);
+        this.setMetadata("last_local_write_at", minutesAgo(9));
+        this.setMetadata("transaction_sequence", "4");
+        this.setMetadata("initialized_at", now);
+
+        if (shouldSeedDemoSyncQueues) {
+          this.setMetadata("last_sync_at", minutesAgo(43));
+        }
+      }
+
+      if (
+        shouldSeedInitialData &&
+        this.scalar("SELECT count(*) AS value FROM product_snapshot") === 0
+      ) {
+        const products = [
+          ["product-001", "FLASH-COLA-50CL", "Flash Cola 50cl", 2.5, 42],
+          ["product-002", "FLASH-WATER-75CL", "Flash Water 75cl", 1.8, 58],
+          [
+            "product-003",
+            "FLASH-BISCUIT-CHOCO",
+            "Flash Choco Biscuit",
+            3.2,
+            34,
+          ],
+          ["product-004", "FLASH-RICE-2KG", "Flash Premium Rice 2kg", 14.9, 16],
+        ] as const;
+
+        for (const product of products) {
+          const hierarchy =
+            demoProductHierarchy.productAssignments[
+              product[1] as keyof typeof demoProductHierarchy.productAssignments
+            ];
+
+          this.db
+            .prepare(
+              "INSERT INTO product_snapshot (id, product_code, product_name, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, is_serialized, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'EA', 1, 'VAT_STD', 'VAT Standard', 15, 0, 1, 0, ?, ?, ?)",
+            )
+            .run(
+              product[0],
+              product[1],
+              product[2],
+              product[2],
+              `${product[2]} synced from the Flash ERP enterprise product master.`,
+              hierarchy?.departmentCode ?? null,
+              hierarchy?.categoryCode ?? null,
+              hierarchy?.subcategory ?? null,
+              product[3],
+              product[4],
+              minutesAgo(20),
+            );
+        }
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM product_snapshot WHERE product_code = ?",
+          demoSerializedProduct.code,
+        ) === 0
+      ) {
+        const serializedHierarchy =
+          demoProductHierarchy.productAssignments[demoSerializedProduct.code];
+
+        this.db
+          .prepare(
+            "INSERT INTO product_snapshot (id, product_code, product_name, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, is_serialized, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'EA', 1, 'VAT_STD', 'VAT Standard', 15, 0, 1, 1, ?, ?, ?)",
+          )
+          .run(
+            demoSerializedProduct.id,
+            demoSerializedProduct.code,
+            demoSerializedProduct.name,
+            demoSerializedProduct.name,
+            `${demoSerializedProduct.name} seeded as a serialized Flash ERP demo item for receipt-linked returns and serial validation.`,
+            serializedHierarchy.departmentCode,
+            serializedHierarchy.categoryCode,
+            serializedHierarchy.subcategory,
+            demoSerializedProduct.unitPrice,
+            demoSerializedProduct.quantityOnHand,
+            minutesAgo(17),
+          );
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM product_department_snapshot",
+        ) === 0
+      ) {
+        for (const department of demoProductHierarchy.departments) {
+          this.db
+            .prepare(
+              "INSERT INTO product_department_snapshot (id, department_code, department_name, description, status, sort_order, updated_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)",
+            )
+            .run(
+              department.id,
+              department.code,
+              department.name,
+              department.description,
+              department.sortOrder,
+              minutesAgo(19),
+            );
+        }
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM product_category_snapshot",
+        ) === 0
+      ) {
+        for (const category of demoProductHierarchy.categories) {
+          this.db
+            .prepare(
+              "INSERT INTO product_category_snapshot (id, category_code, category_name, department_code, department_name, description, status, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)",
+            )
+            .run(
+              category.id,
+              category.code,
+              category.name,
+              category.departmentCode,
+              category.departmentName,
+              category.description,
+              category.sortOrder,
+              minutesAgo(19),
+            );
+        }
+      }
+
+      if (
+        this.scalar("SELECT count(*) AS value FROM tax_profile_snapshot") === 0
+      ) {
+        this.db
+          .prepare(
+            "INSERT INTO tax_profile_snapshot (id, tax_profile_code, tax_profile_name, description, rate_percent, is_default, is_tax_inclusive, status, updated_at) VALUES ('tax-001', 'VAT_STD', 'VAT Standard', 'Default standard VAT posture for Flash ERP demo data.', 15, 1, 0, 'ACTIVE', ?)",
+          )
+          .run(minutesAgo(21));
+      }
+
+      if (
+        this.scalar("SELECT count(*) AS value FROM tender_method_snapshot") ===
+        0
+      ) {
+        const tenderMethods = [
+          ["tender-001", "CASH", "Cash", "CASH", 0, 1, 1, 1, "ACTIVE", 10],
+          ["tender-002", "CARD", "Card", "CARD", 1, 0, 1, 0, "ACTIVE", 20],
+          [
+            "tender-003",
+            "MOMO",
+            "Mobile Money",
+            "MOBILE_MONEY",
+            1,
+            0,
+            1,
+            0,
+            "ACTIVE",
+            30,
+          ],
+          [
+            "tender-004",
+            "BANK",
+            "Bank Transfer",
+            "BANK_TRANSFER",
+            1,
+            0,
+            1,
+            0,
+            "ACTIVE",
+            40,
+          ],
+        ] as const;
+
+        for (const tenderMethod of tenderMethods) {
+          this.db
+            .prepare(
+              "INSERT INTO tender_method_snapshot (id, tender_method_code, tender_method_name, payment_method, description, requires_reference, allow_change, allow_refund, allow_open_cash_drawer, status, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              tenderMethod[0],
+              tenderMethod[1],
+              tenderMethod[2],
+              tenderMethod[3],
+              `${tenderMethod[2]} seeded into the Flash ERP store desktop.`,
+              tenderMethod[4],
+              tenderMethod[5],
+              tenderMethod[6],
+              tenderMethod[7],
+              tenderMethod[8],
+              tenderMethod[9],
+              minutesAgo(21),
+            );
+        }
+      }
+
+      if (
+        shouldSeedInitialData &&
+        shouldSeedDemoSyncQueues &&
+        this.scalar("SELECT count(*) AS value FROM barcode_snapshot") === 0
+      ) {
+        const barcodes = [
+          ["barcode-001", "1000000000001", "FLASH-COLA-50CL", "EAN13"],
+          ["barcode-002", "1000000000002", "FLASH-WATER-75CL", "EAN13"],
+          ["barcode-003", "1000000000003", "FLASH-BISCUIT-CHOCO", "EAN13"],
+          ["barcode-004", "1000000000004", "FLASH-RICE-2KG", "EAN13"],
+        ] as const;
+
+        for (const barcode of barcodes) {
+          this.db
+            .prepare(
+              "INSERT INTO barcode_snapshot (id, barcode_code, product_code, barcode_type, updated_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .run(
+              barcode[0],
+              barcode[1],
+              barcode[2],
+              barcode[3],
+              minutesAgo(18),
+            );
+        }
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM barcode_snapshot WHERE barcode_code = ?",
+          demoSerializedProduct.barcode,
+        ) === 0
+      ) {
+        this.db
+          .prepare(
+            "INSERT INTO barcode_snapshot (id, barcode_code, product_code, barcode_type, updated_at) VALUES (?, ?, ?, 'EAN13', ?)",
+          )
+          .run(
+            "barcode-005",
+            demoSerializedProduct.barcode,
+            demoSerializedProduct.code,
+            minutesAgo(17),
+          );
+      }
+
+      if (
+        shouldSeedInitialData &&
+        this.scalar("SELECT count(*) AS value FROM customer") === 0
+      ) {
+        const customers = [
+          [
+            "customer-001",
+            "CUST-0001",
+            "Ama Mensah",
+            "+233200000111",
+            "ama.mensah@flash.local",
+          ],
+          [
+            "customer-002",
+            "CUST-0002",
+            "Kojo Bediako",
+            "+233200000222",
+            "kojo.bediako@flash.local",
+          ],
+          [
+            "customer-003",
+            "CUST-0003",
+            "Rita Asare",
+            "+233200000333",
+            "rita.asare@flash.local",
+          ],
+        ] as const;
+
+        for (const customer of customers) {
+          this.db
+            .prepare(
+              "INSERT INTO customer (id, customer_no, full_name, phone, email, record_version, deleted_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, NULL, ?)",
+            )
+            .run(
+              customer[0],
+              customer[1],
+              customer[2],
+              customer[3],
+              customer[4],
+              minutesAgo(18),
+            );
+        }
+      }
+
+      const seededShiftOwnerLoginId =
+        shouldSeedInitialData &&
+        this.scalar("SELECT count(*) AS value FROM pos_shift") === 0
+          ? this.getPreferredCashierLoginId()
+          : null;
+      const seededShiftId = seededShiftOwnerLoginId ? "shift-open-001" : null;
+
+      if (seededShiftOwnerLoginId) {
+        this.db
+          .prepare(
+            "INSERT INTO pos_shift (id, shift_no, terminal_code, cashier_code, status, opening_float_amount, closing_declared_cash, closing_variance, opened_at, closed_at, record_version) VALUES ('shift-open-001', 'SHIFT-0001', ?, ?, 'OPEN', 120, NULL, NULL, ?, NULL, 1)",
+          )
+          .run(
+            defaultStoreConfig.terminalCode,
+            seededShiftOwnerLoginId,
+            minutesAgo(250),
+          );
+      }
+
+      if (
+        shouldSeedInitialData &&
+        this.scalar("SELECT count(*) AS value FROM pos_transaction") === 0
+      ) {
+        const transactions = [
+          [
+            "txn-001",
+            "POS-ACC-0001",
+            null,
+            "COMPLETED",
+            7.5,
+            0.6,
+            8.1,
+            minutesAgo(46),
+          ],
+          [
+            "txn-002",
+            "POS-ACC-0002",
+            "customer-001",
+            "COMPLETED",
+            14.9,
+            1.19,
+            16.09,
+            minutesAgo(19),
+          ],
+          [
+            "txn-003",
+            "POS-ACC-0003",
+            null,
+            "PARKED",
+            3.2,
+            0.26,
+            3.46,
+            minutesAgo(7),
+          ],
+        ] as const;
+
+        for (const transaction of transactions) {
+          this.db
+            .prepare(
+              "INSERT INTO pos_transaction (id, transaction_no, shift_id, customer_id, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, completed_at, record_version, deleted_at, updated_at) VALUES (?, ?, ?, ?, 'SALE', ?, ?, 0, ?, ?, ?, 0, ?, ?, 1, NULL, ?)",
+            )
+            .run(
+              transaction[0],
+              transaction[1],
+              seededShiftId,
+              transaction[2],
+              transaction[3],
+              transaction[4],
+              transaction[5],
+              transaction[6],
+              transaction[3] === "COMPLETED" ? transaction[6] : 0,
+              transaction[3] === "COMPLETED"
+                ? "Seeded local sale"
+                : "Parked basket waiting for cashier resume",
+              transaction[3] === "COMPLETED" ? transaction[7] : null,
+              transaction[7],
+            );
+        }
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM pos_transaction WHERE transaction_no = 'POS-ACC-0004'",
+        ) === 0
+      ) {
+        const completedAt = minutesAgo(17);
+        const demoSerializedRow = this.db
+          .prepare(
+            "SELECT id FROM product_snapshot WHERE product_code = ? LIMIT 1",
+          )
+          .get(demoSerializedProduct.code) as { id: string } | undefined;
+
+        this.db
+          .prepare(
+            "INSERT INTO pos_transaction (id, transaction_no, shift_id, customer_id, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, completed_at, record_version, deleted_at, updated_at) VALUES ('txn-004', 'POS-ACC-0004', ?, 'customer-001', 'SALE', 'COMPLETED', 299.99, 0, 45, 344.99, 344.99, 0, ?, ?, 1, NULL, ?)",
+          )
+          .run(
+            seededShiftId,
+            `Seeded local serialized sale for ${demoSerializedProduct.name}.`,
+            completedAt,
+            completedAt,
+          );
+        this.db
+          .prepare(
+            "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, product_code_snapshot, product_name_snapshot, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total) VALUES ('line-004', 'txn-004', ?, 'SALE', NULL, ?, ?, ?, 1, 299.99, 0, 45, 344.99)",
+          )
+          .run(
+            demoSerializedRow?.id ?? demoSerializedProduct.id,
+            demoSerializedProduct.code,
+            demoSerializedProduct.name,
+            JSON.stringify([demoSerializedProduct.soldSerialNumber]),
+          );
+        this.db
+          .prepare(
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES ('payment-004', 'txn-004', 'CASH', 'Cash', 'CASH', 344.99, 'CASH-POS-ACC-0004', ?)",
+          )
+          .run(completedAt);
+      }
+
+      if (
+        shouldSeedInitialData &&
+        shouldSeedDemoSyncQueues &&
+        this.scalar("SELECT count(*) AS value FROM sync_outbox") === 0
+      ) {
+        const outboxEvents = [
+          [
+            "outbox-001",
+            "posTransaction",
+            "txn-002",
+            "pos.transaction.completed",
+            "PENDING",
+            "POS-ACC-0002",
+          ],
+          [
+            "outbox-002",
+            "inventoryLedgerEntry",
+            "txn-002",
+            "inventory.ledger.recorded",
+            "IN_FLIGHT",
+            "POS-ACC-0002",
+          ],
+          [
+            "outbox-003",
+            "posTransaction",
+            "txn-001",
+            "pos.transaction.completed",
+            "FAILED",
+            "POS-ACC-0001",
+          ],
+        ] as const;
+
+        for (const event of outboxEvents) {
+          this.db
+            .prepare(
+              "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)",
+            )
+            .run(
+              event[0],
+              ENTERPRISE_NODE_CODE,
+              event[1],
+              event[2],
+              event[3],
+              `${defaultStoreConfig.nodeCode}:${event[3]}:${event[5]}`,
+              JSON.stringify({ transactionNo: event[5] }),
+              event[4],
+              minutesAgo(40),
+              minutesAgo(12),
+            );
+        }
+      }
+
+      if (
+        shouldSeedInitialData &&
+        shouldSeedDemoSyncQueues &&
+        this.scalar("SELECT count(*) AS value FROM sync_inbox") === 0
+      ) {
+        const inboxEvents = [
+          ["inbox-001", "product", "catalog.product.published", "RECEIVED"],
+          [
+            "inbox-002",
+            "priceList",
+            "pricing.price-list.published",
+            "RECEIVED",
+          ],
+          ["inbox-003", "role", "security.role.published", "DEAD_LETTER"],
+        ] as const;
+
+        for (const event of inboxEvents) {
+          this.db
+            .prepare(
+              "INSERT INTO sync_inbox (id, source_node_code, aggregate_type, aggregate_id, event_type, payload_json, status, received_at, applied_at, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              event[0],
+              ENTERPRISE_NODE_CODE,
+              event[1],
+              `${event[1]}-seed`,
+              event[2],
+              JSON.stringify({ seeded: true }),
+              event[3],
+              minutesAgo(35),
+              null,
+              event[3] === "DEAD_LETTER"
+                ? "Policy version mismatch on the previous apply."
+                : null,
+            );
+        }
+      }
+
+      if (shouldSeedInitialData && shouldSeedDemoSyncQueues) {
+        this.db
+          .prepare(
+            "INSERT INTO sync_checkpoint (remote_node_code, last_event_id, last_received_cursor, last_received_at, last_applied_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(remote_node_code) DO UPDATE SET last_event_id = excluded.last_event_id, last_received_cursor = excluded.last_received_cursor, last_received_at = excluded.last_received_at, last_applied_at = excluded.last_applied_at",
+          )
+          .run(
+            ENTERPRISE_NODE_CODE,
+            "enterprise-event-seed",
+            "cursor-seed-001",
+            minutesAgo(43),
+            minutesAgo(43),
+          );
+      }
+
+      if (
+        shouldSeedInitialData &&
+        shouldSeedDemoSyncQueues &&
+        this.scalar("SELECT count(*) AS value FROM sync_run_log") === 0
+      ) {
+        this.insertRunLog({
+          runKind: "SYNC_CYCLE",
+          result: "SUCCESS",
+          summary:
+            "Applied 1 downstream packet and acknowledged 2 upstream events during an earlier store cycle.",
+          upstreamProcessed: 2,
+          downstreamApplied: 1,
+          startedAt: minutesAgo(92),
+          finishedAt: minutesAgo(91),
+        });
+        this.insertRunLog({
+          runKind: "RECOVERY",
+          result: "WARNING",
+          summary:
+            "A role publication failed and was parked for operator review.",
+          upstreamProcessed: 0,
+          downstreamApplied: 0,
+          startedAt: minutesAgo(36),
+          finishedAt: minutesAgo(35),
+        });
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM inventory_location_snapshot",
+        ) === 0
+      ) {
+        for (const location of defaultInventoryLocations) {
+          this.db
+            .prepare(
+              "INSERT INTO inventory_location_snapshot (id, location_code, location_name, location_type, status, defaults, is_sales_default, is_sales_order_default, is_receiving_default, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              location.id,
+              location.code,
+              location.name,
+              location.locationType,
+              location.status,
+              location.defaults,
+              location.isSalesDefault,
+              location.isSalesOrderDefault,
+              location.isReceivingDefault,
+              minutesAgo(18),
+            );
+        }
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM inventory_location_balance",
+        ) === 0
+      ) {
+        const seededAt = minutesAgo(18);
+        const products = this.db
+          .prepare(
+            "SELECT id, product_code, product_name, unit_price, quantity_on_hand FROM product_snapshot ORDER BY product_code ASC",
+          )
+          .all() as ProductRow[];
+
+        for (const product of products) {
+          const productCode =
+            product.product_code as keyof typeof defaultLocationBalanceMatrix;
+          const templateBalances = defaultLocationBalanceMatrix[productCode];
+          const currentQuantity = Number(
+            asNumber(product.quantity_on_hand).toFixed(3),
+          );
+
+          if (!templateBalances) {
+            const fallbackLocationCode =
+              this.getDefaultSalesLocationCode() ??
+              defaultInventoryLocations[0].code;
+            this.db
+              .prepare(
+                "INSERT INTO inventory_location_balance (location_code, product_code, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?)",
+              )
+              .run(
+                fallbackLocationCode,
+                product.product_code,
+                currentQuantity,
+                seededAt,
+              );
+            continue;
+          }
+
+          const templateEntries = Object.entries(templateBalances);
+          const templateTotal = templateEntries.reduce(
+            (sum, [, quantityOnHand]) => sum + quantityOnHand,
+            0,
+          );
+          let remainingQuantity = currentQuantity;
+
+          templateEntries.forEach(([locationCode, templateQuantity], index) => {
+            const quantityOnHand =
+              index === templateEntries.length - 1
+                ? Number(remainingQuantity.toFixed(3))
+                : Number(
+                    (
+                      (currentQuantity * templateQuantity) /
+                      templateTotal
+                    ).toFixed(3),
+                  );
+
+            remainingQuantity = Number(
+              (remainingQuantity - quantityOnHand).toFixed(3),
+            );
+
+            this.db
+              .prepare(
+                "INSERT INTO inventory_location_balance (location_code, product_code, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?)",
+              )
+              .run(
+                locationCode,
+                product.product_code,
+                quantityOnHand,
+                seededAt,
+              );
+          });
+        }
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM inventory_location_balance WHERE product_code = ?",
+          demoSerializedProduct.code,
+        ) === 0
+      ) {
+        const seededAt = minutesAgo(17);
+        const templateEntries = Object.entries(
+          defaultLocationBalanceMatrix[demoSerializedProduct.code],
+        );
+        const templateTotal = templateEntries.reduce(
+          (sum, [, quantityOnHand]) => sum + quantityOnHand,
+          0,
+        );
+        let remainingQuantity: number = demoSerializedProduct.quantityOnHand;
+
+        templateEntries.forEach(([locationCode, templateQuantity], index) => {
+          const quantityOnHand =
+            index === templateEntries.length - 1
+              ? Number(remainingQuantity.toFixed(3))
+              : Number(
+                  (
+                    (demoSerializedProduct.quantityOnHand * templateQuantity) /
+                    templateTotal
+                  ).toFixed(3),
+                );
+
+          remainingQuantity = Number(
+            (remainingQuantity - quantityOnHand).toFixed(3),
+          );
+
+          this.db
+            .prepare(
+              "INSERT INTO inventory_location_balance (location_code, product_code, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?)",
+            )
+            .run(
+              locationCode,
+              demoSerializedProduct.code,
+              quantityOnHand,
+              seededAt,
+            );
+        });
+      }
+
+      if (
+        this.scalar(
+          "SELECT count(*) AS value FROM serial_registry WHERE product_code = ?",
+          demoSerializedProduct.code,
+        ) === 0
+      ) {
+        const seededAt = minutesAgo(17);
+        const salesLocationCode = defaultInventoryLocations[0].code;
+
+        this.upsertSerialRegistryEntry({
+          productCode: demoSerializedProduct.code,
+          serialNumber: demoSerializedProduct.soldSerialNumber,
+          inventoryLocationCode: salesLocationCode,
+          status: "SOLD",
+          sourceTransactionId: "txn-004",
+          sourceTransactionNo: "POS-ACC-0004",
+          updatedAt: seededAt,
+        });
+
+        for (const serialNumber of demoSerializedProduct.availableSerialNumbers) {
+          this.upsertSerialRegistryEntry({
+            productCode: demoSerializedProduct.code,
+            serialNumber,
+            inventoryLocationCode: salesLocationCode,
+            status: "AVAILABLE",
+            sourceTransactionId: null,
+            sourceTransactionNo: null,
+            updatedAt: seededAt,
+          });
+        }
+      }
+
+      for (const department of demoProductHierarchy.departments) {
+        this.db
+          .prepare(
+            "INSERT INTO product_department_snapshot (id, department_code, department_name, description, status, sort_order, updated_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?) ON CONFLICT(department_code) DO UPDATE SET department_name = excluded.department_name, description = excluded.description, sort_order = excluded.sort_order, updated_at = excluded.updated_at",
+          )
+          .run(
+            department.id,
+            department.code,
+            department.name,
+            department.description,
+            department.sortOrder,
+            minutesAgo(19),
+          );
+      }
+
+      for (const category of demoProductHierarchy.categories) {
+        this.db
+          .prepare(
+            "INSERT INTO product_category_snapshot (id, category_code, category_name, department_code, department_name, description, status, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?) ON CONFLICT(category_code) DO UPDATE SET category_name = excluded.category_name, department_code = excluded.department_code, department_name = excluded.department_name, description = excluded.description, sort_order = excluded.sort_order, updated_at = excluded.updated_at",
+          )
+          .run(
+            category.id,
+            category.code,
+            category.name,
+            category.departmentCode,
+            category.departmentName,
+            category.description,
+            category.sortOrder,
+            minutesAgo(19),
+          );
+      }
+
+      for (const [productCode, assignment] of Object.entries(
+        demoProductHierarchy.productAssignments,
+      )) {
+        this.db
+          .prepare(
+            "UPDATE product_snapshot SET department_code = COALESCE(department_code, ?), category_code = COALESCE(category_code, ?), subcategory = COALESCE(subcategory, ?), updated_at = CASE WHEN department_code IS NULL OR category_code IS NULL OR subcategory IS NULL THEN ? ELSE updated_at END WHERE product_code = ?",
+          )
+          .run(
+            assignment.departmentCode,
+            assignment.categoryCode,
+            assignment.subcategory,
+            minutesAgo(18),
+            productCode,
+          );
+      }
+
+      this.setMetadata(
+        "transaction_sequence",
+        String(Math.max(4, asNumber(this.metadata("transaction_sequence")))),
+      );
+      this.setMetadata("seed_version", "flash-erp-store-v5");
+    });
+  }
+
+  private ensureCompatibleSchema() {
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS product_department_snapshot (id TEXT PRIMARY KEY, department_code TEXT NOT NULL UNIQUE, department_name TEXT NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS product_category_snapshot (id TEXT PRIMARY KEY, category_code TEXT NOT NULL UNIQUE, category_name TEXT NOT NULL, department_code TEXT NOT NULL, department_name TEXT NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_product_department_snapshot_sort ON product_department_snapshot(status, sort_order, department_name)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_product_category_snapshot_sort ON product_category_snapshot(department_code, status, sort_order, category_name)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS permission_snapshot (id TEXT PRIMARY KEY, permission_code TEXT NOT NULL, permission_name TEXT NOT NULL, description TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS role_snapshot (id TEXT PRIMARY KEY, role_code TEXT NOT NULL, role_name TEXT NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', permission_codes_json TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS retail_user_snapshot (id TEXT PRIMARY KEY, login_id TEXT NOT NULL, email TEXT, display_name TEXT NOT NULL, account_status TEXT NOT NULL, home_store_code TEXT, home_store_name TEXT, role_codes_json TEXT, role_names_json TEXT, permission_codes_json TEXT, password_hash TEXT, password_updated_at TEXT, cashier_eligible INTEGER NOT NULL DEFAULT 0, supervisor_eligible INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS operator_session (id TEXT PRIMARY KEY, retail_user_id TEXT NOT NULL, terminal_code TEXT, opened_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, closed_at TEXT, close_reason TEXT)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS customer (id TEXT PRIMARY KEY, customer_no TEXT NOT NULL, full_name TEXT NOT NULL, customer_type TEXT NOT NULL DEFAULT 'INDIVIDUAL', phone TEXT, email TEXT, home_store_code TEXT, home_store_name TEXT, address_line1 TEXT, city TEXT, country_code TEXT, loyalty_enrolled INTEGER NOT NULL DEFAULT 0, loyalty_tier TEXT, loyalty_points_balance INTEGER NOT NULL DEFAULT 0, allow_credit_sales INTEGER NOT NULL DEFAULT 0, credit_limit_amount NUMERIC, receivable_balance_amount NUMERIC NOT NULL DEFAULT 0, note TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', record_version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS transaction_reference_capture (id TEXT PRIMARY KEY, reference_value TEXT NOT NULL, normalized_reference TEXT NOT NULL UNIQUE, details TEXT, first_transaction_no TEXT, last_transaction_no TEXT, use_count INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS customer_account_entry (id TEXT PRIMARY KEY, entry_no TEXT NOT NULL UNIQUE, customer_id TEXT NOT NULL, customer_no TEXT NOT NULL, customer_name TEXT NOT NULL, entry_type TEXT NOT NULL, payment_method TEXT NOT NULL, tender_method_code TEXT, tender_method_name TEXT, amount NUMERIC NOT NULL, reference TEXT, note TEXT, shift_id TEXT NOT NULL, shift_no TEXT, cashier_code TEXT, synced_at TEXT, occurred_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS bank_account_snapshot (id TEXT PRIMARY KEY, bank_code TEXT NOT NULL, bank_name TEXT NOT NULL, branch_code TEXT NOT NULL, branch_name TEXT NOT NULL, account_number TEXT NOT NULL, account_name TEXT NOT NULL, currency_code TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE', updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS price_list_entry_snapshot (id TEXT PRIMARY KEY, price_list_code TEXT NOT NULL, price_list_name TEXT NOT NULL, currency_code TEXT NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, customer_type TEXT, loyalty_tier TEXT, product_code TEXT NOT NULL, unit_price NUMERIC NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ACTIVE', updated_at TEXT NOT NULL, UNIQUE(price_list_code, product_code))",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS promotion_snapshot (id TEXT PRIMARY KEY, promotion_code TEXT NOT NULL UNIQUE, promotion_name TEXT NOT NULL, description TEXT, discount_type TEXT NOT NULL, target_scope TEXT NOT NULL DEFAULT 'ALL_ITEMS', discount_value NUMERIC NOT NULL, minimum_basket_amount NUMERIC, minimum_line_quantity NUMERIC, buy_quantity NUMERIC, reward_quantity NUMERIC, target_department_code TEXT, target_category_code TEXT, target_product_code TEXT, eligible_store_codes_json TEXT, eligible_customer_types_json TEXT, eligible_loyalty_tiers_json TEXT, active_days_of_week_json TEXT, active_from_minutes INTEGER, active_to_minutes INTEGER, coupon_required INTEGER NOT NULL DEFAULT 0, coupon_code TEXT, allow_with_loyalty INTEGER NOT NULL DEFAULT 1, apply_once_per_basket INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 0, start_at TEXT, end_at TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_permission_snapshot_code ON permission_snapshot(permission_code COLLATE NOCASE)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_role_snapshot_code ON role_snapshot(role_code COLLATE NOCASE)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_retail_user_snapshot_login ON retail_user_snapshot(login_id COLLATE NOCASE)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_retail_user_snapshot_cashier ON retail_user_snapshot(cashier_eligible, display_name)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_retail_user_snapshot_supervisor ON retail_user_snapshot(supervisor_eligible, display_name)",
+    );
+    this.ensureColumn("operator_session", "terminal_code", "TEXT");
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_operator_session_open ON operator_session(terminal_code, closed_at, opened_at DESC)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_customer_no ON customer(customer_no COLLATE NOCASE)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_transaction_reference_capture_key ON transaction_reference_capture(normalized_reference)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_transaction_reference_capture_seen ON transaction_reference_capture(last_seen_at DESC)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_promotion_snapshot_code ON promotion_snapshot(promotion_code COLLATE NOCASE)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_price_list_entry_snapshot_product ON price_list_entry_snapshot(product_code, status, is_default)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_price_list_entry_snapshot_profile ON price_list_entry_snapshot(product_code, customer_type, loyalty_tier, status)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_promotion_snapshot_status_priority ON promotion_snapshot(status, priority, updated_at DESC)",
+    );
+    this.ensureColumn("promotion_snapshot", "minimum_line_quantity", "NUMERIC");
+    this.ensureColumn("promotion_snapshot", "buy_quantity", "NUMERIC");
+    this.ensureColumn("promotion_snapshot", "reward_quantity", "NUMERIC");
+    this.ensureColumn(
+      "promotion_snapshot",
+      "eligible_store_codes_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "promotion_snapshot",
+      "eligible_customer_types_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "promotion_snapshot",
+      "eligible_loyalty_tiers_json",
+      "TEXT",
+    );
+    this.ensureColumn("promotion_snapshot", "active_days_of_week_json", "TEXT");
+    this.ensureColumn("promotion_snapshot", "active_from_minutes", "INTEGER");
+    this.ensureColumn("promotion_snapshot", "active_to_minutes", "INTEGER");
+    this.ensureColumn(
+      "promotion_snapshot",
+      "coupon_required",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("promotion_snapshot", "coupon_code", "TEXT");
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_customer_account_entry_occurred_at ON customer_account_entry(occurred_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_customer_account_entry_customer ON customer_account_entry(customer_id, occurred_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_customer_account_entry_synced ON customer_account_entry(synced_at, occurred_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_bank_account_snapshot_status ON bank_account_snapshot(status, bank_name, branch_name)",
+    );
+    this.ensureColumn("tender_method_snapshot", "gateway_provider", "TEXT");
+    this.ensureColumn("tender_method_snapshot", "gateway_mode", "TEXT");
+    this.ensureColumn("tender_method_snapshot", "gateway_merchant_id", "TEXT");
+    this.ensureColumn("tender_method_snapshot", "gateway_public_key", "TEXT");
+    this.ensureColumn("tender_method_snapshot", "gateway_callback_url", "TEXT");
+    this.ensureColumn(
+      "tender_method_snapshot",
+      "gateway_active",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "tender_method_snapshot",
+      "gateway_status",
+      "TEXT NOT NULL DEFAULT 'DISABLED'",
+    );
+    this.ensureColumn("tender_method_snapshot", "published_at", "TEXT");
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS serial_registry (id TEXT PRIMARY KEY, product_code TEXT NOT NULL, serial_number TEXT NOT NULL, inventory_location_code TEXT, status TEXT NOT NULL DEFAULT 'AVAILABLE', source_transaction_id TEXT, source_transaction_no TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_serial_registry_product_serial ON serial_registry(product_code, serial_number COLLATE NOCASE)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_serial_registry_status ON serial_registry(product_code, status, inventory_location_code, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS purchase_order_snapshot (id TEXT PRIMARY KEY, purchase_order_no TEXT NOT NULL UNIQUE, status TEXT NOT NULL, inventory_location_code TEXT NOT NULL, inventory_location_name TEXT NOT NULL, supplier_no TEXT, supplier_name TEXT, external_reference TEXT, note TEXT, operator_name TEXT, ordered_quantity NUMERIC NOT NULL DEFAULT 0, received_quantity NUMERIC NOT NULL DEFAULT 0, exception_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_quantity NUMERIC NOT NULL DEFAULT 0, committed_at TEXT, closed_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS purchase_order_line_snapshot (id TEXT PRIMARY KEY, purchase_order_id TEXT NOT NULL, line_no INTEGER NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, department_code TEXT, category_code TEXT, subcategory TEXT, is_serialized INTEGER NOT NULL DEFAULT 0, ordered_quantity NUMERIC NOT NULL, received_quantity NUMERIC NOT NULL DEFAULT 0, exception_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_quantity NUMERIC NOT NULL DEFAULT 0, unit_cost NUMERIC, updated_at TEXT NOT NULL, UNIQUE (purchase_order_id, line_no))",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS local_goods_receipt (id TEXT PRIMARY KEY, goods_receipt_no TEXT NOT NULL UNIQUE, purchase_order_id TEXT, purchase_order_no TEXT, inventory_location_code TEXT NOT NULL, supplier_no TEXT, supplier_name TEXT, external_reference TEXT, note TEXT, operator_name TEXT NOT NULL, total_quantity NUMERIC NOT NULL, exception_quantity NUMERIC NOT NULL DEFAULT 0, synced_at TEXT, received_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS local_goods_receipt_line (id TEXT PRIMARY KEY, local_goods_receipt_id TEXT NOT NULL, purchase_order_line_id TEXT, line_no INTEGER NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, quantity NUMERIC NOT NULL, unit_cost NUMERIC, serial_numbers_json TEXT, updated_at TEXT NOT NULL, UNIQUE (local_goods_receipt_id, line_no))",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS local_goods_receipt_exception (id TEXT PRIMARY KEY, local_goods_receipt_id TEXT NOT NULL, purchase_order_line_id TEXT, line_no INTEGER NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, quantity NUMERIC NOT NULL, unit_cost NUMERIC, reason TEXT NOT NULL, note TEXT, updated_at TEXT NOT NULL, UNIQUE (local_goods_receipt_id, line_no))",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS local_supplier_return (id TEXT PRIMARY KEY, supplier_return_no TEXT NOT NULL UNIQUE, purchase_order_id TEXT, purchase_order_no TEXT, goods_receipt_id TEXT NOT NULL, goods_receipt_no TEXT NOT NULL, inventory_location_code TEXT NOT NULL, supplier_no TEXT NOT NULL, supplier_name TEXT NOT NULL, external_reference TEXT, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'POSTED', note TEXT, operator_name TEXT NOT NULL, total_quantity NUMERIC NOT NULL, synced_at TEXT, returned_at TEXT NOT NULL, cancelled_at TEXT, cancellation_note TEXT, cancellation_operator_name TEXT, cancellation_acknowledged_at TEXT, cancellation_acknowledged_by TEXT, cancellation_acknowledgement_note TEXT, cancellation_ack_synced_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS local_supplier_return_line (id TEXT PRIMARY KEY, local_supplier_return_id TEXT NOT NULL, goods_receipt_line_id TEXT, purchase_order_line_id TEXT, line_no INTEGER NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, quantity NUMERIC NOT NULL, unit_cost NUMERIC, serial_numbers_json TEXT, updated_at TEXT NOT NULL, UNIQUE (local_supplier_return_id, line_no))",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS inter_store_transfer_snapshot (id TEXT PRIMARY KEY, transfer_no TEXT NOT NULL UNIQUE, transfer_batch_no TEXT, line_no INTEGER NOT NULL DEFAULT 1, role TEXT NOT NULL, origin TEXT NOT NULL, status TEXT NOT NULL, external_reference TEXT, source_store_code TEXT NOT NULL, source_store_name TEXT NOT NULL, source_location_code TEXT NOT NULL, source_location_name TEXT NOT NULL, destination_store_code TEXT NOT NULL, destination_store_name TEXT NOT NULL, destination_location_code TEXT NOT NULL, destination_location_name TEXT NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, department_code TEXT, category_code TEXT, subcategory TEXT, is_serialized INTEGER NOT NULL DEFAULT 0, requested_quantity NUMERIC NOT NULL DEFAULT 0, issued_quantity NUMERIC NOT NULL DEFAULT 0, received_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_issue_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_receipt_quantity NUMERIC NOT NULL DEFAULT 0, unit_cost NUMERIC, issued_serial_numbers_json TEXT, received_serial_numbers_json TEXT, request_note TEXT, issue_note TEXT, receipt_note TEXT, request_operator_name TEXT, issue_operator_name TEXT, receipt_operator_name TEXT, requested_by_node_code TEXT, source_node_code TEXT, destination_node_code TEXT, requested_at TEXT NOT NULL, required_at TEXT, issued_at TEXT, received_at TEXT, closed_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS inter_store_transfer_request_target_snapshot (source_location_code TEXT PRIMARY KEY, source_store_code TEXT NOT NULL, source_store_name TEXT NOT NULL, source_store_sales_enabled INTEGER NOT NULL DEFAULT 1, source_store_warehouse_enabled INTEGER NOT NULL DEFAULT 1, source_location_name TEXT NOT NULL, source_location_type TEXT NOT NULL, source_location_status TEXT NOT NULL, source_location_defaults TEXT NOT NULL, source_warehouse_code TEXT, source_warehouse_name TEXT, use_for_sales_default INTEGER NOT NULL DEFAULT 0, use_for_receiving_default INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS inter_store_transfer_request_draft (id TEXT PRIMARY KEY, request_no TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'DRAFT', source_store_code TEXT NOT NULL, source_store_name TEXT NOT NULL, source_location_code TEXT NOT NULL, source_location_name TEXT NOT NULL, destination_store_code TEXT NOT NULL, destination_store_name TEXT NOT NULL, destination_location_code TEXT NOT NULL, destination_location_name TEXT NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, department_code TEXT, category_code TEXT, subcategory TEXT, is_serialized INTEGER NOT NULL DEFAULT 0, quantity NUMERIC NOT NULL, external_reference TEXT, note TEXT, operator_name TEXT NOT NULL, submitted_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS stock_count_session (id TEXT PRIMARY KEY, session_no TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'DRAFT', inventory_location_code TEXT NOT NULL, inventory_location_name TEXT NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, department_code TEXT, category_code TEXT, subcategory TEXT, is_serialized INTEGER NOT NULL DEFAULT 0, previous_quantity NUMERIC NOT NULL, counted_quantity NUMERIC NOT NULL, variance_quantity NUMERIC NOT NULL, previous_serial_numbers_json TEXT, counted_serial_numbers_json TEXT, note TEXT, operator_name TEXT NOT NULL, submitted_at TEXT, committed_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS sales_order (id TEXT PRIMARY KEY, order_no TEXT NOT NULL UNIQUE, source_transaction_id TEXT NOT NULL, source_transaction_no TEXT NOT NULL, customer_id TEXT, customer_no TEXT, customer_name TEXT, status TEXT NOT NULL DEFAULT 'OPEN', total_amount NUMERIC NOT NULL, operator_name TEXT, note TEXT, fulfilled_transaction_id TEXT, fulfilled_transaction_no TEXT, synced_at TEXT, created_at TEXT NOT NULL, fulfilled_at TEXT, cancelled_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS eod_reconciliation (id TEXT PRIMARY KEY, reconciliation_no TEXT NOT NULL UNIQUE, shift_id TEXT NOT NULL, shift_no TEXT NOT NULL, cashier_code TEXT NOT NULL, expected_cash_amount NUMERIC NOT NULL, declared_cash_amount NUMERIC NOT NULL, variance_amount NUMERIC NOT NULL, net_sales_amount NUMERIC NOT NULL, cash_tendered_amount NUMERIC NOT NULL, non_cash_tendered_amount NUMERIC NOT NULL, transaction_count INTEGER NOT NULL DEFAULT 0, operator_name TEXT, note TEXT, synced_at TEXT, reconciled_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS banking_deposit (id TEXT PRIMARY KEY, deposit_no TEXT NOT NULL UNIQUE, reconciliation_id TEXT NOT NULL, reconciliation_no TEXT NOT NULL, shift_id TEXT NOT NULL, shift_no TEXT NOT NULL, amount NUMERIC NOT NULL, bank_name TEXT, reference TEXT, operator_name TEXT, note TEXT, synced_at TEXT, deposited_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_purchase_order_snapshot_status ON purchase_order_snapshot(status, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_purchase_order_line_snapshot_order ON purchase_order_line_snapshot(purchase_order_id, line_no)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_local_goods_receipt_received_at ON local_goods_receipt(received_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_local_goods_receipt_exception_receipt ON local_goods_receipt_exception(local_goods_receipt_id, line_no)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_local_supplier_return_returned_at ON local_supplier_return(returned_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_local_supplier_return_goods_receipt ON local_supplier_return(goods_receipt_id, returned_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_inter_store_transfer_snapshot_role_status ON inter_store_transfer_snapshot(role, status, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_inter_store_transfer_snapshot_location ON inter_store_transfer_snapshot(source_location_code, destination_location_code, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_inter_store_transfer_request_target_store ON inter_store_transfer_request_target_snapshot(source_store_name, source_location_name)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_inter_store_transfer_request_draft_status ON inter_store_transfer_request_draft(status, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_stock_count_session_status ON stock_count_session(status, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_stock_count_session_location_product ON stock_count_session(inventory_location_code, product_code, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sales_order_status ON sales_order(status, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sales_order_source_transaction ON sales_order(source_transaction_id)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_synced ON eod_reconciliation(synced_at, reconciled_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_banking_deposit_reconciliation ON banking_deposit(reconciliation_id, deposited_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_banking_deposit_synced ON banking_deposit(synced_at, deposited_at DESC)",
+    );
+    this.ensureColumn("sync_outbox", "last_attempt_at", "TEXT");
+    this.ensureColumn("sync_outbox", "next_retry_at", "TEXT");
+    this.ensureColumn("sync_outbox", "failure_kind", "TEXT");
+    this.ensureColumn("sync_outbox", "last_http_status", "INTEGER");
+    this.ensureColumn("sync_outbox", "sync_run_id", "TEXT");
+    this.ensureColumn("sync_outbox", "acknowledged_at", "TEXT");
+    this.ensureColumn(
+      "sync_outbox",
+      "record_version",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn("sync_outbox", "error_message", "TEXT");
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_outbox_retry ON sync_outbox(status, next_retry_at, created_at)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_outbox_status_updated ON sync_outbox(status, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_outbox_acknowledged ON sync_outbox(acknowledged_at, updated_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_outbox_recent_updated ON sync_outbox(COALESCE(acknowledged_at, last_attempt_at, updated_at, created_at) DESC)",
+    );
+    this.ensureColumn("sync_inbox", "acknowledged_at", "TEXT");
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_inbox_status_updated ON sync_inbox(status, received_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_inbox_acknowledged ON sync_inbox(acknowledged_at, received_at)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sync_inbox_recent_updated ON sync_inbox(COALESCE(acknowledged_at, applied_at, received_at) DESC)",
+    );
+    this.ensureColumn("purchase_order_snapshot", "closure_reason", "TEXT");
+    this.ensureColumn("purchase_order_snapshot", "closure_note", "TEXT");
+    this.ensureColumn(
+      "purchase_order_snapshot",
+      "closure_operator_name",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "purchase_order_snapshot",
+      "exception_quantity",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "local_supplier_return",
+      "status",
+      "TEXT NOT NULL DEFAULT 'POSTED'",
+    );
+    this.ensureColumn("local_supplier_return", "cancelled_at", "TEXT");
+    this.ensureColumn("local_supplier_return", "cancellation_note", "TEXT");
+    this.ensureColumn(
+      "local_supplier_return",
+      "cancellation_operator_name",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "local_supplier_return",
+      "cancellation_acknowledged_at",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "local_supplier_return",
+      "cancellation_acknowledged_by",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "local_supplier_return",
+      "cancellation_acknowledgement_note",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "local_supplier_return",
+      "cancellation_ack_synced_at",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "purchase_order_line_snapshot",
+      "exception_quantity",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "local_goods_receipt",
+      "exception_quantity",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "inter_store_transfer_snapshot",
+      "transfer_batch_no",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "inter_store_transfer_snapshot",
+      "line_no",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn("inter_store_transfer_snapshot", "required_at", "TEXT");
+    this.ensureColumn(
+      "customer",
+      "customer_type",
+      "TEXT NOT NULL DEFAULT 'INDIVIDUAL'",
+    );
+    this.ensureColumn("customer", "home_store_code", "TEXT");
+    this.ensureColumn("customer", "home_store_name", "TEXT");
+    this.ensureColumn("customer", "address_line1", "TEXT");
+    this.ensureColumn("customer", "city", "TEXT");
+    this.ensureColumn("customer", "country_code", "TEXT");
+    this.ensureColumn(
+      "customer",
+      "loyalty_enrolled",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("customer", "loyalty_tier", "TEXT");
+    this.ensureColumn(
+      "customer",
+      "loyalty_points_balance",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "customer",
+      "allow_credit_sales",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("customer", "credit_limit_amount", "NUMERIC");
+    this.ensureColumn(
+      "customer",
+      "receivable_balance_amount",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("customer", "note", "TEXT");
+    this.ensureColumn("customer", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'");
+    this.ensureColumn("product_snapshot", "short_name", "TEXT");
+    this.ensureColumn(
+      "product_snapshot",
+      "product_type",
+      "TEXT NOT NULL DEFAULT 'STANDARD'",
+    );
+    this.ensureColumn("product_snapshot", "description", "TEXT");
+    this.ensureColumn("product_snapshot", "primary_image_url", "TEXT");
+    this.ensureColumn("product_snapshot", "department_code", "TEXT");
+    this.ensureColumn("product_snapshot", "category_code", "TEXT");
+    this.ensureColumn("product_snapshot", "subcategory", "TEXT");
+    this.ensureColumn(
+      "product_snapshot",
+      "unit_of_measure",
+      "TEXT NOT NULL DEFAULT 'EA'",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "taxable",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn("product_snapshot", "tax_profile_code", "TEXT");
+    this.ensureColumn("product_snapshot", "tax_profile_name", "TEXT");
+    this.ensureColumn("product_snapshot", "tax_rate_percent", "NUMERIC");
+    this.ensureColumn(
+      "product_snapshot",
+      "tax_inclusive",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "track_inventory",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "is_serialized",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "track_size",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "track_color",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "must_enter_price_at_pos",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("product_snapshot", "min_stock_level", "NUMERIC");
+    this.ensureColumn("product_snapshot", "reorder_point", "NUMERIC");
+    this.ensureColumn("product_snapshot", "safety_stock_level", "NUMERIC");
+    this.ensureColumn(
+      "product_snapshot",
+      "catalog_membership_active",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn("product_snapshot", "catalog_sort_order", "INTEGER");
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS product_variant_snapshot (id TEXT PRIMARY KEY, product_code TEXT NOT NULL, variant_code TEXT NOT NULL UNIQUE, sku TEXT, display_name TEXT, unit_price NUMERIC NOT NULL DEFAULT 0, quantity_on_hand NUMERIC NOT NULL DEFAULT 0, barcode TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', attributes_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_product_variant_product ON product_variant_snapshot(product_code)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_product_variant_barcode ON product_variant_snapshot(barcode)",
+    );
+    this.ensureColumn("retail_user_snapshot", "password_hash", "TEXT");
+    this.ensureColumn("retail_user_snapshot", "password_updated_at", "TEXT");
+    this.ensureColumn(
+      "inventory_location_snapshot",
+      "is_sales_order_default",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.db.exec(
+      "UPDATE inventory_location_snapshot SET is_sales_order_default = is_sales_default WHERE is_sales_order_default = 0 AND is_sales_default = 1",
+    );
+    this.ensureColumn("pos_transaction", "cashier_code", "TEXT");
+    this.ensureColumn("pos_transaction", "source_transaction_id", "TEXT");
+    this.ensureColumn("pos_transaction", "source_transaction_no", "TEXT");
+    this.ensureColumn("pos_transaction", "header_reference", "TEXT");
+    this.ensureColumn("pos_transaction", "additional_details", "TEXT");
+    this.ensureColumn(
+      "pos_transaction",
+      "loyalty_redemption_points",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "pos_transaction",
+      "loyalty_redemption_amount",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "pos_transaction_line",
+      "line_intent",
+      "TEXT NOT NULL DEFAULT 'SALE'",
+    );
+    this.ensureColumn("pos_transaction_line", "source_line_id", "TEXT");
+    this.ensureColumn("pos_transaction_line", "inventory_location_code", "TEXT");
+    this.ensureColumn(
+      "pos_transaction_line",
+      "product_variant_code_snapshot",
+      "TEXT",
+    );
+    this.ensureColumn("pos_transaction_line", "variant_size", "TEXT");
+    this.ensureColumn("pos_transaction_line", "variant_color", "TEXT");
+    this.ensureColumn(
+      "pos_transaction_line",
+      "variant_attributes_snapshot",
+      "TEXT",
+    );
+    this.ensureColumn("pos_transaction_line", "line_note", "TEXT");
+    this.ensureColumn("pos_transaction_line", "applied_promotion_code", "TEXT");
+    this.ensureColumn("pos_transaction_line", "applied_promotion_name", "TEXT");
+    this.ensureColumn("pos_transaction_line", "serial_numbers_json", "TEXT");
+    this.ensureColumn(
+      "pos_transaction_line",
+      "manual_price_override",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "pos_transaction_line",
+      "manual_discount_override",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "sales_order",
+      "deposit_amount",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "sales_order",
+      "balance_amount",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("sales_order", "deposit_tender_method_code", "TEXT");
+    this.ensureColumn("sales_order", "deposit_tender_method_name", "TEXT");
+    this.ensureColumn("sales_order", "deposit_payment_method", "TEXT");
+    this.ensureColumn("sales_order", "deposit_reference", "TEXT");
+    this.ensureColumn("sales_order", "deposit_paid_at", "TEXT");
+    this.db.exec(
+      "UPDATE sales_order SET balance_amount = total_amount WHERE balance_amount = 0 AND status = 'OPEN'",
+    );
+    this.ensureColumn("pos_payment", "tender_method_code", "TEXT");
+    this.ensureColumn("pos_payment", "tender_method_name", "TEXT");
+    this.ensureColumn("pos_payment", "bank_account_id", "TEXT");
+    this.ensureColumn("pos_payment", "bank_code", "TEXT");
+    this.ensureColumn("pos_payment", "bank_name", "TEXT");
+    this.ensureColumn("pos_payment", "bank_branch_code", "TEXT");
+    this.ensureColumn("pos_payment", "bank_branch_name", "TEXT");
+    this.ensureColumn("pos_payment", "bank_account_number", "TEXT");
+    this.ensureColumn("pos_payment", "bank_account_name", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_account_id", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_code", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_name", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_branch_code", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_branch_name", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_account_number", "TEXT");
+    this.ensureColumn("customer_account_entry", "bank_account_name", "TEXT");
+    this.ensureColumn("banking_deposit", "bank_account_id", "TEXT");
+    this.ensureColumn("banking_deposit", "bank_code", "TEXT");
+    this.ensureColumn("banking_deposit", "bank_branch_code", "TEXT");
+    this.ensureColumn("banking_deposit", "bank_branch_name", "TEXT");
+    this.ensureColumn("banking_deposit", "bank_account_number", "TEXT");
+    this.ensureColumn("banking_deposit", "bank_account_name", "TEXT");
+    this.ensureColumn(
+      "sync_recovery_task",
+      "replacement_aggregate_type",
+      "TEXT",
+    );
+    this.ensureColumn("sync_recovery_task", "replacement_aggregate_id", "TEXT");
+    this.ensureColumn("sync_recovery_task", "replacement_event_type", "TEXT");
+    this.ensureColumn(
+      "sync_recovery_task",
+      "replacement_record_version",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn("sync_recovery_task", "replacement_payload_json", "TEXT");
+  }
+
+  private getHealth(
+    queueMetrics: StoreSyncSnapshot["queueMetrics"],
+    lastSyncAt: string | null,
+    standalone = false,
+  ): StoreSyncHealth {
+    if (standalone) {
+      if (queueMetrics.deadLetter > 0) {
+        return "attention";
+      }
+
+      if (
+        queueMetrics.upstreamQueued > 0 ||
+        queueMetrics.downstreamQueued > 0 ||
+        queueMetrics.upstreamInFlight > 0
+      ) {
+        return "lagging";
+      }
+
+      return "healthy";
+    }
+
+    const lastSyncMinutes = minutesSince(lastSyncAt);
+
+    if (
+      queueMetrics.deadLetter > 0 ||
+      lastSyncMinutes >= 120 ||
+      queueMetrics.upstreamQueued >= 6 ||
+      queueMetrics.downstreamQueued >= 5
+    ) {
+      return "attention";
+    }
+
+    if (
+      lastSyncMinutes >= 30 ||
+      queueMetrics.upstreamQueued >= 3 ||
+      queueMetrics.downstreamQueued >= 2 ||
+      queueMetrics.upstreamInFlight >= 2
+    ) {
+      return "lagging";
+    }
+
+    return "healthy";
+  }
+
+  private buildActivityFeed(input: {
+    queueMetrics: StoreSyncSnapshot["queueMetrics"];
+    openRecoveryTasks: number;
+    activeDepartments: number;
+    activeCategories: number;
+    lastSyncAt: string | null;
+    health: StoreSyncHealth;
+  }) {
+    const standalone = this.isStandaloneDeployment();
+    const enterpriseSyncUrlMissing = !standalone && !this.syncBaseUrl;
+    const goodsReceiptUnacknowledgedCount = this.scalar(
+      "SELECT count(*) AS value FROM local_goods_receipt WHERE synced_at IS NULL",
+    );
+    const customerAccountUnacknowledgedCount = this.scalar(
+      "SELECT count(*) AS value FROM customer_account_entry WHERE synced_at IS NULL",
+    );
+    const eodUnacknowledgedCount = this.scalar(
+      "SELECT count(*) AS value FROM eod_reconciliation WHERE synced_at IS NULL",
+    );
+    const bankingUnacknowledgedCount = this.scalar(
+      "SELECT count(*) AS value FROM banking_deposit WHERE synced_at IS NULL",
+    );
+    const items = [
+      enterpriseSyncUrlMissing
+        ? "HQ Managed mode is selected, but no HQ sync URL is configured. Upload/download sync is blocked until Desktop setup is corrected and the desktop is restarted."
+        : null,
+      standalone
+        ? `${input.queueMetrics.upstreamQueued} local queue item(s) are waiting for standalone review.`
+        : `${input.queueMetrics.upstreamQueued} upstream event(s) are waiting to publish from the store node.`,
+      standalone
+        ? `${input.queueMetrics.downstreamQueued} local inbound packet(s) are ready to apply.`
+        : `${input.queueMetrics.downstreamQueued} downstream packet(s) are ready to apply locally.`,
+      `${input.activeDepartments} active department(s) and ${input.activeCategories} active category(s) are hydrated into the local catalog hierarchy.`,
+      input.openRecoveryTasks > 0
+        ? `${input.openRecoveryTasks} enterprise task(s) are waiting for store follow-up.`
+        : standalone
+          ? "No standalone recovery tasks are currently waiting for this desktop."
+          : "No enterprise tasks are currently waiting for this desktop.",
+      goodsReceiptUnacknowledgedCount > 0
+        ? standalone
+          ? `${goodsReceiptUnacknowledgedCount} local goods receipt(s) are posted in standalone reports.`
+          : `${goodsReceiptUnacknowledgedCount} local goods receipt(s) are still waiting for enterprise acknowledgement.`
+        : standalone
+          ? "No standalone goods receipts are waiting for follow-up."
+          : "All locally posted goods receipts have already been acknowledged by enterprise.",
+      customerAccountUnacknowledgedCount > 0
+        ? standalone
+          ? `${customerAccountUnacknowledgedCount} customer account payment(s) are posted in standalone receivables.`
+          : `${customerAccountUnacknowledgedCount} customer account payment(s) are still waiting for enterprise acknowledgement.`
+        : standalone
+          ? "No standalone customer account payments are waiting for follow-up."
+          : "All locally collected customer account payments have already been acknowledged by enterprise.",
+      this.scalar(
+        "SELECT count(*) AS value FROM sales_order WHERE status = 'OPEN'",
+      ) > 0
+        ? `${this.scalar("SELECT count(*) AS value FROM sales_order WHERE status = 'OPEN'")} local sales order(s) are waiting for fulfilment.`
+        : "No local sales orders are currently waiting for fulfilment.",
+      eodUnacknowledgedCount > 0
+        ? standalone
+          ? `${eodUnacknowledgedCount} EOD reconciliation record(s) are posted in standalone closeout history.`
+          : `${eodUnacknowledgedCount} EOD reconciliation record(s) are waiting for enterprise acknowledgement.`
+        : standalone
+          ? "No standalone EOD reconciliation records are waiting for follow-up."
+          : "All local EOD reconciliation records have already been acknowledged by enterprise.",
+      bankingUnacknowledgedCount > 0
+        ? standalone
+          ? `${bankingUnacknowledgedCount} banking deposit record(s) are posted in standalone banking history.`
+          : `${bankingUnacknowledgedCount} banking deposit record(s) are waiting for enterprise acknowledgement.`
+        : standalone
+          ? "No standalone banking deposits are waiting for follow-up."
+          : "All local banking deposit records have already been acknowledged by enterprise.",
+      this.scalar(
+        "SELECT count(*) AS value FROM stock_count_session WHERE status IN ('DRAFT', 'SUBMITTED')",
+      ) > 0
+        ? `${this.scalar("SELECT count(*) AS value FROM stock_count_session WHERE status IN ('DRAFT', 'SUBMITTED')")} local stock count session(s) are still waiting for submission or commit.`
+        : "No local stock count sessions are currently waiting for follow-up.",
+      input.queueMetrics.deadLetter > 0
+        ? `${input.queueMetrics.deadLetter} dead-letter item(s) need review before they can move again.`
+        : "No dead-letter items are currently blocking the local queue.",
+    ].filter((item): item is string => Boolean(item));
+
+    if (enterpriseSyncUrlMissing) {
+      items.push("Open Desktop setup, enter the HQ application URL, save, and restart before retrying sync.");
+    } else if (input.health === "attention") {
+      items.push(
+        `The node needs attention because the last confirmed sync is ${minutesSince(input.lastSyncAt)} minute(s) old.`,
+      );
+    } else if (input.health === "lagging") {
+      items.push(
+        "The node is still operational, but queue pressure is starting to climb.",
+      );
+    } else {
+      items.push(
+        "The local store is healthy and can continue selling through network interruptions.",
+      );
+    }
+
+    return items;
+  }
+
+  private getProductDepartmentSummaries(): StoreProductDepartmentSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          department.department_code AS department_code,
+          department.department_name AS department_name,
+          department.description AS description,
+          department.status AS status,
+          department.sort_order AS sort_order,
+          department.updated_at AS updated_at,
+          COUNT(category.category_code) AS category_count
+        FROM product_department_snapshot AS department
+        LEFT JOIN product_category_snapshot AS category
+          ON category.department_code = department.department_code
+        GROUP BY
+          department.department_code,
+          department.department_name,
+          department.description,
+          department.status,
+          department.sort_order,
+          department.updated_at
+        ORDER BY department.sort_order ASC, department.department_name ASC`,
+      )
+      .all() as ProductDepartmentSnapshotRow[];
+
+    return rows.map<StoreProductDepartmentSummary>((row) => ({
+      departmentCode: row.department_code,
+      departmentName: row.department_name,
+      description: row.description,
+      status: row.status,
+      sortOrder: asNumber(row.sort_order),
+      categoryCount: asNumber(row.category_count),
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getProductCategorySummaries(): StoreProductCategorySummary[] {
+    const rows = this.db
+      .prepare(
+        "SELECT category_code, category_name, department_code, department_name, description, status, sort_order, updated_at FROM product_category_snapshot ORDER BY department_name ASC, sort_order ASC, category_name ASC",
+      )
+      .all() as ProductCategorySnapshotRow[];
+
+    return rows.map<StoreProductCategorySummary>((row) => ({
+      categoryCode: row.category_code,
+      categoryName: row.category_name,
+      departmentCode: row.department_code,
+      departmentName: row.department_name,
+      description: row.description,
+      status: row.status,
+      sortOrder: asNumber(row.sort_order),
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getInventoryLocationSummaries(): StoreInventoryLocationSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          location.location_code AS location_code,
+          location.location_name AS location_name,
+          location.location_type AS location_type,
+          location.status AS status,
+          location.defaults AS defaults,
+          location.is_sales_default AS is_sales_default,
+          location.is_sales_order_default AS is_sales_order_default,
+          location.is_receiving_default AS is_receiving_default,
+          location.updated_at AS updated_at,
+          COUNT(CASE WHEN COALESCE(balance.quantity_on_hand, 0) != 0 THEN 1 END) AS tracked_products,
+          COALESCE(SUM(balance.quantity_on_hand), 0) AS on_hand_quantity,
+          SUM(CASE WHEN COALESCE(balance.quantity_on_hand, 0) < 0 THEN 1 ELSE 0 END) AS negative_positions
+        FROM inventory_location_snapshot AS location
+        LEFT JOIN inventory_location_balance AS balance
+          ON balance.location_code = location.location_code
+        GROUP BY
+          location.location_code,
+          location.location_name,
+          location.location_type,
+          location.status,
+          location.defaults,
+          location.is_sales_default,
+          location.is_sales_order_default,
+          location.is_receiving_default,
+          location.updated_at,
+          location.is_sales_default
+        ORDER BY location.is_sales_default DESC, location.location_name ASC`,
+      )
+      .all() as InventoryLocationRow[];
+    const highlightRows = this.db
+      .prepare(
+        `SELECT location_code, product_code, quantity_on_hand
+        FROM inventory_location_balance
+        WHERE quantity_on_hand != 0
+        ORDER BY ABS(quantity_on_hand) DESC, product_code ASC`,
+      )
+      .all() as InventoryLocationHighlightRow[];
+    const highlightsByLocation = new Map<string, string[]>();
+
+    for (const row of highlightRows) {
+      const items = highlightsByLocation.get(row.location_code) ?? [];
+
+      if (items.length >= 3) {
+        continue;
+      }
+
+      items.push(
+        `${row.product_code} (${Number(asNumber(row.quantity_on_hand).toFixed(3))})`,
+      );
+      highlightsByLocation.set(row.location_code, items);
+    }
+
+    return rows.map<StoreInventoryLocationSummary>((row) => ({
+      locationCode: row.location_code,
+      locationName: row.location_name,
+      locationType: row.location_type,
+      status: row.status,
+      defaults: formatLocalLocationDefaults(row),
+      trackedProducts: asNumber(row.tracked_products),
+      onHandQuantity: Number(asNumber(row.on_hand_quantity).toFixed(3)),
+      negativePositions: asNumber(row.negative_positions),
+      highlightedProducts: highlightsByLocation.get(row.location_code) ?? [],
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getTransferRequestTargetSummaries(): StoreTransferRequestTargetSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          source_store_code,
+          source_store_name,
+          source_store_sales_enabled,
+          source_store_warehouse_enabled,
+          source_location_code,
+          source_location_name,
+          source_location_type,
+          source_location_status,
+          source_location_defaults,
+          source_warehouse_code,
+          source_warehouse_name,
+          use_for_sales_default,
+          use_for_receiving_default,
+          updated_at
+        FROM inter_store_transfer_request_target_snapshot
+        ORDER BY
+          source_store_warehouse_enabled DESC,
+          source_store_name ASC,
+          use_for_receiving_default DESC,
+          source_location_name ASC`,
+      )
+      .all() as TransferRequestTargetSnapshotRow[];
+
+    return rows.map<StoreTransferRequestTargetSummary>((row) => ({
+      sourceStoreCode: row.source_store_code,
+      sourceStoreName: row.source_store_name,
+      sourceStoreSalesEnabled: asBooleanFlag(row.source_store_sales_enabled),
+      sourceStoreWarehouseEnabled: asBooleanFlag(
+        row.source_store_warehouse_enabled,
+      ),
+      sourceLocationCode: row.source_location_code,
+      sourceLocationName: row.source_location_name,
+      sourceLocationType: row.source_location_type,
+      sourceLocationStatus: row.source_location_status,
+      sourceLocationDefaults: row.source_location_defaults,
+      sourceWarehouseCode: row.source_warehouse_code,
+      sourceWarehouseName: row.source_warehouse_name,
+      useForSalesDefault: asBooleanFlag(row.use_for_sales_default),
+      useForReceivingDefault: asBooleanFlag(row.use_for_receiving_default),
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getInterStoreTransferRequestDraftSummaries(): StoreInterStoreTransferRequestDraftSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          draft.id,
+          draft.request_no,
+          draft.status,
+          draft.source_store_code,
+          draft.source_store_name,
+          draft.source_location_code,
+          draft.source_location_name,
+          draft.destination_store_code,
+          draft.destination_store_name,
+          draft.destination_location_code,
+          draft.destination_location_name,
+          draft.product_code,
+          draft.product_name,
+          draft.department_code,
+          department.department_name AS department_name,
+          draft.category_code,
+          category.category_name AS category_name,
+          draft.subcategory,
+          draft.is_serialized,
+          draft.quantity,
+          draft.external_reference,
+          draft.note,
+          draft.operator_name,
+          draft.submitted_at,
+          draft.updated_at
+        FROM inter_store_transfer_request_draft AS draft
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = draft.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = draft.category_code
+        ORDER BY
+          CASE draft.status WHEN 'DRAFT' THEN 0 ELSE 1 END,
+          draft.updated_at DESC`,
+      )
+      .all() as InterStoreTransferRequestDraftRow[];
+
+    return rows.map<StoreInterStoreTransferRequestDraftSummary>((row) => ({
+      draftId: row.id,
+      requestNo: row.request_no,
+      status: row.status,
+      sourceStoreCode: row.source_store_code,
+      sourceStoreName: row.source_store_name,
+      sourceLocationCode: row.source_location_code,
+      sourceLocationName: row.source_location_name,
+      destinationStoreCode: row.destination_store_code,
+      destinationStoreName: row.destination_store_name,
+      destinationLocationCode: row.destination_location_code,
+      destinationLocationName: row.destination_location_name,
+      productCode: row.product_code,
+      productName: row.product_name,
+      departmentCode: row.department_code,
+      departmentName: row.department_name,
+      categoryCode: row.category_code,
+      categoryName: row.category_name,
+      subcategory: row.subcategory,
+      isSerialized: asBooleanFlag(row.is_serialized),
+      quantity: Number(asNumber(row.quantity).toFixed(3)),
+      externalReference: row.external_reference,
+      note: row.note,
+      operatorName: row.operator_name,
+      submittedAt: row.submitted_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getStockCountSessionSummaries(): StoreStockCountSessionSummary[] {
+    return this.getStockCountSessionSummariesInternal();
+  }
+
+  private getLocalGoodsReceiptSummaries(): StoreLocalGoodsReceiptSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          receipt.id AS id,
+          receipt.goods_receipt_no AS goods_receipt_no,
+          receipt.purchase_order_id AS purchase_order_id,
+          receipt.purchase_order_no AS purchase_order_no,
+          receipt.inventory_location_code AS inventory_location_code,
+          location.location_name AS inventory_location_name,
+          receipt.supplier_no AS supplier_no,
+          receipt.supplier_name AS supplier_name,
+          receipt.external_reference AS external_reference,
+          receipt.note AS note,
+          receipt.operator_name AS operator_name,
+          receipt.total_quantity AS total_quantity,
+          receipt.exception_quantity AS exception_quantity,
+          COUNT(DISTINCT line.id) AS line_count,
+          COUNT(DISTINCT exception.id) AS exception_count,
+          receipt.synced_at AS synced_at,
+          receipt.received_at AS received_at,
+          receipt.updated_at AS updated_at
+        FROM local_goods_receipt AS receipt
+        LEFT JOIN inventory_location_snapshot AS location
+          ON location.location_code = receipt.inventory_location_code
+        LEFT JOIN local_goods_receipt_line AS line
+          ON line.local_goods_receipt_id = receipt.id
+        LEFT JOIN local_goods_receipt_exception AS exception
+          ON exception.local_goods_receipt_id = receipt.id
+        GROUP BY
+          receipt.id,
+          receipt.goods_receipt_no,
+          receipt.purchase_order_id,
+          receipt.purchase_order_no,
+          receipt.inventory_location_code,
+          location.location_name,
+          receipt.supplier_no,
+          receipt.supplier_name,
+          receipt.external_reference,
+          receipt.note,
+          receipt.operator_name,
+          receipt.total_quantity,
+          receipt.exception_quantity,
+          receipt.synced_at,
+          receipt.received_at,
+          receipt.updated_at
+        ORDER BY receipt.received_at DESC, receipt.goods_receipt_no DESC
+        LIMIT 8`,
+      )
+      .all() as LocalGoodsReceiptRow[];
+    const receiptIds = rows.map((row) => row.id);
+    const lineRows =
+      receiptIds.length === 0
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT
+                line.id AS id,
+                line.local_goods_receipt_id AS local_goods_receipt_id,
+                line.purchase_order_line_id AS purchase_order_line_id,
+                line.line_no AS line_no,
+                line.product_code AS product_code,
+                line.product_name AS product_name,
+                COALESCE(po_line.ordered_quantity, line.quantity) AS ordered_quantity,
+                line.quantity AS quantity,
+                line.unit_cost AS unit_cost,
+                line.serial_numbers_json AS serial_numbers_json
+              FROM local_goods_receipt_line AS line
+              LEFT JOIN purchase_order_line_snapshot AS po_line
+                ON po_line.id = line.purchase_order_line_id
+              WHERE line.local_goods_receipt_id IN (${receiptIds.map(() => "?").join(", ")})
+              ORDER BY line.local_goods_receipt_id ASC, line.line_no ASC`,
+            )
+            .all(...receiptIds) as LocalGoodsReceiptLineRow[]);
+    const exceptionRows =
+      receiptIds.length === 0
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT
+                exception.id AS id,
+                exception.local_goods_receipt_id AS local_goods_receipt_id,
+                exception.purchase_order_line_id AS purchase_order_line_id,
+                exception.line_no AS line_no,
+                exception.product_code AS product_code,
+                exception.product_name AS product_name,
+                exception.quantity AS quantity,
+                exception.unit_cost AS unit_cost,
+                exception.reason AS reason,
+                exception.note AS note
+              FROM local_goods_receipt_exception AS exception
+              WHERE exception.local_goods_receipt_id IN (${receiptIds.map(() => "?").join(", ")})
+              ORDER BY exception.local_goods_receipt_id ASC, exception.line_no ASC`,
+            )
+            .all(...receiptIds) as LocalGoodsReceiptExceptionRow[]);
+    const linesByReceiptId = new Map<
+      string,
+      StoreLocalGoodsReceiptSummary["lines"]
+    >();
+    const exceptionsByReceiptId = new Map<
+      string,
+      StoreLocalGoodsReceiptSummary["exceptions"]
+    >();
+
+    for (const row of lineRows) {
+      const currentLines =
+        linesByReceiptId.get(row.local_goods_receipt_id) ?? [];
+
+      currentLines.push({
+        goodsReceiptLineId: row.id,
+        purchaseOrderLineId: row.purchase_order_line_id,
+        lineNo: asNumber(row.line_no),
+        productCode: row.product_code,
+        productName: row.product_name,
+        orderedQuantity: Number(
+          asNumber(row.ordered_quantity ?? row.quantity).toFixed(3),
+        ),
+        quantity: Number(asNumber(row.quantity).toFixed(3)),
+        unitCost: asNullableNumber(row.unit_cost),
+        serialNumbers: readSerializedLineNumbers(row.serial_numbers_json),
+      });
+      linesByReceiptId.set(row.local_goods_receipt_id, currentLines);
+    }
+
+    for (const row of exceptionRows) {
+      const currentExceptions =
+        exceptionsByReceiptId.get(row.local_goods_receipt_id) ?? [];
+
+      currentExceptions.push({
+        receiptExceptionId: row.id,
+        purchaseOrderLineId: row.purchase_order_line_id,
+        lineNo: asNumber(row.line_no),
+        productCode: row.product_code,
+        productName: row.product_name,
+        quantity: Number(asNumber(row.quantity).toFixed(3)),
+        unitCost: asNullableNumber(row.unit_cost),
+        reason:
+          row.reason as StoreLocalGoodsReceiptSummary["exceptions"][number]["reason"],
+        note: row.note,
+      });
+      exceptionsByReceiptId.set(row.local_goods_receipt_id, currentExceptions);
+    }
+
+    return rows.map<StoreLocalGoodsReceiptSummary>((row) => ({
+      goodsReceiptId: row.id,
+      goodsReceiptNo: row.goods_receipt_no,
+      purchaseOrderId: row.purchase_order_id,
+      purchaseOrderNo: row.purchase_order_no,
+      inventoryLocationCode: row.inventory_location_code,
+      inventoryLocationName:
+        row.inventory_location_name ?? row.inventory_location_code,
+      supplierNo: row.supplier_no,
+      supplierName: row.supplier_name,
+      externalReference: row.external_reference,
+      note: row.note,
+      operatorName: row.operator_name,
+      totalQuantity: Number(asNumber(row.total_quantity).toFixed(3)),
+      lineCount: asNumber(row.line_count),
+      exceptionQuantity: Number(asNumber(row.exception_quantity).toFixed(3)),
+      exceptionCount: asNumber(row.exception_count),
+      syncedAt: row.synced_at,
+      receivedAt: row.received_at,
+      updatedAt: row.updated_at,
+      lines: linesByReceiptId.get(row.id) ?? [],
+      exceptions: exceptionsByReceiptId.get(row.id) ?? [],
+    }));
+  }
+
+  private getLocalSupplierReturnSummaries(): StoreLocalSupplierReturnSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          supplier_return.id AS id,
+          supplier_return.supplier_return_no AS supplier_return_no,
+          supplier_return.purchase_order_id AS purchase_order_id,
+          supplier_return.purchase_order_no AS purchase_order_no,
+          supplier_return.goods_receipt_id AS goods_receipt_id,
+          supplier_return.goods_receipt_no AS goods_receipt_no,
+          supplier_return.inventory_location_code AS inventory_location_code,
+          location.location_name AS inventory_location_name,
+          supplier_return.supplier_no AS supplier_no,
+          supplier_return.supplier_name AS supplier_name,
+          supplier_return.external_reference AS external_reference,
+          supplier_return.reason AS reason,
+          supplier_return.status AS status,
+          supplier_return.note AS note,
+          supplier_return.operator_name AS operator_name,
+          supplier_return.total_quantity AS total_quantity,
+          COUNT(line.id) AS line_count,
+          supplier_return.synced_at AS synced_at,
+          supplier_return.returned_at AS returned_at,
+          supplier_return.cancelled_at AS cancelled_at,
+          supplier_return.cancellation_note AS cancellation_note,
+          supplier_return.cancellation_operator_name AS cancellation_operator_name,
+          supplier_return.cancellation_acknowledged_at AS cancellation_acknowledged_at,
+          supplier_return.cancellation_acknowledged_by AS cancellation_acknowledged_by,
+          supplier_return.cancellation_acknowledgement_note AS cancellation_acknowledgement_note,
+          supplier_return.cancellation_ack_synced_at AS cancellation_ack_synced_at,
+          supplier_return.updated_at AS updated_at
+        FROM local_supplier_return AS supplier_return
+        LEFT JOIN inventory_location_snapshot AS location
+          ON location.location_code = supplier_return.inventory_location_code
+        LEFT JOIN local_supplier_return_line AS line
+          ON line.local_supplier_return_id = supplier_return.id
+        GROUP BY
+          supplier_return.id,
+          supplier_return.supplier_return_no,
+          supplier_return.purchase_order_id,
+          supplier_return.purchase_order_no,
+          supplier_return.goods_receipt_id,
+          supplier_return.goods_receipt_no,
+          supplier_return.inventory_location_code,
+          location.location_name,
+          supplier_return.supplier_no,
+          supplier_return.supplier_name,
+          supplier_return.external_reference,
+          supplier_return.reason,
+          supplier_return.status,
+          supplier_return.note,
+          supplier_return.operator_name,
+          supplier_return.total_quantity,
+          supplier_return.synced_at,
+          supplier_return.returned_at,
+          supplier_return.cancelled_at,
+          supplier_return.cancellation_note,
+          supplier_return.cancellation_operator_name,
+          supplier_return.cancellation_acknowledged_at,
+          supplier_return.cancellation_acknowledged_by,
+          supplier_return.cancellation_acknowledgement_note,
+          supplier_return.cancellation_ack_synced_at,
+          supplier_return.updated_at
+        ORDER BY supplier_return.returned_at DESC, supplier_return.supplier_return_no DESC
+        LIMIT 8`,
+      )
+      .all() as LocalSupplierReturnRow[];
+    const supplierReturnIds = rows.map((row) => row.id);
+    const lineRows =
+      supplierReturnIds.length === 0
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT
+                line.id AS id,
+                line.local_supplier_return_id AS local_supplier_return_id,
+                line.goods_receipt_line_id AS goods_receipt_line_id,
+                line.purchase_order_line_id AS purchase_order_line_id,
+                line.line_no AS line_no,
+                line.product_code AS product_code,
+                line.product_name AS product_name,
+                line.quantity AS quantity,
+                line.unit_cost AS unit_cost,
+                line.serial_numbers_json AS serial_numbers_json
+              FROM local_supplier_return_line AS line
+              WHERE line.local_supplier_return_id IN (${supplierReturnIds.map(() => "?").join(", ")})
+              ORDER BY line.local_supplier_return_id ASC, line.line_no ASC`,
+            )
+            .all(...supplierReturnIds) as LocalSupplierReturnLineRow[]);
+    const linesBySupplierReturnId = new Map<
+      string,
+      StoreLocalSupplierReturnSummary["lines"]
+    >();
+
+    for (const row of lineRows) {
+      const currentLines =
+        linesBySupplierReturnId.get(row.local_supplier_return_id) ?? [];
+
+      currentLines.push({
+        supplierReturnLineId: row.id,
+        goodsReceiptLineId: row.goods_receipt_line_id,
+        purchaseOrderLineId: row.purchase_order_line_id,
+        lineNo: asNumber(row.line_no),
+        productCode: row.product_code,
+        productName: row.product_name,
+        quantity: Number(asNumber(row.quantity).toFixed(3)),
+        unitCost: asNullableNumber(row.unit_cost),
+        serialNumbers: readSerializedLineNumbers(row.serial_numbers_json),
+      });
+      linesBySupplierReturnId.set(row.local_supplier_return_id, currentLines);
+    }
+
+    return rows.map<StoreLocalSupplierReturnSummary>((row) => ({
+      supplierReturnId: row.id,
+      supplierReturnNo: row.supplier_return_no,
+      purchaseOrderId: row.purchase_order_id,
+      purchaseOrderNo: row.purchase_order_no,
+      goodsReceiptId: row.goods_receipt_id,
+      goodsReceiptNo: row.goods_receipt_no,
+      inventoryLocationCode: row.inventory_location_code,
+      inventoryLocationName:
+        row.inventory_location_name ?? row.inventory_location_code,
+      supplierNo: row.supplier_no,
+      supplierName: row.supplier_name,
+      externalReference: row.external_reference,
+      reason: row.reason as StoreLocalSupplierReturnSummary["reason"],
+      status: row.status,
+      note: row.note,
+      operatorName: row.operator_name,
+      totalQuantity: Number(asNumber(row.total_quantity).toFixed(3)),
+      lineCount: asNumber(row.line_count),
+      syncedAt: row.synced_at,
+      returnedAt: row.returned_at,
+      cancelledAt: row.cancelled_at,
+      cancellationNote: row.cancellation_note,
+      cancellationOperatorName: row.cancellation_operator_name,
+      cancellationAcknowledgedAt: row.cancellation_acknowledged_at,
+      cancellationAcknowledgedBy: row.cancellation_acknowledged_by,
+      cancellationAcknowledgementNote: row.cancellation_acknowledgement_note,
+      cancellationAcknowledgementSyncedAt: row.cancellation_ack_synced_at,
+      updatedAt: row.updated_at,
+      lines: linesBySupplierReturnId.get(row.id) ?? [],
+    }));
+  }
+
+  private getRecentCustomerAccountEntrySummaries(): StoreCustomerAccountEntrySummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          entry_no,
+          customer_id,
+          customer_no,
+          customer_name,
+          entry_type,
+          payment_method,
+          tender_method_code,
+          tender_method_name,
+          amount,
+          reference,
+          note,
+          shift_id,
+          shift_no,
+          cashier_code,
+          synced_at,
+          occurred_at,
+          updated_at
+        FROM customer_account_entry
+        ORDER BY occurred_at DESC, entry_no DESC
+        LIMIT 8`,
+      )
+      .all() as CustomerAccountEntryRow[];
+
+    return rows.map<StoreCustomerAccountEntrySummary>((row) => ({
+      entryId: row.id,
+      entryNo: row.entry_no,
+      customerId: row.customer_id,
+      customerNo: row.customer_no,
+      customerName: row.customer_name,
+      entryType: row.entry_type,
+      paymentMethod: row.payment_method,
+      tenderMethodCode: row.tender_method_code,
+      tenderMethodName: row.tender_method_name,
+      amount: Number(asNumber(row.amount).toFixed(2)),
+      reference: row.reference,
+      note: row.note,
+      shiftId: row.shift_id,
+      shiftNo: row.shift_no,
+      cashierCode: row.cashier_code,
+      syncedAt: row.synced_at,
+      occurredAt: row.occurred_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getSalesOrderRow(orderId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          sales_order.id AS id,
+          sales_order.order_no AS order_no,
+          sales_order.source_transaction_id AS source_transaction_id,
+          sales_order.source_transaction_no AS source_transaction_no,
+          sales_order.customer_id AS customer_id,
+          sales_order.customer_no AS customer_no,
+          sales_order.customer_name AS customer_name,
+          sales_order.status AS status,
+          sales_order.total_amount AS total_amount,
+          sales_order.deposit_amount AS deposit_amount,
+          sales_order.balance_amount AS balance_amount,
+          sales_order.deposit_tender_method_code AS deposit_tender_method_code,
+          sales_order.deposit_tender_method_name AS deposit_tender_method_name,
+          sales_order.deposit_payment_method AS deposit_payment_method,
+          sales_order.deposit_reference AS deposit_reference,
+          sales_order.deposit_paid_at AS deposit_paid_at,
+          COUNT(line.id) AS line_count,
+          COALESCE(SUM(line.quantity), 0) AS item_count,
+          sales_order.operator_name AS operator_name,
+          sales_order.note AS note,
+          sales_order.fulfilled_transaction_id AS fulfilled_transaction_id,
+          sales_order.fulfilled_transaction_no AS fulfilled_transaction_no,
+          sales_order.synced_at AS synced_at,
+          sales_order.created_at AS created_at,
+          sales_order.fulfilled_at AS fulfilled_at,
+          sales_order.cancelled_at AS cancelled_at,
+          sales_order.updated_at AS updated_at
+        FROM sales_order
+        LEFT JOIN pos_transaction_line AS line
+          ON line.pos_transaction_id = sales_order.source_transaction_id
+        WHERE sales_order.id = ?
+        GROUP BY
+          sales_order.id,
+          sales_order.order_no,
+          sales_order.source_transaction_id,
+          sales_order.source_transaction_no,
+          sales_order.customer_id,
+          sales_order.customer_no,
+          sales_order.customer_name,
+          sales_order.status,
+          sales_order.total_amount,
+          sales_order.deposit_amount,
+          sales_order.balance_amount,
+          sales_order.deposit_tender_method_code,
+          sales_order.deposit_tender_method_name,
+          sales_order.deposit_payment_method,
+          sales_order.deposit_reference,
+          sales_order.deposit_paid_at,
+          sales_order.operator_name,
+          sales_order.note,
+          sales_order.fulfilled_transaction_id,
+          sales_order.fulfilled_transaction_no,
+          sales_order.synced_at,
+          sales_order.created_at,
+          sales_order.fulfilled_at,
+          sales_order.cancelled_at,
+          sales_order.updated_at
+        LIMIT 1`,
+      )
+      .get(orderId) as SalesOrderRow | undefined;
+  }
+
+  private getSalesOrderSummaries(): StoreSalesOrderSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          sales_order.id AS id,
+          sales_order.order_no AS order_no,
+          sales_order.source_transaction_id AS source_transaction_id,
+          sales_order.source_transaction_no AS source_transaction_no,
+          sales_order.customer_id AS customer_id,
+          sales_order.customer_no AS customer_no,
+          sales_order.customer_name AS customer_name,
+          sales_order.status AS status,
+          sales_order.total_amount AS total_amount,
+          sales_order.deposit_amount AS deposit_amount,
+          sales_order.balance_amount AS balance_amount,
+          sales_order.deposit_tender_method_code AS deposit_tender_method_code,
+          sales_order.deposit_tender_method_name AS deposit_tender_method_name,
+          sales_order.deposit_payment_method AS deposit_payment_method,
+          sales_order.deposit_reference AS deposit_reference,
+          sales_order.deposit_paid_at AS deposit_paid_at,
+          COUNT(line.id) AS line_count,
+          COALESCE(SUM(line.quantity), 0) AS item_count,
+          sales_order.operator_name AS operator_name,
+          sales_order.note AS note,
+          sales_order.fulfilled_transaction_id AS fulfilled_transaction_id,
+          sales_order.fulfilled_transaction_no AS fulfilled_transaction_no,
+          sales_order.synced_at AS synced_at,
+          sales_order.created_at AS created_at,
+          sales_order.fulfilled_at AS fulfilled_at,
+          sales_order.cancelled_at AS cancelled_at,
+          sales_order.updated_at AS updated_at
+        FROM sales_order
+        LEFT JOIN pos_transaction_line AS line
+          ON line.pos_transaction_id = sales_order.source_transaction_id
+        GROUP BY
+          sales_order.id,
+          sales_order.order_no,
+          sales_order.source_transaction_id,
+          sales_order.source_transaction_no,
+          sales_order.customer_id,
+          sales_order.customer_no,
+          sales_order.customer_name,
+          sales_order.status,
+          sales_order.total_amount,
+          sales_order.deposit_amount,
+          sales_order.balance_amount,
+          sales_order.deposit_tender_method_code,
+          sales_order.deposit_tender_method_name,
+          sales_order.deposit_payment_method,
+          sales_order.deposit_reference,
+          sales_order.deposit_paid_at,
+          sales_order.operator_name,
+          sales_order.note,
+          sales_order.fulfilled_transaction_id,
+          sales_order.fulfilled_transaction_no,
+          sales_order.synced_at,
+          sales_order.created_at,
+          sales_order.fulfilled_at,
+          sales_order.cancelled_at,
+          sales_order.updated_at
+        ORDER BY
+          CASE sales_order.status
+            WHEN 'OPEN' THEN 0
+            WHEN 'FULFILLED' THEN 1
+            ELSE 2
+          END,
+          sales_order.updated_at DESC
+        LIMIT 12`,
+      )
+      .all() as SalesOrderRow[];
+
+    return rows.map<StoreSalesOrderSummary>((row) => ({
+      orderId: row.id,
+      orderNo: row.order_no,
+      sourceTransactionId: row.source_transaction_id,
+      sourceTransactionNo: row.source_transaction_no,
+      customerId: row.customer_id,
+      customerNo: row.customer_no,
+      customerName: row.customer_name,
+      status: row.status,
+      totalAmount: Number(asNumber(row.total_amount).toFixed(2)),
+      depositAmount: Number(asNumber(row.deposit_amount).toFixed(2)),
+      balanceAmount: Number(asNumber(row.balance_amount).toFixed(2)),
+      depositTenderMethodCode: row.deposit_tender_method_code,
+      depositTenderMethodName: row.deposit_tender_method_name,
+      depositPaymentMethod: row.deposit_payment_method,
+      depositReference: row.deposit_reference,
+      depositPaidAt: row.deposit_paid_at,
+      lineCount: asNumber(row.line_count),
+      itemCount: Number(asNumber(row.item_count).toFixed(3)),
+      operatorName: row.operator_name,
+      note: row.note,
+      fulfilledTransactionId: row.fulfilled_transaction_id,
+      fulfilledTransactionNo: row.fulfilled_transaction_no,
+      syncedAt: row.synced_at,
+      createdAt: row.created_at,
+      fulfilledAt: row.fulfilled_at,
+      cancelledAt: row.cancelled_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getEodReconciliationRow(reconciliationId: string) {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          reconciliation_no,
+          shift_id,
+          shift_no,
+          cashier_code,
+          expected_cash_amount,
+          declared_cash_amount,
+          variance_amount,
+          net_sales_amount,
+          cash_tendered_amount,
+          non_cash_tendered_amount,
+          transaction_count,
+          operator_name,
+          note,
+          synced_at,
+          reconciled_at,
+          updated_at
+        FROM eod_reconciliation
+        WHERE id = ?
+        LIMIT 1`,
+      )
+      .get(reconciliationId) as EodReconciliationRow | undefined;
+  }
+
+  private getRecentEodReconciliationSummaries(): StoreEodReconciliationSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          reconciliation_no,
+          shift_id,
+          shift_no,
+          cashier_code,
+          expected_cash_amount,
+          declared_cash_amount,
+          variance_amount,
+          net_sales_amount,
+          cash_tendered_amount,
+          non_cash_tendered_amount,
+          transaction_count,
+          operator_name,
+          note,
+          synced_at,
+          reconciled_at,
+          updated_at
+        FROM eod_reconciliation
+        ORDER BY reconciled_at DESC, reconciliation_no DESC
+        LIMIT 8`,
+      )
+      .all() as EodReconciliationRow[];
+
+    return rows.map<StoreEodReconciliationSummary>((row) => ({
+      reconciliationId: row.id,
+      reconciliationNo: row.reconciliation_no,
+      shiftId: row.shift_id,
+      shiftNo: row.shift_no,
+      cashierCode: row.cashier_code,
+      expectedCashAmount: Number(asNumber(row.expected_cash_amount).toFixed(2)),
+      declaredCashAmount: Number(asNumber(row.declared_cash_amount).toFixed(2)),
+      varianceAmount: Number(asNumber(row.variance_amount).toFixed(2)),
+      netSalesAmount: Number(asNumber(row.net_sales_amount).toFixed(2)),
+      cashTenderedAmount: Number(asNumber(row.cash_tendered_amount).toFixed(2)),
+      nonCashTenderedAmount: Number(
+        asNumber(row.non_cash_tendered_amount).toFixed(2),
+      ),
+      transactionCount: asNumber(row.transaction_count),
+      operatorName: row.operator_name,
+      note: row.note,
+      syncedAt: row.synced_at,
+      reconciledAt: row.reconciled_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getRecentBankingDepositSummaries(): StoreBankingDepositSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          deposit_no,
+          reconciliation_id,
+          reconciliation_no,
+          shift_id,
+          shift_no,
+          amount,
+          bank_account_id,
+          bank_code,
+          bank_name,
+          bank_branch_code,
+          bank_branch_name,
+          bank_account_number,
+          bank_account_name,
+          reference,
+          operator_name,
+          note,
+          synced_at,
+          deposited_at,
+          updated_at
+        FROM banking_deposit
+        ORDER BY deposited_at DESC, deposit_no DESC
+        LIMIT 8`,
+      )
+      .all() as BankingDepositRow[];
+
+    return rows.map<StoreBankingDepositSummary>((row) => ({
+      depositId: row.id,
+      depositNo: row.deposit_no,
+      reconciliationId: row.reconciliation_id,
+      reconciliationNo: row.reconciliation_no,
+      shiftId: row.shift_id,
+      shiftNo: row.shift_no,
+      amount: Number(asNumber(row.amount).toFixed(2)),
+      bankName: row.bank_name,
+      reference: row.reference,
+      operatorName: row.operator_name,
+      note: row.note,
+      syncedAt: row.synced_at,
+      depositedAt: row.deposited_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getStockCountSessionSummariesInternal(): StoreStockCountSessionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          session.id,
+          session.session_no,
+          session.status,
+          session.inventory_location_code,
+          session.inventory_location_name,
+          session.product_code,
+          session.product_name,
+          session.department_code,
+          department.department_name AS department_name,
+          session.category_code,
+          category.category_name AS category_name,
+          session.subcategory,
+          session.is_serialized,
+          session.previous_quantity,
+          session.counted_quantity,
+          session.variance_quantity,
+          session.previous_serial_numbers_json,
+          session.counted_serial_numbers_json,
+          session.note,
+          session.operator_name,
+          session.submitted_at,
+          session.committed_at,
+          session.updated_at
+        FROM stock_count_session AS session
+        LEFT JOIN product_department_snapshot AS department
+          ON department.department_code = session.department_code
+        LEFT JOIN product_category_snapshot AS category
+          ON category.category_code = session.category_code
+        ORDER BY
+          CASE session.status
+            WHEN 'DRAFT' THEN 0
+            WHEN 'SUBMITTED' THEN 1
+            ELSE 2
+          END,
+          session.updated_at DESC`,
+      )
+      .all() as StockCountSessionRow[];
+
+    return rows.map<StoreStockCountSessionSummary>((row) => ({
+      sessionId: row.id,
+      sessionNo: row.session_no,
+      status: row.status,
+      inventoryLocationCode: row.inventory_location_code,
+      inventoryLocationName: row.inventory_location_name,
+      productCode: row.product_code,
+      productName: row.product_name,
+      departmentCode: row.department_code,
+      departmentName: row.department_name,
+      categoryCode: row.category_code,
+      categoryName: row.category_name,
+      subcategory: row.subcategory,
+      isSerialized: asBooleanFlag(row.is_serialized),
+      previousQuantity: Number(asNumber(row.previous_quantity).toFixed(3)),
+      countedQuantity: Number(asNumber(row.counted_quantity).toFixed(3)),
+      varianceQuantity: Number(asNumber(row.variance_quantity).toFixed(3)),
+      previousSerialNumbers: readSerializedLineNumbers(
+        row.previous_serial_numbers_json,
+      ),
+      countedSerialNumbers: readSerializedLineNumbers(
+        row.counted_serial_numbers_json,
+      ),
+      note: row.note,
+      operatorName: row.operator_name,
+      submittedAt: row.submitted_at,
+      committedAt: row.committed_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private listActiveTenderMethods(): StoreTenderMethodSummary[] {
+    const seededTenderDescriptionPattern =
+      "%seeded into the Flash ERP store desktop.%";
+    const tenderScopeSql = this.isStandaloneDeployment()
+      ? `(
+            published_at IS NOT NULL
+            OR NOT EXISTS (
+              SELECT 1
+              FROM tender_method_snapshot AS enterprise_tender
+              WHERE enterprise_tender.published_at IS NOT NULL
+            )
+          )`
+      : `(
+            published_at IS NOT NULL
+            OR (
+              NOT EXISTS (
+                SELECT 1
+                FROM tender_method_snapshot AS enterprise_tender
+                WHERE enterprise_tender.published_at IS NOT NULL
+              )
+              AND (
+                COALESCE(description, '') NOT LIKE ?
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM tender_method_snapshot AS configured_tender
+                  WHERE configured_tender.status = 'ACTIVE'
+                    AND COALESCE(configured_tender.description, '') NOT LIKE ?
+                )
+              )
+            )
+          )`;
+    const queryArgs = this.isStandaloneDeployment()
+      ? []
+      : [seededTenderDescriptionPattern, seededTenderDescriptionPattern];
+    const rows = this.db
+      .prepare(
+        `SELECT
+          tender_method_code,
+          tender_method_name,
+          payment_method,
+          gateway_provider,
+          gateway_mode,
+          gateway_merchant_id,
+          gateway_public_key,
+          gateway_callback_url,
+          gateway_active,
+          gateway_status,
+          requires_reference,
+          allow_change,
+          allow_refund,
+          allow_open_cash_drawer,
+          status,
+          sort_order,
+          updated_at
+        FROM tender_method_snapshot
+        WHERE status = 'ACTIVE'
+          AND ${tenderScopeSql}
+        ORDER BY
+          CASE
+            WHEN payment_method = 'CASH' OR upper(tender_method_code) = 'CASH' THEN 0
+            ELSE 1
+          END,
+          sort_order ASC,
+          tender_method_name ASC`,
+      )
+      .all(...queryArgs) as TenderMethodRow[];
+
+    return rows.map<StoreTenderMethodSummary>((row) => ({
+      tenderMethodCode: row.tender_method_code,
+      tenderMethodName: row.tender_method_name,
+      paymentMethod: row.payment_method,
+      gatewayProvider: row.gateway_provider,
+      gatewayMode: row.gateway_mode,
+      gatewayMerchantId: row.gateway_merchant_id,
+      gatewayPublicKey: row.gateway_public_key,
+      gatewayCallbackUrl: row.gateway_callback_url,
+      gatewayActive: asBooleanFlag(row.gateway_active),
+      gatewayStatus: row.gateway_status ?? "DISABLED",
+      requiresReference: asBooleanFlag(row.requires_reference),
+      allowChange: asBooleanFlag(row.allow_change),
+      allowRefund: asBooleanFlag(row.allow_refund),
+      allowOpenCashDrawer: asBooleanFlag(row.allow_open_cash_drawer),
+      status: row.status,
+      sortOrder: asNumber(row.sort_order),
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getTenderMethodByCode(tenderMethodCode: string) {
+    return (
+      this.listActiveTenderMethods().find(
+        (method) => method.tenderMethodCode === tenderMethodCode,
+      ) ?? null
+    );
+  }
+
+  private tenderRequiresBankAccount(
+    method: StoreTenderMethodSummary | null | undefined,
+  ) {
+    if (!method) {
+      return false;
+    }
+
+    const searchable =
+      `${method.tenderMethodCode} ${method.tenderMethodName} ${method.paymentMethod}`.toUpperCase();
+
+    return (
+      method.paymentMethod === "BANK_TRANSFER" ||
+      searchable.includes("CHEQUE") ||
+      searchable.includes("CHECK") ||
+      searchable.includes("BANK DEPOSIT") ||
+      searchable.includes("DEPOSIT")
+    );
+  }
+
+  private listActiveBankAccounts(): StoreBankAccountSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          bank_code,
+          bank_name,
+          branch_code,
+          branch_name,
+          account_number,
+          account_name,
+          currency_code,
+          status,
+          updated_at
+        FROM bank_account_snapshot
+        WHERE status = 'ACTIVE'
+        ORDER BY bank_name ASC, branch_name ASC, account_number ASC`,
+      )
+      .all() as BankAccountSnapshotRow[];
+
+    return rows.map<StoreBankAccountSummary>((row) => ({
+      bankAccountId: row.id,
+      bankCode: row.bank_code,
+      bankName: row.bank_name,
+      branchCode: row.branch_code,
+      branchName: row.branch_name,
+      accountNumber: row.account_number,
+      accountName: row.account_name,
+      currencyCode: row.currency_code,
+      status: row.status,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private listSuppliers(options: { activeOnly: boolean }): StoreSupplierSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          supplier_no,
+          supplier_name,
+          phone,
+          email,
+          tax_number,
+          address_line1,
+          city,
+          country_code,
+          status,
+          updated_at
+        FROM supplier_snapshot
+        ${options.activeOnly ? "WHERE status = 'ACTIVE'" : ""}
+        ORDER BY supplier_name ASC, supplier_no ASC`,
+      )
+      .all() as Array<{
+      supplier_no: string;
+      supplier_name: string;
+      phone: string | null;
+      email: string | null;
+      tax_number: string | null;
+      address_line1: string | null;
+      city: string | null;
+      country_code: string | null;
+      status: string;
+      updated_at: string;
+    }>;
+
+    return rows.map<StoreSupplierSummary>((row) => ({
+      supplierNo: row.supplier_no,
+      supplierName: row.supplier_name,
+      phone: row.phone,
+      email: row.email,
+      taxNumber: row.tax_number,
+      addressLine1: row.address_line1,
+      city: row.city,
+      countryCode: row.country_code,
+      status: row.status,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private listPriceListEntries(): StorePriceListEntrySummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          price_list_code,
+          price_list_name,
+          currency_code,
+          is_default,
+          customer_type,
+          loyalty_tier,
+          product_code,
+          unit_price,
+          status,
+          updated_at
+        FROM price_list_entry_snapshot
+        ORDER BY is_default DESC, price_list_name ASC, product_code ASC
+        LIMIT 300`,
+      )
+      .all() as Array<{
+      price_list_code: string;
+      price_list_name: string;
+      currency_code: string;
+      is_default: number | string;
+      customer_type: string | null;
+      loyalty_tier: string | null;
+      product_code: string;
+      unit_price: number | string;
+      status: string;
+      updated_at: string;
+    }>;
+
+    return rows.map<StorePriceListEntrySummary>((row) => ({
+      priceListCode: row.price_list_code,
+      priceListName: row.price_list_name,
+      currencyCode: row.currency_code,
+      isDefault: asBooleanFlag(row.is_default),
+      customerType: row.customer_type,
+      loyaltyTier: row.loyalty_tier,
+      productCode: row.product_code,
+      unitPrice: Number(asNumber(row.unit_price).toFixed(2)),
+      status: row.status,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private listPromotions(): StorePromotionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          promotion_code,
+          promotion_name,
+          description,
+          discount_type,
+          target_scope,
+          discount_value,
+          minimum_basket_amount,
+          minimum_line_quantity,
+          buy_quantity,
+          reward_quantity,
+          target_department_code,
+          target_category_code,
+          target_product_code,
+          eligible_store_codes_json,
+          eligible_customer_types_json,
+          eligible_loyalty_tiers_json,
+          active_days_of_week_json,
+          active_from_minutes,
+          active_to_minutes,
+          coupon_required,
+          coupon_code,
+          allow_with_loyalty,
+          apply_once_per_basket,
+          priority,
+          start_at,
+          end_at,
+          status,
+          updated_at
+        FROM promotion_snapshot
+        ORDER BY status ASC, priority ASC, promotion_name ASC
+        LIMIT 200`,
+      )
+      .all() as Array<{
+      promotion_code: string;
+      promotion_name: string;
+      description: string | null;
+      discount_type: SyncPromotionDiscountType;
+      target_scope: SyncPromotionTargetScope;
+      discount_value: number | string;
+      minimum_basket_amount: number | string | null;
+      minimum_line_quantity: number | string | null;
+      buy_quantity: number | string | null;
+      reward_quantity: number | string | null;
+      target_department_code: string | null;
+      target_category_code: string | null;
+      target_product_code: string | null;
+      eligible_store_codes_json: string | null;
+      eligible_customer_types_json: string | null;
+      eligible_loyalty_tiers_json: string | null;
+      active_days_of_week_json: string | null;
+      active_from_minutes: number | string | null;
+      active_to_minutes: number | string | null;
+      coupon_required: number | string;
+      coupon_code: string | null;
+      allow_with_loyalty: number | string;
+      apply_once_per_basket: number | string;
+      priority: number | string;
+      start_at: string | null;
+      end_at: string | null;
+      status: string;
+      updated_at: string;
+    }>;
+
+    return rows.map<StorePromotionSummary>((row) => ({
+      promotionCode: row.promotion_code,
+      promotionName: row.promotion_name,
+      description: row.description,
+      discountType: row.discount_type,
+      targetScope: row.target_scope,
+      discountValue: Number(asNumber(row.discount_value).toFixed(2)),
+      minimumBasketAmount:
+        row.minimum_basket_amount == null
+          ? null
+          : Number(asNumber(row.minimum_basket_amount).toFixed(2)),
+      minimumLineQuantity:
+        row.minimum_line_quantity == null
+          ? null
+          : Number(asNumber(row.minimum_line_quantity).toFixed(3)),
+      buyQuantity:
+        row.buy_quantity == null
+          ? null
+          : Number(asNumber(row.buy_quantity).toFixed(3)),
+      rewardQuantity:
+        row.reward_quantity == null
+          ? null
+          : Number(asNumber(row.reward_quantity).toFixed(3)),
+      targetDepartmentCode: row.target_department_code,
+      targetCategoryCode: row.target_category_code,
+      targetProductCode: row.target_product_code,
+      eligibleStoreCodes: readStringArray(row.eligible_store_codes_json),
+      eligibleCustomerTypes: readStringArray(row.eligible_customer_types_json),
+      eligibleLoyaltyTiers: readStringArray(row.eligible_loyalty_tiers_json),
+      activeDaysOfWeek: readStringArray(row.active_days_of_week_json),
+      activeFromMinutes: asNullableNumber(row.active_from_minutes),
+      activeToMinutes: asNullableNumber(row.active_to_minutes),
+      couponRequired: asBooleanFlag(row.coupon_required),
+      couponCode: row.coupon_code,
+      allowWithLoyalty: asBooleanFlag(row.allow_with_loyalty),
+      applyOncePerBasket: asBooleanFlag(row.apply_once_per_basket),
+      priority: Math.trunc(asNumber(row.priority)),
+      startAt: row.start_at,
+      endAt: row.end_at,
+      status: row.status,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private getBankAccountById(bankAccountId: string | null | undefined) {
+    if (!bankAccountId?.trim()) {
+      return null;
+    }
+
+    return (
+      this.listActiveBankAccounts().find(
+        (account) => account.bankAccountId === bankAccountId,
+      ) ?? null
+    );
+  }
+
+  private getLoyaltySettingsSummary(
+    metadata: Record<string, string>,
+  ): StoreLoyaltySettingsSummary {
+    return normalizeLoyaltyPolicy({
+      loyaltyProgramEnabled: metadata.loyalty_program_enabled !== "0",
+      loyaltyPointsPerCurrencyUnit: asNumber(
+        metadata.loyalty_points_per_currency_unit,
+      ),
+      loyaltyRedemptionEnabled: metadata.loyalty_redemption_enabled === "1",
+      loyaltyRedemptionPointsStep: Math.max(
+        1,
+        Math.trunc(asNumber(metadata.loyalty_redemption_points_step) || 100),
+      ),
+      loyaltyRedemptionValueAmount: Number(
+        (asNumber(metadata.loyalty_redemption_value_amount) || 1).toFixed(2),
+      ),
+      loyaltyMinimumRedeemPoints: Math.max(
+        1,
+        Math.trunc(asNumber(metadata.loyalty_minimum_redeem_points) || 100),
+      ),
+      loyaltyMaximumRedeemPercentOfSale: Number(
+        (
+          asNumber(metadata.loyalty_maximum_redeem_percent_of_sale) || 100
+        ).toFixed(2),
+      ),
+    });
+  }
+
+  private getOptionSettingsSummary(
+    metadata: Record<string, string>,
+  ): StoreOptionSettingsSummary {
+    return {
+      shiftFloatPromptAmount: Number(
+        Math.max(0, asNumber(metadata.shift_float_prompt_amount)).toFixed(2),
+      ),
+      showCriticalStocksOnStartup:
+        metadata.show_critical_stocks_on_startup === "1",
+      productSizes: readProductSizesMetadata(metadata.product_sizes_json),
+      posDiscountRates: readPosDiscountRatesMetadata(metadata.pos_discount_rates_json),
+    };
+  }
+
+  private getPasswordPolicySummary(metadata: Record<string, string>) {
+    return {
+      minimumLength: normalizePolicyInteger(
+        metadata.password_policy_minimum_length,
+        8,
+        4,
+        128,
+      ),
+      requireUppercase: metadata.password_policy_require_uppercase !== "0",
+      requireLowercase: metadata.password_policy_require_lowercase !== "0",
+      requireNumber: metadata.password_policy_require_number !== "0",
+      requireSymbol: metadata.password_policy_require_symbol === "1",
+      temporaryPasswordMustChange:
+        metadata.password_policy_temporary_must_change !== "0",
+      passwordExpiryDays: normalizePolicyInteger(
+        metadata.password_policy_expiry_days,
+        0,
+        0,
+        999,
+      ),
+      passwordHistoryCount: normalizePolicyInteger(
+        metadata.password_policy_history_count,
+        0,
+        0,
+        24,
+      ),
+      lockoutThreshold: normalizePolicyInteger(
+        metadata.password_policy_lockout_threshold,
+        5,
+        0,
+        20,
+      ),
+      lockoutMinutes: normalizePolicyInteger(
+        metadata.password_policy_lockout_minutes,
+        15,
+        0,
+        1440,
+      ),
+      updatedAt: metadata.password_policy_updated_at ?? null,
+    };
+  }
+
+  private toCustomerAccountPostingCustomer(
+    customer: CustomerRow,
+  ): CustomerAccountPostingCustomer {
+    return {
+      customerId: customer.id,
+      customerNo: customer.customer_no,
+      fullName: customer.full_name,
+      status: customer.status,
+      loyaltyEnrolled: hasLocalLoyaltyAccount(customer),
+      loyaltyPointsBalance: Math.trunc(
+        asNumber(customer.loyalty_points_balance),
+      ),
+      allowCreditSales: asBooleanFlag(customer.allow_credit_sales),
+      creditLimitAmount:
+        customer.credit_limit_amount === null
+          ? null
+          : Number(asNumber(customer.credit_limit_amount).toFixed(2)),
+      receivableBalanceAmount: Number(
+        asNumber(customer.receivable_balance_amount).toFixed(2),
+      ),
+    };
+  }
+
+  private getBasketLoyaltyCustomer(header: BasketHeaderRow) {
+    if (!header.customer_id) {
+      return null;
+    }
+
+    return {
+      fullName:
+        header.customer_name ?? header.customer_no ?? "Attached customer",
+      loyaltyEnrolled: hasLocalLoyaltyAccount({
+        loyalty_enrolled: header.customer_loyalty_enrolled,
+        loyalty_tier: header.customer_loyalty_tier,
+        loyalty_points_balance: header.customer_loyalty_points_balance,
+      }),
+      loyaltyPointsBalance: Math.max(
+        0,
+        Math.trunc(asNumber(header.customer_loyalty_points_balance)),
+      ),
+    };
+  }
+
+  private calculateBasketLoyaltyRedemption(
+    header: BasketHeaderRow,
+    grossTotalAmount: number,
+    appliedPromotions?: StoreBasketAppliedPromotionSummary[],
+    requestedPoints?: number,
+  ) {
+    if ((appliedPromotions ?? []).length > 0) {
+      const promotionDetails = this.getDetailedAppliedPromotionSummaries(
+        this.getBasketLines(header.id),
+      );
+      const blockingPromotions = promotionDetails.filter(
+        (promotion) => !promotion.allowWithLoyalty,
+      );
+
+      if (blockingPromotions.length > 0) {
+        const blockingLabel = blockingPromotions
+          .map((promotion) => promotion.promotionName)
+          .join(", ");
+
+        return {
+          canRedeem: false,
+          message: `Flash ERP cannot combine loyalty redemption with active enterprise promotion${blockingPromotions.length === 1 ? "" : "s"}: ${blockingLabel}.`,
+          appliedPoints: 0,
+          appliedAmount: 0,
+          maxRedeemablePoints: 0,
+          maxRedeemableAmount: 0,
+        };
+      }
+    }
+
+    return calculateLoyaltyRedemption({
+      customer: this.getBasketLoyaltyCustomer(header),
+      totalAmount: grossTotalAmount,
+      requestedPoints:
+        requestedPoints === undefined
+          ? Math.max(0, Math.trunc(asNumber(header.loyalty_redemption_points)))
+          : Math.max(0, Math.trunc(requestedPoints)),
+      policy: this.getLoyaltySettingsSummary(this.getMetadata()),
+    });
+  }
+
+  private buildBasketNotesWithLoyaltyRedemption(input: {
+    existingNotes: string | null;
+    loyaltyPointsRedeemed: number;
+    loyaltyRedemptionAmount: number;
+  }) {
+    const baseNotes = input.existingNotes?.trim() ?? "";
+    const loyaltyNote =
+      input.loyaltyPointsRedeemed > 0
+        ? `Loyalty redemption applied: ${input.loyaltyPointsRedeemed} pt(s) = ${input.loyaltyRedemptionAmount.toFixed(2)}.`
+        : "";
+
+    if (!loyaltyNote) {
+      return baseNotes || null;
+    }
+
+    if (!baseNotes) {
+      return loyaltyNote;
+    }
+
+    return `${baseNotes}\n${loyaltyNote}`;
+  }
+
+  private getReceiptSettingsSummary(metadata: Record<string, string>) {
+    const salesReceiptTemplateHtml =
+      metadata.sales_receipt_template_html?.trim() || null;
+    const templateMode =
+      metadata.sales_receipt_template_mode === "linked" ||
+      metadata.sales_receipt_template_mode === "legacy"
+        ? metadata.sales_receipt_template_mode
+        : salesReceiptTemplateHtml
+          ? "legacy"
+          : "default";
+
+    return {
+      currencyCode: metadata.currency_code ?? "USD",
+      timezone: metadata.timezone ?? "UTC",
+      receiptHeader: metadata.receipt_header?.trim() || null,
+      receiptFooter: metadata.receipt_footer?.trim() || null,
+      salesReceiptTemplateCode:
+        metadata.sales_receipt_template_code?.trim() || null,
+      salesReceiptTemplateName:
+        metadata.sales_receipt_template_name?.trim() || null,
+      salesReceiptTemplateHtml,
+      goodsReceiptTemplateCode:
+        metadata.goods_receipt_template_code?.trim() || null,
+      goodsReceiptTemplateName:
+        metadata.goods_receipt_template_name?.trim() || null,
+      goodsReceiptTemplateHtml:
+        metadata.goods_receipt_template_html?.trim() || null,
+      templateMode,
+    } as const;
+  }
+
+  private getReceiptPrinterSettingsSummary(metadata: Record<string, string>) {
+    const terminalCode = this.getTerminalCode();
+    const terminalPrinterName =
+      metadata[`receipt_printer_name:${terminalCode}`]?.trim();
+    const terminalSilentPrint =
+      metadata[`receipt_printer_silent:${terminalCode}`];
+    const terminalAutoPrint = metadata[`receipt_auto_print:${terminalCode}`];
+
+    return {
+      selectedPrinterName:
+        terminalPrinterName || metadata.receipt_printer_name?.trim() || null,
+      silentPrintEnabled:
+        (terminalSilentPrint ?? metadata.receipt_printer_silent) === "1",
+      autoPrintOnComplete:
+        (terminalAutoPrint ?? metadata.receipt_auto_print) !== "0",
+    } as const;
+  }
+
+  private listAutomaticPromotionPolicies(evaluatedAt: string) {
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          promotion_code,
+          promotion_name,
+          description,
+          discount_type,
+          target_scope,
+          discount_value,
+          minimum_basket_amount,
+          minimum_line_quantity,
+          buy_quantity,
+          reward_quantity,
+          target_department_code,
+          target_category_code,
+          target_product_code,
+          eligible_store_codes_json,
+          eligible_customer_types_json,
+          eligible_loyalty_tiers_json,
+          active_days_of_week_json,
+          active_from_minutes,
+          active_to_minutes,
+          coupon_required,
+          coupon_code,
+          allow_with_loyalty,
+          apply_once_per_basket,
+          priority,
+          start_at,
+          end_at,
+          status,
+          updated_at
+        FROM promotion_snapshot
+        WHERE status = 'ACTIVE'
+          AND (start_at IS NULL OR start_at <= ?)
+          AND (end_at IS NULL OR end_at >= ?)
+        ORDER BY priority ASC, promotion_name ASC, promotion_code ASC`,
+      )
+      .all(evaluatedAt, evaluatedAt) as PromotionSnapshotRow[];
+
+    return rows.map<AutomaticPromotionPolicy>((row) => ({
+      promotionCode: row.promotion_code,
+      promotionName: row.promotion_name,
+      discountType: row.discount_type,
+      targetScope: row.target_scope,
+      discountValue: Number(asNumber(row.discount_value).toFixed(2)),
+      minimumBasketAmount:
+        row.minimum_basket_amount === null
+          ? null
+          : Number(asNumber(row.minimum_basket_amount).toFixed(2)),
+      minimumLineQuantity:
+        row.minimum_line_quantity === null
+          ? null
+          : Number(asNumber(row.minimum_line_quantity).toFixed(3)),
+      buyQuantity:
+        row.buy_quantity === null
+          ? null
+          : Number(asNumber(row.buy_quantity).toFixed(3)),
+      rewardQuantity:
+        row.reward_quantity === null
+          ? null
+          : Number(asNumber(row.reward_quantity).toFixed(3)),
+      targetDepartmentCode: row.target_department_code,
+      targetCategoryCode: row.target_category_code,
+      targetProductCode: row.target_product_code,
+      eligibleStoreCodes: readStringArray(row.eligible_store_codes_json),
+      eligibleCustomerTypes: readStringArray(row.eligible_customer_types_json),
+      eligibleLoyaltyTiers: readStringArray(row.eligible_loyalty_tiers_json),
+      activeDaysOfWeek: readStringArray(row.active_days_of_week_json),
+      activeFromMinutes: asNullableNumber(row.active_from_minutes),
+      activeToMinutes: asNullableNumber(row.active_to_minutes),
+      couponRequired: asBooleanFlag(row.coupon_required),
+      couponCode: row.coupon_code,
+      allowWithLoyalty: asBooleanFlag(row.allow_with_loyalty),
+      applyOncePerBasket: asBooleanFlag(row.apply_once_per_basket),
+      priority: Math.trunc(asNumber(row.priority)),
+      startAt: row.start_at,
+      endAt: row.end_at,
+      status: row.status,
+    }));
+  }
+
+  private getPromotionCustomerProfile(customerId: string | null | undefined) {
+    if (!customerId) {
+      return {
+        customerType: null as string | null,
+        loyaltyTier: null as string | null,
+      };
+    }
+
+    const customer = this.db
+      .prepare(
+        "SELECT customer_type, loyalty_tier FROM customer WHERE id = ? AND deleted_at IS NULL AND status = 'ACTIVE' LIMIT 1",
+      )
+      .get(customerId) as
+      | { customer_type: string | null; loyalty_tier: string | null }
+      | undefined;
+
+    return {
+      customerType: customer?.customer_type ?? null,
+      loyaltyTier: customer?.loyalty_tier ?? null,
+    };
+  }
+
+  private getDetailedAppliedPromotionSummaries(
+    lines: Array<{
+      applied_promotion_code: string | null;
+      applied_promotion_name: string | null;
+      discount_amount: number | string;
+    }>,
+  ) {
+    const promotions = new Map<
+      string,
+      {
+        promotionCode: string;
+        promotionName: string;
+        discountAmount: number;
+        allowWithLoyalty: boolean;
+      }
+    >();
+
+    for (const line of lines) {
+      const promotionCode = normalizePromotionCode(line.applied_promotion_code);
+      const lineDiscountAmount = Number(
+        asNumber(line.discount_amount).toFixed(2),
+      );
+
+      if (!promotionCode || lineDiscountAmount <= 0) {
+        continue;
+      }
+
+      const existing = promotions.get(promotionCode);
+
+      if (existing) {
+        existing.discountAmount = Number(
+          (existing.discountAmount + lineDiscountAmount).toFixed(2),
+        );
+        continue;
+      }
+
+      const promotionRow = this.db
+        .prepare(
+          "SELECT promotion_name, allow_with_loyalty FROM promotion_snapshot WHERE promotion_code = ? LIMIT 1",
+        )
+        .get(promotionCode) as
+        | {
+            promotion_name: string;
+            allow_with_loyalty: number | string;
+          }
+        | undefined;
+
+      promotions.set(promotionCode, {
+        promotionCode,
+        promotionName:
+          line.applied_promotion_name ??
+          promotionRow?.promotion_name ??
+          promotionCode,
+        discountAmount: lineDiscountAmount,
+        allowWithLoyalty: promotionRow
+          ? asBooleanFlag(promotionRow.allow_with_loyalty)
+          : true,
+      });
+    }
+
+    return [...promotions.values()].sort((left, right) =>
+      left.promotionName.localeCompare(right.promotionName),
+    );
+  }
+
+  private getPublicAppliedPromotionSummaries(
+    lines: Array<{
+      applied_promotion_code: string | null;
+      applied_promotion_name: string | null;
+      discount_amount: number | string;
+    }>,
+  ) {
+    return this.getDetailedAppliedPromotionSummaries(
+      lines,
+    ).map<StoreBasketAppliedPromotionSummary>((promotion) => ({
+      promotionCode: promotion.promotionCode,
+      promotionName: promotion.promotionName,
+      discountAmount: promotion.discountAmount,
+    }));
+  }
+
+  private refreshActiveBasketIfPresent(updatedAt: string) {
+    const activeBasketId = this.getActiveBasketId();
+
+    if (!activeBasketId) {
+      return;
+    }
+
+    const activeBasket = this.getBasketHeader(activeBasketId);
+
+    if (!activeBasket || activeBasket.status !== "PARKED") {
+      this.deleteMetadata(this.getActiveBasketMetadataKey());
+      return;
+    }
+
+    this.refreshBasketTotals(activeBasket.id, updatedAt);
+  }
+
+  private getDefaultSalesLocationCode() {
+    return (
+      (
+        this.db
+          .prepare(
+            "SELECT location_code FROM inventory_location_snapshot WHERE is_sales_default = 1 ORDER BY updated_at ASC LIMIT 1",
+          )
+          .get() as { location_code: string } | undefined
+      )?.location_code ?? null
+    );
+  }
+
+  private getDefaultSalesOrderLocationCode() {
+    return (
+      (
+        this.db
+          .prepare(
+            `SELECT location_code
+             FROM inventory_location_snapshot
+             WHERE status = 'ACTIVE'
+             ORDER BY
+               CASE
+                 WHEN is_sales_order_default = 1 THEN 0
+                 WHEN is_sales_default = 1 THEN 1
+                 WHEN is_receiving_default = 1 THEN 2
+                 ELSE 3
+               END,
+               location_name ASC
+             LIMIT 1`,
+          )
+          .get() as { location_code: string } | undefined
+      )?.location_code ?? null
+    );
+  }
+
+  private isOpenSalesOrderBasket(transactionId: string) {
+    return (
+      this.scalar(
+        "SELECT count(*) AS value FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN'",
+        transactionId,
+      ) > 0
+    );
+  }
+
+  private getDefaultReceivingLocationCode() {
+    return (
+      (
+        this.db
+          .prepare(
+            "SELECT location_code FROM inventory_location_snapshot WHERE is_receiving_default = 1 ORDER BY updated_at ASC LIMIT 1",
+          )
+          .get() as { location_code: string } | undefined
+      )?.location_code ?? null
+    );
+  }
+
+  private getLocationQuantity(locationCode: string, productCode: string) {
+    return asNumber(
+      (
+        this.db
+          .prepare(
+            "SELECT quantity_on_hand AS value FROM inventory_location_balance WHERE location_code = ? AND product_code = ? LIMIT 1",
+          )
+          .get(locationCode, productCode) as NumericRow | undefined
+      )?.value,
+    );
+  }
+
+  private getOptionalLocationQuantity(
+    locationCode: string,
+    productCode: string,
+  ) {
+    const row = this.db
+      .prepare(
+        "SELECT quantity_on_hand AS value FROM inventory_location_balance WHERE location_code = ? AND product_code = ? LIMIT 1",
+      )
+      .get(locationCode, productCode) as NumericRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return asNumber(row.value);
+  }
+
+  private hasLocationBalance(locationCode: string, productCode: string) {
+    return this.getOptionalLocationQuantity(locationCode, productCode) !== null;
+  }
+
+  private touchLocation(locationCode: string, updatedAt: string) {
+    this.db
+      .prepare(
+        "UPDATE inventory_location_snapshot SET updated_at = ? WHERE location_code = ?",
+      )
+      .run(updatedAt, locationCode);
+  }
+
+  private applyLocationBalanceDelta(
+    locationCode: string,
+    productCode: string,
+    delta: number,
+    updatedAt: string,
+  ) {
+    const nextQuantity = Number(
+      (this.getLocationQuantity(locationCode, productCode) + delta).toFixed(3),
+    );
+
+    this.db
+      .prepare(
+        "INSERT INTO inventory_location_balance (location_code, product_code, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(location_code, product_code) DO UPDATE SET quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
+      )
+      .run(locationCode, productCode, nextQuantity, updatedAt);
+    this.touchLocation(locationCode, updatedAt);
+  }
+
+  private setLocationBalanceQuantity(
+    locationCode: string,
+    productCode: string,
+    quantity: number,
+    updatedAt: string,
+  ) {
+    this.db
+      .prepare(
+        "INSERT INTO inventory_location_balance (location_code, product_code, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(location_code, product_code) DO UPDATE SET quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
+      )
+      .run(locationCode, productCode, Number(quantity.toFixed(3)), updatedAt);
+    this.touchLocation(locationCode, updatedAt);
+  }
+
+  private scalar(sql: string, ...params: SQLInputValue[]) {
+    const row = this.db.prepare(sql).get(...params) as NumericRow | undefined;
+    return asNumber(row?.value);
+  }
+
+  private metadata(key: string) {
+    return (
+      this.db
+        .prepare("SELECT value FROM app_metadata WHERE key = ? LIMIT 1")
+        .get(key) as { value: string } | undefined
+    )?.value;
+  }
+
+  private expectedInboundStoreCode(payloadStoreCode: unknown) {
+    if (typeof payloadStoreCode !== "string" || !payloadStoreCode.trim()) {
+      return null;
+    }
+
+    return this.metadata("store_code") ?? payloadStoreCode;
+  }
+
+  private rememberInboundStoreCode(storeCode: string) {
+    if (!this.metadata("store_code")) {
+      this.setMetadata("store_code", storeCode);
+    }
+  }
+
+  private getMetadata() {
+    const rows = this.db
+      .prepare("SELECT key, value FROM app_metadata")
+      .all() as MetadataRow[];
+
+    return Object.fromEntries(
+      rows.map((row) => [row.key, row.value]),
+    ) as Record<string, string>;
+  }
+
+  private setMetadata(key: string, value: string) {
+    this.db
+      .prepare(
+        "INSERT INTO app_metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, value);
+  }
+
+  private deleteMetadata(key: string) {
+    this.db.prepare("DELETE FROM app_metadata WHERE key = ?").run(key);
+  }
+
+  private nextSequence(key: string) {
+    const nextValue = asNumber(this.metadata(key)) + 1;
+    this.setMetadata(key, String(nextValue));
+    return nextValue;
+  }
+
+  private insertRunLog(input: {
+    runKind: string;
+    result: string;
+    summary: string;
+    upstreamProcessed: number;
+    downstreamApplied: number;
+    startedAt: string;
+    finishedAt: string | null;
+  }) {
+    this.db
+      .prepare(
+        "INSERT INTO sync_run_log (id, run_kind, result, summary, upstream_processed, downstream_applied, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        randomUUID(),
+        input.runKind,
+        input.result,
+        input.summary,
+        input.upstreamProcessed,
+        input.downstreamApplied,
+        input.startedAt,
+        input.finishedAt,
+      );
+  }
+
+  private ensureColumn(
+    tableName: string,
+    columnName: string,
+    columnDefinition: string,
+  ) {
+    const columns = this.db
+      .prepare(`PRAGMA table_info(${tableName})`)
+      .all() as Array<{ name: string }>;
+
+    if (columns.some((column) => column.name === columnName)) {
+      return;
+    }
+
+    this.db.exec(
+      `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`,
+    );
+  }
+
+  private withTransaction(work: () => void) {
+    this.db.exec("BEGIN IMMEDIATE");
+
+    try {
+      work();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+}

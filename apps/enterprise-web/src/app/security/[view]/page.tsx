@@ -1,0 +1,56 @@
+import { notFound } from "next/navigation";
+
+import { EnterpriseSecurityWorkspace } from "@/components/enterprise/enterprise-security-workspace";
+import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
+import {
+  buildUnavailableEnterpriseSecurityWorkspace,
+  getEnterpriseSecurityWorkspace
+} from "@/server/repositories/enterprise-security.repository";
+import {
+  isEnterpriseSecurityView,
+  type EnterpriseSecurityView
+} from "@/lib/navigation/enterprise-navigation";
+
+export const dynamic = "force-dynamic";
+
+export default async function SecuritySubmenuPage({
+  params
+}: {
+  params: Promise<{
+    view: string;
+  }>;
+}) {
+  const { view } = await params;
+
+  if (!isEnterpriseSecurityView(view)) {
+    notFound();
+  }
+
+  const permissionByView: Record<EnterpriseSecurityView, string | string[]> = {
+    users: "security.user.manage",
+    "roles-privileges": ["security.role.manage", "security.privilege.manage"],
+    "audit-logs": "security.audit-log.view",
+    "online-users": "security.online-user.view",
+    "password-policy": "security.password-policy.manage",
+    "security-logs": "security.log.view"
+  };
+
+  const required = permissionByView[view];
+  if (Array.isArray(required)) {
+    await requireEnterprisePermission(required, { any: true });
+  } else {
+    await requireEnterprisePermission([required]);
+  }
+
+  const workspace = await getEnterpriseSecurityWorkspace().catch((error: unknown) =>
+    buildUnavailableEnterpriseSecurityWorkspace(
+      error instanceof Error
+        ? `Unable to load live Flash ERP security policy: ${error.message}`
+        : "Unable to load live Flash ERP security policy."
+    )
+  );
+
+  return (
+    <EnterpriseSecurityWorkspace view={view as EnterpriseSecurityView} workspace={workspace} />
+  );
+}

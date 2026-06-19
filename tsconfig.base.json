@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "allowJs": false,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@flash-erp/domain": [
+        "packages/domain/src/index.ts"
+      ],
+      "@flash-erp/domain/*": [
+        "packages/domain/src/*"
+      ],
+      "@flash-erp/sync-core": [
+        "packages/sync-core/src/index.ts"
+      ],
+      "@flash-erp/sync-core/*": [
+        "packages/sync-core/src/*"
+      ]
+    }
+  }
+}

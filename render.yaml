@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: flash-erp-enterprise-web
+    runtime: node
+    repo: https://github.com/flashyjunior/FLASH-ERP.git
+    branch: master
+    plan: free
+    buildCommand: npm ci --include=dev && npx prisma migrate deploy --schema prisma/schema.prisma && npm --workspace @flash-erp/enterprise-web run build
+    preDeployCommand: npx prisma migrate deploy --schema prisma/schema.prisma
+    startCommand: npm --workspace @flash-erp/enterprise-web run start -- -H 0.0.0.0 -p $PORT
+    autoDeployTrigger: commit
+    healthCheckPath: /api/system/live
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.0
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: flash-erp-enterprise-db
+          property: connectionString
+      - key: FLASH_ERP_AUTH_SECRET
+        generateValue: true
+      - key: FLASH_ERP_ENTERPRISE_APP_URL
+        sync: false
+      - key: NEXT_PUBLIC_ENTERPRISE_URL
+        sync: false
+      - key: FLASH_ERP_INTEGRATION_API_KEY
+        sync: false
+      - key: FLASH_ERP_INTEGRATION_API_KEYS
+        sync: false
+      - key: FLASH_ERP_MFA_DELIVERY_MODE
+        value: internal
+
+databases:
+  - name: flash-erp-enterprise-db
+    plan: free
+    databaseName: flash_erp_enterprise
+    user: flash_erp

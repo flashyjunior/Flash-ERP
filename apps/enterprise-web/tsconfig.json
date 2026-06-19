@@ -1,0 +1,39 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@flash-erp/domain": [
+        "../../packages/domain/src/index.ts"
+      ],
+      "@flash-erp/domain/*": [
+        "../../packages/domain/src/*"
+      ],
+      "@flash-erp/sync-core": [
+        "../../packages/sync-core/src/index.ts"
+      ],
+      "@flash-erp/sync-core/*": [
+        "../../packages/sync-core/src/*"
+      ],
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    "incremental": true,
+    "isolatedModules": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

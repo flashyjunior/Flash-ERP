@@ -1,0 +1,161 @@
+Yes. The first migration script is mainly for **new database creation**:
+
+```text
+20260522000000_init_sqlserver/migration.sql
+```
+
+It creates the full HQ schema from scratch: tables like `RetailOrg`, `Store`, `TenderMethod`, `Bank`, `Product`, `PosTransaction`, etc.
+
+The other 4 are **upgrade migrations** that add changes after the initial schema:
+
+```text
+20260522021500_add_relation_indexes
+20260522043000_widen_receipt_template_html
+20260523000000_inventory_location_sales_order_defaults
+20260524090000_product_matrix_variants
+```
+
+So:
+
+- For a completely empty hosted database: run all 5 in order.
+- For a database that already has the HQ tables from the first migration: do **not** rerun the first migration. Run only the missing later migrations.
+- Your current hosted DB has no tables, so run all 5 in order.
+
+After that, run the tenders/banks seed SQL, then restart the app.
+
+===============================================================
+
+Yes. Do it this way:
+
+1. Run the SQL migration files manually in this exact order from `prisma/migrations-sqlserver`:
+
+```text
+20260522000000_init_sqlserver/migration.sql
+20260522021500_add_relation_indexes/migration.sql
+20260522043000_widen_receipt_template_html/migration.sql
+20260523000000_inventory_location_sales_order_defaults/migration.sql
+20260524090000_product_matrix_variants/migration.sql
+```
+
+2. After they succeed, run this small script so Prisma/readiness knows those migrations are applied:
+
+```sql
+IF OBJECT_ID(N'[dbo].[_prisma_migrations]', N'U') IS NULL
+CREATE TABLE [dbo].[_prisma_migrations] (
+  [id] VARCHAR(36) NOT NULL PRIMARY KEY,
+  [checksum] VARCHAR(64) NOT NULL,
+  [finished_at] DATETIMEOFFSET NULL,
+  [migration_name] VARCHAR(255) NOT NULL,
+  [logs] NVARCHAR(MAX) NULL,
+  [rolled_back_at] DATETIMEOFFSET NULL,
+  [started_at] DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+  [applied_steps_count] INT NOT NULL DEFAULT 0
+);
+
+MERGE [dbo].[_prisma_migrations] AS target
+USING (VALUES
+('9e783e85479675bd0c02c6638ade4c8573e60b5efa2bf0829548c4dcf07188a9','20260522000000_init_sqlserver'),
+('78a9ff354323503b5e16e6ea727c6e5c2e34d3794a99db54058a2693969fc898','20260522021500_add_relation_indexes'),
+('ae6519f34054e055f8aaf7c696f6397dc8ef6f54477c4470c0f3b9604970f74c','20260522043000_widen_receipt_template_html'),
+('da587ca8fff61e022617d90b3ca5ba38ead17e20f61f395400e6bb00d24dfa87','20260523000000_inventory_location_sales_order_defaults'),
+('ff885b9a046c66f0b515aa771d6e7b873166bf68de1df5443c7cb1c4de32f425','20260524090000_product_matrix_variants')
+) AS source ([checksum], [migration_name])
+ON target.[migration_name] = source.[migration_name]
+WHEN NOT MATCHED THEN
+INSERT ([id], [checksum], [finished_at], [migration_name], [started_at], [applied_steps_count])
+VALUES (LOWER(CONVERT(VARCHAR(36), NEWID())), source.[checksum], SYSDATETIMEOFFSET(), source.[migration_name], SYSDATETIMEOFFSET(), 1);
+```
+
+3. Then run this for tenders and banks:
+
+```sql
+DECLARE @Now DATETIME2 = SYSUTCDATETIME();
+DECLARE @OrgId NVARCHAR(1000);
+DECLARE @EnterpriseNodeId NVARCHAR(1000);
+
+SELECT @OrgId = [id] FROM [dbo].[RetailOrg] WHERE [code] = N'flash-retail';
+
+IF @OrgId IS NULL
+BEGIN
+  SET @OrgId = LOWER(CONVERT(NVARCHAR(36), NEWID()));
+  INSERT [dbo].[RetailOrg] ([id],[code],[name],[baseCurrencyCode],[timezone],[status],[createdAt],[updatedAt])
+  VALUES (@OrgId,N'flash-retail',N'Flash Retail',N'GHS',N'Africa/Accra',N'ACTIVE',@Now,@Now);
+END;
+
+SELECT TOP 1 @EnterpriseNodeId = [id]
+FROM [dbo].[SyncNode]
+WHERE [retailOrgId] = @OrgId AND [nodeType] = N'ENTERPRISE' AND [isPrimary] = 1;
+
+IF @EnterpriseNodeId IS NULL
+BEGIN
+  SET @EnterpriseNodeId = LOWER(CONVERT(NVARCHAR(36), NEWID()));
+  INSERT [dbo].[SyncNode] ([id],[retailOrgId],[code],[name],[nodeType],[direction],[isPrimary],[status],[lastHeartbeatAt],[createdAt],[updatedAt])
+  VALUES (@EnterpriseNodeId,@OrgId,N'enterprise-primary',N'Enterprise Primary',N'ENTERPRISE',N'BIDIRECTIONAL',1,N'ACTIVE',@Now,@Now,@Now);
+END;
+
+DECLARE @Tender TABLE ([code] NVARCHAR(1000), [name] NVARCHAR(1000), [method] NVARCHAR(1000), [ref] BIT, [chg] BIT, [drawer] BIT, [sort] INT);
+INSERT @Tender VALUES
+(N'CASH',N'Cash',N'CASH',0,1,1,10),
+(N'VISA-MASTERCARD',N'Visa / Mastercard',N'CARD',1,0,0,20),
+(N'MOMO-MTN',N'MTN Mobile Money',N'MOBILE_MONEY',1,0,0,30),
+(N'MOMO-TELECEL',N'Telecel Cash',N'MOBILE_MONEY',1,0,0,40),
+(N'MOMO-AT',N'AT Money',N'MOBILE_MONEY',1,0,0,50),
+(N'BANK-TRANSFER',N'Bank Transfer',N'BANK_TRANSFER',1,0,0,60),
+(N'STORE-CREDIT',N'Customer Account',N'STORE_CREDIT',0,0,0,70),
+(N'GIFT-CARD',N'Gift Card',N'GIFT_CARD',1,0,0,80);
+
+MERGE [dbo].[TenderMethod] AS t
+USING @Tender AS s ON t.[retailOrgId]=@OrgId AND t.[code]=s.[code]
+WHEN MATCHED THEN UPDATE SET
+  [name]=s.[name], [paymentMethod]=s.[method], [requiresReference]=s.[ref],
+  [allowChange]=s.[chg], [allowRefund]=1, [allowOpenCashDrawer]=s.[drawer],
+  [sortOrder]=s.[sort], [status]=N'ACTIVE', [gatewayActive]=0,
+  [gatewayStatus]=N'DISABLED', [lastModifiedByNodeCode]=N'enterprise-primary',
+  [updatedAt]=@Now
+WHEN NOT MATCHED THEN INSERT
+  ([id],[retailOrgId],[code],[name],[paymentMethod],[requiresReference],[allowChange],[allowRefund],[allowOpenCashDrawer],[sortOrder],[status],[gatewayActive],[gatewayStatus],[originNodeCode],[lastModifiedByNodeCode],[createdAt],[updatedAt])
+VALUES
+  (LOWER(CONVERT(NVARCHAR(36), NEWID())),@OrgId,s.[code],s.[name],s.[method],s.[ref],s.[chg],1,s.[drawer],s.[sort],N'ACTIVE',0,N'DISABLED',N'enterprise-primary',N'enterprise-primary',@Now,@Now);
+
+UPDATE [dbo].[TenderMethod]
+SET [status]=N'INACTIVE', [lastModifiedByNodeCode]=N'enterprise-primary', [updatedAt]=@Now
+WHERE [retailOrgId]=@OrgId AND [code] IN (N'CARD-VISA-MC', N'MOMO');
+
+DECLARE @Bank TABLE ([bankCode] NVARCHAR(1000), [bankName] NVARCHAR(1000), [branchCode] NVARCHAR(1000), [branchName] NVARCHAR(1000), [accountNo] NVARCHAR(1000), [accountName] NVARCHAR(1000));
+INSERT @Bank VALUES
+(N'GCB',N'GCB Bank',N'GCB-ACCRA-CENTRAL',N'Accra Central Branch',N'103000445501',N'Sheval Fashion - Cash Clearing'),
+(N'ECOBANK',N'Ecobank Ghana',N'ECO-OSU',N'Osu Oxford Street Branch',N'144200118899',N'Sheval Fashion - Digital Receipts'),
+(N'ABSA',N'Absa Bank Ghana',N'ABSA-RINGWAY',N'Ringway Branch',N'220010334455',N'Sheval Fashion - Card Settlement'),
+(N'STANBIC',N'Stanbic Bank Ghana',N'STB-AIRPORT',N'Airport Branch',N'770045560012',N'Sheval Fashion - Operations');
+
+MERGE [dbo].[Bank] AS t
+USING (SELECT DISTINCT [bankCode],[bankName] FROM @Bank) AS s
+ON t.[retailOrgId]=@OrgId AND t.[code]=s.[bankCode]
+WHEN MATCHED THEN UPDATE SET [name]=s.[bankName], [status]=N'ACTIVE', [updatedAt]=@Now
+WHEN NOT MATCHED THEN INSERT ([id],[retailOrgId],[code],[name],[status],[originNodeCode],[lastModifiedByNodeCode],[createdAt],[updatedAt])
+VALUES (LOWER(CONVERT(NVARCHAR(36), NEWID())),@OrgId,s.[bankCode],s.[bankName],N'ACTIVE',N'enterprise-primary',N'enterprise-primary',@Now,@Now);
+
+MERGE [dbo].[BankBranch] AS t
+USING (
+  SELECT b.[id] AS bankId, s.* FROM @Bank s JOIN [dbo].[Bank] b ON b.[retailOrgId]=@OrgId AND b.[code]=s.[bankCode]
+) AS s
+ON t.[retailOrgId]=@OrgId AND t.[code]=s.[branchCode]
+WHEN MATCHED THEN UPDATE SET [bankId]=s.[bankId], [name]=s.[branchName], [status]=N'ACTIVE', [updatedAt]=@Now
+WHEN NOT MATCHED THEN INSERT ([id],[retailOrgId],[bankId],[code],[name],[status],[originNodeCode],[lastModifiedByNodeCode],[createdAt],[updatedAt])
+VALUES (LOWER(CONVERT(NVARCHAR(36), NEWID())),@OrgId,s.[bankId],s.[branchCode],s.[branchName],N'ACTIVE',N'enterprise-primary',N'enterprise-primary',@Now,@Now);
+
+MERGE [dbo].[BankAccount] AS t
+USING (
+  SELECT br.[id] AS branchId, s.* FROM @Bank s JOIN [dbo].[BankBranch] br ON br.[retailOrgId]=@OrgId AND br.[code]=s.[branchCode]
+) AS s
+ON t.[retailOrgId]=@OrgId AND t.[accountNumber]=s.[accountNo]
+WHEN MATCHED THEN UPDATE SET [branchId]=s.[branchId], [accountName]=s.[accountName], [currencyCode]=N'GHS', [status]=N'ACTIVE', [updatedAt]=@Now
+WHEN NOT MATCHED THEN INSERT ([id],[retailOrgId],[branchId],[accountNumber],[accountName],[currencyCode],[status],[originNodeCode],[lastModifiedByNodeCode],[createdAt],[updatedAt])
+VALUES (LOWER(CONVERT(NVARCHAR(36), NEWID())),@OrgId,s.[branchId],s.[accountNo],s.[accountName],N'GHS',N'ACTIVE',N'enterprise-primary',N'enterprise-primary',@Now,@Now);
+
+SELECT 'Seed complete' AS [result],
+  (SELECT COUNT(*) FROM [dbo].[TenderMethod] WHERE [retailOrgId]=@OrgId AND [status]=N'ACTIVE') AS activeTenders,
+  (SELECT COUNT(*) FROM [dbo].[BankAccount] WHERE [retailOrgId]=@OrgId AND [status]=N'ACTIVE') AS activeBankAccounts;
+```
+
+Run the seed again any time; it is safe/idempotent. After this, restart the app.

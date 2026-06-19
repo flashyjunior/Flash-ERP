@@ -1,0 +1,63 @@
+{
+  "name": "flash-erp-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev:enterprise",
+    "dev:enterprise": "npm --workspace @flash-erp/enterprise-web run dev",
+    "dev:desktop": "npm --workspace @flash-erp/store-desktop run dev",
+    "preview:desktop": "npm --workspace @flash-erp/store-desktop run preview",
+    "dev:mobile": "npm --workspace @flash-erp/mobile run start",
+    "build": "npm run build:domain && npm run build:sync && npm run build:enterprise && npm run build:desktop",
+    "build:deploy": "npm run build:domain && npm run build:sync && npm run build:enterprise",
+    "build:domain": "npm --workspace @flash-erp/domain run build",
+    "build:sync": "npm --workspace @flash-erp/sync-core run build",
+    "build:enterprise": "npm --workspace @flash-erp/enterprise-web run build",
+    "build:desktop": "npm --workspace @flash-erp/store-desktop run build",
+    "start": "npm --workspace @flash-erp/enterprise-web run start",
+    "typecheck": "npm --workspaces --if-present run typecheck",
+    "prisma:validate": "prisma validate --schema prisma/schema.prisma",
+    "prisma:format": "prisma format --schema prisma/schema.prisma",
+    "prisma:generate": "prisma generate --schema prisma/schema.prisma",
+    "prisma:seed": "tsx prisma/seed.ts",
+    "seed:clothing": "tsx scripts/seed-clothing-catalog.ts",
+    "smoke:desktop": "tsx scripts/desktop-smoke-check.ts",
+    "soak:desktop": "tsx scripts/desktop-soak-gate.ts",
+    "cert:hardware": "tsx scripts/desktop-hardware-certification-gate.ts",
+    "acceptance:rms": "tsx scripts/rms-acceptance-gates.ts",
+    "acceptance:sync-hardening": "tsx scripts/sync-hardening-gates.ts",
+    "acceptance:desktop-stability": "tsx scripts/desktop-stability-gates.ts",
+    "acceptance:parity": "tsx scripts/rms-parity-closure-gates.ts && npm run acceptance:online-store-parity",
+    "acceptance:online-store-parity": "tsx scripts/online-store-desktop-parity-gate.ts",
+    "acceptance:sync-chaos": "tsx scripts/sync-chaos-reconciliation-gate.ts",
+    "cert:installed-soak": "tsx scripts/installed-desktop-soak-evidence-gate.ts",
+    "cert:security-providers": "tsx scripts/security-provider-certification-gate.ts",
+    "cert:hardware-execution": "tsx scripts/hardware-execution-evidence-gate.ts",
+    "cert:database-readiness": "tsx scripts/database-readiness-gate.ts",
+    "cert:desktop-sync-mssql": "tsx scripts/desktop-sync-mssql-certification-gate.ts",
+    "acceptance:functional-uat": "tsx scripts/functional-uat-certification-gate.ts",
+    "acceptance:production-hardening": "npm run acceptance:sync-chaos && npm run cert:installed-soak && npm run cert:security-providers && npm run cert:hardware-execution && npm run acceptance:functional-uat && npm run cert:database-readiness",
+    "acceptance:e2e": "tsx scripts/rms-e2e-certification-gates.ts",
+    "e2e:browser": "playwright test --project=enterprise-browser",
+    "e2e:electron": "playwright test --project=store-electron",
+    "e2e:certification": "playwright test",
+    "bootstrap:enterprise-admin": "tsx scripts/bootstrap-enterprise-admin.ts",
+    "bootstrap:store-operators": "tsx scripts/bootstrap-store-operators.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-mssql": "^7.7.0",
+    "@prisma/client": "^7.7.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/pg": "^8.20.0",
+    "dotenv": "^17.2.2",
+    "prisma": "^7.7.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

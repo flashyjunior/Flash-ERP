@@ -1,0 +1,36 @@
+{
+  "name": "@flash-erp/enterprise-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "prisma generate --schema ../../prisma/schema.prisma && next dev",
+    "build": "prisma generate --schema ../../prisma/schema.prisma && next build",
+    "start": "node ../../scripts/start-enterprise-web.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@tanstack/react-table": "^8.21.3",
+    "@tinymce/tinymce-react": "^6.3.0",
+    "bcryptjs": "^3.0.3",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.544.0",
+    "next": "16.1.7",
+    "nodemailer": "^8.0.7",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "recharts": "^3.8.1",
+    "tailwind-merge": "^3.3.1",
+    "tinymce": "^8.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.16",
+    "@types/node": "^24.5.2",
+    "@types/nodemailer": "^8.0.0",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "postcss": "^8.5.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "^5.9.3"
+  }
+}

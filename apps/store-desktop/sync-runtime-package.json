@@ -1,0 +1,5 @@
+{
+  "name": "@flash-erp/store-desktop-sync-runtime",
+  "private": true,
+  "type": "module"
+}

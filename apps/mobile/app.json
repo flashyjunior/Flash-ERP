@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Flash ERP Mobile",
+    "slug": "flash-erp-mobile",
+    "scheme": "flash-erp-mobile",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "plugins": ["expo-router"],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

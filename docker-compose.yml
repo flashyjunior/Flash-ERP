@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: flash-erp-enterprise-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flash_erp_enterprise
+      POSTGRES_USER: erp
+      POSTGRES_PASSWORD: erpdev
+    ports:
+      - "15532:5432"
+    volumes:
+      - flash-erp-enterprise-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp -d flash_erp_enterprise"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  store-postgres:
+    image: postgres:16-alpine
+    container_name: flash-erp-store-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flash_erp_store_accra_central
+      POSTGRES_USER: erp
+      POSTGRES_PASSWORD: erpdev
+    ports:
+      - "15533:5432"
+    volumes:
+      - flash-erp-store-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp -d flash_erp_store_accra_central"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  flash-erp-enterprise-postgres-data:
+  flash-erp-store-postgres-data:
