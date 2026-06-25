@@ -18,6 +18,11 @@ export async function POST(
       entryMode?: "ACCOUNT_PAYMENT" | "RECEIVABLE_ADJUSTMENT" | "LOYALTY_ADJUSTMENT";
       amount?: number | null;
       loyaltyPoints?: number | null;
+      tenderMethodCode?: string | null;
+      allocations?: Array<{
+        invoiceEntryId?: string | null;
+        amount?: number | null;
+      }>;
       storeCode?: string | null;
       reference?: string | null;
       note?: string | null;
@@ -27,6 +32,15 @@ export async function POST(
       entryMode: body.entryMode ?? "ACCOUNT_PAYMENT",
       amount: typeof body.amount === "number" ? body.amount : null,
       loyaltyPoints: typeof body.loyaltyPoints === "number" ? body.loyaltyPoints : null,
+      tenderMethodCode: body.tenderMethodCode ?? null,
+      allocations: Array.isArray(body.allocations)
+        ? body.allocations
+            .filter((allocation) => allocation.invoiceEntryId)
+            .map((allocation) => ({
+              invoiceEntryId: allocation.invoiceEntryId ?? "",
+              amount: typeof allocation.amount === "number" ? allocation.amount : null
+            }))
+        : [],
       storeCode: body.storeCode ?? null,
       reference: body.reference ?? null,
       note: body.note ?? null

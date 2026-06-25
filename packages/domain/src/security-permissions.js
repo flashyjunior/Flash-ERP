@@ -315,6 +315,60 @@ const catalog = [
         sortOrder: 310
     },
     {
+        code: "fuel.station.view",
+        name: "View station fuel operations",
+        description: "Open the online-store fuel operations workspace for station-side fuel capture.",
+        domain: "Operations",
+        group: "Fuel Operations",
+        surface: "store",
+        sortOrder: 315
+    },
+    {
+        code: "fuel.tank.manage",
+        name: "Manage station fuel tanks",
+        description: "Create and maintain station fuel tank records from the online-store fuel workspace.",
+        domain: "Operations",
+        group: "Fuel Operations",
+        surface: "store",
+        sortOrder: 316
+    },
+    {
+        code: "fuel.dip.capture",
+        name: "Capture tank dips",
+        description: "Capture station tank dip readings and required fuel evidence.",
+        domain: "Operations",
+        group: "Fuel Operations",
+        surface: "store",
+        sortOrder: 317
+    },
+    {
+        code: "fuel.meter-reading.capture",
+        name: "Capture meter readings",
+        description: "Capture station nozzle meter readings and required fuel evidence.",
+        domain: "Operations",
+        group: "Fuel Operations",
+        surface: "store",
+        sortOrder: 318
+    },
+    {
+        code: "fuel.supplier-receipt.capture",
+        name: "Capture supplier fuel receipts",
+        description: "Record supplier fuel receipts into station tanks from the online-store fuel workspace.",
+        domain: "Operations",
+        group: "Fuel Operations",
+        surface: "store",
+        sortOrder: 319
+    },
+    {
+        code: "fuel.reconciliation.manage",
+        name: "Manage station fuel reconciliation",
+        description: "Run station fuel daily reconciliation from tank, dip, receipt, and meter activity.",
+        domain: "Operations",
+        group: "Fuel Operations",
+        surface: "store",
+        sortOrder: 320
+    },
+    {
         code: "pos.shift.open",
         name: "Open shift",
         description: "Open a POS shift and start a branch till session.",
@@ -631,6 +685,12 @@ export function deriveRetailUserCapabilities(permissionCodes, accountStatus) {
         canReceiveTransfer: isActive && hasAny("inventory.transfer.receive"),
         canReceiveGoods: isActive && hasAny("inventory.grn.receive"),
         canManageSupplierReturns: isActive && hasAny("inventory.supplier-return.manage"),
+        hasFuelOperationsVisibility: isActive && hasAny("fuel.station.view"),
+        canManageFuelTanks: isActive && hasAny("fuel.tank.manage"),
+        canCaptureFuelDips: isActive && hasAny("fuel.dip.capture"),
+        canCaptureFuelMeterReadings: isActive && hasAny("fuel.meter-reading.capture"),
+        canCaptureSupplierFuelReceipts: isActive && hasAny("fuel.supplier-receipt.capture"),
+        canManageFuelReconciliation: isActive && hasAny("fuel.reconciliation.manage"),
         canOperateStoreSync: isActive && hasAny("sync.store.operate")
     };
 }

@@ -369,6 +369,14 @@ export function EnterpriseCatalogWorkspace({
         cell: ({ row }) => currencyFormatter.format(row.original.baseUnitPrice),
       },
       {
+        accessorKey: "baseCostPrice",
+        header: "Base cost",
+        cell: ({ row }) =>
+          row.original.baseCostPrice === null
+            ? "Not set"
+            : currencyFormatter.format(row.original.baseCostPrice),
+      },
+      {
         accessorKey: "defaultPrice",
         header: "Default sell",
         cell: ({ row }) =>

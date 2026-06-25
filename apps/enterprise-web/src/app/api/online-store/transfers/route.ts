@@ -14,6 +14,11 @@ export async function POST(request: Request) {
       lines: Array.isArray(body?.lines) ? body.lines : null,
       externalReference: body?.externalReference ?? null,
       requiredAt: body?.requiredAt ?? null,
+      transporterName: body?.transporterName ?? null,
+      vehicleRegistrationNo: body?.vehicleRegistrationNo ?? null,
+      driverName: body?.driverName ?? null,
+      driverContact: body?.driverContact ?? null,
+      deliveryNoteNo: body?.deliveryNoteNo ?? null,
       note: body?.note ?? null
     });
 

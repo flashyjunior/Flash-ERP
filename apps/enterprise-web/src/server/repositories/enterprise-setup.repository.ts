@@ -323,6 +323,11 @@ export type EnterpriseSetupWorkspaceData = {
     tenderMethodCode: string;
     name: string;
     paymentMethod: string;
+    cashbookAccountId: string | null;
+    cashbookAccountCode: string | null;
+    cashbookAccountName: string | null;
+    cashbookAccountType: string | null;
+    glAccountCode: string | null;
     gatewayProvider: string | null;
     gatewayMode: string | null;
     gatewayMerchantId: string | null;
@@ -387,6 +392,14 @@ export type EnterpriseSetupWorkspaceData = {
     updatedAt: string;
     updatedAtLabel: string;
   }>;
+  cashbookAccountOptions: Array<{
+    cashbookAccountId: string;
+    code: string;
+    name: string;
+    accountType: string;
+    glAccountCode: string;
+    label: string;
+  }>;
   postureMessages: string[];
   priorities: string[];
   statusMessage: string;
@@ -426,6 +439,7 @@ export function buildUnavailableEnterpriseSetupWorkspace(
     bankRows: [],
     bankBranchRows: [],
     bankAccountRows: [],
+    cashbookAccountOptions: [],
     postureMessages: [
       "Enterprise departments, categories, taxes, tender methods, loyalty policy, and receipt templates will appear here once Flash ERP can read the control-plane database.",
       "This workspace is intended to own enterprise selling policy before stores trade locally."
@@ -454,6 +468,17 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
   await ensureEnterpriseGoodsReceiptTemplate(prisma, enterpriseNode.retailOrgId);
   await ensureEnterprisePurchaseOrderTemplate(prisma, enterpriseNode.retailOrgId);
 
+  const primaryCompany = await prisma.erpCompany.findFirst({
+    where: {
+      retailOrgId: enterpriseNode.retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
   const [
     departments,
     categories,
@@ -462,7 +487,8 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
     receiptTemplates,
     banks,
     bankBranches,
-    bankAccounts
+    bankAccounts,
+    cashbookAccounts
   ] = await Promise.all([
     prisma.productDepartment.findMany({
       where: {
@@ -534,6 +560,18 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
         code: true,
         name: true,
         paymentMethod: true,
+        cashbookAccountId: true,
+        cashbookAccount: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            accountType: true,
+            glAccountCode: true,
+            bankName: true,
+            mobileProviderName: true
+          }
+        },
         gatewayProvider: true,
         gatewayMode: true,
         gatewayMerchantId: true,
@@ -684,7 +722,29 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
           }
         }
       }
-    })
+    }),
+    primaryCompany
+      ? prisma.erpCashbookAccount.findMany({
+          where: {
+            retailOrgId: enterpriseNode.retailOrgId,
+            companyId: primaryCompany.id,
+            status: RecordStatus.ACTIVE,
+            accountType: {
+              in: ["CASH", "BANK", "MOBILE_MONEY", "CARD_CLEARING", "OTHER"]
+            }
+          },
+          orderBy: [{ accountType: "asc" }, { code: "asc" }],
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            accountType: true,
+            glAccountCode: true,
+            bankName: true,
+            mobileProviderName: true
+          }
+        })
+      : Promise.resolve([])
   ]);
 
   const activeDepartments = departments.filter((department) => department.status === RecordStatus.ACTIVE);
@@ -693,6 +753,21 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
   const activeTenderMethods = tenderMethods.filter(
     (method) => method.status === RecordStatus.ACTIVE
   );
+
+  if (activeTaxProfiles.length > 0) {
+    await prisma.$transaction(async (tx) => {
+      for (const profile of activeTaxProfiles) {
+        await syncTaxProfileToFinanceTaxCode(tx, {
+          retailOrgId: enterpriseNode.retailOrgId,
+          taxProfileCode: profile.code,
+          name: profile.name,
+          ratePercent: Number(profile.ratePercent),
+          status: profile.status
+        });
+      }
+    });
+  }
+
   const activeBankAccounts = bankAccounts.filter(
     (account) =>
       account.status === RecordStatus.ACTIVE &&
@@ -726,6 +801,12 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
   if (!activeTenderMethods.some((method) => method.paymentMethod === PaymentMethod.CASH)) {
     priorities.push(
       "Activate at least one cash tender before store rollout depends on mixed-payment settlement."
+    );
+  }
+
+  if (activeTenderMethods.some((method) => method.paymentMethod !== PaymentMethod.STORE_CREDIT && !method.cashbookAccountId)) {
+    priorities.push(
+      "Map active cash, bank, mobile-money, card, and other receipt tenders to Finance cashbook accounts before using them for Fuel Sales."
     );
   }
 
@@ -827,6 +908,14 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
       tenderMethodCode: method.code,
       name: method.name,
       paymentMethod: method.paymentMethod,
+      cashbookAccountId: method.cashbookAccountId,
+      cashbookAccountCode: method.cashbookAccount?.code ?? null,
+      cashbookAccountName:
+        method.cashbookAccount?.accountType === "MOBILE_MONEY"
+          ? method.cashbookAccount.mobileProviderName ?? method.cashbookAccount.name
+          : method.cashbookAccount?.bankName ?? method.cashbookAccount?.name ?? null,
+      cashbookAccountType: method.cashbookAccount?.accountType ?? null,
+      glAccountCode: method.cashbookAccount?.glAccountCode ?? null,
       gatewayProvider: method.gatewayProvider,
       gatewayMode: method.gatewayMode,
       gatewayMerchantId: method.gatewayMerchantId,
@@ -901,6 +990,21 @@ export async function getEnterpriseSetupWorkspace(): Promise<EnterpriseSetupWork
       updatedAt: account.updatedAt.toISOString(),
       updatedAtLabel: formatRelativeTime(account.updatedAt)
     })),
+    cashbookAccountOptions: cashbookAccounts.map((account) => {
+      const accountName =
+        account.accountType === "MOBILE_MONEY"
+          ? account.mobileProviderName ?? account.name
+          : account.bankName ?? account.name;
+
+      return {
+        cashbookAccountId: account.id,
+        code: account.code,
+        name: account.name,
+        accountType: account.accountType,
+        glAccountCode: account.glAccountCode,
+        label: `${account.code} - ${accountName} (${account.accountType}; GL ${account.glAccountCode})`
+      };
+    }),
     postureMessages: [
       `${activeDepartments.length} active department(s) and ${activeCategories.length} active category(s) are currently controlled from enterprise.`,
       `${activeTaxProfiles.length} active tax profile(s) and ${activeTenderMethods.length} active tender method(s) are available for downstream policy sync.`,
@@ -1283,6 +1387,134 @@ export type TaxProfileMutationResponse = {
   serverProcessedAt: string;
 };
 
+async function findTaxMirrorAccountCode(tx: Prisma.TransactionClient, retailOrgId: string) {
+  const preferred = await tx.glAccount.findFirst({
+    where: {
+      retailOrgId,
+      code: "2100",
+      status: RecordStatus.ACTIVE
+    },
+    select: {
+      code: true
+    }
+  });
+
+  if (preferred) {
+    return preferred.code;
+  }
+
+  const liability = await tx.glAccount.findFirst({
+    where: {
+      retailOrgId,
+      accountType: "LIABILITY",
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ sortOrder: "asc" }, { code: "asc" }],
+    select: {
+      code: true
+    }
+  });
+
+  if (liability) {
+    return liability.code;
+  }
+
+  const account = await tx.glAccount.findFirst({
+    where: {
+      retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ sortOrder: "asc" }, { code: "asc" }],
+    select: {
+      code: true
+    }
+  });
+
+  return account?.code ?? null;
+}
+
+async function syncTaxProfileToFinanceTaxCode(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    taxProfileCode: string;
+    name: string;
+    ratePercent: number;
+    status: string;
+  }
+) {
+  const company = await tx.erpCompany.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true,
+      baseCurrencyCode: true
+    }
+  });
+
+  if (!company) {
+    return;
+  }
+
+  const fallbackAccountCode = await findTaxMirrorAccountCode(tx, input.retailOrgId);
+  const registration = await tx.erpTaxRegistration.findUnique({
+    where: {
+      companyId: company.id
+    },
+    select: {
+      defaultInputTaxAccountCode: true,
+      defaultOutputTaxAccountCode: true,
+      taxPayableAccountCode: true,
+      taxReceivableAccountCode: true
+    }
+  });
+  const outputTaxAccountCode =
+    registration?.defaultOutputTaxAccountCode ??
+    registration?.taxPayableAccountCode ??
+    fallbackAccountCode;
+  const inputTaxAccountCode =
+    registration?.defaultInputTaxAccountCode ??
+    registration?.taxReceivableAccountCode ??
+    fallbackAccountCode;
+
+  await tx.erpTaxCode.upsert({
+    where: {
+      companyId_code: {
+        companyId: company.id,
+        code: input.taxProfileCode
+      }
+    },
+    update: {
+      name: input.name,
+      calculationMode: "PERCENTAGE",
+      ratePercent: input.ratePercent,
+      inputTaxAccountCode,
+      outputTaxAccountCode,
+      payableAccountCode: registration?.taxPayableAccountCode ?? outputTaxAccountCode,
+      receivableAccountCode: registration?.taxReceivableAccountCode ?? inputTaxAccountCode,
+      status: input.status
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      code: input.taxProfileCode,
+      name: input.name,
+      taxType: "VAT",
+      calculationMode: "PERCENTAGE",
+      ratePercent: input.ratePercent,
+      recoverablePercent: 100,
+      inputTaxAccountCode,
+      outputTaxAccountCode,
+      payableAccountCode: registration?.taxPayableAccountCode ?? outputTaxAccountCode,
+      receivableAccountCode: registration?.taxReceivableAccountCode ?? inputTaxAccountCode,
+      status: input.status
+    }
+  });
+}
+
 export async function createEnterpriseTaxProfile(
   input: CreateTaxProfileRequest
 ): Promise<TaxProfileMutationResponse> {
@@ -1324,10 +1556,17 @@ export async function createEnterpriseTaxProfile(
           lastModifiedByNodeCode: enterpriseNode.code
         }
       });
+      await syncTaxProfileToFinanceTaxCode(tx, {
+        retailOrgId: enterpriseNode.retailOrgId,
+        taxProfileCode,
+        name,
+        ratePercent,
+        status
+      });
 
       return {
         taxProfileCode,
-        message: `Flash ERP created tax profile ${taxProfileCode}. Stores will receive the policy delta on their next pull.`,
+        message: `Flash ERP created tax profile ${taxProfileCode}. Master Tax is the source of truth and Finance posting will use the synced tax code.`,
         serverProcessedAt: new Date().toISOString()
       };
     });
@@ -1399,10 +1638,17 @@ export async function updateEnterpriseTaxProfile(
           }
         }
       });
+      await syncTaxProfileToFinanceTaxCode(tx, {
+        retailOrgId: enterpriseNode.retailOrgId,
+        taxProfileCode: normalizedCode,
+        name,
+        ratePercent,
+        status
+      });
 
       return {
         taxProfileCode: normalizedCode,
-        message: `Flash ERP updated tax profile ${normalizedCode}. Stores will consume the policy delta on their next pull.`,
+        message: `Flash ERP updated tax profile ${normalizedCode}. Master Tax remains the source of truth and Finance posting will use the synced tax code.`,
         serverProcessedAt: new Date().toISOString()
       };
     });
@@ -1415,6 +1661,7 @@ export type CreateTenderMethodRequest = {
   tenderMethodCode: string;
   name: string;
   paymentMethod: string;
+  cashbookAccountId?: string | null;
   gatewayProvider?: string | null;
   gatewayMode?: string | null;
   gatewayMerchantId?: string | null;
@@ -1437,6 +1684,42 @@ export type TenderMethodMutationResponse = {
   message: string;
   serverProcessedAt: string;
 };
+
+async function validateTenderCashbookAccount(
+  tx: Prisma.TransactionClient,
+  retailOrgId: string,
+  cashbookAccountId: string | null
+) {
+  if (!cashbookAccountId) {
+    return null;
+  }
+
+  const account = await tx.erpCashbookAccount.findFirst({
+    where: {
+      id: cashbookAccountId,
+      retailOrgId,
+      status: RecordStatus.ACTIVE,
+      accountType: {
+        in: ["CASH", "BANK", "MOBILE_MONEY", "CARD_CLEARING", "OTHER"]
+      }
+    },
+    select: {
+      id: true,
+      code: true,
+      glAccountCode: true
+    }
+  });
+
+  if (!account) {
+    throw new Error("Flash ERP could not find the Finance cashbook account selected for this tender.");
+  }
+
+  if (!account.glAccountCode?.trim()) {
+    throw new Error(`${account.code} must be mapped to a GL account before it can be linked to a tender.`);
+  }
+
+  return account.id;
+}
 
 export async function createEnterpriseTenderMethod(
   input: CreateTenderMethodRequest
@@ -1464,14 +1747,21 @@ export async function createEnterpriseTenderMethod(
   const allowOpenCashDrawer = input.allowOpenCashDrawer ?? false;
   const sortOrder = normalizeSortOrder(input.sortOrder);
   const status = normalizeRecordStatus(input.status);
+  const requestedCashbookAccountId = normalizeOptionalText(input.cashbookAccountId);
 
   try {
     return await prisma.$transaction(async (tx) => {
       const enterpriseNode = await getWritableEnterpriseNode(tx);
+      const cashbookAccountId = await validateTenderCashbookAccount(
+        tx,
+        enterpriseNode.retailOrgId,
+        requestedCashbookAccountId
+      );
 
       await tx.tenderMethod.create({
         data: {
           retailOrgId: enterpriseNode.retailOrgId,
+          cashbookAccountId,
           code: tenderMethodCode,
           name,
           paymentMethod,
@@ -1534,10 +1824,16 @@ export async function updateEnterpriseTenderMethod(
   const allowOpenCashDrawer = input.allowOpenCashDrawer ?? false;
   const sortOrder = normalizeSortOrder(input.sortOrder);
   const status = normalizeRecordStatus(input.status);
+  const requestedCashbookAccountId = normalizeOptionalText(input.cashbookAccountId);
 
   try {
     return await prisma.$transaction(async (tx) => {
       const enterpriseNode = await getWritableEnterpriseNode(tx);
+      const cashbookAccountId = await validateTenderCashbookAccount(
+        tx,
+        enterpriseNode.retailOrgId,
+        requestedCashbookAccountId
+      );
 
       const tenderMethod = await tx.tenderMethod.findFirst({
         where: {
@@ -1560,6 +1856,7 @@ export async function updateEnterpriseTenderMethod(
         },
         data: {
           name,
+          cashbookAccountId,
           paymentMethod,
           gatewayProvider,
           gatewayMode,

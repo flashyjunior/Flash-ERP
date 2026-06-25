@@ -16,6 +16,7 @@ export type EnterpriseSettingsView =
   | "smtp"
   | "sms"
   | "inventory-catalogs"
+  | "fuel-operations"
   | "shop-prices"
   | "licenses"
   | "receipt-templates"
@@ -29,6 +30,19 @@ export type EnterpriseSecurityView =
   | "online-users"
   | "password-policy"
   | "security-logs";
+
+export type EnterpriseNavigationMenuItem = {
+  key: string;
+  label: string;
+  href: string;
+  requiredPermissions?: readonly string[];
+};
+
+export type EnterpriseNavigationMenuGroup = {
+  key: string;
+  label: string;
+  items: readonly EnterpriseNavigationMenuItem[];
+};
 
 export const enterpriseMasterMenuItems = [
   { key: "customers", label: "Customers", href: "/master/customers" },
@@ -51,9 +65,77 @@ export const enterpriseSettingsMenuItems = [
   { key: "smtp", label: "SMTP", href: "/settings/smtp" },
   { key: "sms", label: "SMS", href: "/settings/sms" },
   { key: "inventory-catalogs", label: "Inventory Catalogs", href: "/settings/inventory-catalogs" },
+  { key: "fuel-operations", label: "Fuel Operations", href: "/settings/fuel-operations" },
   { key: "licenses", label: "Licensing", href: "/settings/licenses" },
   { key: "receipt-templates", label: "Receipt Templates", href: "/settings/receipt-templates" },
   { key: "retail-users", label: "Retail Users", href: "/settings/retail-users" }
+] as const;
+
+export const enterpriseFinanceSettingsMenuItems = [
+  { key: "foundation", label: "Finance Overview", href: "/finance/foundation" },
+  { key: "fiscal-calendar", label: "Fiscal Calendar", href: "/finance/fiscal-calendar" },
+  { key: "multi-currency", label: "Multi Currency", href: "/finance/multi-currency" },
+  { key: "chart-of-accounts", label: "Chart of Accounts", href: "/finance/chart-of-accounts" },
+  { key: "posting-setup", label: "Posting Setup", href: "/finance/posting-setup" },
+  { key: "party-profiles", label: "Party Profiles", href: "/finance/party-profiles" },
+  { key: "document-numbering", label: "Document Numbering", href: "/finance/document-numbering" },
+  { key: "operating-foundation", label: "Operating Foundation", href: "/finance/operating-foundation" }
+] as const;
+
+export const enterpriseSettingsMenuGroups: readonly EnterpriseNavigationMenuGroup[] = [
+  {
+    key: "organization",
+    label: "Organization Settings",
+    items: enterpriseSettingsMenuItems
+  },
+  {
+    key: "finance",
+    label: "Finance Settings",
+    items: enterpriseFinanceSettingsMenuItems
+  }
+] as const;
+
+export const enterpriseOnlineStoreMenuItems = [
+  { key: "online-store-pos", label: "POS", href: "/online-store" }
+] as const;
+
+export const enterpriseOnlineFuelMenuItems = [
+  {
+    key: "online-fuel-overview",
+    label: "Fuel Overview",
+    href: "/online-store/fuel",
+    requiredPermissions: ["fuel.station.view"]
+  },
+  {
+    key: "online-fuel-tanks",
+    label: "Tank Management",
+    href: "/online-store/fuel/tanks",
+    requiredPermissions: ["fuel.tank.manage"]
+  },
+  {
+    key: "online-fuel-dips",
+    label: "Tank Dips",
+    href: "/online-store/fuel/dips",
+    requiredPermissions: ["fuel.dip.capture"]
+  },
+  {
+    key: "online-fuel-meter-readings",
+    label: "Meter Readings",
+    href: "/online-store/fuel/meter-readings",
+    requiredPermissions: ["fuel.meter-reading.capture"]
+  },
+  {
+    key: "online-fuel-supplier-receipts",
+    label: "Supplier Receipts",
+    href: "/online-store/fuel/supplier-receipts",
+    requiredPermissions: ["fuel.supplier-receipt.capture"]
+  },
+  {
+    key: "online-fuel-reconciliation",
+    label: "Reconciliation",
+    href: "/online-store/fuel/reconciliation",
+    requiredPermissions: ["fuel.reconciliation.manage"]
+  }
 ] as const;
 
 export const enterpriseInventoryMenuItems = [
@@ -70,6 +152,66 @@ export const enterprisePurchasesMenuItems = [
   { key: "goods-receipt", label: "Goods Receipt", href: "/purchases/goods-receipt" },
   { key: "predictive-review", label: "Predictive Review", href: "/purchases/predictive-review" }
 ] as const;
+
+export const enterpriseFuelOperationsMenuItems = [
+  { key: "fuel-overview", label: "Fuel Overview", href: "/fuel-operations" },
+  { key: "fuel-tanks", label: "Tank Management", href: "/fuel-operations/tanks" },
+  { key: "fuel-pumps", label: "Pumps & Nozzles", href: "/fuel-operations/pumps" },
+  { key: "fuel-dips", label: "Tank Dips", href: "/fuel-operations/dips" },
+  { key: "fuel-meter-readings", label: "Meter Readings", href: "/fuel-operations/meter-readings" },
+  { key: "fuel-stations", label: "Filling Stations", href: "/fuel-operations/stations" },
+  { key: "fuel-deliveries", label: "Fuel Deliveries", href: "/fuel-operations/deliveries" },
+  { key: "fuel-supplier-receipts", label: "Supplier Receipts", href: "/fuel-operations/supplier-receipts" },
+  { key: "fuel-reconciliation", label: "Reconciliation", href: "/fuel-operations#reconciliation" }
+] as const;
+
+export const enterpriseFinanceMenuGroups: readonly EnterpriseNavigationMenuGroup[] = [
+  {
+    key: "general-ledger",
+    label: "General Ledger",
+    items: [
+      { key: "ledger", label: "Ledger Overview", href: "/finance" },
+      { key: "financial-statements", label: "Financial Statements", href: "/finance/financial-statements" },
+      { key: "trial-balance", label: "Trial Balance", href: "/finance/trial-balance" },
+      { key: "account-activity", label: "Account Activity", href: "/finance/account-activity" },
+      { key: "journal-inquiry", label: "Journal Inquiry", href: "/finance/journal-inquiry" },
+      { key: "journals", label: "Manual Journals", href: "/finance/journals" },
+      { key: "recurring-journals", label: "Recurring Journals", href: "/finance/recurring-journals" }
+    ]
+  },
+  {
+    key: "receivables-payables",
+    label: "Receivables & Payables",
+    items: [
+      { key: "operational-documents", label: "Source Documents", href: "/finance/operational-documents" },
+      { key: "ar-ap-documents", label: "AR/AP Documents", href: "/finance/ar-ap-documents" },
+      { key: "ar-ap-settlements", label: "Receipts & Payments", href: "/finance/ar-ap-settlements" }
+    ]
+  },
+  {
+    key: "banking",
+    label: "Banking",
+    items: [
+      { key: "cashbook", label: "Cashbook", href: "/finance/cashbook" },
+      { key: "bank-reconciliation", label: "Bank Reconciliation", href: "/finance/bank-reconciliation" }
+    ]
+  },
+  {
+    key: "fixed-assets",
+    label: "Fixed Assets",
+    items: [{ key: "fixed-assets", label: "Asset Register", href: "/finance/fixed-assets" }]
+  },
+  {
+    key: "planning-payroll",
+    label: "Planning & Payroll",
+    items: [
+      { key: "budgets", label: "Budgets", href: "/finance/budgets" },
+      { key: "payroll-gl", label: "Payroll GL", href: "/finance/payroll-gl" }
+    ]
+  }
+] as const;
+
+export const enterpriseFinanceMenuItems = enterpriseFinanceMenuGroups.flatMap((group) => group.items);
 
 export const enterpriseSecurityMenuItems = [
   { key: "users", label: "Users", href: "/security/users" },
@@ -198,6 +340,13 @@ export const enterpriseSettingsPageMeta: Record<
     description:
       "Create shop-specific inventory catalogs, control product order, and publish assortments to stores.",
     href: "/settings/inventory-catalogs"
+  },
+  "fuel-operations": {
+    label: "Fuel Operations",
+    heading: "Fuel Operations",
+    description:
+      "Configure default Fuel Operations source and dispatch sites used by sale and delivery entry.",
+    href: "/settings/fuel-operations"
   },
   "shop-prices": {
     label: "Shop Prices",

@@ -10,6 +10,7 @@ export async function POST(request: Request) {
       tenderMethodCode?: string;
       name?: string;
       paymentMethod?: string;
+      cashbookAccountId?: string | null;
       gatewayProvider?: string | null;
       gatewayMode?: string | null;
       gatewayMerchantId?: string | null;
@@ -31,6 +32,7 @@ export async function POST(request: Request) {
       tenderMethodCode: body.tenderMethodCode ?? "",
       name: body.name ?? "",
       paymentMethod: body.paymentMethod ?? "CASH",
+      cashbookAccountId: body.cashbookAccountId ?? null,
       gatewayProvider: body.gatewayProvider ?? null,
       gatewayMode: body.gatewayMode ?? null,
       gatewayMerchantId: body.gatewayMerchantId ?? null,

@@ -13,6 +13,7 @@ import {
   type EnterpriseSettingsView
 } from "@/lib/navigation/enterprise-navigation";
 import type { EnterpriseSecurityWorkspaceData } from "@/server/repositories/enterprise-security.repository";
+import type { FuelOperationsSettingsWorkspaceData } from "@/server/repositories/erp-fuel-operations.repository";
 import type { EnterpriseSettingsWorkspaceData } from "@/server/repositories/enterprise-settings.repository";
 import type { EnterpriseSetupWorkspaceData } from "@/server/repositories/enterprise-setup.repository";
 
@@ -82,6 +83,38 @@ function Field({
         type={type}
         value={value}
       />
+    </label>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+  disabled = false
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ label: string; value: string }>;
+  disabled?: boolean;
+}) {
+  return (
+    <label className="grid gap-1 text-[13px] text-stone-700">
+      <span className="block text-[12px] font-semibold leading-none text-stone-900">{label}</span>
+      <select
+        className="h-8 w-full rounded-lg border border-stone-200 bg-white px-2.5 text-[13px] outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_3px_rgba(37,99,235,0.08)] disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500"
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
     </label>
   );
 }
@@ -326,17 +359,23 @@ const saleSmsTemplatePlaceholders = [
   "{totalAmount}",
   "{customerFirstName}"
 ];
+const fuelReceiptPaperOptions = [
+  { label: "Thermal slip", value: "THERMAL" },
+  { label: "A4 receipt", value: "A4" }
+];
 
 export function EnterpriseSettingsWorkspace({
   workspace,
   setupWorkspace,
   securityWorkspace,
+  fuelOperationsSettingsWorkspace,
   initialView,
   view
 }: {
   workspace: EnterpriseSettingsWorkspaceData;
   setupWorkspace?: EnterpriseSetupWorkspaceData;
   securityWorkspace?: EnterpriseSecurityWorkspaceData;
+  fuelOperationsSettingsWorkspace?: FuelOperationsSettingsWorkspaceData;
   initialView?: string;
   view?: EnterpriseSettingsView;
 }) {
@@ -347,6 +386,15 @@ export function EnterpriseSettingsWorkspace({
   const [smtpDraft, setSmtpDraft] = useState(workspace.smtpSettings);
   const [smsDraft, setSmsDraft] = useState(workspace.smsSettings);
   const [optionsDraft, setOptionsDraft] = useState(workspace.optionsSettings);
+  const [fuelOperationsDraft, setFuelOperationsDraft] = useState(
+    fuelOperationsSettingsWorkspace?.fuelSettings ?? {
+      defaultSaleSourceSiteId: "",
+      defaultDispatchSiteId: "",
+      saleReceiptPaperKind: "THERMAL",
+      deliveryReceiptPaperKind: "THERMAL",
+      salesOrderReceiptPaperKind: "A4"
+    }
+  );
   const [newProductSize, setNewProductSize] = useState("");
   const [newPosDiscountRate, setNewPosDiscountRate] = useState("");
   const [companyTab, setCompanyTab] = useState<CompanySettingsTab>("details");
@@ -367,10 +415,33 @@ export function EnterpriseSettingsWorkspace({
     message: ""
   });
   const [optionsState, setOptionsState] = useState<MutationState>({ status: "idle", message: "" });
+  const [fuelOperationsState, setFuelOperationsState] = useState<MutationState>({
+    status: "idle",
+    message: ""
+  });
   const selectedView = forcedView;
   const pageMeta = enterpriseSettingsPageMeta[selectedView];
   const defaultReceiptTemplate =
     setupWorkspace?.receiptTemplateRows.find((template) => template.isDefault) ?? null;
+  const fuelSiteOptions = [
+    { label: "Not set", value: "" },
+    ...(fuelOperationsSettingsWorkspace?.siteOptions.map((site) => ({
+      label: site.label,
+      value: site.operatingSiteId
+    })) ?? [])
+  ];
+  const companyCurrencyOptions =
+    workspace.currencyOptions.length > 0
+      ? workspace.currencyOptions.map((currency) => ({
+          label: currency.label,
+          value: currency.currencyCode
+        }))
+      : [
+          {
+            label: workspace.companyProfile.baseCurrencyCode,
+            value: workspace.companyProfile.baseCurrencyCode
+          }
+        ];
 
   useEffect(() => {
     setCompanyDraft(workspace.companyProfile);
@@ -378,7 +449,16 @@ export function EnterpriseSettingsWorkspace({
     setSmtpDraft(workspace.smtpSettings);
     setSmsDraft(workspace.smsSettings);
     setOptionsDraft(workspace.optionsSettings);
-  }, [workspace.refreshedAt]);
+    setFuelOperationsDraft(
+      fuelOperationsSettingsWorkspace?.fuelSettings ?? {
+        defaultSaleSourceSiteId: "",
+        defaultDispatchSiteId: "",
+        saleReceiptPaperKind: "THERMAL",
+        deliveryReceiptPaperKind: "THERMAL",
+        salesOrderReceiptPaperKind: "A4"
+      }
+    );
+  }, [fuelOperationsSettingsWorkspace?.refreshedAt, workspace.refreshedAt]);
 
   const summaryCards = (() => {
     switch (selectedView) {
@@ -452,6 +532,30 @@ export function EnterpriseSettingsWorkspace({
             icon: Store,
             label: "Reports",
             value: formatToggleState(smsDraft.deliveryReportEnabled)
+          }
+        ];
+      case "fuel-operations":
+        return [
+          {
+            icon: Store,
+            label: "Default sale source",
+            value:
+              fuelOperationsSettingsWorkspace?.siteOptions.find(
+                (site) => site.operatingSiteId === fuelOperationsDraft.defaultSaleSourceSiteId
+              )?.code ?? "Not set"
+          },
+          {
+            icon: Building2,
+            label: "Dispatch site",
+            value:
+              fuelOperationsSettingsWorkspace?.siteOptions.find(
+                (site) => site.operatingSiteId === fuelOperationsDraft.defaultDispatchSiteId
+              )?.code ?? "Not set"
+          },
+          {
+            icon: ShieldCheck,
+            label: "Sale receipt",
+            value: fuelOperationsDraft.saleReceiptPaperKind === "A4" ? "A4" : "Thermal"
           }
         ];
       case "receipt-templates":
@@ -528,6 +632,9 @@ export function EnterpriseSettingsWorkspace({
     selectedView === "receipt-templates"
       ? setupWorkspace?.statusMessage ??
         "Receipt template information is temporarily unavailable in enterprise settings."
+      : selectedView === "fuel-operations"
+        ? fuelOperationsSettingsWorkspace?.statusMessage ??
+          "Fuel Operations settings are temporarily unavailable in enterprise settings."
       : selectedView === "retail-users"
         ? securityWorkspace?.statusMessage ??
           "Retail user information is temporarily unavailable in enterprise settings."
@@ -624,11 +731,12 @@ export function EnterpriseSettingsWorkspace({
                       }
                       value={companyDraft.taxRegistrationNo}
                     />
-                    <Field
+                    <SelectField
                       label="Base currency"
                       onChange={(value) =>
                         setCompanyDraft((current) => ({ ...current, baseCurrencyCode: value }))
                       }
+                      options={companyCurrencyOptions}
                       value={companyDraft.baseCurrencyCode}
                     />
                     <Field
@@ -1509,6 +1617,84 @@ export function EnterpriseSettingsWorkspace({
               setup workspace finishes loading.
             </p>
           </section>
+        );
+      case "fuel-operations":
+        return (
+          <SettingsFormCard
+            actionLabel="Save fuel settings"
+            actionToneClassName="bg-[linear-gradient(135deg,#0f766e,#115e59)]"
+            mutationState={fuelOperationsState}
+            onSave={() =>
+              void saveSection(
+                "/api/settings/fuel-operations",
+                fuelOperationsDraft,
+                setFuelOperationsState,
+                () => router.refresh(),
+                "Flash ERP could not update Fuel Operations settings."
+              )
+            }
+            title="Fuel Operations defaults"
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              <SelectField
+                disabled={!fuelSiteOptions.length}
+                label="Default fuel sale source"
+                onChange={(value) =>
+                  setFuelOperationsDraft((current) => ({
+                    ...current,
+                    defaultSaleSourceSiteId: value || null
+                  }))
+                }
+                options={fuelSiteOptions}
+                value={fuelOperationsDraft.defaultSaleSourceSiteId ?? ""}
+              />
+              <SelectField
+                disabled={!fuelSiteOptions.length}
+                label="Default delivery dispatch site"
+                onChange={(value) =>
+                  setFuelOperationsDraft((current) => ({
+                    ...current,
+                    defaultDispatchSiteId: value || null
+                  }))
+                }
+                options={fuelSiteOptions}
+                value={fuelOperationsDraft.defaultDispatchSiteId ?? ""}
+              />
+              <SelectField
+                label="Fuel sale receipt"
+                onChange={(value) =>
+                  setFuelOperationsDraft((current) => ({
+                    ...current,
+                    saleReceiptPaperKind: value
+                  }))
+                }
+                options={fuelReceiptPaperOptions}
+                value={fuelOperationsDraft.saleReceiptPaperKind ?? "THERMAL"}
+              />
+              <SelectField
+                label="Station delivery receipt"
+                onChange={(value) =>
+                  setFuelOperationsDraft((current) => ({
+                    ...current,
+                    deliveryReceiptPaperKind: value
+                  }))
+                }
+                options={fuelReceiptPaperOptions}
+                value={fuelOperationsDraft.deliveryReceiptPaperKind ?? "THERMAL"}
+              />
+              <SelectField
+                label="Sales order receipt"
+                onChange={(value) =>
+                  setFuelOperationsDraft((current) => ({
+                    ...current,
+                    salesOrderReceiptPaperKind: value
+                  }))
+                }
+                options={fuelReceiptPaperOptions}
+                value={fuelOperationsDraft.salesOrderReceiptPaperKind ?? "A4"}
+              />
+            </div>
+          </SettingsFormCard>
         );
       case "retail-users":
         return securityWorkspace ? (

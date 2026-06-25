@@ -4,21 +4,42 @@ import {
   Activity,
   BarChart3,
   Bell,
+  BookOpen,
+  Building2,
+  CalendarDays,
   ChevronDown,
+  ClipboardList,
+  CreditCard,
+  FileText,
+  Fuel,
+  Gauge,
+  Gift,
+  KeyRound,
   Landmark,
   LayoutDashboard,
   LogOut,
+  Mail,
   Menu,
+  MessageSquare,
   Package,
   PackageCheck,
+  Percent,
   RefreshCcw,
+  ReceiptText,
+  Scale,
   Search,
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
   ShoppingCart,
   Store,
+  Tags,
   UserCircle2,
+  UserCog,
+  Users,
+  Wallet,
+  Warehouse,
+  type LucideIcon,
   X
 } from "lucide-react";
 import Link from "next/link";
@@ -34,11 +55,17 @@ import {
 } from "react";
 
 import {
+  enterpriseFuelOperationsMenuItems,
+  enterpriseFinanceMenuGroups,
   enterpriseMasterMenuItems,
   enterpriseInventoryMenuItems,
+  enterpriseOnlineFuelMenuItems,
+  enterpriseOnlineStoreMenuItems,
   enterprisePurchasesMenuItems,
   enterpriseSecurityMenuItems,
-  enterpriseSettingsMenuItems
+  enterpriseSettingsMenuGroups,
+  type EnterpriseNavigationMenuGroup,
+  type EnterpriseNavigationMenuItem
 } from "@/lib/navigation/enterprise-navigation";
 import {
   buildAccountInitials,
@@ -55,16 +82,22 @@ type EnterpriseShellProps = {
   children: ReactNode;
 };
 
+type NavigationChildItem = {
+  groupKey?: string;
+  key: string;
+  label: string;
+  href?: string;
+  requiredPermissions?: readonly string[];
+  type?: "group";
+};
+
 type NavigationItem = {
   key: string;
   label: string;
-  icon: typeof Store;
+  icon: LucideIcon;
   href?: string;
   hiddenInSidebar?: boolean;
-  children?: Array<{
-    label: string;
-    href?: string;
-  }>;
+  children?: NavigationChildItem[];
 };
 
 type EnterpriseSessionSnapshot = {
@@ -77,6 +110,7 @@ type EnterpriseSessionSnapshot = {
   isOnlineStoreUser: boolean;
   roleCodes: string[];
   permissionCount: number;
+  permissionCodes: string[];
   lastActiveAt: string;
   lastLoginAt: string | null;
   expiresAt: string;
@@ -124,7 +158,15 @@ const navigation: NavigationItem[] = [
     key: "online-store",
     label: "Online Store",
     icon: Store,
-    href: "/online-store"
+    href: "/online-store",
+    children: enterpriseOnlineStoreMenuItems.map((item) => menuItemChild(item))
+  },
+  {
+    key: "online-fuel-management",
+    label: "Fuel Management",
+    icon: Fuel,
+    href: "/online-store/fuel",
+    children: enterpriseOnlineFuelMenuItems.map((item) => menuItemChild(item))
   },
   {
     key: "profile",
@@ -138,30 +180,21 @@ const navigation: NavigationItem[] = [
     label: "Master",
     icon: SlidersHorizontal,
     href: "/master/customers",
-    children: enterpriseMasterMenuItems.map((item) => ({
-      label: item.label,
-      href: item.href
-    }))
+    children: enterpriseMasterMenuItems.map((item) => menuItemChild(item))
   },
   {
     key: "inventory",
     label: "Inventory",
     icon: Package,
     href: "/inventory/products",
-    children: enterpriseInventoryMenuItems.map((item) => ({
-      label: item.label,
-      href: item.href
-    }))
+    children: enterpriseInventoryMenuItems.map((item) => menuItemChild(item))
   },
   {
     key: "purchases",
     label: "Purchases",
     icon: PackageCheck,
     href: "/purchases/purchase-orders",
-    children: enterprisePurchasesMenuItems.map((item) => ({
-      label: item.label,
-      href: item.href
-    }))
+    children: enterprisePurchasesMenuItems.map((item) => menuItemChild(item))
   },
   {
     key: "pos",
@@ -182,6 +215,13 @@ const navigation: NavigationItem[] = [
     href: "/operations"
   },
   {
+    key: "fuel-operations",
+    label: "Fuel",
+    icon: Fuel,
+    href: "/fuel-operations",
+    children: enterpriseFuelOperationsMenuItems.map((item) => menuItemChild(item))
+  },
+  {
     key: "reports",
     label: "Reports",
     icon: BarChart3,
@@ -191,32 +231,162 @@ const navigation: NavigationItem[] = [
     key: "finance",
     label: "Finance",
     icon: Landmark,
-    href: "/finance"
+    href: "/finance",
+    children: groupedMenuChildren(enterpriseFinanceMenuGroups)
   },
   {
     key: "settings",
     label: "Settings",
     icon: Settings2,
     href: "/settings/company",
-    children: enterpriseSettingsMenuItems.map((item) => ({
-      label: item.label,
-      href: item.href
-    }))
+    children: groupedMenuChildren(enterpriseSettingsMenuGroups)
   },
   {
     key: "security",
     label: "Security",
     icon: ShieldCheck,
     href: "/security/users",
-    children: enterpriseSecurityMenuItems.map((item) => ({
-      label: item.label,
-      href: item.href
-    }))
+    children: enterpriseSecurityMenuItems.map((item) => menuItemChild(item))
   }
 ];
+const sidebarExpandedSectionStorageKey = "flash-erp:enterprise-shell-expanded-section";
+
+const navigationChildIconByKey: Record<string, LucideIcon> = {
+  "account-activity": Activity,
+  "ar-ap-documents": ReceiptText,
+  "ar-ap-settlements": Wallet,
+  "audit-logs": FileText,
+  banks: Landmark,
+  banking: Landmark,
+  "bank-reconciliation": Landmark,
+  budgets: BarChart3,
+  cashbook: Wallet,
+  categories: Tags,
+  "chart-of-accounts": BookOpen,
+  company: Building2,
+  customers: Users,
+  departments: Building2,
+  "document-numbering": FileText,
+  "financial-statements": BarChart3,
+  finance: Landmark,
+  "fiscal-calendar": CalendarDays,
+  foundation: LayoutDashboard,
+  "fixed-assets": Building2,
+  "fuel-activity": Gauge,
+  "fuel-deliveries": PackageCheck,
+  "fuel-overview": Fuel,
+  "fuel-pumps": Gauge,
+  "fuel-reconciliation": Scale,
+  "fuel-tanks": Warehouse,
+  "general-ledger": BookOpen,
+  "goods-receipt": PackageCheck,
+  "in-transit": PackageCheck,
+  "inventory-catalogs": ClipboardList,
+  "journal-inquiry": Search,
+  journals: FileText,
+  ldap: KeyRound,
+  ledger: BookOpen,
+  licenses: KeyRound,
+  loyalty: Gift,
+  "online-fuel-dips": Gauge,
+  "online-fuel-meter-readings": Gauge,
+  "online-fuel-overview": Fuel,
+  "online-fuel-reconciliation": Scale,
+  "online-fuel-supplier-receipts": PackageCheck,
+  "online-fuel-tanks": Warehouse,
+  "online-store-pos": ShoppingCart,
+  "online-users": Activity,
+  "operating-foundation": Building2,
+  "operational-documents": FileText,
+  options: Settings2,
+  organization: Building2,
+  "party-profiles": Users,
+  "password-policy": KeyRound,
+  "payroll-gl": Users,
+  "planning-payroll": BarChart3,
+  "posting-setup": Settings2,
+  "predictive-review": BarChart3,
+  products: Package,
+  promotions: Tags,
+  "purchase-orders": ClipboardList,
+  "receipt-templates": ReceiptText,
+  "receivables-payables": ReceiptText,
+  "recurring-journals": RefreshCcw,
+  "retail-users": UserCog,
+  "roles-privileges": ShieldCheck,
+  "security-logs": Bell,
+  "shop-prices": Tags,
+  sms: MessageSquare,
+  smtp: Mail,
+  "stock-by-shop": BarChart3,
+  "stock-count": ClipboardList,
+  stores: Store,
+  suppliers: UserCog,
+  tax: Percent,
+  "tax-setup": Percent,
+  tenders: CreditCard,
+  transfers: RefreshCcw,
+  "trial-balance": Scale,
+  uom: Scale,
+  users: Users
+};
+
+function resolveNavigationChildIcon(key: string) {
+  return navigationChildIconByKey[key] ?? FileText;
+}
+
+function menuItemChild(item: EnterpriseNavigationMenuItem, groupKey?: string): NavigationChildItem {
+  return {
+    groupKey,
+    key: item.key,
+    label: item.label,
+    href: item.href,
+    requiredPermissions: item.requiredPermissions
+  };
+}
+
+function groupedMenuChildren(groups: readonly EnterpriseNavigationMenuGroup[]): NavigationChildItem[] {
+  return groups.flatMap((group) => [
+    {
+      groupKey: group.key,
+      key: group.key,
+      label: group.label,
+      type: "group" as const
+    },
+    ...group.items.map((item) => menuItemChild(item, group.key))
+  ]);
+}
 
 function matchesHref(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function findActiveNavigationMatch(
+  pathname: string,
+  items: NavigationItem[],
+  fallbackSection: string
+) {
+  const activeChildMatch = items
+    .flatMap((item) =>
+      (item.children ?? [])
+        .filter((child) => child.href && matchesHref(pathname, child.href))
+        .map((child) => ({ child, item }))
+    )
+    .sort((left, right) => (right.child.href?.length ?? 0) - (left.child.href?.length ?? 0))[0];
+
+  if (activeChildMatch) {
+    return {
+      groupKey: activeChildMatch.child.groupKey ?? null,
+      sectionKey: activeChildMatch.item.key
+    };
+  }
+
+  const activeItem = items.find((item) => item.href && pathname === item.href);
+
+  return {
+    groupKey: null,
+    sectionKey: activeItem?.key ?? fallbackSection
+  };
 }
 
 function getSessionWarningLeadMs(remainingMs: number) {
@@ -268,6 +438,7 @@ export function EnterpriseShell({
   const [alertSnapshot, setAlertSnapshot] = useState<EnterpriseAlertSnapshot | null>(null);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
   const [sessionWarning, setSessionWarning] = useState<SessionWarningState | null>(null);
+  const [expandedSubgroups, setExpandedSubgroups] = useState<Record<string, string | null>>({});
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(
       navigation
@@ -285,15 +456,40 @@ export function EnterpriseShell({
   const pathname = usePathname();
   const router = useRouter();
   const isOnlineStoreSession = Boolean(sessionSnapshot?.isOnlineStoreUser);
+  const sessionPermissionCodes = useMemo(
+    () => new Set(sessionSnapshot?.permissionCodes ?? []),
+    [sessionSnapshot?.permissionCodes]
+  );
   const sidebarNavigation = useMemo(() => {
     const visibleNavigation = navigation.filter((item) => !item.hiddenInSidebar);
 
     if (isOnlineStoreSession) {
-      return visibleNavigation.filter((item) => item.key === "online-store");
+      return visibleNavigation
+        .filter((item) => item.key === "online-store" || item.key === "online-fuel-management")
+        .map((item) => ({
+          ...item,
+          children: item.children?.filter(
+            (child) =>
+              !child.requiredPermissions?.length ||
+              child.requiredPermissions.every((permissionCode) =>
+                sessionPermissionCodes.has(permissionCode)
+              )
+          )
+        }))
+        .filter(
+          (item) => item.key !== "online-fuel-management" || Boolean(item.children?.length)
+        );
     }
 
-    return visibleNavigation.filter((item) => item.key !== "online-store");
-  }, [isOnlineStoreSession]);
+    return visibleNavigation.filter(
+      (item) => item.key !== "online-store" && item.key !== "online-fuel-management"
+    );
+  }, [isOnlineStoreSession, sessionPermissionCodes]);
+  const activeNavigationMatch = useMemo(
+    () => findActiveNavigationMatch(pathname, sidebarNavigation, activeSection),
+    [activeSection, pathname, sidebarNavigation]
+  );
+  const activeNavigationKey = activeNavigationMatch.sectionKey;
   const avatarSeed = sessionSnapshot?.loginId ?? sessionSnapshot?.displayName ?? "Flash ERP";
   const avatarTheme = resolveAccountAvatarTheme(avatarSeed);
   const accountInitials = buildAccountInitials(sessionSnapshot?.displayName ?? "Flash ERP");
@@ -386,12 +582,36 @@ export function EnterpriseShell({
   }, [sessionWarning]);
 
   useEffect(() => {
-    setExpandedSections((current) =>
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const activeSectionHasChildren = sidebarNavigation.some(
+      (item) => item.key === activeNavigationKey && item.children?.length
+    );
+    const preferredSection = activeSectionHasChildren ? activeNavigationKey : null;
+
+    if (preferredSection) {
+      window.localStorage.setItem(sidebarExpandedSectionStorageKey, preferredSection);
+    } else {
+      window.localStorage.removeItem(sidebarExpandedSectionStorageKey);
+    }
+
+    setExpandedSections(
       Object.fromEntries(
-        Object.keys(current).map((key) => [key, key === activeSection])
+        sidebarNavigation
+          .filter((item) => item.children?.length)
+          .map((item) => [item.key, item.key === preferredSection])
       ) as Record<string, boolean>
     );
-  }, [activeSection]);
+
+    if (preferredSection && activeNavigationMatch.groupKey) {
+      setExpandedSubgroups((current) => ({
+        ...current,
+        [preferredSection]: activeNavigationMatch.groupKey
+      }));
+    }
+  }, [activeNavigationKey, activeNavigationMatch.groupKey, sidebarNavigation]);
 
   useEffect(() => {
     setIsMobileSidebarOpen(false);
@@ -923,105 +1143,60 @@ export function EnterpriseShell({
               <div className="space-y-0.5">
                 {sidebarNavigation.map((item) => {
                   const Icon = item.icon;
-                  const isActive = item.key === activeSection;
+                  const isActive = item.key === activeNavigationKey;
                   const isExpanded = expandedSections[item.key] ?? isActive;
+                  const openGroupKey = expandedSubgroups[item.key] ?? null;
                   const itemClassName = cn(
-                    "group/nav flex w-full items-center gap-2 rounded-2xl border px-2 py-1 transition",
+                    "group/nav flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition",
                     isActive
-                      ? "border-sky-400/20 bg-[linear-gradient(135deg,rgba(37,99,235,0.96),rgba(14,116,144,0.92))] text-white shadow-[0_16px_30px_rgba(14,116,144,0.24)]"
+                      ? "bg-white/12 text-white shadow-[inset_3px_0_0_rgba(125,211,252,0.95)]"
                       : item.href
-                        ? "border-transparent bg-white/5 text-slate-100 hover:border-white/10 hover:bg-white/9"
-                        : "cursor-not-allowed border-transparent bg-white/4 text-slate-400",
-                    isSidebarCollapsed ? "lg:justify-center lg:px-1.5" : ""
+                        ? "text-slate-200 hover:bg-white/7 hover:text-white"
+                        : "cursor-not-allowed text-slate-500",
+                    isSidebarCollapsed ? "lg:justify-center lg:px-2" : ""
                   );
 
                   return (
                     <div className="space-y-1.5" key={item.key}>
                       {item.children?.length ? (
-                        <div className={itemClassName}>
-                          <Link
-                            className={cn(
-                              "flex min-w-0 flex-1 items-center gap-2",
-                              isSidebarCollapsed ? "lg:flex-none lg:justify-center" : ""
-                            )}
-                            href={item.href ?? "#"}
-                            onClick={() => setIsMobileSidebarOpen(false)}
-                            title={item.label}
-                          >
-                            <span
-                              className={cn(
-                                "flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border transition",
-                                isActive
-                                  ? "border-white/14 bg-white/14 text-white"
-                                  : item.href
-                                    ? "border-white/8 bg-white/8 text-slate-300 group-hover/nav:border-white/14 group-hover/nav:bg-white/12 group-hover/nav:text-white"
-                                    : "border-white/8 bg-white/5 text-slate-500"
-                              )}
-                            >
-                              <Icon className="h-4.5 w-4.5" />
-                            </span>
-                            <span
-                              className={cn(
-                                "shell-label min-w-0 flex-1 truncate text-sm font-medium",
-                                isSidebarCollapsed ? "lg:hidden" : ""
-                              )}
-                            >
-                              {item.label}
-                            </span>
-                            <span
-                              className={cn(
-                                "shell-trailing h-2.5 w-2.5 rounded-full transition",
-                                isActive ? "bg-white" : "bg-slate-500 group-hover/nav:bg-sky-300",
-                                isSidebarCollapsed ? "lg:hidden" : ""
-                              )}
-                            />
-                          </Link>
-                          <button
-                            aria-expanded={isExpanded}
-                            aria-label={`${isExpanded ? "Collapse" : "Expand"} ${item.label}`}
-                            className={cn(
-                              "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/8 text-slate-200 transition hover:border-white/14 hover:bg-white/12 hover:text-white",
-                              isSidebarCollapsed ? "lg:hidden" : ""
-                            )}
-                            onClick={() =>
-                              setExpandedSections((current) =>
-                                Object.fromEntries(
-                                  Object.keys(current).map((key) => [
-                                    key,
-                                    key === item.key ? !(current[item.key] ?? false) : false
-                                  ])
-                                ) as Record<string, boolean>
-                              )
-                            }
-                            type="button"
-                          >
-                            <ChevronDown
-                              className={cn(
-                                "h-4 w-4 transition-transform duration-200",
-                                isExpanded ? "rotate-180" : "rotate-0"
-                              )}
-                            />
-                          </button>
-                        </div>
-                      ) : item.href ? (
-                        <Link
+                        <button
+                          aria-expanded={isExpanded}
+                          aria-label={`${isExpanded ? "Collapse" : "Expand"} ${item.label}`}
                           className={itemClassName}
-                          href={item.href}
-                          onClick={() => setIsMobileSidebarOpen(false)}
+                          onClick={() => {
+                            setExpandedSections((current) => {
+                              const nextValue = !(current[item.key] ?? false);
+
+                              if (typeof window !== "undefined") {
+                                if (nextValue) {
+                                  window.localStorage.setItem(
+                                    sidebarExpandedSectionStorageKey,
+                                    item.key
+                                  );
+                                } else {
+                                  window.localStorage.removeItem(sidebarExpandedSectionStorageKey);
+                                }
+                              }
+
+                              return Object.fromEntries(
+                                Object.keys(current).map((key) => [
+                                  key,
+                                  key === item.key ? nextValue : false
+                                ])
+                              ) as Record<string, boolean>;
+                            });
+                          }}
                           title={item.label}
+                          type="button"
                         >
-                          <span
+                          <Icon
                             className={cn(
-                              "flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border transition",
+                              "h-4.5 w-4.5 shrink-0 transition",
                               isActive
-                                ? "border-white/14 bg-white/14 text-white"
-                                : item.href
-                                  ? "border-white/8 bg-white/8 text-slate-300 group-hover/nav:border-white/14 group-hover/nav:bg-white/12 group-hover/nav:text-white"
-                                  : "border-white/8 bg-white/5 text-slate-500"
+                                ? "text-sky-200"
+                                : "text-slate-400 group-hover/nav:text-slate-100"
                             )}
-                          >
-                            <Icon className="h-4.5 w-4.5" />
-                          </span>
+                          />
                           <span
                             className={cn(
                               "shell-label min-w-0 flex-1 truncate text-sm font-medium",
@@ -1030,13 +1205,37 @@ export function EnterpriseShell({
                           >
                             {item.label}
                           </span>
-                          <span
+                          <ChevronDown
                             className={cn(
-                              "shell-trailing h-2.5 w-2.5 rounded-full transition",
-                              isActive ? "bg-white" : "bg-slate-500 group-hover/nav:bg-sky-300",
+                              "h-4 w-4 shrink-0 text-slate-500 transition-transform duration-200 group-hover/nav:text-slate-200",
+                              isExpanded ? "rotate-180 text-slate-200" : "rotate-0",
                               isSidebarCollapsed ? "lg:hidden" : ""
                             )}
                           />
+                        </button>
+                      ) : item.href ? (
+                        <Link
+                          className={itemClassName}
+                          href={item.href}
+                          onClick={() => setIsMobileSidebarOpen(false)}
+                          title={item.label}
+                        >
+                          <Icon
+                            className={cn(
+                              "h-4.5 w-4.5 shrink-0 transition",
+                              isActive
+                                ? "text-sky-200"
+                                : "text-slate-400 group-hover/nav:text-slate-100"
+                            )}
+                          />
+                          <span
+                            className={cn(
+                              "shell-label min-w-0 flex-1 truncate text-sm font-medium",
+                              isSidebarCollapsed ? "lg:hidden" : ""
+                            )}
+                          >
+                            {item.label}
+                          </span>
                         </Link>
                       ) : (
                         <button
@@ -1045,9 +1244,7 @@ export function EnterpriseShell({
                           disabled
                           type="button"
                         >
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/5 text-slate-500">
-                            <Icon className="h-4.5 w-4.5" />
-                          </span>
+                          <Icon className="h-4.5 w-4.5 shrink-0 text-slate-500" />
                           <span
                             className={cn(
                               "shell-label min-w-0 flex-1 truncate text-sm font-medium",
@@ -1068,33 +1265,74 @@ export function EnterpriseShell({
                       )}
 
                       {item.children?.length && isExpanded && !isSidebarCollapsed ? (
-                        <div className="ml-4 space-y-1 border-l border-white/8 pl-3">
+                        <div className="shell-submenu ml-9 space-y-1 border-l border-white/14 pl-5">
                           {item.children.map((child) => {
+                            if (child.type === "group") {
+                              const groupKey = child.groupKey ?? child.label;
+                              const isGroupOpen = openGroupKey === groupKey;
+                              const ChildIcon = resolveNavigationChildIcon(child.key);
+
+                              return (
+                                <button
+                                  aria-expanded={isGroupOpen}
+                                  className={cn(
+                                    "shell-submenu-group flex w-full items-center justify-between gap-2 rounded-lg px-0 pt-3 pb-1 text-left transition first:pt-1 hover:text-slate-200",
+                                    isGroupOpen ? "text-slate-200" : "text-slate-500"
+                                  )}
+                                  key={`${item.key}-${child.key}`}
+                                  onClick={() =>
+                                    setExpandedSubgroups((current) => ({
+                                      ...current,
+                                      [item.key]: isGroupOpen ? null : groupKey
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  <span className="flex min-w-0 items-center gap-2">
+                                    <ChildIcon
+                                      className={cn(
+                                        "h-3.5 w-3.5 shrink-0",
+                                        isGroupOpen ? "text-sky-300" : "text-slate-600"
+                                      )}
+                                    />
+                                    <span className="truncate">{child.label}</span>
+                                  </span>
+                                  <ChevronDown
+                                    className={cn(
+                                      "h-3.5 w-3.5 shrink-0 text-slate-500 transition-transform duration-200",
+                                      isGroupOpen ? "rotate-180 text-slate-300" : "rotate-0"
+                                    )}
+                                  />
+                                </button>
+                              );
+                            }
+
+                            if (child.groupKey && openGroupKey !== child.groupKey) {
+                              return null;
+                            }
+
                             const childIsActive = child.href
                               ? matchesHref(pathname, child.href)
                               : false;
+                            const ChildIcon = resolveNavigationChildIcon(child.key);
                             const childClassName = cn(
-                              "flex min-h-[2.15rem] items-center justify-between rounded-xl px-3 text-[12px] font-medium transition",
+                              "shell-submenu-link flex min-h-[2rem] items-center gap-2 rounded-lg px-3 transition",
                               child.href
                                 ? childIsActive
-                                  ? "bg-white/12 text-white"
-                                  : "text-slate-300 hover:bg-white/8 hover:text-white"
+                                  ? "bg-white/10 text-white shadow-[inset_2px_0_0_rgba(125,211,252,0.85)]"
+                                  : "text-slate-300 hover:bg-white/7 hover:text-white"
                                 : "cursor-not-allowed text-slate-500"
                             );
 
                             const childContent = (
                               <>
-                                <span className="truncate">{child.label}</span>
-                                <span
+                                <ChildIcon
                                   className={cn(
-                                    "h-2 w-2 rounded-full",
-                                    child.href
-                                      ? childIsActive
-                                        ? "bg-sky-300"
-                                        : "bg-slate-500"
-                                      : "bg-slate-600"
+                                    "h-3.5 w-3.5 shrink-0",
+                                    childIsActive ? "text-sky-300" : "text-slate-500"
                                   )}
                                 />
+                                <span className="truncate">{child.label}</span>
                               </>
                             );
 
@@ -1103,7 +1341,7 @@ export function EnterpriseShell({
                                 <Link
                                   className={childClassName}
                                   href={child.href}
-                                  key={child.label}
+                                  key={child.key}
                                   onClick={() => setIsMobileSidebarOpen(false)}
                                 >
                                   {childContent}
@@ -1112,8 +1350,8 @@ export function EnterpriseShell({
                             }
 
                             return (
-                              <div className={childClassName} key={child.label}>
-                                <span>{child.label}</span>
+                              <div className={childClassName} key={child.key}>
+                                {childContent}
                                 <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
                                   Soon
                                 </span>

@@ -132,6 +132,23 @@ option {
   overflow: hidden;
 }
 
+.shell-submenu-group,
+.shell-submenu-link {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-transform: none;
+}
+
+.shell-submenu-group {
+  color: rgb(148 163 184);
+}
+
+.shell-submenu-link {
+  color: rgb(203 213 225);
+}
+
 .workspace-tabs-content > .workspace-tabs-root {
   margin-top: 0;
 }
@@ -1434,8 +1451,30 @@ option {
 }
 
 .rms-online-desktop .rms-customer-strip {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(138px, 0.24fr) auto;
   margin-top: 8px;
+}
+
+.rms-online-desktop .rms-pos-service-select {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-pos-service-select span {
+  overflow: hidden;
+  color: #607266;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rms-online-desktop .rms-pos-service-select select {
+  width: 100%;
+  height: 36px;
 }
 
 .rms-online-desktop .rms-scan-strip {
@@ -2142,6 +2181,10 @@ option {
   width: min(1080px, calc(100vw - 96px));
 }
 
+.rms-online-desktop .rms-transfer-feedback-dialog {
+  width: min(1240px, calc(100vw - 64px));
+}
+
 .rms-online-desktop .rms-document-dialog,
 .rms-online-desktop .rms-serial-dialog {
   align-content: start;
@@ -2349,7 +2392,7 @@ option {
 
 .rms-online-desktop .rms-stock-request-table .rms-table-head,
 .rms-online-desktop .rms-stock-request-table .rms-table-row {
-  grid-template-columns: minmax(150px, 1fr) minmax(132px, 0.8fr) minmax(132px, 0.8fr) 108px 84px 96px 48px 48px;
+  grid-template-columns: minmax(150px, 1fr) minmax(132px, 0.8fr) minmax(132px, 0.8fr) 108px 84px 96px 48px 58px 78px 48px;
 }
 
 .rms-online-desktop .rms-transfer-document-dialog .rms-table {
@@ -2682,6 +2725,14 @@ option {
   min-height: 90px;
   padding: 8px 9px;
   resize: vertical;
+}
+
+.rms-online-desktop .rms-transfer-feedback-note {
+  grid-column: 1 / -1;
+}
+
+.rms-online-desktop .rms-transfer-feedback-note textarea {
+  min-height: 68px;
 }
 
 .rms-online-desktop .rms-reference-suggestions {

@@ -321,10 +321,13 @@ export function deriveCustomerAccountPostingEffect(input: {
       const projectedReceivableBalance = roundMoney(
         customer.receivableBalanceAmount + storeCreditTenderAmount
       );
+      const creditLimitAmount =
+        customer.creditLimitAmount === null ? null : roundMoney(customer.creditLimitAmount);
 
       if (
-        customer.creditLimitAmount !== null &&
-        projectedReceivableBalance > roundMoney(customer.creditLimitAmount)
+        creditLimitAmount !== null &&
+        creditLimitAmount > 0 &&
+        projectedReceivableBalance > creditLimitAmount
       ) {
         throw new Error(
           `Flash ERP cannot exceed ${customer.fullName}'s credit limit with this Store Credit amount.`

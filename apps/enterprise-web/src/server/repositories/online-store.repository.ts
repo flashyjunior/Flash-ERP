@@ -46,10 +46,16 @@ import {
   ensureProductVariantSalesOrderDepositSchemaCompatibility
 } from "@/server/repositories/schema-compatibility.repository";
 import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
+import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
 import {
   captureTransactionReference,
   sendSaleSmsNotificationSafely
 } from "@/server/repositories/sale-sms.repository";
+import {
+  buildUnavailableFuelOperationsWorkspace,
+  getFuelOperationsWorkspace,
+  type FuelOperationsWorkspaceData
+} from "@/server/repositories/erp-fuel-operations.repository";
 
 const onlineTerminalCode = "online-web";
 const onlineStoreRoleCodes = new Set([
@@ -89,6 +95,600 @@ function normalizeMoney(value: unknown, label: string) {
 
 function optionalText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isServiceProductType(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase() === "SERVICE";
+}
+
+function isOnlineStoreStockManagedProduct(product: {
+  productType?: string | null;
+  trackInventory?: boolean | null;
+}) {
+  return Boolean(product.trackInventory) && !isServiceProductType(product.productType);
+}
+
+function normalizeFuelTransferProductKey(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function isFuelTransferProduct(product: {
+  code?: string | null;
+  sku?: string | null;
+  name?: string | null;
+  shortName?: string | null;
+  department?: string | null;
+  category?: string | null;
+  subcategory?: string | null;
+}) {
+  const values = [
+    product.code,
+    product.sku,
+    product.name,
+    product.shortName,
+    product.department,
+    product.category,
+    product.subcategory
+  ].map(normalizeFuelTransferProductKey);
+  const exactFuelCodes = new Set([
+    "AGO",
+    "DIESEL",
+    "AUTOMOTIVEGASOIL",
+    "PMS",
+    "PETROL",
+    "GASOLINE",
+    "PREMIUMMOTORSPIRIT",
+    "LPG",
+    "LIQUEFIEDPETROLEUMGAS",
+    "KERO",
+    "KEROSENE",
+    "ATK",
+    "JETFUEL"
+  ]);
+
+  if (values.some((value) => exactFuelCodes.has(value))) {
+    return true;
+  }
+
+  return values.some((value) =>
+    ["FUEL", "PETROL", "DIESEL", "GASOIL", "GASOLINE", "LPG"].some((keyword) =>
+      value.includes(keyword)
+    )
+  );
+}
+
+async function ensureOnlineFuelDeliverySequence(
+  tx: Prisma.TransactionClient,
+  input: { retailOrgId: string; companyId: string }
+) {
+  const fiscalYear = await tx.erpFiscalYear.findFirst({
+    where: {
+      companyId: input.companyId,
+      status: {
+        not: "CLOSED"
+      }
+    },
+    orderBy: {
+      startsOn: "desc"
+    },
+    select: {
+      id: true
+    }
+  });
+
+  if (!fiscalYear) {
+    throw new Error("Flash ERP needs an open fiscal year before it can mirror a fuel receipt into a tank.");
+  }
+
+  await tx.erpDocumentSequence.upsert({
+    where: {
+      companyId_documentType_fiscalYearId: {
+        companyId: input.companyId,
+        documentType: "FUEL_DELIVERY",
+        fiscalYearId: fiscalYear.id
+      }
+    },
+    update: {},
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: input.companyId,
+      fiscalYearId: fiscalYear.id,
+      documentType: "FUEL_DELIVERY",
+      prefix: "FD",
+      paddingLength: 6,
+      resetPolicy: "FISCAL_YEAR",
+      status: RecordStatus.ACTIVE
+    }
+  });
+}
+
+async function ensureOnlineFuelProductProfileFromCatalogProduct(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    companyId: string;
+    product: {
+      code: string;
+      name: string;
+      shortName?: string | null;
+      unitOfMeasure?: string | null;
+    };
+  }
+) {
+  return tx.erpProductProfile.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: input.retailOrgId,
+        code: input.product.code
+      }
+    },
+    update: {
+      companyId: input.companyId,
+      name: input.product.name,
+      productFamily: "FUEL",
+      variantName: input.product.shortName ?? null,
+      defaultUomCode: input.product.unitOfMeasure || "LTR",
+      trackingMode: "BULK_LIQUID",
+      status: RecordStatus.ACTIVE
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: input.companyId,
+      code: input.product.code,
+      name: input.product.name,
+      productFamily: "FUEL",
+      variantName: input.product.shortName ?? null,
+      defaultUomCode: input.product.unitOfMeasure || "LTR",
+      trackingMode: "BULK_LIQUID",
+      status: RecordStatus.ACTIVE
+    }
+  });
+}
+
+async function mirrorOnlineFuelReceiptToTank(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    storeId: string;
+    inventoryLocationId: string;
+    inventoryLocationCode: string;
+    inventoryLocationName: string;
+    referenceNo: string;
+    sourceLabel: string | null;
+    notes: string;
+    occurredAt: Date;
+    lines: Array<{
+      product: {
+        code: string;
+        sku?: string | null;
+        name: string;
+        shortName?: string | null;
+        department?: string | null;
+        category?: string | null;
+        subcategory?: string | null;
+        unitOfMeasure?: string | null;
+        baseCostPrice?: Prisma.Decimal | number | null;
+      };
+      quantity: number;
+      unitCost: number;
+    }>;
+  }
+) {
+  const fuelLineCandidates = input.lines.filter((line) => isFuelTransferProduct(line.product));
+
+  if (fuelLineCandidates.length === 0) {
+    return {
+      deliveryNo: null as string | null,
+      skippedProducts: [] as string[]
+    };
+  }
+
+  const company = await tx.erpCompany.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+    select: {
+      id: true,
+      baseCurrencyCode: true
+    }
+  });
+
+  if (!company) {
+    return {
+      deliveryNo: null,
+      skippedProducts: fuelLineCandidates.map((line) => `${line.product.code} at ${input.inventoryLocationCode}`)
+    };
+  }
+
+  const site = await tx.erpOperatingSite.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: input.retailOrgId,
+        code: input.inventoryLocationCode
+      }
+    },
+    update: {
+      companyId: company.id,
+      name: input.inventoryLocationName,
+      siteType: "FUEL_SITE",
+      location: input.inventoryLocationName,
+      status: RecordStatus.ACTIVE
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      code: input.inventoryLocationCode,
+      name: input.inventoryLocationName,
+      siteType: "FUEL_SITE",
+      location: input.inventoryLocationName,
+      status: RecordStatus.ACTIVE
+    }
+  });
+  const siblingLocations = await tx.inventoryLocation.findMany({
+    where: {
+      retailOrgId: input.retailOrgId,
+      storeId: input.storeId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [
+      { useForReceivingDefault: "desc" },
+      { useForSalesDefault: "desc" },
+      { useForSalesOrderDefault: "desc" },
+      { code: "asc" }
+    ],
+    select: {
+      code: true
+    }
+  });
+  const candidateSiteCodes = [
+    input.inventoryLocationCode,
+    ...siblingLocations.map((location) => location.code)
+  ].filter((code, index, codes): code is string => code.length > 0 && codes.indexOf(code) === index);
+  const candidateSiteRows = await tx.erpOperatingSite.findMany({
+    where: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      code: {
+        in: candidateSiteCodes
+      },
+      status: RecordStatus.ACTIVE
+    },
+    select: {
+      id: true,
+      code: true
+    }
+  });
+  const candidateSiteByCode = new Map(candidateSiteRows.map((candidateSite) => [candidateSite.code, candidateSite]));
+  candidateSiteByCode.set(site.code, { id: site.id, code: site.code });
+  const candidateSites = candidateSiteCodes
+    .map((code) => candidateSiteByCode.get(code))
+    .filter((candidateSite): candidateSite is { id: string; code: string } => Boolean(candidateSite));
+  const fuelLines: Array<{
+    tank: { id: string; code: string; currentBookQuantity: Prisma.Decimal };
+    profile: { id: string; code: string };
+    quantity: number;
+    unitCost: number;
+    site: { id: string; code: string };
+  }> = [];
+  const skippedProducts: string[] = [];
+
+  for (const line of fuelLineCandidates) {
+    const profile = await ensureOnlineFuelProductProfileFromCatalogProduct(tx, {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      product: line.product
+    });
+    let tank: { id: string; code: string; currentBookQuantity: Prisma.Decimal } | null = null;
+    let tankSite: { id: string; code: string } | null = null;
+
+    for (const candidateSite of candidateSites) {
+      tank = await tx.erpFuelTank.findFirst({
+        where: {
+          companyId: company.id,
+          operatingSiteId: candidateSite.id,
+          productProfileId: profile.id,
+          status: RecordStatus.ACTIVE
+        },
+        orderBy: [{ code: "asc" }],
+        select: {
+          id: true,
+          code: true,
+          currentBookQuantity: true
+        }
+      });
+
+      if (tank) {
+        tankSite = candidateSite;
+        break;
+      }
+    }
+
+    if (!tank) {
+      skippedProducts.push(`${profile.code} at ${site.code}`);
+      continue;
+    }
+
+    const fallbackUnitCost =
+      line.product.baseCostPrice === null || line.product.baseCostPrice === undefined
+        ? 0
+        : Number(line.product.baseCostPrice);
+    const unitCost = line.unitCost > 0 ? line.unitCost : fallbackUnitCost;
+
+    fuelLines.push({
+      tank,
+      profile,
+      quantity: toQuantity(line.quantity),
+      unitCost: toMoney(unitCost),
+      site: tankSite ?? site
+    });
+  }
+
+  if (fuelLines.length === 0) {
+    return {
+      deliveryNo: null,
+      skippedProducts
+    };
+  }
+
+  await ensureOnlineFuelDeliverySequence(tx, {
+    retailOrgId: input.retailOrgId,
+    companyId: company.id
+  });
+  const reserved = await reserveErpDocumentNumberInTransaction(tx, {
+    retailOrgId: input.retailOrgId,
+    companyId: company.id,
+    documentType: "FUEL_DELIVERY"
+  });
+  const mirrorSite = fuelLines[0]?.site ?? site;
+  const delivery = await tx.erpFuelDelivery.create({
+    data: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      operatingSiteId: mirrorSite.id,
+      deliveryNo: reserved.documentNo,
+      supplierName: input.sourceLabel,
+      supplierDocumentNo: input.referenceNo,
+      deliveryDate: input.occurredAt,
+      currencyCode: company.baseCurrencyCode,
+      totalOrderedQuantity: toQuantityString(fuelLines.reduce((sum, line) => sum + line.quantity, 0)),
+      totalDeliveredQuantity: toQuantityString(fuelLines.reduce((sum, line) => sum + line.quantity, 0)),
+      totalAcceptedQuantity: toQuantityString(fuelLines.reduce((sum, line) => sum + line.quantity, 0)),
+      totalVarianceQuantity: toQuantityString(0),
+      totalCostAmount: toMoneyString(fuelLines.reduce((sum, line) => sum + line.quantity * line.unitCost, 0)),
+      notes: input.notes,
+      status: "POSTED",
+      lines: {
+        create: fuelLines.map((line) => ({
+          retailOrgId: input.retailOrgId,
+          companyId: company.id,
+          tankId: line.tank.id,
+          productProfileId: line.profile.id,
+          orderedQuantity: toQuantityString(line.quantity),
+          deliveredQuantity: toQuantityString(line.quantity),
+          acceptedQuantity: toQuantityString(line.quantity),
+          varianceQuantity: toQuantityString(0),
+          unitCost: line.unitCost.toFixed(4),
+          lineCostAmount: toMoneyString(line.quantity * line.unitCost),
+          notes: input.referenceNo
+        }))
+      }
+    },
+    select: {
+      deliveryNo: true
+    }
+  });
+  const incrementByTankId = new Map<string, { tank: (typeof fuelLines)[number]["tank"]; quantity: number }>();
+
+  for (const line of fuelLines) {
+    const current = incrementByTankId.get(line.tank.id);
+    incrementByTankId.set(line.tank.id, {
+      tank: current?.tank ?? line.tank,
+      quantity: toQuantity((current?.quantity ?? 0) + line.quantity)
+    });
+  }
+
+  for (const entry of incrementByTankId.values()) {
+    await tx.erpFuelTank.update({
+      where: {
+        id: entry.tank.id
+      },
+      data: {
+        currentBookQuantity: toQuantityString(Number(entry.tank.currentBookQuantity) + entry.quantity)
+      }
+    });
+  }
+
+  return {
+    deliveryNo: delivery.deliveryNo,
+    skippedProducts
+  };
+}
+
+async function reduceOnlineFuelTankForSale(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    storeId: string;
+    inventoryLocationCode: string;
+    inventoryLocationName: string;
+    referenceNo: string;
+    lines: Array<{
+      product: {
+        code?: string | null;
+        sku?: string | null;
+        name: string;
+        shortName?: string | null;
+        department?: string | null;
+        category?: string | null;
+        subcategory?: string | null;
+        unitOfMeasure?: string | null;
+      };
+      quantity: number;
+    }>;
+  }
+) {
+  const fuelLineCandidates = input.lines.filter((line) => isFuelTransferProduct(line.product));
+
+  if (fuelLineCandidates.length === 0) {
+    return {
+      adjustedProducts: [] as string[],
+      skippedProducts: [] as string[]
+    };
+  }
+
+  const company = await tx.erpCompany.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  if (!company) {
+    return {
+      adjustedProducts: [],
+      skippedProducts: fuelLineCandidates.map((line) => `${line.product.code ?? line.product.name} at ${input.inventoryLocationCode}`)
+    };
+  }
+
+  const site = await tx.erpOperatingSite.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: input.retailOrgId,
+        code: input.inventoryLocationCode
+      }
+    },
+    update: {
+      companyId: company.id,
+      name: input.inventoryLocationName,
+      siteType: "FUEL_SITE",
+      location: input.inventoryLocationName,
+      status: RecordStatus.ACTIVE
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      code: input.inventoryLocationCode,
+      name: input.inventoryLocationName,
+      siteType: "FUEL_SITE",
+      location: input.inventoryLocationName,
+      status: RecordStatus.ACTIVE
+    }
+  });
+  const siblingLocations = await tx.inventoryLocation.findMany({
+    where: {
+      retailOrgId: input.retailOrgId,
+      storeId: input.storeId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [
+      { useForSalesDefault: "desc" },
+      { useForReceivingDefault: "desc" },
+      { useForSalesOrderDefault: "desc" },
+      { code: "asc" }
+    ],
+    select: {
+      code: true
+    }
+  });
+  const candidateSiteCodes = [
+    input.inventoryLocationCode,
+    ...siblingLocations.map((location) => location.code)
+  ].filter((code, index, codes): code is string => code.length > 0 && codes.indexOf(code) === index);
+  const candidateSiteRows = await tx.erpOperatingSite.findMany({
+    where: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      code: {
+        in: candidateSiteCodes
+      },
+      status: RecordStatus.ACTIVE
+    },
+    select: {
+      id: true,
+      code: true
+    }
+  });
+  const candidateSiteByCode = new Map(candidateSiteRows.map((candidateSite) => [candidateSite.code, candidateSite]));
+  candidateSiteByCode.set(site.code, { id: site.id, code: site.code });
+  const candidateSites = candidateSiteCodes
+    .map((code) => candidateSiteByCode.get(code))
+    .filter((candidateSite): candidateSite is { id: string; code: string } => Boolean(candidateSite));
+  const reductionByTankId = new Map<string, {
+    tank: { id: string; code: string; currentBookQuantity: Prisma.Decimal };
+    productCode: string;
+    quantity: number;
+  }>();
+  const skippedProducts: string[] = [];
+
+  for (const line of fuelLineCandidates) {
+    const productCode = line.product.code ?? line.product.name;
+    const profile = await ensureOnlineFuelProductProfileFromCatalogProduct(tx, {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      product: {
+        code: productCode,
+        name: line.product.name,
+        shortName: line.product.shortName ?? null,
+        unitOfMeasure: line.product.unitOfMeasure ?? "LTR"
+      }
+    });
+    let tank: { id: string; code: string; currentBookQuantity: Prisma.Decimal } | null = null;
+
+    for (const candidateSite of candidateSites) {
+      tank = await tx.erpFuelTank.findFirst({
+        where: {
+          companyId: company.id,
+          operatingSiteId: candidateSite.id,
+          productProfileId: profile.id,
+          status: RecordStatus.ACTIVE
+        },
+        orderBy: [{ code: "asc" }],
+        select: {
+          id: true,
+          code: true,
+          currentBookQuantity: true
+        }
+      });
+
+      if (tank) {
+        break;
+      }
+    }
+
+    if (!tank) {
+      skippedProducts.push(`${profile.code} at ${site.code}`);
+      continue;
+    }
+
+    const current = reductionByTankId.get(tank.id);
+    reductionByTankId.set(tank.id, {
+      tank: current?.tank ?? tank,
+      productCode: current?.productCode ?? profile.code,
+      quantity: toQuantity((current?.quantity ?? 0) + line.quantity)
+    });
+  }
+
+  for (const reduction of reductionByTankId.values()) {
+    await tx.erpFuelTank.update({
+      where: {
+        id: reduction.tank.id
+      },
+      data: {
+        currentBookQuantity: toQuantityString(Number(reduction.tank.currentBookQuantity) - reduction.quantity)
+      }
+    });
+  }
+
+  return {
+    adjustedProducts: [...reductionByTankId.values()].map((entry) => entry.productCode),
+    skippedProducts
+  };
 }
 
 function resolveSaleSmsDetails(details: unknown, note: string | null) {
@@ -291,6 +891,10 @@ function toMoney(value: number) {
   return Number(value.toFixed(2));
 }
 
+function toMoneyString(value: number) {
+  return toMoney(value).toFixed(2);
+}
+
 export type OnlineStoreManagerOverrideRequest = {
   supervisorCode?: string | null;
   supervisorPassword?: string | null;
@@ -308,6 +912,10 @@ type OnlineStoreManagerApproval = {
 
 function toQuantity(value: unknown) {
   return Number(Number(value ?? 0).toFixed(3));
+}
+
+function toQuantityString(value: number) {
+  return toQuantity(value).toFixed(3);
 }
 
 function formatNumberForMessage(value: number) {
@@ -982,6 +1590,15 @@ export type OnlineStoreWorkspaceData = {
     displayName: string;
     loginId: string;
   };
+  capabilities: {
+    hasFuelOperationsVisibility: boolean;
+    canManageFuelTanks: boolean;
+    canCaptureFuelDips: boolean;
+    canCaptureFuelMeterReadings: boolean;
+    canCaptureSupplierFuelReceipts: boolean;
+    canManageFuelReconciliation: boolean;
+  };
+  fuelOperationsWorkspace: FuelOperationsWorkspaceData;
   store: {
     id: string;
     code: string;
@@ -1059,6 +1676,7 @@ export type OnlineStoreWorkspaceData = {
     taxInclusive: boolean;
     mustEnterPriceAtPos: boolean;
     isSerialized: boolean;
+    trackInventory: boolean;
     trackSize: boolean;
     trackColor: boolean;
     matrixVariants: Array<{
@@ -1092,6 +1710,7 @@ export type OnlineStoreWorkspaceData = {
     taxInclusive: boolean;
     mustEnterPriceAtPos: boolean;
     isSerialized: boolean;
+    trackInventory: boolean;
     trackSize: boolean;
     trackColor: boolean;
     matrixVariants: Array<{
@@ -1287,6 +1906,7 @@ export type OnlineStoreWorkspaceData = {
     role: "SOURCE" | "DESTINATION";
     origin: string;
     externalReference: string | null;
+    workflowType: string | null;
     sourceStoreCode: string;
     sourceStoreName: string;
     sourceLocationId: string;
@@ -1308,6 +1928,24 @@ export type OnlineStoreWorkspaceData = {
     outstandingIssueQuantity: number;
     outstandingReceiptQuantity: number;
     unitCost: number | null;
+    transporterName: string | null;
+    vehicleRegistrationNo: string | null;
+    driverName: string | null;
+    driverContact: string | null;
+    deliveryNoteNo: string | null;
+    feedbackStatus: string;
+    waterTestResult: string | null;
+    quantityBeforeDelivery: number | null;
+    expectedQuantityReceived: number | null;
+    expectedStockQuantity: number | null;
+    quantityAfterDelivery: number | null;
+    actualQuantityReceived: number | null;
+    feedbackVarianceQuantity: number | null;
+    feedbackNote: string | null;
+    feedbackRecordedAt: string | null;
+    feedbackConfirmedAt: string | null;
+    feedbackPostedAt: string | null;
+    feedbackOperatorName: string | null;
     issuedSerialNumbers: string[];
     receivedSerialNumbers: string[];
     requestNote: string | null;
@@ -1559,6 +2197,9 @@ export type OnlineStoreWorkspaceData = {
 };
 
 const emptyOnlineStoreCollections = {
+  fuelOperationsWorkspace: buildUnavailableFuelOperationsWorkspace(
+    "Fuel Operations is not available for this online-store workspace."
+  ),
   promotions: [],
   customers: [],
   products: [],
@@ -1620,6 +2261,17 @@ const emptyOnlineStoreCollections = {
     }
   }
 };
+
+function mapOnlineStoreCapabilities(capabilities: ReturnType<typeof deriveRetailUserCapabilities>) {
+  return {
+    hasFuelOperationsVisibility: capabilities.hasFuelOperationsVisibility,
+    canManageFuelTanks: capabilities.canManageFuelTanks,
+    canCaptureFuelDips: capabilities.canCaptureFuelDips,
+    canCaptureFuelMeterReadings: capabilities.canCaptureFuelMeterReadings,
+    canCaptureSupplierFuelReceipts: capabilities.canCaptureSupplierFuelReceipts,
+    canManageFuelReconciliation: capabilities.canManageFuelReconciliation
+  };
+}
 
 type OnlineStoreContext = Awaited<ReturnType<typeof requireOnlineStoreForOperation>>;
 type OnlineStoreTx = Prisma.TransactionClient | typeof prisma;
@@ -2276,6 +2928,20 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     displayName: assignment.user?.displayName ?? assignment.session.displayName,
     loginId: assignment.user?.loginId ?? assignment.session.loginId
   };
+  const capabilities = mapOnlineStoreCapabilities(
+    deriveRetailUserCapabilities(assignment.session.permissionCodes, assignment.session.accountStatus)
+  );
+  const fuelOperationsWorkspace = capabilities.hasFuelOperationsVisibility
+    ? await getFuelOperationsWorkspace({ storeCode: assignment.store?.code ?? null }).catch((error: unknown) =>
+        buildUnavailableFuelOperationsWorkspace(
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not load Online Store Fuel Operations."
+        )
+      )
+    : buildUnavailableFuelOperationsWorkspace(
+        "Fuel Operations is not enabled for this online-store user."
+      );
 
   if (!assignment.user?.homeStore) {
     return {
@@ -2283,6 +2949,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       unavailableReason:
         "Your user profile is not assigned to a home store. Assign the user to an online store from Retail Users.",
       operator,
+      capabilities,
       store: null,
       branding: readOnlineStoreBranding(),
       metrics: {
@@ -2317,6 +2984,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           ? "Your home store is not marked as an Online Store. Switch the store execution mode in HQ store setup before using browser POS."
           : "Your user profile is not assigned to an online-store role. Assign Online Store Cashier or Online Store Supervisor before using browser POS.",
       operator,
+      capabilities,
       store: null,
       branding: readOnlineStoreBranding(assignment.user.homeStore.retailOrg),
       metrics: {
@@ -3034,12 +3702,31 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         transferBatchNo: true,
         lineNo: true,
         origin: true,
+        workflowType: true,
         status: true,
         externalReference: true,
         requestedQuantity: true,
         issuedQuantity: true,
         receivedQuantity: true,
         unitCost: true,
+        transporterName: true,
+        vehicleRegistrationNo: true,
+        driverName: true,
+        driverContact: true,
+        deliveryNoteNo: true,
+        feedbackStatus: true,
+        waterTestResult: true,
+        quantityBeforeDelivery: true,
+        expectedQuantityReceived: true,
+        expectedStockQuantity: true,
+        quantityAfterDelivery: true,
+        actualQuantityReceived: true,
+        feedbackVarianceQuantity: true,
+        feedbackNote: true,
+        feedbackRecordedAt: true,
+        feedbackConfirmedAt: true,
+        feedbackPostedAt: true,
+        feedbackOperatorName: true,
         issuedSerialNumbersSnapshot: true,
         receivedSerialNumbersSnapshot: true,
         requestNote: true,
@@ -3172,7 +3859,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     });
   const salesLocation = inventoryLocations.find((location) => location.useForSalesDefault) ?? inventoryLocations[0] ?? null;
   const locationIds = inventoryLocations.map((location) => location.id);
-  const inventoryManagedProducts = products.filter((product) => product.trackInventory);
+  const inventoryManagedProducts = products.filter(isOnlineStoreStockManagedProduct);
   const productIds = [...new Set([...productsForCatalog, ...inventoryManagedProducts].map((product) => product.id))];
   const ledgerPositions =
     locationIds.length && productIds.length
@@ -3371,9 +4058,15 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   };
   const mappedProducts = productsForCatalog.map(mapWorkspaceProduct);
   const mappedInventoryProducts = inventoryManagedProducts.map(mapWorkspaceProduct);
+  const serviceCatalogProducts = mappedProducts.filter((product) => isServiceProductType(product.productType));
+  const stockedCatalogProducts = mappedProducts
+    .filter((product) => !isServiceProductType(product.productType) && product.quantityOnHand > 0)
+    .slice(0, 80);
+  const sellableProductIds = new Set(
+    [...stockedCatalogProducts, ...serviceCatalogProducts].map((product) => product.productId)
+  );
   const sellableProducts = mappedProducts
-    .filter((product) => product.quantityOnHand > 0)
-    .slice(0, 80)
+    .filter((product) => sellableProductIds.has(product.productId))
     .map((product) => ({
       productId: product.productId,
       productCode: product.productCode,
@@ -3389,6 +4082,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       taxInclusive: product.taxInclusive,
       mustEnterPriceAtPos: product.mustEnterPriceAtPos,
       isSerialized: product.isSerialized,
+      trackInventory: product.trackInventory,
       trackSize: product.trackSize,
       trackColor: product.trackColor,
       matrixVariants: product.matrixVariants
@@ -3517,6 +4211,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       role: transfer.sourceStore.id === currentStoreId ? "SOURCE" as const : "DESTINATION" as const,
       origin: transfer.origin,
       externalReference: transfer.externalReference,
+      workflowType: transfer.workflowType,
       sourceStoreCode: transfer.sourceStore.code,
       sourceStoreName: transfer.sourceStore.name,
       sourceLocationId: transfer.sourceInventoryLocation.id,
@@ -3538,6 +4233,30 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       outstandingIssueQuantity: toQuantity(Math.max(0, requestedQuantity - issuedQuantity)),
       outstandingReceiptQuantity: toQuantity(Math.max(0, issuedQuantity - receivedQuantity)),
       unitCost: transfer.unitCost === null ? null : Number(transfer.unitCost),
+      transporterName: transfer.transporterName,
+      vehicleRegistrationNo: transfer.vehicleRegistrationNo,
+      driverName: transfer.driverName,
+      driverContact: transfer.driverContact,
+      deliveryNoteNo: transfer.deliveryNoteNo,
+      feedbackStatus: transfer.feedbackStatus,
+      waterTestResult: transfer.waterTestResult,
+      quantityBeforeDelivery:
+        transfer.quantityBeforeDelivery === null ? null : toQuantity(transfer.quantityBeforeDelivery),
+      expectedQuantityReceived:
+        transfer.expectedQuantityReceived === null ? null : toQuantity(transfer.expectedQuantityReceived),
+      expectedStockQuantity:
+        transfer.expectedStockQuantity === null ? null : toQuantity(transfer.expectedStockQuantity),
+      quantityAfterDelivery:
+        transfer.quantityAfterDelivery === null ? null : toQuantity(transfer.quantityAfterDelivery),
+      actualQuantityReceived:
+        transfer.actualQuantityReceived === null ? null : toQuantity(transfer.actualQuantityReceived),
+      feedbackVarianceQuantity:
+        transfer.feedbackVarianceQuantity === null ? null : toQuantity(transfer.feedbackVarianceQuantity),
+      feedbackNote: transfer.feedbackNote,
+      feedbackRecordedAt: transfer.feedbackRecordedAt?.toISOString() ?? null,
+      feedbackConfirmedAt: transfer.feedbackConfirmedAt?.toISOString() ?? null,
+      feedbackPostedAt: transfer.feedbackPostedAt?.toISOString() ?? null,
+      feedbackOperatorName: transfer.feedbackOperatorName,
       issuedSerialNumbers: readStringArrayJson(transfer.issuedSerialNumbersSnapshot) ?? [],
       receivedSerialNumbers: readStringArrayJson(transfer.receivedSerialNumbersSnapshot) ?? [],
       requestNote: transfer.requestNote,
@@ -3861,6 +4580,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     isAvailable: true,
     unavailableReason: null,
     operator,
+    capabilities,
     store: {
       id: assignment.store.id,
       code: assignment.store.code,
@@ -3925,6 +4645,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       taxInclusive: product.taxInclusive,
       mustEnterPriceAtPos: product.mustEnterPriceAtPos,
       isSerialized: product.isSerialized,
+      trackInventory: product.trackInventory,
       trackSize: product.trackSize,
       trackColor: product.trackColor,
       matrixVariants: product.matrixVariants
@@ -4032,6 +4753,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     })),
     reports,
     reporting,
+    fuelOperationsWorkspace,
     refreshedAt: new Date().toISOString()
   };
 }
@@ -4598,6 +5320,7 @@ export type CreateOnlineStoreSaleRequest = {
   loyaltyRedemptionAmount?: number | null;
   managerOverride?: OnlineStoreManagerOverrideRequest | null;
   reference?: string | null;
+  serviceType?: string | null;
   note?: string | null;
   details?: string | null;
 };
@@ -4708,6 +5431,7 @@ export type CreateOnlineStoreSalesOrderRequest = {
   depositAmount?: number | null;
   depositTenderMethodCode?: string | null;
   depositReference?: string | null;
+  serviceType?: string | null;
   note?: string | null;
 };
 
@@ -4886,6 +5610,11 @@ export type CreateOnlineStoreTransferRequest = {
   }> | null;
   externalReference?: string | null;
   requiredAt?: string | null;
+  transporterName?: string | null;
+  vehicleRegistrationNo?: string | null;
+  driverName?: string | null;
+  driverContact?: string | null;
+  deliveryNoteNo?: string | null;
   note?: string | null;
 };
 
@@ -5364,10 +6093,14 @@ async function prepareOnlineStoreBasketLines(
     select: {
       id: true,
       code: true,
+      sku: true,
       name: true,
+      shortName: true,
       productType: true,
       department: true,
       category: true,
+      subcategory: true,
+      unitOfMeasure: true,
       baseUnitPrice: true,
       storeProductPrices: {
         where: {
@@ -5669,14 +6402,14 @@ async function assertOnlineStoreSaleStockAvailable(
   const trackedProductIds = [
     ...new Set(
       preparedLines
-        .filter((line) => line.product.trackInventory && line.product.productType !== "MATRIX")
+        .filter((line) => isOnlineStoreStockManagedProduct(line.product) && line.product.productType !== "MATRIX")
         .map((line) => line.product.id)
     )
   ];
   const requestedQuantityByProduct = new Map<string, number>();
 
   for (const line of preparedLines) {
-    if (!line.product.trackInventory || line.product.productType === "MATRIX") {
+    if (!isOnlineStoreStockManagedProduct(line.product) || line.product.productType === "MATRIX") {
       continue;
     }
 
@@ -5707,7 +6440,7 @@ async function assertOnlineStoreSaleStockAvailable(
     stockPositions.map((position) => [position.productId, toQuantity(position._sum.quantity)] as const)
   );
   const insufficientLine = preparedLines.find((line) => {
-    if (!line.product.trackInventory) {
+    if (!isOnlineStoreStockManagedProduct(line.product)) {
       return false;
     }
 
@@ -5839,7 +6572,15 @@ async function completeOnlineStoreParkedTransaction(
           product: {
             select: {
               id: true,
+              code: true,
+              sku: true,
               name: true,
+              shortName: true,
+              productType: true,
+              department: true,
+              category: true,
+              subcategory: true,
+              unitOfMeasure: true,
               baseCostPrice: true,
               trackInventory: true
             }
@@ -5863,7 +6604,15 @@ async function completeOnlineStoreParkedTransaction(
   const preparedLines = sourceTransaction.lines.map((line) => ({
     product: {
       id: line.productId,
+      code: line.product.code ?? line.productCodeSnapshot,
+      sku: line.product.sku,
       name: line.productNameSnapshot,
+      shortName: line.product.shortName,
+      productType: line.product.productType,
+      department: line.product.department,
+      category: line.product.category,
+      subcategory: line.product.subcategory,
+      unitOfMeasure: line.product.unitOfMeasure,
       baseCostPrice: line.product.baseCostPrice,
       trackInventory: line.product.trackInventory
     },
@@ -6013,7 +6762,7 @@ async function completeOnlineStoreParkedTransaction(
   });
 
   const inventoryMovements = preparedLines
-    .filter((line) => line.product.trackInventory)
+    .filter((line) => isOnlineStoreStockManagedProduct(line.product))
     .map((line) => ({
       retailOrgId: session.retailOrgId,
       storeId: store.id,
@@ -6036,6 +6785,17 @@ async function completeOnlineStoreParkedTransaction(
       data: inventoryMovements
     });
   }
+  const fuelTankReduction = await reduceOnlineFuelTankForSale(tx, {
+    retailOrgId: session.retailOrgId,
+    storeId: store.id,
+    inventoryLocationCode: salesLocation.code,
+    inventoryLocationName: salesLocation.name,
+    referenceNo: transaction.transactionNo,
+    lines: preparedLines.map((line) => ({
+      product: line.product,
+      quantity: line.quantity
+    }))
+  });
 
   if (openSalesOrder) {
     await tx.salesOrder.update({
@@ -6143,9 +6903,17 @@ async function completeOnlineStoreParkedTransaction(
       })),
       payments: [...existingReceiptPayments, ...preparedReceiptPayments]
     },
-    message: openSalesOrder
-      ? `Flash ERP fulfilled ${openSalesOrder.orderNo} with ${transaction.transactionNo}.`
-      : `Flash ERP completed ${transaction.transactionNo} directly in enterprise for ${store.code}.`,
+    message: [
+      openSalesOrder
+        ? `Flash ERP fulfilled ${openSalesOrder.orderNo} with ${transaction.transactionNo}.`
+        : `Flash ERP completed ${transaction.transactionNo} directly in enterprise for ${store.code}.`,
+      fuelTankReduction.adjustedProducts.length > 0
+        ? `Fuel tank book quantity reduced for ${fuelTankReduction.adjustedProducts.join(", ")}.`
+        : "",
+      fuelTankReduction.skippedProducts.length > 0
+        ? `Fuel tank reduction skipped for ${fuelTankReduction.skippedProducts.join(", ")} because no matching active tank exists.`
+        : ""
+    ].filter(Boolean).join(" "),
     serverProcessedAt: new Date().toISOString()
   };
 }
@@ -6230,10 +6998,14 @@ export async function createOnlineStoreSale(
     select: {
       id: true,
       code: true,
+      sku: true,
       name: true,
+      shortName: true,
       productType: true,
       department: true,
       category: true,
+      subcategory: true,
+      unitOfMeasure: true,
       baseUnitPrice: true,
       storeProductPrices: {
         where: {
@@ -6457,7 +7229,9 @@ export async function createOnlineStoreSale(
           }
         ]
       : [];
-  const note = optionalText(input.note);
+  const serviceType = optionalText(input.serviceType)?.toUpperCase() ?? null;
+  const serviceTypeNote = serviceType ? `Service type: ${serviceType.replace(/_/g, " ")}` : null;
+  const note = [serviceTypeNote, optionalText(input.note)].filter(Boolean).join(" | ") || null;
   const saleSmsDetails = resolveSaleSmsDetails(input.details, note);
 
   const salesLocation = await resolveOnlineStoreLocation({
@@ -6470,14 +7244,14 @@ export async function createOnlineStoreSale(
     const trackedProductIds = [
       ...new Set(
         pricedLines
-          .filter((line) => line.product.trackInventory && line.product.productType !== "MATRIX")
+          .filter((line) => isOnlineStoreStockManagedProduct(line.product) && line.product.productType !== "MATRIX")
           .map((line) => line.product.id)
       )
     ];
     const requestedQuantityByProduct = new Map<string, number>();
 
     for (const line of pricedLines) {
-      if (!line.product.trackInventory || line.product.productType === "MATRIX") {
+      if (!isOnlineStoreStockManagedProduct(line.product) || line.product.productType === "MATRIX") {
         continue;
       }
 
@@ -6508,7 +7282,7 @@ export async function createOnlineStoreSale(
       stockPositions.map((position) => [position.productId, toQuantity(position._sum.quantity)] as const)
     );
     const insufficientLine = pricedLines.find((line) => {
-      if (!line.product.trackInventory || line.product.productType === "MATRIX") {
+      if (!isOnlineStoreStockManagedProduct(line.product) || line.product.productType === "MATRIX") {
         return false;
       }
 
@@ -6614,7 +7388,7 @@ export async function createOnlineStoreSale(
     });
 
     const inventoryMovements = pricedLines
-      .filter((line) => line.product.trackInventory)
+      .filter((line) => isOnlineStoreStockManagedProduct(line.product))
       .map((line) => ({
           retailOrgId: session.retailOrgId,
           storeId: store.id,
@@ -6638,6 +7412,17 @@ export async function createOnlineStoreSale(
         data: inventoryMovements
       });
     }
+    const fuelTankReduction = await reduceOnlineFuelTankForSale(tx, {
+      retailOrgId: session.retailOrgId,
+      storeId: store.id,
+      inventoryLocationCode: salesLocation.code,
+      inventoryLocationName: salesLocation.name,
+      referenceNo: transaction.transactionNo,
+      lines: pricedLines.map((line) => ({
+        product: line.product,
+        quantity: line.quantity
+      }))
+    });
 
     for (const line of pricedLines) {
       if (!line.productVariant) {
@@ -6759,7 +7544,15 @@ export async function createOnlineStoreSale(
           reference: payment.reference ?? null
         }))
       },
-      message: `Flash ERP completed ${transaction.transactionNo} directly in enterprise for ${store.code}.`,
+      message: [
+        `Flash ERP completed ${transaction.transactionNo} directly in enterprise for ${store.code}.`,
+        fuelTankReduction.adjustedProducts.length > 0
+          ? `Fuel tank book quantity reduced for ${fuelTankReduction.adjustedProducts.join(", ")}.`
+          : "",
+        fuelTankReduction.skippedProducts.length > 0
+          ? `Fuel tank reduction skipped for ${fuelTankReduction.skippedProducts.join(", ")} because no matching active tank exists.`
+          : ""
+      ].filter(Boolean).join(" "),
       serverProcessedAt: new Date().toISOString()
     };
   });
@@ -6929,7 +7722,9 @@ export async function createOnlineStoreSalesOrder(
   }
 
   const lineInputs = Array.isArray(input.lines) ? input.lines : [];
-  const note = optionalText(input.note);
+  const serviceType = optionalText(input.serviceType)?.toUpperCase() ?? null;
+  const serviceTypeNote = serviceType ? `Service type: ${serviceType.replace(/_/g, " ")}` : null;
+  const note = [serviceTypeNote, optionalText(input.note)].filter(Boolean).join(" | ") || null;
   const customerId = optionalText(input.customerId);
 
   if (!customerId) {
@@ -7434,6 +8229,7 @@ export async function createOnlineStoreSalesOrderFulfilmentTransfers(
             id: true,
             code: true,
             name: true,
+            productType: true,
             trackInventory: true,
             isSerialized: true,
             baseCostPrice: true
@@ -7512,7 +8308,7 @@ export async function createOnlineStoreSalesOrderFulfilmentTransfers(
 
       const transferLines = destinationOrders.flatMap((order) =>
         (linesBySourceTransactionId.get(order.sourceTransactionId) ?? [])
-          .filter((line) => line.product.trackInventory)
+          .filter((line) => isOnlineStoreStockManagedProduct(line.product))
           .map((line) => ({
             order,
             line,
@@ -8170,6 +8966,7 @@ async function resolveOnlineStoreLocation(input: {
       id: true,
       warehouseId: true,
       code: true,
+      name: true,
       store: {
         select: {
           code: true
@@ -8568,6 +9365,7 @@ export async function createOnlineStoreCorrection(
             product: {
               select: {
                 id: true,
+                productType: true,
                 baseCostPrice: true,
                 trackInventory: true
               }
@@ -8678,6 +9476,7 @@ export async function createOnlineStoreCorrection(
               id: true,
               code: true,
               name: true,
+              productType: true,
               baseUnitPrice: true,
               baseCostPrice: true,
               mustEnterPriceAtPos: true,
@@ -8766,11 +9565,11 @@ export async function createOnlineStoreCorrection(
             requireSupervisorEligible: true
           })
         : null;
-    const trackedSaleProductIds = [...new Set(preparedSaleLines.filter((line) => line.product.trackInventory).map((line) => line.product.id))];
+    const trackedSaleProductIds = [...new Set(preparedSaleLines.filter((line) => isOnlineStoreStockManagedProduct(line.product)).map((line) => line.product.id))];
     const requestedSaleQuantityByProduct = new Map<string, number>();
 
     for (const line of preparedSaleLines) {
-      if (!line.product.trackInventory) {
+      if (!isOnlineStoreStockManagedProduct(line.product)) {
         continue;
       }
 
@@ -8801,7 +9600,7 @@ export async function createOnlineStoreCorrection(
       stockPositions.map((position) => [position.productId, toQuantity(position._sum.quantity)] as const)
     );
     const insufficientLine = preparedSaleLines.find((line) => {
-      if (!line.product.trackInventory) {
+      if (!isOnlineStoreStockManagedProduct(line.product)) {
         return false;
       }
 
@@ -8955,7 +9754,7 @@ export async function createOnlineStoreCorrection(
     });
     const inventoryMovements = [
       ...preparedReturnLines
-        .filter((line) => line.sourceLine.product.trackInventory)
+        .filter((line) => isOnlineStoreStockManagedProduct(line.sourceLine.product))
         .map((line) => {
           const returnLocation = line.sourceLine.inventoryLocationId
             ? (returnLocationById.get(line.sourceLine.inventoryLocationId) ?? salesLocation)
@@ -8979,7 +9778,7 @@ export async function createOnlineStoreCorrection(
           };
         }),
       ...preparedSaleLines
-        .filter((line) => line.product.trackInventory)
+        .filter((line) => isOnlineStoreStockManagedProduct(line.product))
         .map((line) => ({
           retailOrgId: session.retailOrgId,
           storeId: store.id,
@@ -9631,7 +10430,13 @@ export async function createOnlineStoreGoodsReceipt(
     select: {
       id: true,
       code: true,
+      sku: true,
       name: true,
+      shortName: true,
+      department: true,
+      category: true,
+      subcategory: true,
+      unitOfMeasure: true,
       baseCostPrice: true,
       isSerialized: true
     }
@@ -9844,6 +10649,24 @@ export async function createOnlineStoreGoodsReceipt(
         occurredAt: now
       }))
     });
+    const fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
+      retailOrgId: session.retailOrgId,
+      storeId: store.id,
+      inventoryLocationId: location.id,
+      inventoryLocationCode: location.code,
+      inventoryLocationName: location.name,
+      referenceNo: receipt.receiptNo,
+      sourceLabel: purchaseOrder?.purchaseOrderNo ?? "Online goods receipt",
+      notes: purchaseOrder
+        ? `Mirrored from online-store GRN ${receipt.receiptNo} for ${purchaseOrder.purchaseOrderNo}.`
+        : `Mirrored from direct online-store GRN ${receipt.receiptNo}.`,
+      occurredAt: now,
+      lines: preparedLines.map((line) => ({
+        product: line.product,
+        quantity: line.quantity,
+        unitCost: line.unitCost
+      }))
+    });
 
     const serialRows = serializedReceiptLines.flatMap((line) =>
       line.serialNumbers.map((serialNumber) => ({
@@ -9891,7 +10714,13 @@ export async function createOnlineStoreGoodsReceipt(
 
     return {
       receiptNo: receipt.receiptNo,
-      message: `Flash ERP posted ${receipt.receiptNo} directly in enterprise for ${store.code}.`,
+      message: [
+        `Flash ERP posted ${receipt.receiptNo} directly in enterprise for ${store.code}.`,
+        fuelMirror.deliveryNo ? `Fuel tank receipt ${fuelMirror.deliveryNo} updated the matching tank book quantity.` : "",
+        fuelMirror.skippedProducts.length > 0
+          ? `Fuel tank mirror skipped for ${fuelMirror.skippedProducts.join(", ")} because no matching active tank exists.`
+          : ""
+      ].filter(Boolean).join(" "),
       serverProcessedAt: now.toISOString()
     };
   });
@@ -10497,7 +11326,13 @@ export async function createOnlineStoreTransferRequest(
       },
       select: {
         id: true,
+        code: true,
+        sku: true,
         name: true,
+        shortName: true,
+        department: true,
+        category: true,
+        subcategory: true,
         baseCostPrice: true
       }
     }),
@@ -10549,10 +11384,16 @@ export async function createOnlineStoreTransferRequest(
           transferBatchNo,
           lineNo: index + 1,
           externalReference,
+          workflowType: isFuelTransferProduct(product) ? "FUEL_TRANSFER" : null,
           origin: InterStoreTransferOrigin.STORE_REQUEST,
           status: InterStoreTransferStatus.REQUESTED,
           requestedQuantity: lineInput.quantity,
           unitCost: product.baseCostPrice ? Number(product.baseCostPrice) : null,
+          transporterName: optionalText(input.transporterName),
+          vehicleRegistrationNo: optionalText(input.vehicleRegistrationNo),
+          driverName: optionalText(input.driverName),
+          driverContact: optionalText(input.driverContact),
+          deliveryNoteNo: optionalText(input.deliveryNoteNo),
           requestNote: note,
           requestOperatorName: user.displayName,
           requestedByNodeCode: "ONLINE_DIRECT",
@@ -10620,6 +11461,11 @@ export async function processOnlineStoreTransfer(
     action: "ISSUE" | "RECEIVE";
     quantity: number;
     serialNumbers?: string[] | null;
+    transporterName?: string | null;
+    vehicleRegistrationNo?: string | null;
+    driverName?: string | null;
+    driverContact?: string | null;
+    deliveryNoteNo?: string | null;
     note?: string | null;
   }
 ): Promise<ProcessOnlineStoreTransferResponse> {
@@ -10640,6 +11486,11 @@ export async function processOnlineStoreTransfer(
   const quantity = normalizeQuantity(input.quantity);
   const serialNumbers = normalizeSerialNumbers(input.serialNumbers);
   const note = optionalText(input.note);
+  const transporterName = optionalText(input.transporterName);
+  const vehicleRegistrationNo = optionalText(input.vehicleRegistrationNo);
+  const driverName = optionalText(input.driverName);
+  const driverContact = optionalText(input.driverContact);
+  const deliveryNoteNo = optionalText(input.deliveryNoteNo);
 
   if (!transferId) {
     throw new Error("Choose an inter-store transfer before processing stock.");
@@ -10661,6 +11512,7 @@ export async function processOnlineStoreTransfer(
       requestedQuantity: true,
       issuedQuantity: true,
       receivedQuantity: true,
+      unitCost: true,
       issuedSerialNumbersSnapshot: true,
       receivedSerialNumbersSnapshot: true,
       sourceStoreId: true,
@@ -10671,12 +11523,14 @@ export async function processOnlineStoreTransfer(
       sourceInventoryLocation: {
         select: {
           code: true,
+          name: true,
           warehouseId: true
         }
       },
       destinationInventoryLocation: {
         select: {
           code: true,
+          name: true,
           warehouseId: true
         }
       },
@@ -10684,7 +11538,13 @@ export async function processOnlineStoreTransfer(
         select: {
           id: true,
           code: true,
+          sku: true,
           name: true,
+          shortName: true,
+          department: true,
+          category: true,
+          subcategory: true,
+          unitOfMeasure: true,
           baseCostPrice: true,
           isSerialized: true
         }
@@ -10796,7 +11656,7 @@ export async function processOnlineStoreTransfer(
           productId: transfer.product.id,
           movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
           quantity: quantity * -1,
-          unitCost: transfer.product.baseCostPrice,
+          unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
           referenceType: "INTER_STORE_TRANSFER",
           referenceId: transfer.id,
           externalReference: transfer.transferNo,
@@ -10814,6 +11674,12 @@ export async function processOnlineStoreTransfer(
           status: nextStatus,
           issuedQuantity: nextIssuedQuantity,
           issuedSerialNumbersSnapshot: serializeJsonField(nextIssuedSerialNumbers.length ? nextIssuedSerialNumbers : null),
+          transporterName: transporterName ?? undefined,
+          vehicleRegistrationNo: vehicleRegistrationNo ?? undefined,
+          driverName: driverName ?? undefined,
+          driverContact: driverContact ?? undefined,
+          deliveryNoteNo: deliveryNoteNo ?? undefined,
+          workflowType: isFuelTransferProduct(transfer.product) ? "FUEL_TRANSFER" : undefined,
           issueNote: note ?? `Issued ${formatNumberForMessage(quantity)} unit(s) from ${transfer.sourceInventoryLocation.code}.`,
           issueOperatorName: user.displayName,
           sourceNodeCode: "ONLINE_DIRECT",
@@ -10933,7 +11799,7 @@ export async function processOnlineStoreTransfer(
         productId: transfer.product.id,
         movementType: InventoryMovementType.STOCK_TRANSFER_IN,
         quantity,
-        unitCost: transfer.product.baseCostPrice,
+        unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
         referenceType: "INTER_STORE_TRANSFER",
         referenceId: transfer.id,
         externalReference: transfer.transferNo,
@@ -10941,6 +11807,24 @@ export async function processOnlineStoreTransfer(
         createdByUserId: user.id,
         occurredAt: now
       }
+    });
+    const fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
+      retailOrgId: session.retailOrgId,
+      storeId: store.id,
+      inventoryLocationId: transfer.destinationInventoryLocationId,
+      inventoryLocationCode: transfer.destinationInventoryLocation.code,
+      inventoryLocationName: transfer.destinationInventoryLocation.name,
+      referenceNo: transfer.transferNo,
+      sourceLabel: "Inter-store transfer",
+      notes: `Mirrored from online-store transfer receipt ${transfer.transferNo}.`,
+      occurredAt: now,
+      lines: [
+        {
+          product: transfer.product,
+          quantity,
+          unitCost: transfer.unitCost === null ? Number(transfer.product.baseCostPrice ?? 0) : Number(transfer.unitCost)
+        }
+      ]
     });
 
     await tx.interStoreTransfer.update({
@@ -10990,7 +11874,13 @@ export async function processOnlineStoreTransfer(
       receivedQuantity: nextReceivedQuantity,
       outstandingIssueQuantity: toQuantity(Math.max(0, requestedQuantity - issuedQuantity)),
       outstandingReceiptQuantity: toQuantity(Math.max(0, issuedQuantity - nextReceivedQuantity)),
-      message: `${transfer.transferNo} received ${formatNumberForMessage(quantity)} unit(s).`,
+      message: [
+        `${transfer.transferNo} received ${formatNumberForMessage(quantity)} unit(s).`,
+        fuelMirror.deliveryNo ? `Fuel tank receipt ${fuelMirror.deliveryNo} updated the matching tank book quantity.` : "",
+        fuelMirror.skippedProducts.length > 0
+          ? `Fuel tank mirror skipped for ${fuelMirror.skippedProducts.join(", ")} because no matching active tank exists.`
+          : ""
+      ].filter(Boolean).join(" "),
       serverProcessedAt: now.toISOString()
     };
   });

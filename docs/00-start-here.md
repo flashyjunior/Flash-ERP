@@ -1,6 +1,8 @@
 # Start Here
 
-This workspace exists to build Flash ERP as a retail platform with offline-capable store operations and enterprise coordination.
+This workspace exists to build Flash ERP as a multi-company ERP foundation with offline-capable operational surfaces and enterprise coordination.
+
+For current implementation status, use `docs/18-flash-erp-implementation-tracker.md` as the live tracker. Some older docs still contain inherited RMS-era retail wording and should be reshaped gradually as the ERP domain model moves away from the RMS baseline.
 
 ## What changed
 
@@ -27,7 +29,7 @@ Flash ERP is now designed around:
 - Store transactions must be durable locally before network acknowledgement.
 - Inventory and sales must be event-driven and auditable.
 - SMS is the UI and engineering reference, not the data model reference.
-- Retail tenancy must be modeled around `RetailOrg`, `Store`, `Warehouse`, `Terminal`, and `SyncNode`.
+- Inherited RMS tenancy still centers on `RetailOrg`, `Store`, `Warehouse`, `Terminal`, and `SyncNode` until ERP ownership and migrations are designed.
 
 ## Immediate implementation goal
 
@@ -36,7 +38,7 @@ Bootstrap the workspace with:
 - `apps/enterprise-web` Next.js application
 - `apps/store-desktop` Electron + React application
 - `apps/mobile` Expo application
-- `packages/domain` for retail-domain contracts
+- `packages/domain` for shared domain contracts
 - `packages/sync-core` for sync envelopes and policies
 - root Prisma/SQL Server enterprise schema
 - first offline and sync architecture documents

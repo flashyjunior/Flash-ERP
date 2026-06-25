@@ -6920,6 +6920,11 @@ export async function queueInterStoreTransferPublication(
       transferBatchNo: true,
       lineNo: true,
       externalReference: true,
+      transporterName: true,
+      vehicleRegistrationNo: true,
+      driverName: true,
+      driverContact: true,
+      deliveryNoteNo: true,
       origin: true,
       status: true,
       requestedQuantity: true,
@@ -7044,6 +7049,11 @@ export async function queueInterStoreTransferPublication(
       origin: transfer.origin as EnterpriseInterStoreTransferPublishedPayload["origin"],
       status: toInterStoreTransferLifecycleStatus(transfer.status),
       externalReference: transfer.externalReference,
+      transporterName: transfer.transporterName,
+      vehicleRegistrationNo: transfer.vehicleRegistrationNo,
+      driverName: transfer.driverName,
+      driverContact: transfer.driverContact,
+      deliveryNoteNo: transfer.deliveryNoteNo,
       sourceStoreCode: transfer.sourceStore.code,
       sourceStoreName: transfer.sourceStore.name,
       sourceLocationCode: transfer.sourceInventoryLocation.code,
@@ -14118,6 +14128,12 @@ export async function createInterStoreTransferBatch(
     const requiredAt = input.requiredAt?.trim()
       ? new Date(input.requiredAt)
       : null;
+    const transporterName = input.transporterName?.trim() || null;
+    const vehicleRegistrationNo = input.vehicleRegistrationNo?.trim() || null;
+    const driverName = input.driverName?.trim() || null;
+    const driverContact = input.driverContact?.trim() || null;
+    const deliveryNoteNo =
+      input.deliveryNoteNo?.trim() || input.externalReference?.trim() || null;
 
     if (!sourceLocationCode) {
       throw new Error(
@@ -14300,6 +14316,11 @@ export async function createInterStoreTransferBatch(
           transferBatchNo,
           lineNo: line.lineNo,
           externalReference: line.externalReference,
+          transporterName,
+          vehicleRegistrationNo,
+          driverName,
+          driverContact,
+          deliveryNoteNo,
           origin: InterStoreTransferOrigin.ENTERPRISE,
           status: saveAsDraft
             ? InterStoreTransferStatus.DRAFT
@@ -14416,6 +14437,12 @@ export async function updateInterStoreTransferBatch(
     const requiredAt = input.requiredAt?.trim()
       ? new Date(input.requiredAt)
       : null;
+    const transporterName = input.transporterName?.trim() || null;
+    const vehicleRegistrationNo = input.vehicleRegistrationNo?.trim() || null;
+    const driverName = input.driverName?.trim() || null;
+    const driverContact = input.driverContact?.trim() || null;
+    const deliveryNoteNo =
+      input.deliveryNoteNo?.trim() || input.externalReference?.trim() || null;
 
     if (!sourceLocationCode) {
       throw new Error(
@@ -14613,6 +14640,11 @@ export async function updateInterStoreTransferBatch(
           transferBatchNo: existingBatchNo,
           lineNo: line.lineNo,
           externalReference: line.externalReference,
+          transporterName,
+          vehicleRegistrationNo,
+          driverName,
+          driverContact,
+          deliveryNoteNo,
           origin: InterStoreTransferOrigin.ENTERPRISE,
           status: InterStoreTransferStatus.DRAFT,
           requestedQuantity: toQuantityString(line.quantity),

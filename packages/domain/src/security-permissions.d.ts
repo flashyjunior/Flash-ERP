@@ -47,5 +47,11 @@ export declare function deriveRetailUserCapabilities(permissionCodes: string[], 
     canReceiveTransfer: boolean;
     canReceiveGoods: boolean;
     canManageSupplierReturns: boolean;
+    hasFuelOperationsVisibility: boolean;
+    canManageFuelTanks: boolean;
+    canCaptureFuelDips: boolean;
+    canCaptureFuelMeterReadings: boolean;
+    canCaptureSupplierFuelReceipts: boolean;
+    canManageFuelReconciliation: boolean;
     canOperateStoreSync: boolean;
 };

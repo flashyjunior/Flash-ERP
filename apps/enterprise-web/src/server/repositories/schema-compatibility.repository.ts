@@ -36,6 +36,36 @@ export function ensureInterStoreTransferSchemaCompatibility() {
         END
       `);
       await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'transporterName') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [transporterName] NVARCHAR(1000) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'vehicleRegistrationNo') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [vehicleRegistrationNo] NVARCHAR(1000) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'driverName') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [driverName] NVARCHAR(1000) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'driverContact') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [driverContact] NVARCHAR(1000) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'deliveryNoteNo') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [deliveryNoteNo] NVARCHAR(1000) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
         IF NOT EXISTS (
           SELECT 1
           FROM sys.indexes
@@ -65,6 +95,21 @@ export function ensureInterStoreTransferSchemaCompatibility() {
       );
       await prisma.$executeRawUnsafe(
         'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "requiredAt" TIMESTAMP(3)'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "transporterName" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "vehicleRegistrationNo" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "driverName" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "driverContact" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "deliveryNoteNo" TEXT'
       );
       await prisma.$executeRawUnsafe(
         'CREATE INDEX IF NOT EXISTS "InterStoreTransfer_retailOrgId_transferBatchNo_idx" ON "InterStoreTransfer"("retailOrgId", "transferBatchNo")'

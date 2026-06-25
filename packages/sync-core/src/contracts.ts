@@ -849,6 +849,11 @@ export type EnterpriseInterStoreTransferPublishedPayload = {
     | "RECEIVED"
     | "CLOSED";
   externalReference: string | null;
+  transporterName?: string | null;
+  vehicleRegistrationNo?: string | null;
+  driverName?: string | null;
+  driverContact?: string | null;
+  deliveryNoteNo?: string | null;
   sourceStoreCode: string;
   sourceStoreName: string;
   sourceLocationCode: string;
@@ -1306,6 +1311,11 @@ export type CreateInterStoreTransferBatchRequest = {
   destinationLocationCode: string;
   lines: CreateInterStoreTransferBatchLineRequest[];
   externalReference?: string | null;
+  transporterName?: string | null;
+  vehicleRegistrationNo?: string | null;
+  driverName?: string | null;
+  driverContact?: string | null;
+  deliveryNoteNo?: string | null;
   note?: string | null;
   operatorName?: string;
   requiredAt?: string | null;

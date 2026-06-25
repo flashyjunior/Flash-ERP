@@ -20,6 +20,7 @@ export async function POST(request: Request) {
       loyaltyTier?: string | null;
       loyaltyPointsBalance?: number | null;
       allowCreditSales?: boolean;
+      paymentTermsCode?: string | null;
       creditLimitAmount?: number | null;
       receivableBalanceAmount?: number | null;
       note?: string | null;
@@ -42,6 +43,7 @@ export async function POST(request: Request) {
       loyaltyPointsBalance:
         typeof body.loyaltyPointsBalance === "number" ? body.loyaltyPointsBalance : 0,
       allowCreditSales: body.allowCreditSales ?? false,
+      paymentTermsCode: body.paymentTermsCode ?? null,
       creditLimitAmount:
         typeof body.creditLimitAmount === "number" ? body.creditLimitAmount : null,
       receivableBalanceAmount:

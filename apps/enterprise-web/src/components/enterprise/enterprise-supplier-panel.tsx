@@ -14,6 +14,7 @@ import type {
 } from "@/server/repositories/enterprise-suppliers.repository";
 
 type SupplierRow = EnterpriseSupplierWorkspaceData["supplierRows"][number];
+type SupplierDialogTab = "details" | "ap-invoices";
 
 type MutationState = {
   status: "idle" | "submitting" | "success" | "error";
@@ -142,6 +143,11 @@ const recordStatusOptions = [
   { value: "ARCHIVED", label: "ARCHIVED" }
 ];
 
+const moneyFormatter = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
 const emptySupplier = (): CreateEnterpriseSupplierRequest => ({
   supplierNo: "",
   name: "",
@@ -166,6 +172,7 @@ export function EnterpriseSupplierPanel({
   const [supplierDraft, setSupplierDraft] =
     useState<CreateEnterpriseSupplierRequest>(emptySupplier());
   const [editingSupplierNo, setEditingSupplierNo] = useState<string | null>(null);
+  const [supplierDialogTab, setSupplierDialogTab] = useState<SupplierDialogTab>("details");
   const [isSupplierDialogOpen, setIsSupplierDialogOpen] = useState(false);
   const [supplierState, setSupplierState] = useState<MutationState>({
     status: "idle",
@@ -199,8 +206,19 @@ export function EnterpriseSupplierPanel({
       status: supplier.status
     });
     setSupplierState({ status: "idle", message: "" });
+    setSupplierDialogTab("details");
     setIsSupplierDialogOpen(true);
   }, [openSupplierNo, workspace.supplierRows]);
+
+  const editingSupplier = useMemo(
+    () =>
+      editingSupplierNo
+        ? workspace.supplierRows.find(
+            (supplier) => supplier.supplierNo.toLowerCase() === editingSupplierNo.toLowerCase()
+          ) ?? null
+        : null,
+    [editingSupplierNo, workspace.supplierRows]
+  );
 
   const supplierColumns = useMemo<ColumnDef<SupplierRow>[]>(
     () => [
@@ -264,7 +282,8 @@ export function EnterpriseSupplierPanel({
             </p>
             <p className="truncate text-xs text-stone-500">
               {row.original.openPurchaseOrderCount} open PO • {row.original.openSupplierClaimCount} open claim
-              {row.original.openSupplierClaimCount === 1 ? "" : "s"} • {row.original.postedSupplierReturnCount} RTV
+              {row.original.openSupplierClaimCount === 1 ? "" : "s"} • {row.original.postedSupplierReturnCount} RTV • {row.original.supplierInvoiceCount} AP invoice
+              {row.original.supplierInvoiceCount === 1 ? "" : "s"}
             </p>
           </div>
         ),
@@ -305,6 +324,7 @@ export function EnterpriseSupplierPanel({
                     status: row.original.status
                   });
                   setSupplierState({ status: "idle", message: "" });
+                  setSupplierDialogTab("details");
                   setIsSupplierDialogOpen(true);
                 }
               }
@@ -402,6 +422,7 @@ export function EnterpriseSupplierPanel({
             className="inline-flex items-center gap-2 rounded-xl border border-[var(--brand)]/25 bg-[color:rgba(37,99,235,0.08)] px-3 py-2 text-sm font-semibold text-[color:var(--brand-deep)] transition hover:border-[var(--brand)]"
             onClick={() => {
               setEditingSupplierNo(null);
+              setSupplierDialogTab("details");
               setSupplierDraft(emptySupplier());
               setSupplierState({ status: "idle", message: "" });
               setIsSupplierDialogOpen(true);
@@ -430,6 +451,34 @@ export function EnterpriseSupplierPanel({
         widthClassName="max-w-5xl"
       >
         <div className="space-y-4">
+          <div className="flex flex-wrap gap-2 border-b border-stone-200 pb-3">
+            <button
+              className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                supplierDialogTab === "details"
+                  ? "bg-[color:rgba(37,99,235,0.1)] text-[color:var(--brand-deep)]"
+                  : "text-stone-600 hover:bg-stone-100 hover:text-stone-950"
+              }`}
+              onClick={() => setSupplierDialogTab("details")}
+              type="button"
+            >
+              Details
+            </button>
+            <button
+              className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                supplierDialogTab === "ap-invoices"
+                  ? "bg-[color:rgba(37,99,235,0.1)] text-[color:var(--brand-deep)]"
+                  : "text-stone-600 hover:bg-stone-100 hover:text-stone-950"
+              }`}
+              disabled={!editingSupplier}
+              onClick={() => setSupplierDialogTab("ap-invoices")}
+              type="button"
+            >
+              AP invoices
+            </button>
+          </div>
+
+          {supplierDialogTab === "details" ? (
+          <>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <DialogTextInput
               disabled={Boolean(editingSupplierNo)}
@@ -529,6 +578,119 @@ export function EnterpriseSupplierPanel({
               {supplierState.status === "submitting" ? "Saving..." : "Save supplier"}
             </button>
           </div>
+          </>
+          ) : (
+            <section className="space-y-3">
+              <div className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3">
+                <p className="text-sm font-semibold text-stone-950">
+                  {editingSupplier?.name ?? "Supplier"} AP invoices
+                </p>
+                <p className="mt-1 text-sm text-stone-600">
+                  Supplier invoices generated from GRNs and posted through Finance appear here.
+                </p>
+              </div>
+              {editingSupplier?.supplierInvoiceRows.length ? (
+                <div className="overflow-x-auto rounded-2xl border border-stone-200">
+                  <div className="min-w-[1280px]">
+                    <div className="grid grid-cols-[1fr_0.8fr_1.7fr_0.75fr_0.75fr_0.75fr_1fr_0.8fr] gap-3 bg-stone-100 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                      <span>Invoice</span>
+                      <span>Date</span>
+                      <span>GRN reference</span>
+                      <span>Amount</span>
+                      <span>Paid</span>
+                      <span>Open</span>
+                      <span>Payment voucher</span>
+                      <span>Journal</span>
+                    </div>
+                    <div className="divide-y divide-stone-200 bg-white">
+                      {editingSupplier.supplierInvoiceRows.map((invoice) => (
+                        <div
+                          className="grid grid-cols-[1fr_0.8fr_1.7fr_0.75fr_0.75fr_0.75fr_1fr_0.8fr] gap-3 px-4 py-3 text-sm text-stone-700"
+                          key={invoice.documentId}
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate font-semibold text-stone-950">{invoice.documentNo}</p>
+                            <p className="truncate text-xs text-stone-500">{invoice.paymentStatus}</p>
+                          </div>
+                          <div className="min-w-0">
+                            <p>{new Date(invoice.documentDate).toLocaleDateString()}</p>
+                            <p className="text-xs text-stone-500">
+                              Posted {new Date(invoice.postingDate).toLocaleDateString()}
+                            </p>
+                          </div>
+                          <div className="min-w-0">
+                            {invoice.sourceGoodsReceiptHref ? (
+                              <a
+                                className="block break-words font-semibold text-[color:var(--brand-deep)] underline decoration-[color:rgba(37,99,235,0.35)] underline-offset-2 hover:text-[color:var(--brand)]"
+                                href={invoice.sourceGoodsReceiptHref}
+                              >
+                                {invoice.externalReference ?? invoice.sourceGoodsReceiptNo}
+                              </a>
+                            ) : (
+                              <span className="block break-words font-semibold text-stone-800">
+                                {invoice.externalReference ?? "No reference"}
+                              </span>
+                            )}
+                            <p className="mt-1 text-xs text-stone-500">
+                              {invoice.sourceGoodsReceiptNo
+                                ? "Open original GRN"
+                                : "No linked GRN found"}
+                            </p>
+                          </div>
+                          <span className="font-semibold text-stone-950">
+                            {invoice.currencyCode} {moneyFormatter.format(invoice.totalAmount)}
+                          </span>
+                          <span className="font-semibold text-emerald-700">
+                            {invoice.currencyCode} {moneyFormatter.format(invoice.settledAmount)}
+                          </span>
+                          <span
+                            className={`font-semibold ${
+                              invoice.openAmount <= 0.01 ? "text-emerald-700" : "text-stone-950"
+                            }`}
+                          >
+                            {invoice.currencyCode} {moneyFormatter.format(invoice.openAmount)}
+                          </span>
+                          <div className="min-w-0">
+                            {invoice.paymentVoucherRows.length ? (
+                              <>
+                                <p className="truncate font-semibold text-stone-950">
+                                  {invoice.paymentVoucherRows[0]?.allocationNo}
+                                </p>
+                                <p className="truncate text-xs text-stone-500">
+                                  {invoice.paymentVoucherCount} voucher
+                                  {invoice.paymentVoucherCount === 1 ? "" : "s"} ·{" "}
+                                  {invoice.paymentVoucherRows[0]?.status}
+                                </p>
+                              </>
+                            ) : (
+                              <span className="text-stone-500">No voucher</span>
+                            )}
+                          </div>
+                          <span className="truncate">{invoice.journalNo ?? "Not posted"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-stone-300 bg-white px-4 py-8 text-center">
+                  <p className="font-semibold text-stone-900">No AP invoices yet</p>
+                  <p className="mt-1 text-sm text-stone-600">
+                    Generate the supplier invoice from an HQ goods receipt to populate this tab.
+                  </p>
+                </div>
+              )}
+              <div className="flex justify-end">
+                <button
+                  className="inline-flex items-center justify-center rounded-full border border-stone-300 px-4 py-2 text-sm font-semibold text-stone-700 transition hover:border-stone-400 hover:text-stone-950"
+                  onClick={() => setIsSupplierDialogOpen(false)}
+                  type="button"
+                >
+                  Close
+                </button>
+              </div>
+            </section>
+          )}
 
           {supplierState.message ? (
             <div

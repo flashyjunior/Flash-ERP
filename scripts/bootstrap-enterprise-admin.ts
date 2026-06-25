@@ -119,7 +119,7 @@ function validatePasswordPolicy(password: string, policy: PasswordPolicySettings
 }
 
 function generateBootstrapPassword(policy: PasswordPolicySettings) {
-  const segments = ["Flash", "RMS", "Admin", new Date().getUTCFullYear().toString()];
+  const segments = ["Flash", "ERP", "Admin", new Date().getUTCFullYear().toString()];
   let password = `${segments.join("")}Aa9`;
 
   if (policy.requireSymbol) {
@@ -182,17 +182,17 @@ async function ensureEnterpriseNode() {
 
   const retailOrg = await prisma.retailOrg.upsert({
     where: {
-      code: "flash-retail"
+      code: "flash-erp"
     },
     update: {
-      name: "Flash Retail",
+      name: "Flash ERP Group",
       baseCurrencyCode: process.env.FLASH_ERP_DEFAULT_CURRENCY ?? "GHS",
       timezone: process.env.FLASH_ERP_DEFAULT_TIMEZONE ?? "Africa/Accra",
       status: RecordStatus.ACTIVE
     },
     create: {
-      code: "flash-retail",
-      name: "Flash Retail",
+      code: "flash-erp",
+      name: "Flash ERP Group",
       baseCurrencyCode: process.env.FLASH_ERP_DEFAULT_CURRENCY ?? "GHS",
       timezone: process.env.FLASH_ERP_DEFAULT_TIMEZONE ?? "Africa/Accra",
       status: RecordStatus.ACTIVE
@@ -313,7 +313,7 @@ async function main() {
   const displayName =
     process.env.FLASH_ERP_BOOTSTRAP_ADMIN_NAME?.trim() || "Flash ERP Enterprise Admin";
   const email =
-    process.env.FLASH_ERP_BOOTSTRAP_ADMIN_EMAIL?.trim() || "hq.admin@flashrms.local";
+    process.env.FLASH_ERP_BOOTSTRAP_ADMIN_EMAIL?.trim() || "hq.admin@flash-erp.local";
   const password =
     process.env.FLASH_ERP_BOOTSTRAP_ADMIN_PASSWORD?.trim() ||
     generateBootstrapPassword(passwordPolicy);

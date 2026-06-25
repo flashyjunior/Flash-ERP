@@ -13,6 +13,11 @@ export async function POST(
       action: "ISSUE",
       quantity: Number(body?.quantity ?? 0),
       serialNumbers: Array.isArray(body?.serialNumbers) ? body.serialNumbers : null,
+      transporterName: body?.transporterName ?? null,
+      vehicleRegistrationNo: body?.vehicleRegistrationNo ?? null,
+      driverName: body?.driverName ?? null,
+      driverContact: body?.driverContact ?? null,
+      deliveryNoteNo: body?.deliveryNoteNo ?? null,
       note: body?.note ?? null
     });
 

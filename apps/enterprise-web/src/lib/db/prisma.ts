@@ -91,7 +91,11 @@ function normalizeMssqlConnectionString(datasourceUrl: string) {
 function createPrismaClient() {
   return new PrismaClient({
     adapter: new PrismaMssql(resolveDatasourceUrl()),
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"]
+    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+    transactionOptions: {
+      maxWait: 60_000,
+      timeout: 60_000
+    }
   });
 }
 

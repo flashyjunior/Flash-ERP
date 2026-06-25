@@ -16,6 +16,7 @@ import {
   Store,
   WalletCards
 } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
@@ -27,6 +28,7 @@ const numberFormatter = new Intl.NumberFormat("en-US");
 
 type StorePerformanceRow = EnterpriseReportingDashboardData["storePerformanceRows"][number];
 type ReceivableRow = EnterpriseReportingDashboardData["receivableRows"][number];
+type StatementReportRow = EnterpriseReportingDashboardData["customerStatementRows"][number];
 type InventoryRiskRow = EnterpriseReportingDashboardData["inventoryRiskRows"][number];
 type PromotionRow = EnterpriseReportingDashboardData["promotionRows"][number];
 type ExceptionRow = EnterpriseReportingDashboardData["exceptionRows"][number];
@@ -72,6 +74,8 @@ type ReportId =
   | "stockValuation"
   | "slowMovingItems"
   | "receivables"
+  | "customerStatements"
+  | "supplierStatements"
   | "users"
   | "promotions"
   | "exceptions";
@@ -125,6 +129,8 @@ const reportIds: ReportId[] = [
   "stockValuation",
   "slowMovingItems",
   "receivables",
+  "customerStatements",
+  "supplierStatements",
   "users",
   "promotions",
   "exceptions"
@@ -675,6 +681,21 @@ const closeoutFilter: FilterFn<CloseoutRow> = (row, _columnId, filterValue) => {
     .includes(query);
 };
 
+const statementReportFilter: FilterFn<StatementReportRow> = (row, _columnId, filterValue) =>
+  matchesReportQuery(
+    [
+      row.original.partyNo,
+      row.original.partyName,
+      row.original.referenceNo,
+      row.original.documentType,
+      row.original.sourceType,
+      row.original.memo ?? "",
+      row.original.journalNo ?? "",
+      row.original.status
+    ],
+    filterValue
+  );
+
 export function EnterpriseReportingDashboard({
   dashboard,
   initialReportId
@@ -851,6 +872,79 @@ export function EnterpriseReportingDashboard({
         meta: {
           disableTruncate: true
         }
+      }
+    ],
+    [currencyFormatter]
+  );
+  const statementReportColumns = useMemo<ColumnDef<StatementReportRow>[]>(
+    () => [
+      {
+        accessorKey: "partyName",
+        header: "Party",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.partyName}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.partyNo}</p>
+          </div>
+        ),
+        meta: {
+          disableTruncate: true
+        }
+      },
+      {
+        accessorKey: "referenceNo",
+        header: "Reference",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.referenceNo}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.documentType}</p>
+          </div>
+        ),
+        meta: {
+          disableTruncate: true
+        }
+      },
+      {
+        accessorKey: "transactionDate",
+        header: "Timestamp",
+        cell: ({ row }) => renderTimestamp(row.original.transactionDate, row.original.sourceType),
+        meta: {
+          disableTruncate: true
+        }
+      },
+      {
+        accessorKey: "debitAmount",
+        header: "Debit",
+        cell: ({ row }) => currencyFormatter.format(row.original.debitAmount)
+      },
+      {
+        accessorKey: "creditAmount",
+        header: "Credit",
+        cell: ({ row }) => currencyFormatter.format(row.original.creditAmount)
+      },
+      {
+        accessorKey: "runningBalance",
+        header: "Running balance",
+        cell: ({ row }) => (
+          <span className="font-semibold text-stone-950">
+            {currencyFormatter.format(row.original.runningBalance)}
+          </span>
+        )
+      },
+      {
+        accessorKey: "journalNo",
+        header: "Journal",
+        cell: ({ row }) =>
+          row.original.journalEntryId ? (
+            <Link
+              className="font-semibold text-[var(--brand)] transition hover:text-[var(--brand-deep)]"
+              href={`/finance/journal-inquiry/${row.original.journalEntryId}`}
+            >
+              {row.original.journalNo ?? "Open"}
+            </Link>
+          ) : (
+            <span className="text-stone-500">Not posted</span>
+          )
       }
     ],
     [currencyFormatter]
@@ -1981,6 +2075,18 @@ export function EnterpriseReportingDashboard({
             label: "Expense tracking",
             description: "PO charges, cash shortages, and supplier recovery exposure.",
             rowCount: dashboard.expenseTrackingRows.length,
+          },
+          {
+            id: "customerStatements",
+            label: "Customer statements",
+            description: "Customer AR statement activity with running balances.",
+            rowCount: dashboard.customerStatementRows.length,
+          },
+          {
+            id: "supplierStatements",
+            label: "Supplier statements",
+            description: "Supplier AP statement activity with vouchers and running balances.",
+            rowCount: dashboard.supplierStatementRows.length,
           }
         ]
       },
@@ -2141,6 +2247,10 @@ export function EnterpriseReportingDashboard({
         return buildChoiceOptions(dashboard.profitAndLossRows.map((row) => row.lineType));
       case "expenseTracking":
         return buildChoiceOptions(dashboard.expenseTrackingRows.map((row) => row.status));
+      case "customerStatements":
+        return buildChoiceOptions(dashboard.customerStatementRows.map((row) => row.status));
+      case "supplierStatements":
+        return buildChoiceOptions(dashboard.supplierStatementRows.map((row) => row.status));
       case "slowMovingItems":
         return buildChoiceOptions(dashboard.slowMovingItemRows.map((row) => row.riskBand));
       case "salesOrders":
@@ -3057,6 +3167,34 @@ export function EnterpriseReportingDashboard({
             searchPlaceholder="Search customers, numbers, or home stores"
           />
         );
+      case "customerStatements":
+        return (
+          <SharedDataGrid
+            columns={statementReportColumns}
+            data={dashboard.customerStatementRows.filter(
+              (row) => matchesDate(row.transactionDate) && matchesChoice(filters.status, [row.status])
+            )}
+            emptyLabel="No customer statement activity is available for this report."
+            exportFileName="flash-erp-customer-statements"
+            globalFilterFn={statementReportFilter}
+            initialPageSize={20}
+            searchPlaceholder="Search customer statements, references, journals, or memo"
+          />
+        );
+      case "supplierStatements":
+        return (
+          <SharedDataGrid
+            columns={statementReportColumns}
+            data={dashboard.supplierStatementRows.filter(
+              (row) => matchesDate(row.transactionDate) && matchesChoice(filters.status, [row.status])
+            )}
+            emptyLabel="No supplier statement activity is available for this report."
+            exportFileName="flash-erp-supplier-statements"
+            globalFilterFn={statementReportFilter}
+            initialPageSize={20}
+            searchPlaceholder="Search supplier statements, vouchers, journals, or memo"
+          />
+        );
       case "users":
         return (
           <SharedDataGrid
@@ -3360,6 +3498,8 @@ export function EnterpriseReportingDashboard({
             goodsReceipts: "GRN history by supplier, location, received quantity, and purchase order.",
             transfers: "Inter-store transfer request, issue, receipt, and in-transit quantities.",
             suppliers: "Supplier master report with sourcing, purchase, claim, and return posture.",
+            customerStatements: "Customer AR statement activity and running balances.",
+            supplierStatements: "Supplier AP statement activity and payment vouchers.",
             users: "User access report with branch, role, cashier, and supervisor eligibility."
           }}
           tabs={[
@@ -3392,6 +3532,16 @@ export function EnterpriseReportingDashboard({
               value: "suppliers",
               label: "Suppliers",
               badge: String(dashboard.supplierReportRows.length)
+            },
+            {
+              value: "customerStatements",
+              label: "Customer statements",
+              badge: String(dashboard.customerStatementRows.length)
+            },
+            {
+              value: "supplierStatements",
+              label: "Supplier statements",
+              badge: String(dashboard.supplierStatementRows.length)
             },
             {
               value: "users",
@@ -3475,6 +3625,30 @@ export function EnterpriseReportingDashboard({
               globalFilterFn={supplierReportFilter}
               initialPageSize={10}
               searchPlaceholder="Search suppliers, contacts, email, phone, or status"
+            />
+          </WorkspaceTabsContent>
+
+          <WorkspaceTabsContent value="customerStatements">
+            <SharedDataGrid
+              columns={statementReportColumns}
+              data={dashboard.customerStatementRows}
+              emptyLabel="No customer statement rows are available yet."
+              exportFileName="flash-erp-hq-customer-statements"
+              globalFilterFn={statementReportFilter}
+              initialPageSize={10}
+              searchPlaceholder="Search customer statements, references, journals, or memo"
+            />
+          </WorkspaceTabsContent>
+
+          <WorkspaceTabsContent value="supplierStatements">
+            <SharedDataGrid
+              columns={statementReportColumns}
+              data={dashboard.supplierStatementRows}
+              emptyLabel="No supplier statement rows are available yet."
+              exportFileName="flash-erp-hq-supplier-statements"
+              globalFilterFn={statementReportFilter}
+              initialPageSize={10}
+              searchPlaceholder="Search supplier statements, vouchers, journals, or memo"
             />
           </WorkspaceTabsContent>
 

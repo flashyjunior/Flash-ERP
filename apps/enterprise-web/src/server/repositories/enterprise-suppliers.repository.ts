@@ -95,6 +95,20 @@ function toSupplierMutationError(error: unknown, fallbackMessage: string) {
   return error instanceof Error ? error : new Error(fallbackMessage);
 }
 
+function resolveSupplierInvoiceGoodsReceiptNo(externalReference: string | null) {
+  const reference = externalReference?.trim() ?? "";
+
+  if (!reference) {
+    return null;
+  }
+
+  if (reference.toUpperCase().startsWith("GRN:")) {
+    return reference.slice(4).trim() || null;
+  }
+
+  return /^GRN[-_:]/i.test(reference) ? reference : null;
+}
+
 type EnterpriseContext = {
   id: string;
   code: string;
@@ -161,6 +175,41 @@ export type EnterpriseSupplierWorkspaceData = {
     openPurchaseOrderCount: number;
     openSupplierClaimCount: number;
     postedSupplierReturnCount: number;
+    supplierInvoiceCount: number;
+    supplierInvoiceRows: Array<{
+      documentId: string;
+      documentNo: string;
+      documentDate: string;
+      postingDate: string;
+      dueDate: string | null;
+      currencyCode: string;
+      externalReference: string | null;
+      sourceGoodsReceiptNo: string | null;
+      sourceGoodsReceiptHref: string | null;
+      memo: string | null;
+      status: string;
+      totalAmount: number;
+      settledAmount: number;
+      openAmount: number;
+      paymentStatus: string;
+      paymentVoucherCount: number;
+      paymentVoucherRows: Array<{
+        allocationId: string;
+        allocationNo: string;
+        allocationDate: string;
+        postingDate: string;
+        amount: number;
+        discountAmount: number;
+        writeOffAmount: number;
+        reductionAmount: number;
+        status: string;
+        journalEntryId: string | null;
+        journalNo: string | null;
+      }>;
+      journalEntryId: string | null;
+      journalNo: string | null;
+      postedAt: string | null;
+    }>;
     updatedAt: string;
     updatedAtLabel: string;
   }>;
@@ -223,48 +272,159 @@ export async function getEnterpriseSupplierWorkspace(): Promise<EnterpriseSuppli
     );
   }
 
-  const suppliers = await prisma.supplier.findMany({
-    where: {
-      retailOrgId: enterpriseNode.retailOrgId,
-      deletedAt: null
-    },
-    orderBy: [{ name: "asc" }, { supplierNo: "asc" }],
-    select: {
-      supplierNo: true,
-      name: true,
-      contactName: true,
-      phone: true,
-      email: true,
-      addressLine1: true,
-      city: true,
-      countryCode: true,
-      leadTimeDays: true,
-      status: true,
-      updatedAt: true,
-      productSuppliers: {
-        select: {
-          id: true
-        }
+  const [suppliers, supplierInvoices] = await Promise.all([
+    prisma.supplier.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+        deletedAt: null
       },
-      purchaseOrders: {
-        select: {
-          status: true
-        }
-      },
-      supplierClaims: {
-        select: {
-          status: true
-        }
-      },
-      supplierReturns: {
-        select: {
-          status: true
+      orderBy: [{ name: "asc" }, { supplierNo: "asc" }],
+      select: {
+        supplierNo: true,
+        name: true,
+        contactName: true,
+        phone: true,
+        email: true,
+        addressLine1: true,
+        city: true,
+        countryCode: true,
+        leadTimeDays: true,
+        status: true,
+        updatedAt: true,
+        productSuppliers: {
+          select: {
+            id: true
+          }
+        },
+        purchaseOrders: {
+          select: {
+            status: true
+          }
+        },
+        supplierClaims: {
+          select: {
+            status: true
+          }
+        },
+        supplierReturns: {
+          select: {
+            status: true
+          }
         }
       }
-    }
-  });
+    }),
+    prisma.erpOperationalDocument.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+        documentType: "SUPPLIER_INVOICE",
+        status: {
+          not: RecordStatus.DELETED
+        }
+      },
+      include: {
+        postingJournalEntry: {
+          select: {
+            id: true,
+            journalNo: true
+          }
+        },
+        settlementAllocations: {
+          where: {
+            status: {
+              not: RecordStatus.DELETED
+            }
+          },
+          orderBy: [{ allocationDate: "desc" }, { allocationNo: "desc" }],
+          include: {
+            postingJournalEntry: {
+              select: {
+                id: true,
+                journalNo: true
+              }
+            }
+          }
+        }
+      },
+      orderBy: [{ documentDate: "desc" }, { documentNo: "desc" }]
+    })
+  ]);
+  const supplierInvoicesBySupplierNo = new Map<string, typeof supplierInvoices>();
+
+  for (const invoice of supplierInvoices) {
+    const supplierNo = invoice.partyNo.trim().toUpperCase();
+    const current = supplierInvoicesBySupplierNo.get(supplierNo) ?? [];
+
+    current.push(invoice);
+    supplierInvoicesBySupplierNo.set(supplierNo, current);
+  }
 
   const supplierRows = suppliers.map((supplier) => {
+    const supplierInvoiceRows = (
+      supplierInvoicesBySupplierNo.get(supplier.supplierNo.trim().toUpperCase()) ?? []
+    ).map((invoice) => {
+      const sourceGoodsReceiptNo = resolveSupplierInvoiceGoodsReceiptNo(invoice.externalReference);
+      const paymentVoucherRows = invoice.settlementAllocations.map((allocation) => {
+        const amount = Number(allocation.amount);
+        const discountAmount = Number(allocation.discountAmount);
+        const writeOffAmount = Number(allocation.writeOffAmount);
+
+        return {
+          allocationId: allocation.id,
+          allocationNo: allocation.allocationNo,
+          allocationDate: allocation.allocationDate.toISOString(),
+          postingDate: allocation.postingDate.toISOString(),
+          amount,
+          discountAmount,
+          writeOffAmount,
+          reductionAmount: Number((amount + discountAmount + writeOffAmount).toFixed(2)),
+          status: allocation.status,
+          journalEntryId: allocation.postingJournalEntry?.id ?? null,
+          journalNo: allocation.postingJournalEntry?.journalNo ?? null
+        };
+      });
+      const totalAmount = Number(invoice.totalAmount);
+      const settledAmount = Number(
+        paymentVoucherRows
+          .filter((allocation) => allocation.status === "POSTED")
+          .reduce((sum, allocation) => sum + allocation.reductionAmount, 0)
+          .toFixed(2)
+      );
+      const openAmount = Number(Math.max(0, totalAmount - settledAmount).toFixed(2));
+      const hasPendingVoucher = paymentVoucherRows.some((allocation) => allocation.status === "DRAFT");
+      const paymentStatus =
+        openAmount <= 0.01
+          ? "SETTLED"
+          : settledAmount > 0
+            ? "PART_PAID"
+            : hasPendingVoucher
+              ? "PENDING_VOUCHER"
+              : "OPEN";
+
+      return {
+        documentId: invoice.id,
+        documentNo: invoice.documentNo,
+        documentDate: invoice.documentDate.toISOString(),
+        postingDate: invoice.postingDate.toISOString(),
+        dueDate: invoice.dueDate?.toISOString() ?? null,
+        currencyCode: invoice.currencyCode,
+        externalReference: invoice.externalReference,
+        sourceGoodsReceiptNo,
+        sourceGoodsReceiptHref: sourceGoodsReceiptNo
+          ? `/purchases/goods-receipt?openGrn=${encodeURIComponent(sourceGoodsReceiptNo)}`
+          : null,
+        memo: invoice.memo,
+        status: invoice.status,
+        totalAmount,
+        settledAmount,
+        openAmount,
+        paymentStatus,
+        paymentVoucherCount: paymentVoucherRows.length,
+        paymentVoucherRows,
+        journalEntryId: invoice.postingJournalEntry?.id ?? null,
+        journalNo: invoice.postingJournalEntry?.journalNo ?? null,
+        postedAt: invoice.postedAt?.toISOString() ?? null
+      };
+    });
     const linkedProductCount = supplier.productSuppliers.length;
     const openPurchaseOrderCount = supplier.purchaseOrders.filter(
       (purchaseOrder) =>
@@ -296,6 +456,8 @@ export async function getEnterpriseSupplierWorkspace(): Promise<EnterpriseSuppli
       openPurchaseOrderCount,
       openSupplierClaimCount,
       postedSupplierReturnCount,
+      supplierInvoiceCount: supplierInvoiceRows.length,
+      supplierInvoiceRows,
       updatedAt: supplier.updatedAt.toISOString(),
       updatedAtLabel: formatRelativeTime(supplier.updatedAt)
     };

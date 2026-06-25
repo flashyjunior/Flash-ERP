@@ -3,10 +3,18 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
+import { defaultAccountPaymentReceiptTemplateHtml } from "@/lib/templates/thermal-receipt-templates";
+import { ensureEnterpriseAccountPaymentReceiptTemplate } from "@/server/repositories/receipt-template-support";
 import { ensureReferenceCaptureTable } from "@/server/repositories/sale-sms.repository";
+import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
+import {
+  postAccountingDocumentInTransaction,
+  type PostAccountingDocumentLine
+} from "@/server/services/erp-posting-engine";
 import {
   CustomerAccountEntryType,
   CustomerType,
+  PaymentMethod,
   RecordStatus,
   SyncNodeType
 } from "@flash-erp/domain";
@@ -60,6 +68,42 @@ function normalizeCode(value: string | null | undefined, fieldLabel: string) {
 
 function toMoneyString(value: number) {
   return value.toFixed(2);
+}
+
+function roundMoney(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function dateOnly(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
+function readJsonObject(value: unknown): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+
+  if (typeof value === "object") {
+    return value as Record<string, unknown>;
+  }
+
+  if (typeof value !== "string") {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function readString(payload: Record<string, unknown>, key: string, fallback = "") {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
 function normalizeCustomerType(value: string | null | undefined) {
@@ -161,7 +205,16 @@ type EnterpriseContext = {
   code: string;
   name: string;
   retailOrgId: string;
+  retailOrg: {
+    code: string;
+    name: string;
+    baseCurrencyCode: string;
+    timezone: string;
+    companySettingsJson: Prisma.JsonValue | null;
+  };
 };
+
+const defaultPaymentTerms = ["DUE-ON-RECEIPT", "NET-7", "NET-15", "NET-30", "NET-60"];
 
 async function getEnterpriseContext(): Promise<EnterpriseContext | null> {
   return prisma.syncNode.findFirst({
@@ -174,7 +227,16 @@ async function getEnterpriseContext(): Promise<EnterpriseContext | null> {
       id: true,
       code: true,
       name: true,
-      retailOrgId: true
+      retailOrgId: true,
+      retailOrg: {
+        select: {
+          code: true,
+          name: true,
+          baseCurrencyCode: true,
+          timezone: true,
+          companySettingsJson: true
+        }
+      }
     }
   });
 }
@@ -188,7 +250,16 @@ async function getWritableEnterpriseNode(tx: Prisma.TransactionClient) {
     },
     select: {
       retailOrgId: true,
-      code: true
+      code: true,
+      retailOrg: {
+        select: {
+          code: true,
+          name: true,
+          baseCurrencyCode: true,
+          timezone: true,
+          companySettingsJson: true
+        }
+      }
     }
   });
 
@@ -197,6 +268,98 @@ async function getWritableEnterpriseNode(tx: Prisma.TransactionClient) {
   }
 
   return enterpriseNode;
+}
+
+async function getPrimaryFinanceCompany(tx: Prisma.TransactionClient, retailOrgId: string) {
+  return tx.erpCompany.findFirst({
+    where: {
+      retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true,
+      legalName: true,
+      tradingName: true,
+      baseCurrencyCode: true,
+      accountingSettings: {
+        select: {
+          arControlAccountCode: true
+        }
+      }
+    }
+  });
+}
+
+async function syncCustomerFinanceProfile(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    customerId: string;
+    customerNo: string;
+    fullName: string;
+    allowCreditSales: boolean;
+    paymentTermsCode: string | null;
+    creditLimitAmount: number | null;
+  }
+) {
+  const company = await getPrimaryFinanceCompany(tx, input.retailOrgId);
+
+  if (!company) {
+    return;
+  }
+
+  const postingProfile = await tx.erpArApPostingProfile.findFirst({
+    where: {
+      companyId: company.id,
+      profileType: "CUSTOMER",
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isDefault: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+  const paymentTermsCode =
+    input.paymentTermsCode ?? (input.allowCreditSales ? "NET-30" : "DUE-ON-RECEIPT");
+  const creditLimitAmount =
+    input.creditLimitAmount === null ? null : toMoneyString(input.creditLimitAmount);
+
+  await tx.erpPartyAccountingProfile.upsert({
+    where: {
+      companyId_partyType_partyNo: {
+        companyId: company.id,
+        partyType: "CUSTOMER",
+        partyNo: input.customerNo
+      }
+    },
+    update: {
+      partyName: input.fullName,
+      customerId: input.customerId,
+      postingProfileId: postingProfile?.id ?? null,
+      creditTermsCode: paymentTermsCode,
+      paymentTermsCode,
+      creditLimitAmount,
+      allowCredit: input.allowCreditSales,
+      creditStatus: input.allowCreditSales ? "ACTIVE" : "CASH_ONLY",
+      status: RecordStatus.ACTIVE
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: company.id,
+      partyType: "CUSTOMER",
+      partyNo: input.customerNo,
+      partyName: input.fullName,
+      customerId: input.customerId,
+      postingProfileId: postingProfile?.id ?? null,
+      creditTermsCode: paymentTermsCode,
+      paymentTermsCode,
+      creditLimitAmount,
+      allowCredit: input.allowCreditSales,
+      creditStatus: input.allowCreditSales ? "ACTIVE" : "CASH_ONLY",
+      status: RecordStatus.ACTIVE
+    }
+  });
 }
 
 export type EnterpriseCustomerWorkspaceData = {
@@ -213,6 +376,21 @@ export type EnterpriseCustomerWorkspaceData = {
     name: string;
     status: string;
   }>;
+  paymentTermOptions: Array<{
+    code: string;
+    label: string;
+  }>;
+  tenderOptions: Array<{
+    tenderMethodCode: string;
+    name: string;
+    paymentMethod: string;
+    requiresReference: boolean;
+    cashbookAccountId: string | null;
+    cashbookAccountCode: string | null;
+    cashbookAccountName: string | null;
+    glAccountCode: string | null;
+    label: string;
+  }>;
   customerRows: Array<{
     customerNo: string;
     fullName: string;
@@ -227,6 +405,7 @@ export type EnterpriseCustomerWorkspaceData = {
     loyaltyTier: string | null;
     loyaltyPointsBalance: number;
     allowCreditSales: boolean;
+    paymentTermsCode: string | null;
     creditLimitAmount: number | null;
     receivableBalanceAmount: number;
     status: string;
@@ -278,6 +457,11 @@ export type EnterpriseCustomerWorkspaceData = {
     storeName: string | null;
     debitAmount: number;
     creditAmount: number;
+    originalAmount: number;
+    appliedAmount: number;
+    openAmount: number;
+    invoiceStatus: string;
+    allocationSummary: string | null;
     resultingReceivableBalance: number;
     note: string | null;
     occurredAt: string;
@@ -303,6 +487,7 @@ export type CreateEnterpriseCustomerRequest = {
   loyaltyTier?: string | null;
   loyaltyPointsBalance?: number | null;
   allowCreditSales?: boolean;
+  paymentTermsCode?: string | null;
   creditLimitAmount?: number | null;
   receivableBalanceAmount?: number | null;
   note?: string | null;
@@ -319,14 +504,58 @@ export type RecordEnterpriseCustomerAccountEntryRequest = {
   entryMode: "ACCOUNT_PAYMENT" | "RECEIVABLE_ADJUSTMENT" | "LOYALTY_ADJUSTMENT";
   amount?: number | null;
   loyaltyPoints?: number | null;
+  tenderMethodCode?: string | null;
+  allocations?: Array<{
+    invoiceEntryId: string;
+    amount?: number | null;
+  }>;
   storeCode?: string | null;
   reference?: string | null;
   note?: string | null;
 };
 
+export type EnterpriseAccountPaymentReceipt = {
+  entryNo: string;
+  retailOrgName: string;
+  companyLogoUrl: string | null;
+  storeCode: string;
+  storeName: string;
+  storePhone: string | null;
+  storeLocation: string | null;
+  storeAddress: string | null;
+  storeAddressLine2: string | null;
+  terminalCode: string;
+  shiftNo: string | null;
+  customerNo: string;
+  customerName: string;
+  cashierCode: string;
+  paymentMethod: string;
+  tenderMethodName: string | null;
+  amount: number;
+  remainingBalanceAmount: number | null;
+  reference: string | null;
+  note: string | null;
+  occurredAt: string;
+  currencyCode: string;
+  timezone: string;
+  receiptHeader: string | null;
+  receiptFooter: string | null;
+  accountPaymentReceiptTemplateHtml: string | null;
+};
+
 export type EnterpriseCustomerAccountEntryMutationResponse = {
   customerNo: string;
   message: string;
+  accountPayment?: {
+    entryId: string;
+    entryNo: string;
+    amount: number;
+    allocatedAmount: number;
+    journalEntryId: string | null;
+    journalNo: string | null;
+    cashbookEntryNo: string | null;
+  };
+  receipt?: EnterpriseAccountPaymentReceipt;
 };
 
 export function buildUnavailableEnterpriseCustomerWorkspace(
@@ -342,6 +571,8 @@ export function buildUnavailableEnterpriseCustomerWorkspace(
       capturedProspects: 0
     },
     availableStores: [],
+    paymentTermOptions: [],
+    tenderOptions: [],
     customerRows: [],
     referenceCaptureRows: [],
     recentActivityRows: [],
@@ -360,6 +591,190 @@ export function buildUnavailableEnterpriseCustomerWorkspace(
   };
 }
 
+type CustomerCreditEntry = Prisma.CustomerAccountEntryGetPayload<{
+  include: {
+    customer: {
+      select: {
+        customerNo: true;
+        fullName: true;
+      };
+    };
+    store: {
+      select: {
+        code: true;
+        name: true;
+      };
+    };
+    invoicePaymentAllocations: {
+      include: {
+        paymentEntry: {
+          select: {
+            transactionNoSnapshot: true;
+            sourceTransactionNoSnapshot: true;
+          };
+        };
+      };
+    };
+    paymentInvoiceAllocations: {
+      include: {
+        invoiceEntry: {
+          select: {
+            transactionNoSnapshot: true;
+            sourceTransactionNoSnapshot: true;
+          };
+        };
+      };
+    };
+  };
+}>;
+
+function customerAccountReference(entry: Pick<CustomerCreditEntry, "id" | "transactionNoSnapshot">) {
+  return entry.transactionNoSnapshot ?? `CAE-${entry.id.slice(0, 8).toUpperCase()}`;
+}
+
+function buildCreditStatementRows(entries: CustomerCreditEntry[]) {
+  const sorted = [...entries].sort(
+    (left, right) =>
+      left.customer.customerNo.localeCompare(right.customer.customerNo) ||
+      left.occurredAt.getTime() - right.occurredAt.getTime() ||
+      left.createdAt.getTime() - right.createdAt.getTime()
+  );
+  const chargeStateById = new Map<
+    string,
+    {
+      originalAmount: number;
+      remainingAmount: number;
+    }
+  >();
+  const explicitPaymentEntryIds = new Set<string>();
+
+  for (const entry of sorted) {
+    for (const allocation of entry.paymentInvoiceAllocations) {
+      explicitPaymentEntryIds.add(allocation.paymentEntryId);
+    }
+  }
+
+  for (const entry of sorted) {
+    const delta = roundMoney(Number(entry.receivableDeltaAmount));
+
+    if (delta > 0) {
+      const explicitSettled = roundMoney(
+        entry.invoicePaymentAllocations.reduce((sum, allocation) => sum + Number(allocation.amount), 0)
+      );
+      chargeStateById.set(entry.id, {
+        originalAmount: delta,
+        remainingAmount: roundMoney(Math.max(0, delta - explicitSettled))
+      });
+      continue;
+    }
+
+    if (delta >= 0 || explicitPaymentEntryIds.has(entry.id)) {
+      continue;
+    }
+
+    let creditAmount = Math.abs(delta);
+
+    for (const charge of sorted.filter(
+      (candidate) =>
+        candidate.customerId === entry.customerId &&
+        Number(candidate.receivableDeltaAmount) > 0 &&
+        (chargeStateById.get(candidate.id)?.remainingAmount ?? 0) > 0
+    )) {
+      if (creditAmount <= 0) {
+        break;
+      }
+
+      const state = chargeStateById.get(charge.id);
+
+      if (!state) {
+        continue;
+      }
+
+      const appliedAmount = Math.min(state.remainingAmount, creditAmount);
+      state.remainingAmount = roundMoney(state.remainingAmount - appliedAmount);
+      creditAmount = roundMoney(creditAmount - appliedAmount);
+    }
+  }
+
+  return [...sorted]
+    .reverse()
+    .map((entry) => {
+      const receivableDeltaAmount = roundMoney(Number(entry.receivableDeltaAmount));
+      const isPayment =
+        entry.entryType === CustomerAccountEntryType.ACCOUNT_PAYMENT ||
+        entry.entryType === CustomerAccountEntryType.POS_RECEIVABLE_SETTLEMENT;
+      const isAdjustment = entry.entryType === CustomerAccountEntryType.MANUAL_RECEIVABLE_ADJUSTMENT;
+      const activityLabel = isPayment
+        ? "Credit payment"
+        : isAdjustment
+          ? "Account adjustment"
+          : "Credit sale invoice";
+      const chargeState = chargeStateById.get(entry.id);
+      const originalAmount = chargeState?.originalAmount ?? Math.abs(receivableDeltaAmount);
+      const openAmount =
+        receivableDeltaAmount > 0 ? roundMoney(chargeState?.remainingAmount ?? receivableDeltaAmount) : 0;
+      const appliedAmount =
+        receivableDeltaAmount > 0
+          ? roundMoney(originalAmount - openAmount)
+          : roundMoney(
+              entry.paymentInvoiceAllocations.reduce(
+                (sum, allocation) => sum + Number(allocation.amount),
+                0
+              )
+            );
+      const invoiceStatus =
+        receivableDeltaAmount <= 0
+          ? "PAYMENT"
+          : openAmount <= 0
+            ? "SETTLED"
+            : appliedAmount > 0
+              ? "PART_PAID"
+              : "OPEN";
+      const allocationSummary =
+        receivableDeltaAmount > 0
+          ? entry.invoicePaymentAllocations
+              .map((allocation) => {
+                const reference =
+                  allocation.paymentEntry.transactionNoSnapshot ??
+                  allocation.paymentEntry.sourceTransactionNoSnapshot ??
+                  "Payment";
+                return `${reference} ${Number(allocation.amount).toFixed(2)}`;
+              })
+              .join(", ") || null
+          : entry.paymentInvoiceAllocations
+              .map((allocation) => {
+                const reference =
+                  allocation.invoiceEntry.transactionNoSnapshot ??
+                  allocation.invoiceEntry.sourceTransactionNoSnapshot ??
+                  "Invoice";
+                return `${reference} ${Number(allocation.amount).toFixed(2)}`;
+              })
+              .join(", ") || null;
+
+      return {
+        entryId: entry.id,
+        customerNo: entry.customer.customerNo,
+        fullName: entry.customer.fullName,
+        activityLabel,
+        transactionNo: entry.transactionNoSnapshot,
+        sourceTransactionNo: entry.sourceTransactionNoSnapshot,
+        storeCode: entry.store?.code ?? null,
+        storeName: entry.store?.name ?? null,
+        debitAmount: receivableDeltaAmount > 0 ? receivableDeltaAmount : 0,
+        creditAmount: receivableDeltaAmount < 0 ? Math.abs(receivableDeltaAmount) : 0,
+        originalAmount,
+        appliedAmount,
+        openAmount,
+        invoiceStatus,
+        allocationSummary,
+        resultingReceivableBalance: Number(entry.resultingReceivableBalance),
+        note: entry.note,
+        occurredAt: entry.occurredAt.toISOString(),
+        occurredAtLabel: formatRelativeTime(entry.occurredAt)
+      };
+    });
+}
+
 export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustomerWorkspaceData> {
   const enterpriseNode = await getEnterpriseContext();
 
@@ -370,8 +785,26 @@ export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustom
   }
 
   await ensureReferenceCaptureTable(prisma);
+  const company = await prisma.erpCompany.findFirst({
+    where: {
+      retailOrgId: enterpriseNode.retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
 
-  const [stores, customers, recentActivity, referenceCaptures] = await Promise.all([
+  const [
+    stores,
+    customers,
+    recentActivity,
+    creditActivity,
+    referenceCaptures,
+    customerProfiles,
+    tenderMethods
+  ] = await Promise.all([
     prisma.store.findMany({
       where: {
         retailOrgId: enterpriseNode.retailOrgId
@@ -464,6 +897,49 @@ export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustom
         }
       }
     }),
+    prisma.customerAccountEntry.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+        receivableDeltaAmount: {
+          not: 0
+        }
+      },
+      orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }],
+      include: {
+        customer: {
+          select: {
+            customerNo: true,
+            fullName: true
+          }
+        },
+        store: {
+          select: {
+            code: true,
+            name: true
+          }
+        },
+        invoicePaymentAllocations: {
+          include: {
+            paymentEntry: {
+              select: {
+                transactionNoSnapshot: true,
+                sourceTransactionNoSnapshot: true
+              }
+            }
+          }
+        },
+        paymentInvoiceAllocations: {
+          include: {
+            invoiceEntry: {
+              select: {
+                transactionNoSnapshot: true,
+                sourceTransactionNoSnapshot: true
+              }
+            }
+          }
+        }
+      }
+    }),
     prisma.transactionReferenceCapture.findMany({
       where: {
         retailOrgId: enterpriseNode.retailOrgId,
@@ -484,12 +960,61 @@ export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustom
         firstCapturedAt: true,
         lastCapturedAt: true
       }
+    }),
+    company
+      ? prisma.erpPartyAccountingProfile.findMany({
+          where: {
+            retailOrgId: enterpriseNode.retailOrgId,
+            companyId: company.id,
+            partyType: "CUSTOMER",
+            status: RecordStatus.ACTIVE
+          },
+          select: {
+            partyNo: true,
+            paymentTermsCode: true,
+            creditLimitAmount: true
+          }
+        })
+      : Promise.resolve([]),
+    prisma.tenderMethod.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+        status: RecordStatus.ACTIVE,
+        deletedAt: null,
+        paymentMethod: {
+          not: PaymentMethod.STORE_CREDIT
+        }
+      },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      include: {
+        cashbookAccount: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            glAccountCode: true,
+            accountType: true
+          }
+        }
+      }
     })
   ]);
 
+  const customerProfileByNo = new Map(
+    customerProfiles.map((profile) => [profile.partyNo, profile] as const)
+  );
+  const paymentTermCodes = Array.from(
+    new Set([
+      ...defaultPaymentTerms,
+      ...customerProfiles
+        .map((profile) => profile.paymentTermsCode)
+        .filter((code): code is string => Boolean(code))
+    ])
+  ).sort();
   const customerRows = customers.map((customer) => {
     const lastTransaction = customer.posTransactions[0] ?? null;
     const receivableBalanceAmount = Number(customer.receivableBalanceAmount);
+    const financeProfile = customerProfileByNo.get(customer.customerNo) ?? null;
 
     return {
       customerNo: customer.customerNo,
@@ -505,8 +1030,15 @@ export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustom
       loyaltyTier: customer.loyaltyTier,
       loyaltyPointsBalance: customer.loyaltyPointsBalance,
       allowCreditSales: customer.allowCreditSales,
+      paymentTermsCode:
+        financeProfile?.paymentTermsCode ??
+        (customer.allowCreditSales ? "NET-30" : "DUE-ON-RECEIPT"),
       creditLimitAmount:
-        customer.creditLimitAmount === null ? null : Number(customer.creditLimitAmount),
+        financeProfile?.creditLimitAmount === null || financeProfile?.creditLimitAmount === undefined
+          ? customer.creditLimitAmount === null
+            ? null
+            : Number(customer.creditLimitAmount)
+          : Number(financeProfile.creditLimitAmount),
       receivableBalanceAmount,
       status: customer.status,
       transactionCount: customer._count.posTransactions,
@@ -579,37 +1111,7 @@ export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustom
     occurredAt: entry.occurredAt.toISOString(),
     occurredAtLabel: formatRelativeTime(entry.occurredAt)
   }));
-  const creditStatementRows = recentActivity
-    .filter((entry) => Number(entry.receivableDeltaAmount) !== 0)
-    .map((entry) => {
-      const receivableDeltaAmount = Number(entry.receivableDeltaAmount);
-      const isPayment =
-        entry.entryType === CustomerAccountEntryType.ACCOUNT_PAYMENT ||
-        entry.entryType === CustomerAccountEntryType.POS_RECEIVABLE_SETTLEMENT;
-      const isAdjustment = entry.entryType === CustomerAccountEntryType.MANUAL_RECEIVABLE_ADJUSTMENT;
-      const activityLabel = isPayment
-        ? "Credit payment"
-        : isAdjustment
-          ? "Account adjustment"
-          : "Credit sale invoice";
-
-      return {
-        entryId: entry.id,
-        customerNo: entry.customer.customerNo,
-        fullName: entry.customer.fullName,
-        activityLabel,
-        transactionNo: entry.transactionNoSnapshot,
-        sourceTransactionNo: entry.sourceTransactionNoSnapshot,
-        storeCode: entry.store?.code ?? null,
-        storeName: entry.store?.name ?? null,
-        debitAmount: receivableDeltaAmount > 0 ? receivableDeltaAmount : 0,
-        creditAmount: receivableDeltaAmount < 0 ? Math.abs(receivableDeltaAmount) : 0,
-        resultingReceivableBalance: Number(entry.resultingReceivableBalance),
-        note: entry.note,
-        occurredAt: entry.occurredAt.toISOString(),
-        occurredAtLabel: formatRelativeTime(entry.occurredAt)
-      };
-    });
+  const creditStatementRows = buildCreditStatementRows(creditActivity);
   const storesWithCreditActivity = new Set(
     creditStatementRows.map((row) => row.storeCode).filter((value): value is string => Boolean(value))
   ).size;
@@ -634,6 +1136,28 @@ export async function getEnterpriseCustomerWorkspace(): Promise<EnterpriseCustom
       name: store.name,
       status: store.status
     })),
+    paymentTermOptions: paymentTermCodes.map((code) => ({
+      code,
+      label: code
+    })),
+    tenderOptions: tenderMethods.map((method) => {
+      const account = method.cashbookAccount;
+      const accountLabel = account
+        ? `${account.code} - ${account.name}${account.glAccountCode ? ` (${account.glAccountCode})` : ""}`
+        : "No Finance cashbook account";
+
+      return {
+        tenderMethodCode: method.code,
+        name: method.name,
+        paymentMethod: method.paymentMethod,
+        requiresReference: method.requiresReference,
+        cashbookAccountId: method.cashbookAccountId,
+        cashbookAccountCode: account?.code ?? null,
+        cashbookAccountName: account?.name ?? null,
+        glAccountCode: account?.glAccountCode ?? null,
+        label: `${method.name} (${method.paymentMethod}) - ${accountLabel}`
+      };
+    }),
     customerRows,
     referenceCaptureRows,
     recentActivityRows,
@@ -662,6 +1186,9 @@ export async function createEnterpriseCustomer(
     const loyaltyPointsBalance =
       normalizeOptionalWholeNumber(input.loyaltyPointsBalance, "loyalty points") ?? 0;
     const allowCreditSales = input.allowCreditSales ?? false;
+    const paymentTermsCode =
+      normalizeOptionalText(input.paymentTermsCode) ??
+      (allowCreditSales ? "NET-30" : "DUE-ON-RECEIPT");
     const creditLimitAmount = normalizeOptionalMoney(input.creditLimitAmount, "credit limit");
     const receivableBalanceAmount = normalizeMoney(
       input.receivableBalanceAmount ?? 0,
@@ -769,6 +1296,16 @@ export async function createEnterpriseCustomer(
         });
       }
 
+      await syncCustomerFinanceProfile(tx, {
+        retailOrgId: enterpriseNode.retailOrgId,
+        customerId: createdCustomer.id,
+        customerNo,
+        fullName,
+        allowCreditSales,
+        paymentTermsCode,
+        creditLimitAmount
+      });
+
       const sourceReferenceCaptureId = normalizeOptionalText(input.sourceReferenceCaptureId);
 
       if (sourceReferenceCaptureId) {
@@ -818,6 +1355,9 @@ export async function updateEnterpriseCustomer(
     const loyaltyPointsBalance =
       normalizeOptionalWholeNumber(input.loyaltyPointsBalance, "loyalty points") ?? 0;
     const allowCreditSales = input.allowCreditSales ?? false;
+    const paymentTermsCode =
+      normalizeOptionalText(input.paymentTermsCode) ??
+      (allowCreditSales ? "NET-30" : "DUE-ON-RECEIPT");
     const creditLimitAmount = normalizeOptionalMoney(input.creditLimitAmount, "credit limit");
     const receivableBalanceAmount = normalizeMoney(
       input.receivableBalanceAmount ?? 0,
@@ -872,7 +1412,7 @@ export async function updateEnterpriseCustomer(
         throw new Error(`Flash ERP could not find home store "${homeStoreCode}".`);
       }
 
-      return tx.customer.update({
+      const updatedCustomer = await tx.customer.update({
         where: {
           id: existingCustomer.id
         },
@@ -899,9 +1439,22 @@ export async function updateEnterpriseCustomer(
           }
         },
         select: {
+          id: true,
           customerNo: true
         }
       });
+
+      await syncCustomerFinanceProfile(tx, {
+        retailOrgId: enterpriseNode.retailOrgId,
+        customerId: updatedCustomer.id,
+        customerNo: updatedCustomer.customerNo,
+        fullName,
+        allowCreditSales,
+        paymentTermsCode,
+        creditLimitAmount
+      });
+
+      return updatedCustomer;
     });
 
     return {
@@ -911,6 +1464,321 @@ export async function updateEnterpriseCustomer(
   } catch (error) {
     throw toCustomerMutationError(error, "Flash ERP could not update that customer.");
   }
+}
+
+async function ensureCustomerCashbookEntrySequence(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    companyId: string;
+  }
+) {
+  const today = new Date();
+  const fiscalYear =
+    (await tx.erpFiscalYear.findFirst({
+      where: {
+        companyId: input.companyId,
+        startsOn: {
+          lte: today
+        },
+        endsOn: {
+          gte: today
+        },
+        status: {
+          not: "CLOSED"
+        }
+      },
+      orderBy: {
+        startsOn: "desc"
+      },
+      select: {
+        id: true
+      }
+    })) ??
+    (await tx.erpFiscalYear.findFirst({
+      where: {
+        companyId: input.companyId,
+        status: {
+          not: "CLOSED"
+        }
+      },
+      orderBy: {
+        startsOn: "desc"
+      },
+      select: {
+        id: true
+      }
+    }));
+
+  if (!fiscalYear) {
+    throw new Error("Flash ERP needs an open fiscal year before customer payments can post to cashbook.");
+  }
+
+  await tx.erpDocumentSequence.upsert({
+    where: {
+      companyId_documentType_fiscalYearId: {
+        companyId: input.companyId,
+        documentType: "CASHBOOK_ENTRY",
+        fiscalYearId: fiscalYear.id
+      }
+    },
+    update: {
+      prefix: "CB",
+      paddingLength: 6,
+      resetPolicy: "FISCAL_YEAR",
+      status: RecordStatus.ACTIVE
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      companyId: input.companyId,
+      fiscalYearId: fiscalYear.id,
+      documentType: "CASHBOOK_ENTRY",
+      prefix: "CB",
+      paddingLength: 6,
+      resetPolicy: "FISCAL_YEAR",
+      status: RecordStatus.ACTIVE
+    }
+  });
+}
+
+async function resolveCustomerPaymentTender(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    companyId: string;
+    tenderMethodCode: string | null;
+    reference: string | null;
+  }
+) {
+  if (!input.tenderMethodCode) {
+    throw new Error("Choose the tender method used to collect this account payment.");
+  }
+
+  const tender = await tx.tenderMethod.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      code: input.tenderMethodCode,
+      status: RecordStatus.ACTIVE,
+      deletedAt: null
+    },
+    include: {
+      cashbookAccount: true
+    }
+  });
+
+  if (!tender) {
+    throw new Error("Flash ERP could not find the selected tender method.");
+  }
+
+  if (tender.paymentMethod === PaymentMethod.STORE_CREDIT) {
+    throw new Error("Store Credit cannot be used to settle a customer receivable balance.");
+  }
+
+  if (tender.requiresReference && !input.reference) {
+    throw new Error(`Flash ERP needs a payment reference for ${tender.name}.`);
+  }
+
+  const cashbookAccount = tender.cashbookAccount;
+
+  if (!tender.cashbookAccountId || !cashbookAccount) {
+    throw new Error(`${tender.name} is not mapped to a Finance cashbook account.`);
+  }
+
+  if (cashbookAccount.companyId !== input.companyId || cashbookAccount.status !== RecordStatus.ACTIVE) {
+    throw new Error(`${tender.name}'s Finance cashbook account is not active for this company.`);
+  }
+
+  if (!cashbookAccount.glAccountCode?.trim()) {
+    throw new Error(`${tender.name}'s Finance cashbook account has no mapped GL account.`);
+  }
+
+  return {
+    ...tender,
+    cashbookAccount
+  };
+}
+
+async function resolveCustomerPaymentAllocations(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    customerId: string;
+    allocations: RecordEnterpriseCustomerAccountEntryRequest["allocations"];
+    expectedAmount: number | null;
+  }
+) {
+  const requestedAllocations = new Map<string, number>();
+
+  for (const allocation of input.allocations ?? []) {
+    const invoiceEntryId = normalizeRequiredText(allocation.invoiceEntryId, "invoice");
+    const amount = normalizeMoney(allocation.amount, "allocation amount");
+
+    if (amount <= 0) {
+      continue;
+    }
+
+    requestedAllocations.set(
+      invoiceEntryId,
+      roundMoney((requestedAllocations.get(invoiceEntryId) ?? 0) + amount)
+    );
+  }
+
+  if (requestedAllocations.size === 0) {
+    throw new Error("Select at least one open invoice and enter the amount to apply.");
+  }
+
+  const customerEntries = await tx.customerAccountEntry.findMany({
+    where: {
+      retailOrgId: input.retailOrgId,
+      customerId: input.customerId,
+      receivableDeltaAmount: {
+        not: 0
+      }
+    },
+    orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }],
+    include: {
+      customer: {
+        select: {
+          customerNo: true,
+          fullName: true
+        }
+      },
+      store: {
+        select: {
+          code: true,
+          name: true
+        }
+      },
+      invoicePaymentAllocations: {
+        include: {
+          paymentEntry: {
+            select: {
+              transactionNoSnapshot: true,
+              sourceTransactionNoSnapshot: true
+            }
+          }
+        }
+      },
+      paymentInvoiceAllocations: {
+        include: {
+          invoiceEntry: {
+            select: {
+              transactionNoSnapshot: true,
+              sourceTransactionNoSnapshot: true
+            }
+          }
+        }
+      }
+    }
+  });
+  const openInvoiceRows = buildCreditStatementRows(customerEntries)
+    .filter((row) => row.debitAmount > 0 && row.openAmount > 0)
+    .map((row) => [row.entryId, row] as const);
+  const openInvoiceById = new Map(openInvoiceRows);
+  const normalizedAllocations = Array.from(requestedAllocations.entries()).map(
+    ([invoiceEntryId, amount]) => {
+      const invoice = openInvoiceById.get(invoiceEntryId);
+
+      if (!invoice) {
+        throw new Error("One of the selected invoices is no longer open for this customer.");
+      }
+
+      if (amount > invoice.openAmount + 0.0001) {
+        throw new Error(
+          `${invoice.transactionNo ?? invoice.entryId} only has ${invoice.openAmount.toFixed(2)} open.`
+        );
+      }
+
+      return {
+        invoiceEntryId,
+        invoiceNo: invoice.transactionNo ?? customerAccountReference({ id: invoice.entryId, transactionNoSnapshot: null }),
+        amount
+      };
+    }
+  );
+  const allocatedAmount = roundMoney(
+    normalizedAllocations.reduce((sum, allocation) => sum + allocation.amount, 0)
+  );
+
+  if (input.expectedAmount !== null && Math.abs(input.expectedAmount - allocatedAmount) > 0.01) {
+    throw new Error("The payment amount must match the invoice allocations.");
+  }
+
+  return {
+    allocatedAmount,
+    allocations: normalizedAllocations
+  };
+}
+
+function buildCustomerPaymentReceipt(input: {
+  enterpriseNode: Awaited<ReturnType<typeof getWritableEnterpriseNode>>;
+  company: NonNullable<Awaited<ReturnType<typeof getPrimaryFinanceCompany>>>;
+  customer: {
+    customerNo: string;
+    fullName: string;
+  };
+  store: {
+    code: string;
+    name: string;
+    phone?: string | null;
+    location?: string | null;
+    addressLine1?: string | null;
+    addressLine2?: string | null;
+    receiptHeader?: string | null;
+    receiptFooter?: string | null;
+    accountPaymentReceiptTemplateHtml?: string | null;
+  } | null;
+  tender: {
+    paymentMethod: string;
+    name: string;
+  };
+  entryNo: string;
+  amount: number;
+  resultingReceivableBalance: number;
+  reference: string | null;
+  note: string | null;
+  occurredAt: Date;
+  templateHtml: string | null | undefined;
+}): EnterpriseAccountPaymentReceipt {
+  const companySettings = readJsonObject(input.enterpriseNode.retailOrg.companySettingsJson);
+  const tradingName =
+    readString(companySettings, "tradingName") ||
+    input.company.tradingName ||
+    input.company.legalName ||
+    input.enterpriseNode.retailOrg.name;
+
+  return {
+    entryNo: input.entryNo,
+    retailOrgName: tradingName,
+    companyLogoUrl: readString(companySettings, "companyLogoUrl") || null,
+    storeCode: input.store?.code ?? input.enterpriseNode.code,
+    storeName: input.store?.name ?? tradingName,
+    storePhone: input.store?.phone ?? (readString(companySettings, "phone") || null),
+    storeLocation: input.store?.location ?? (readString(companySettings, "city") || null),
+    storeAddress: input.store?.addressLine1 ?? (readString(companySettings, "addressLine1") || null),
+    storeAddressLine2:
+      input.store?.addressLine2 ?? (readString(companySettings, "addressLine2") || null),
+    terminalCode: "HQ",
+    shiftNo: null,
+    customerNo: input.customer.customerNo,
+    customerName: input.customer.fullName,
+    cashierCode: "Flash ERP",
+    paymentMethod: input.tender.paymentMethod,
+    tenderMethodName: input.tender.name,
+    amount: input.amount,
+    remainingBalanceAmount: input.resultingReceivableBalance,
+    reference: input.reference,
+    note: input.note,
+    occurredAt: input.occurredAt.toISOString(),
+    currencyCode: input.company.baseCurrencyCode || input.enterpriseNode.retailOrg.baseCurrencyCode,
+    timezone: input.enterpriseNode.retailOrg.timezone,
+    receiptHeader: input.store?.receiptHeader ?? null,
+    receiptFooter: input.store?.receiptFooter ?? null,
+    accountPaymentReceiptTemplateHtml:
+      input.store?.accountPaymentReceiptTemplateHtml?.trim() ||
+      input.templateHtml?.trim() ||
+      defaultAccountPaymentReceiptTemplateHtml
+  };
 }
 
 export async function recordEnterpriseCustomerAccountEntry(
@@ -963,7 +1831,14 @@ export async function recordEnterpriseCustomerAccountEntry(
             select: {
               id: true,
               code: true,
-              name: true
+              name: true,
+              phone: true,
+              location: true,
+              addressLine1: true,
+              addressLine2: true,
+              receiptHeader: true,
+              receiptFooter: true,
+              accountPaymentReceiptTemplateHtml: true
             }
           })
         : null;
@@ -972,15 +1847,34 @@ export async function recordEnterpriseCustomerAccountEntry(
         throw new Error(`Flash ERP could not find store "${storeCode}" for this account activity.`);
       }
 
-      let entryType: CustomerAccountEntryType;
-      let receivableDeltaAmount = 0;
-      let loyaltyPointsDelta = 0;
-      let resultingReceivableBalance = Number(customer.receivableBalanceAmount);
-      let resultingLoyaltyPointsBalance = customer.loyaltyPointsBalance;
-      let activityNote = note;
-
       if (entryMode === "ACCOUNT_PAYMENT") {
-        const amount = normalizeMoney(input.amount, "payment amount");
+        const requestedAmount =
+          input.amount === null || input.amount === undefined
+            ? null
+            : normalizeMoney(input.amount, "payment amount");
+        const company = await getPrimaryFinanceCompany(tx, enterpriseNode.retailOrgId);
+
+        if (!company) {
+          throw new Error("Create a company in Finance foundation before posting customer payments.");
+        }
+
+        if (!company.accountingSettings) {
+          throw new Error("Configure Finance accounting settings before posting customer payments.");
+        }
+
+        const tender = await resolveCustomerPaymentTender(tx, {
+          retailOrgId: enterpriseNode.retailOrgId,
+          companyId: company.id,
+          tenderMethodCode: normalizeOptionalText(input.tenderMethodCode),
+          reference
+        });
+        const allocationResult = await resolveCustomerPaymentAllocations(tx, {
+          retailOrgId: enterpriseNode.retailOrgId,
+          customerId: customer.id,
+          allocations: input.allocations,
+          expectedAmount: requestedAmount
+        });
+        const amount = allocationResult.allocatedAmount;
 
         if (amount <= 0) {
           throw new Error("Flash ERP needs a payment amount greater than zero.");
@@ -992,15 +1886,189 @@ export async function recordEnterpriseCustomerAccountEntry(
           );
         }
 
-        entryType = CustomerAccountEntryType.ACCOUNT_PAYMENT;
-        receivableDeltaAmount = Number((amount * -1).toFixed(2));
-        resultingReceivableBalance = Number(
-          (Number(customer.receivableBalanceAmount) + receivableDeltaAmount).toFixed(2)
+        await ensureCustomerCashbookEntrySequence(tx, {
+          retailOrgId: enterpriseNode.retailOrgId,
+          companyId: company.id
+        });
+        const entryNo = (
+          await reserveErpDocumentNumberInTransaction(tx, {
+            retailOrgId: enterpriseNode.retailOrgId,
+            companyId: company.id,
+            documentType: "RECEIPT_VOUCHER"
+          })
+        ).documentNo;
+        const receivableDeltaAmount = roundMoney(amount * -1);
+        const resultingReceivableBalance = roundMoney(
+          Number(customer.receivableBalanceAmount) + receivableDeltaAmount
         );
-        activityNote =
-          activityNote ??
-          `Customer payment collected against receivables${reference ? ` (${reference})` : ""}.`;
-      } else if (entryMode === "RECEIVABLE_ADJUSTMENT") {
+        const resultingLoyaltyPointsBalance = customer.loyaltyPointsBalance;
+        const invoiceSummary = allocationResult.allocations
+          .map((allocation) => `${allocation.invoiceNo} ${allocation.amount.toFixed(2)}`)
+          .join(", ");
+        const activityNote =
+          note ??
+          `Customer payment collected through ${tender.name} against invoice(s): ${invoiceSummary}.`;
+        const occurredAt = new Date();
+
+        await tx.customer.update({
+          where: {
+            id: customer.id
+          },
+          data: {
+            receivableBalanceAmount: resultingReceivableBalance,
+            loyaltyPointsBalance: resultingLoyaltyPointsBalance,
+            lastModifiedByNodeCode: enterpriseNode.code,
+            recordVersion: {
+              increment: 1
+            }
+          }
+        });
+
+        const entry = await tx.customerAccountEntry.create({
+          data: {
+            retailOrgId: enterpriseNode.retailOrgId,
+            customerId: customer.id,
+            storeId: store?.id ?? null,
+            terminalId: null,
+            posTransactionId: null,
+            entryType: CustomerAccountEntryType.ACCOUNT_PAYMENT,
+            transactionNoSnapshot: entryNo,
+            sourceTransactionNoSnapshot: reference,
+            receivableDeltaAmount,
+            loyaltyPointsDelta: 0,
+            resultingReceivableBalance,
+            resultingLoyaltyPointsBalance,
+            note: activityNote,
+            originNodeCode: enterpriseNode.code,
+            occurredAt
+          },
+          select: {
+            id: true,
+            transactionNoSnapshot: true
+          }
+        });
+        await tx.customerAccountPaymentAllocation.createMany({
+          data: allocationResult.allocations.map((allocation) => ({
+            retailOrgId: enterpriseNode.retailOrgId,
+            customerId: customer.id,
+            paymentEntryId: entry.id,
+            invoiceEntryId: allocation.invoiceEntryId,
+            amount: allocation.amount,
+            note: reference
+          }))
+        });
+
+        const arAccountCode = normalizeRequiredText(
+          company.accountingSettings.arControlAccountCode ?? "1100",
+          "AR control account"
+        );
+        const postingLines: PostAccountingDocumentLine[] = [
+          {
+            accountCode: tender.cashbookAccount.glAccountCode,
+            debitAmount: amount,
+            creditAmount: 0,
+            memo: `${entryNo} ${tender.name} account payment`
+          },
+          {
+            accountCode: arAccountCode,
+            debitAmount: 0,
+            creditAmount: amount,
+            memo: `${entryNo} customer receivable settlement`
+          }
+        ];
+        const journal = await postAccountingDocumentInTransaction(tx, {
+          retailOrgId: enterpriseNode.retailOrgId,
+          companyId: company.id,
+          documentType: "JOURNAL",
+          batchSourceType: "CUSTOMER_ACCOUNT_PAYMENT",
+          journalType: "CUSTOMER_PAYMENT",
+          sourceType: "CUSTOMER_ACCOUNT_PAYMENT",
+          sourceId: entry.id,
+          sourceReference: entryNo,
+          postingDate: occurredAt,
+          description: `${entryNo} customer account payment from ${customer.fullName}`,
+          postedBy: "Customer Accounts",
+          lines: postingLines
+        });
+        const cashbookEntryNo = (
+          await reserveErpDocumentNumberInTransaction(tx, {
+            retailOrgId: enterpriseNode.retailOrgId,
+            companyId: company.id,
+            documentType: "CASHBOOK_ENTRY"
+          })
+        ).documentNo;
+        await tx.erpCashbookEntry.create({
+          data: {
+            retailOrgId: enterpriseNode.retailOrgId,
+            companyId: company.id,
+            cashbookAccountId: tender.cashbookAccount.id,
+            postingJournalEntryId: journal.journalEntryId,
+            entryNo: cashbookEntryNo,
+            entryType: "RECEIPT",
+            direction: "INFLOW",
+            entryDate: occurredAt,
+            postingDate: occurredAt,
+            valueDate: occurredAt,
+            currencyCode: tender.cashbookAccount.currencyCode || company.baseCurrencyCode,
+            amount,
+            offsetAccountCode: arAccountCode,
+            counterpartyName: customer.fullName,
+            workflowType: "CUSTOMER_ACCOUNT_PAYMENT",
+            workflowReference: entryNo,
+            providerReference: reference,
+            externalReference: entryNo,
+            memo: activityNote,
+            reconciliationStatus: "UNRECONCILED",
+            status: "POSTED",
+            postedAt: occurredAt,
+            postedBy: "Customer Accounts"
+          }
+        });
+        const receiptTemplate = await ensureEnterpriseAccountPaymentReceiptTemplate(
+          tx,
+          enterpriseNode.retailOrgId
+        );
+
+        return {
+          customerNo: customer.customerNo,
+          message:
+            resultingReceivableBalance <= 0
+              ? `${entryNo} collected ${amount.toFixed(2)} from ${customer.fullName}. The receivable is fully settled.`
+              : `${entryNo} collected ${amount.toFixed(2)} from ${customer.fullName}. Remaining receivable balance is ${resultingReceivableBalance.toFixed(2)}.`,
+          accountPayment: {
+            entryId: entry.id,
+            entryNo,
+            amount,
+            allocatedAmount: allocationResult.allocatedAmount,
+            journalEntryId: journal.journalEntryId,
+            journalNo: journal.journalNo,
+            cashbookEntryNo
+          },
+          receipt: buildCustomerPaymentReceipt({
+            enterpriseNode,
+            company,
+            customer,
+            store,
+            tender,
+            entryNo,
+            amount,
+            resultingReceivableBalance,
+            reference,
+            note: activityNote,
+            occurredAt,
+            templateHtml: receiptTemplate?.templateHtml
+          })
+        };
+      }
+
+      let entryType: CustomerAccountEntryType;
+      let receivableDeltaAmount = 0;
+      let loyaltyPointsDelta = 0;
+      let resultingReceivableBalance = Number(customer.receivableBalanceAmount);
+      let resultingLoyaltyPointsBalance = customer.loyaltyPointsBalance;
+      let activityNote = note;
+
+      if (entryMode === "RECEIVABLE_ADJUSTMENT") {
         const amount = normalizeSignedMoney(input.amount, "receivable adjustment amount");
 
         if (amount === 0) {
@@ -1089,11 +2157,9 @@ export async function recordEnterpriseCustomerAccountEntry(
       return {
         customerNo: customer.customerNo,
         message:
-          entryMode === "ACCOUNT_PAYMENT"
-            ? `Payment posted to ${customer.customerNo}. The updated receivable balance will sync to stores automatically.`
-            : entryMode === "RECEIVABLE_ADJUSTMENT"
-              ? `Receivable adjustment posted to ${customer.customerNo}.`
-              : `Loyalty adjustment posted to ${customer.customerNo}.`
+          entryMode === "RECEIVABLE_ADJUSTMENT"
+            ? `Receivable adjustment posted to ${customer.customerNo}.`
+            : `Loyalty adjustment posted to ${customer.customerNo}.`
       };
     });
 

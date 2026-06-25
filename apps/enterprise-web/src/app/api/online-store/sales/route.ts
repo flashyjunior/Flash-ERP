@@ -20,6 +20,7 @@ export async function POST(request: Request) {
         body?.managerOverride && typeof body.managerOverride === "object"
           ? body.managerOverride
           : null,
+      serviceType: body?.serviceType ?? null,
       note: body?.note ?? null,
       details: body?.details ?? null
     });

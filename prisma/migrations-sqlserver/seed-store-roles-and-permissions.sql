@@ -82,6 +82,12 @@ VALUES
   (N'inventory.transfer.receive', N'Receive transfers', N'Receive stock into the destination location against transfer instructions.'),
   (N'inventory.grn.receive', N'Receive goods', N'Receive purchase orders into stock and post goods receipts.'),
   (N'inventory.supplier-return.manage', N'Manage supplier returns', N'Post, review, and cancel supplier returns and exception posture.'),
+  (N'fuel.station.view', N'View fuel operations', N'Open the online-store fuel operations workspace for station-side fuel capture.'),
+  (N'fuel.tank.manage', N'Manage fuel tanks', N'Create and maintain station fuel tank records from the online-store fuel workspace.'),
+  (N'fuel.dip.capture', N'Capture tank dips', N'Record fuel tank dip readings with evidence from the online-store fuel workspace.'),
+  (N'fuel.meter-reading.capture', N'Capture meter readings', N'Record fuel meter/nozzle readings with evidence from the online-store fuel workspace.'),
+  (N'fuel.supplier-receipt.capture', N'Capture fuel receipts', N'Record supplier fuel receipts into station tanks from the online-store fuel workspace.'),
+  (N'fuel.reconciliation.manage', N'Manage fuel reconciliation', N'Review station fuel reconciliation from the online-store fuel workspace.'),
   (N'pos.shift.open', N'Open shift', N'Open a POS shift and start a branch till session.'),
   (N'pos.shift.close', N'Close shift', N'Close and reconcile a POS shift.'),
   (N'pos.sale.process', N'Process sales', N'Capture normal sales and complete baskets at POS.'),
@@ -172,6 +178,12 @@ VALUES
   (N'STORE_MANAGER', N'pos.customer.attach'),
   (N'STORE_MANAGER', N'pos.customer.account.collect'),
   (N'STORE_MANAGER', N'pos.loyalty.redeem'),
+  (N'STORE_MANAGER', N'fuel.station.view'),
+  (N'STORE_MANAGER', N'fuel.tank.manage'),
+  (N'STORE_MANAGER', N'fuel.dip.capture'),
+  (N'STORE_MANAGER', N'fuel.meter-reading.capture'),
+  (N'STORE_MANAGER', N'fuel.supplier-receipt.capture'),
+  (N'STORE_MANAGER', N'fuel.reconciliation.manage'),
 
   (N'ONLINE_STORE_CASHIER', N'pos.shift.open'),
   (N'ONLINE_STORE_CASHIER', N'pos.shift.close'),
@@ -207,7 +219,13 @@ VALUES
   (N'ONLINE_STORE_SUPERVISOR', N'inventory.transfer.issue'),
   (N'ONLINE_STORE_SUPERVISOR', N'inventory.transfer.receive'),
   (N'ONLINE_STORE_SUPERVISOR', N'inventory.grn.receive'),
-  (N'ONLINE_STORE_SUPERVISOR', N'inventory.supplier-return.manage');
+  (N'ONLINE_STORE_SUPERVISOR', N'inventory.supplier-return.manage'),
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.station.view'),
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.tank.manage'),
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.dip.capture'),
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.meter-reading.capture'),
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.supplier-receipt.capture'),
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.reconciliation.manage');
 
 BEGIN TRANSACTION;
 

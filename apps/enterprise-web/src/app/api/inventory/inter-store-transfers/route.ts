@@ -48,6 +48,15 @@ export async function POST(request: NextRequest) {
       destinationLocationCode: payload.destinationLocationCode.trim(),
       externalReference:
         typeof payload.externalReference === "string" ? payload.externalReference : undefined,
+      transporterName:
+        typeof payload.transporterName === "string" ? payload.transporterName : undefined,
+      vehicleRegistrationNo:
+        typeof payload.vehicleRegistrationNo === "string" ? payload.vehicleRegistrationNo : undefined,
+      driverName: typeof payload.driverName === "string" ? payload.driverName : undefined,
+      driverContact:
+        typeof payload.driverContact === "string" ? payload.driverContact : undefined,
+      deliveryNoteNo:
+        typeof payload.deliveryNoteNo === "string" ? payload.deliveryNoteNo : undefined,
       operatorName: typeof payload.operatorName === "string" ? payload.operatorName : undefined,
       note: typeof payload.note === "string" ? payload.note : undefined,
       requiredAt: typeof payload.requiredAt === "string" ? payload.requiredAt : undefined,

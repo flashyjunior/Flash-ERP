@@ -11,6 +11,7 @@ export async function POST(request: Request) {
       depositAmount: body?.depositAmount ?? null,
       depositTenderMethodCode: body?.depositTenderMethodCode ?? null,
       depositReference: body?.depositReference ?? null,
+      serviceType: body?.serviceType ?? null,
       note: body?.note ?? null
     });
 

@@ -17,6 +17,10 @@ import {
   getEnterpriseSettingsWorkspace
 } from "@/server/repositories/enterprise-settings.repository";
 import {
+  buildUnavailableFuelOperationsSettingsWorkspace,
+  getFuelOperationsSettingsWorkspace
+} from "@/server/repositories/erp-fuel-operations.repository";
+import {
   buildUnavailableEnterpriseSetupWorkspace,
   getEnterpriseSetupWorkspace
 } from "@/server/repositories/enterprise-setup.repository";
@@ -54,6 +58,7 @@ export default async function SettingsSubmenuPage({
     smtp: "settings.smtp.manage",
     sms: "settings.sms.manage",
     "inventory-catalogs": "master.product.manage",
+    "fuel-operations": "settings.company.manage",
     "shop-prices": "master.product.manage",
     licenses: "master.store.manage",
     "receipt-templates": "settings.receipt-template.manage",
@@ -87,7 +92,7 @@ export default async function SettingsSubmenuPage({
     return <EnterpriseLicenseWorkspace workspace={workspace} />;
   }
 
-  const [workspace, setupWorkspace, securityWorkspace] = await Promise.all([
+  const [workspace, setupWorkspace, fuelOperationsSettingsWorkspace, securityWorkspace] = await Promise.all([
     getEnterpriseSettingsWorkspace().catch((error: unknown) =>
       buildUnavailableEnterpriseSettingsWorkspace(
         error instanceof Error
@@ -104,6 +109,15 @@ export default async function SettingsSubmenuPage({
           )
         )
       : Promise.resolve(undefined),
+    view === "fuel-operations"
+      ? getFuelOperationsSettingsWorkspace().catch((error: unknown) =>
+          buildUnavailableFuelOperationsSettingsWorkspace(
+            error instanceof Error
+              ? `Unable to load live Flash ERP Fuel Operations settings: ${error.message}`
+              : "Unable to load live Flash ERP Fuel Operations settings."
+          )
+        )
+      : Promise.resolve(undefined),
     view === "retail-users"
       ? getEnterpriseSecurityWorkspace().catch((error: unknown) =>
           buildUnavailableEnterpriseSecurityWorkspace(
@@ -117,6 +131,7 @@ export default async function SettingsSubmenuPage({
 
   return (
     <EnterpriseSettingsWorkspace
+      fuelOperationsSettingsWorkspace={fuelOperationsSettingsWorkspace}
       securityWorkspace={securityWorkspace}
       setupWorkspace={setupWorkspace}
       view={view as EnterpriseSettingsView}

@@ -5,6 +5,10 @@ import { useRouter } from "next/navigation";
 import { applyAutomaticPromotions, calculateLoyaltyRedemption } from "@flash-erp/sync-core";
 
 import {
+  FuelOperationsWorkspace,
+  type ViewKey as FuelOperationsViewKey
+} from "@/components/enterprise/erp-fuel-operations-workspace";
+import {
   defaultAccountPaymentReceiptTemplateHtml,
   defaultThermalReceiptTemplateHtml,
   documentTemplateRawHtml,
@@ -43,7 +47,7 @@ type TenderMethod = OnlineStoreWorkspaceData["tenderMethods"][number];
 type Receipt = CreateOnlineStoreSaleResponse["receipt"];
 type AccountPaymentReceipt = RecordOnlineStoreAccountPaymentResponse["receipt"];
 type OnlineShift = NonNullable<OnlineStoreWorkspaceData["shift"]>;
-type WorkspaceId = "dashboard" | "pos" | "inventory" | "manager" | "reversals" | "reports";
+type WorkspaceId = "dashboard" | "pos" | "inventory" | "manager" | "reversals" | "reports" | "fuel";
 type ManagerTab = "shift" | "eod" | "banking" | "summary";
 type ReportId = "sales" | "products" | "orders" | "tenders" | "inventory" | "banking" | "shifts";
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
@@ -75,6 +79,7 @@ type TransferDocumentGroup = {
   key: string;
   documentNo: string;
   statusLabel: string;
+  workflowType: string | null;
   sourceStoreCode: string;
   sourceStoreName: string;
   destinationStoreCode: string;
@@ -85,6 +90,24 @@ type TransferDocumentGroup = {
   outstandingIssueQuantity: number;
   outstandingReceiptQuantity: number;
   externalReference: string | null;
+  transporterName: string | null;
+  vehicleRegistrationNo: string | null;
+  driverName: string | null;
+  driverContact: string | null;
+  deliveryNoteNo: string | null;
+  feedbackStatus: string;
+  waterTestResult: string | null;
+  quantityBeforeDelivery: number | null;
+  expectedQuantityReceived: number | null;
+  expectedStockQuantity: number | null;
+  quantityAfterDelivery: number | null;
+  actualQuantityReceived: number | null;
+  feedbackVarianceQuantity: number | null;
+  feedbackNote: string | null;
+  feedbackRecordedAt: string | null;
+  feedbackConfirmedAt: string | null;
+  feedbackPostedAt: string | null;
+  feedbackOperatorName: string | null;
   updatedAt: string;
   lines: TransferRequest[];
 };
@@ -130,6 +153,12 @@ const supplierReturnReasonOptions: SupplierReturnReason[] = [
   "WRONG_ITEM",
   "OTHER"
 ];
+const onlineStoreServiceTypeOptions = [
+  { value: "COMBO", label: "Combo" },
+  { value: "BDC_ONLY", label: "BDC only" },
+  { value: "OMC_ONLY", label: "OMC only" },
+  { value: "OTHERS", label: "Others" }
+];
 type OpenPriceDraft = {
   product: Product;
   quantity: string;
@@ -156,17 +185,39 @@ const workspaceNav: Array<{
   id: WorkspaceId;
   label: string;
   detail: string;
-  icon: "dashboard" | "pos" | "inventory" | "manager" | "reversals" | "reports";
+  icon: "dashboard" | "pos" | "inventory" | "manager" | "reversals" | "reports" | "fuel";
+  requiresFuelOperationsVisibility?: boolean;
 }> = [
   { id: "dashboard", label: "Dashboard", detail: "Shop pulse, sales, stock", icon: "dashboard" },
   { id: "pos", label: "POS", detail: "Sales, orders, shifts", icon: "pos" },
   { id: "inventory", label: "Inventory", detail: "Request, receive, count", icon: "inventory" },
+  {
+    id: "fuel",
+    label: "Fuel",
+    detail: "Tanks, dips, readings",
+    icon: "fuel",
+    requiresFuelOperationsVisibility: true
+  },
   { id: "manager", label: "Manager", detail: "EOD, banking, reports", icon: "manager" },
   { id: "reversals", label: "Reversals", detail: "Returns, exchanges", icon: "reversals" },
   { id: "reports", label: "Reports", detail: "Sales, stock, banking", icon: "reports" }
 ];
 
 const formatNumber = new Intl.NumberFormat("en-US");
+
+function isServiceCatalogProduct(product: Pick<Product, "productType">) {
+  return product.productType.trim().toUpperCase() === "SERVICE";
+}
+
+function isSellableCatalogProduct(product: Pick<Product, "productType" | "quantityOnHand">) {
+  return isServiceCatalogProduct(product) || product.quantityOnHand > 0;
+}
+
+function formatCatalogAvailability(product: Pick<Product, "productType" | "quantityOnHand">) {
+  return isServiceCatalogProduct(product)
+    ? "Service"
+    : `Stock ${formatNumber.format(product.quantityOnHand)}`;
+}
 
 function paymentDraftId() {
   return `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -362,6 +413,43 @@ function parseStockCountCsv(text: string): Array<{ productCode: string; countedQ
     .filter((row) => row.productCode);
 }
 
+function normalizeFuelTransferLineKey(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function isFuelTransferLine(line: Pick<TransferRequest, "productCode" | "productName">) {
+  const values = [line.productCode, line.productName].map(normalizeFuelTransferLineKey);
+  const exactFuelCodes = new Set([
+    "AGO",
+    "DIESEL",
+    "AUTOMOTIVEGASOIL",
+    "PMS",
+    "PETROL",
+    "GASOLINE",
+    "PREMIUMMOTORSPIRIT",
+    "LPG",
+    "LIQUEFIEDPETROLEUMGAS",
+    "KERO",
+    "KEROSENE",
+    "ATK",
+    "JETFUEL"
+  ]);
+
+  if (values.some((value) => exactFuelCodes.has(value))) {
+    return true;
+  }
+
+  return values.some((value) =>
+    ["FUEL", "PETROL", "DIESEL", "GASOIL", "GASOLINE", "LPG"].some((keyword) =>
+      value.includes(keyword)
+    )
+  );
+}
+
+function isFuelTransferDocument(transfer: Pick<TransferDocumentGroup, "workflowType" | "lines">) {
+  return transfer.workflowType === "FUEL_TRANSFER" || transfer.lines.some(isFuelTransferLine);
+}
+
 function buildTransferDocumentGroups(transfers: TransferRequest[]): TransferDocumentGroup[] {
   const groups = new Map<string, TransferRequest[]>();
 
@@ -383,6 +471,9 @@ function buildTransferDocumentGroups(transfers: TransferRequest[]): TransferDocu
         key,
         documentNo: firstLine?.transferBatchNo ?? firstLine?.transferNo ?? key,
         statusLabel: lines.every((line) => line.status === lines[0]?.status) ? lines[0]?.status ?? "REQUESTED" : "MIXED",
+        workflowType:
+          firstLine?.workflowType ??
+          (lines.some(isFuelTransferLine) ? "FUEL_TRANSFER" : null),
         sourceStoreCode: firstLine?.sourceStoreCode ?? "",
         sourceStoreName: firstLine?.sourceStoreName ?? "Source",
         destinationStoreCode: firstLine?.destinationStoreCode ?? "",
@@ -393,6 +484,26 @@ function buildTransferDocumentGroups(transfers: TransferRequest[]): TransferDocu
         outstandingIssueQuantity,
         outstandingReceiptQuantity,
         externalReference: firstLine?.externalReference ?? null,
+        transporterName: firstLine?.transporterName ?? null,
+        vehicleRegistrationNo: firstLine?.vehicleRegistrationNo ?? null,
+        driverName: firstLine?.driverName ?? null,
+        driverContact: firstLine?.driverContact ?? null,
+        deliveryNoteNo: firstLine?.deliveryNoteNo ?? null,
+        feedbackStatus: firstLine?.feedbackStatus ?? "PENDING",
+        waterTestResult: firstLine?.waterTestResult ?? null,
+        quantityBeforeDelivery: firstLine?.quantityBeforeDelivery ?? null,
+        expectedQuantityReceived:
+          firstLine?.expectedQuantityReceived ??
+          (issuedQuantity > 0 ? issuedQuantity : null),
+        expectedStockQuantity: firstLine?.expectedStockQuantity ?? null,
+        quantityAfterDelivery: firstLine?.quantityAfterDelivery ?? null,
+        actualQuantityReceived: firstLine?.actualQuantityReceived ?? null,
+        feedbackVarianceQuantity: firstLine?.feedbackVarianceQuantity ?? null,
+        feedbackNote: firstLine?.feedbackNote ?? null,
+        feedbackRecordedAt: firstLine?.feedbackRecordedAt ?? null,
+        feedbackConfirmedAt: firstLine?.feedbackConfirmedAt ?? null,
+        feedbackPostedAt: firstLine?.feedbackPostedAt ?? null,
+        feedbackOperatorName: firstLine?.feedbackOperatorName ?? null,
         updatedAt: lines.map((line) => line.updatedAt).sort().at(-1) ?? firstLine?.requestedAt ?? "",
         lines
       };
@@ -453,6 +564,12 @@ function SidebarIcon({ name }: { name: (typeof workspaceNav)[number]["icon"] }) 
         <path d="M14 3v4h4" />
         <path d="M9 13h6" />
         <path d="M9 17h6" />
+      </>
+    ),
+    fuel: (
+      <>
+        <path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0C6 9.5 12 3 12 3z" />
+        <path d="M9 15a3 3 0 0 0 3 3" />
       </>
     )
   };
@@ -1311,8 +1428,17 @@ function buildGoodsReceiptWindowHtml(input: {
 function buildTransferDocumentWindowHtml(input: {
   transfer: TransferDocumentGroup;
   storeName: string;
+  companyLogoUrl: string | null;
 }) {
-  const { transfer, storeName } = input;
+  const { transfer, storeName, companyLogoUrl } = input;
+  const logoHtml = renderReceiptTemplateLogo(companyLogoUrl, `${storeName} logo`);
+  const logisticsRows = [
+    ["Waybill", transfer.deliveryNoteNo ?? transfer.documentNo],
+    ["Vehicle", transfer.vehicleRegistrationNo ?? "Not captured"],
+    ["Driver", transfer.driverName ?? "Not captured"],
+    ["Driver contact", transfer.driverContact ?? "Not captured"],
+    ["Transporter", transfer.transporterName ?? "Not captured"]
+  ];
   const rows = transfer.lines
     .map(
       (line) => `<tr>
@@ -1329,16 +1455,20 @@ function buildTransferDocumentWindowHtml(input: {
   return `<!doctype html>
   <html>
     <head>
-      <title>${escapeHtml(transfer.documentNo)} • Stock transfer</title>
+      <title>${escapeHtml(transfer.documentNo)} • Waybill</title>
       <style>
         *{box-sizing:border-box} body{margin:0;background:#f5f7f5;color:#17211b;font-family:"Segoe UI",Arial,sans-serif}
         main{width:min(980px,calc(100vw - 48px));margin:24px auto;background:#fff;padding:28px;box-shadow:0 18px 42px rgba(20,30,24,.16)}
         header{display:flex;justify-content:space-between;gap:24px;border-bottom:2px solid #17211b;padding-bottom:18px}
-        h1{margin:0;font-size:24px} h2{margin:4px 0 0;color:#5b6c60;font-size:13px;text-transform:uppercase}
+        .brand{display:flex;align-items:flex-start;gap:14px}.brand .document-logo{margin:0!important;text-align:left!important}.brand .document-logo img{max-width:92px!important;max-height:64px!important}
+        h1{margin:0;font-size:25px;text-transform:uppercase;letter-spacing:.05em} h2{margin:4px 0 0;color:#5b6c60;font-size:13px;text-transform:uppercase}
         dl{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}
         dt{color:#607067;font-size:11px;font-weight:800;text-transform:uppercase} dd{margin:3px 0 0;font-weight:800}
+        .logistics{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:18px 0;padding:12px;border:1px solid #dbe6de;background:#f8fbf8}
+        .logistics div{min-width:0}.logistics span{display:block;color:#607067;font-size:10px;font-weight:800;text-transform:uppercase}.logistics strong{display:block;margin-top:3px;font-size:12px}
         table{width:100%;border-collapse:collapse} th{background:#245f84;color:#fff;padding:9px;text-align:left;font-size:12px;text-transform:uppercase}
         td{border-bottom:1px solid #e4ebe5;padding:10px 9px;vertical-align:top;font-size:13px} td span{color:#68786d;font-size:12px}
+        .signatures{display:grid;grid-template-columns:repeat(3,1fr);gap:32px;margin-top:36px}.signatures div{border-top:1px solid #64756a;padding-top:8px;font-size:12px;color:#55645b}
         .actions{margin-top:18px;text-align:right} button{border:0;border-radius:8px;background:#245f84;color:#fff;padding:10px 16px;font-weight:800}
         @media print{body{background:#fff} main{width:auto;margin:0;box-shadow:none}.actions{display:none}}
       </style>
@@ -1346,20 +1476,29 @@ function buildTransferDocumentWindowHtml(input: {
     <body>
       <main>
         <header>
-          <div><h1>${escapeHtml(transfer.documentNo)}</h1><h2>Stock transfer • ${escapeHtml(storeName)}</h2></div>
+          <div class="brand">${logoHtml}<div><h1>Waybill</h1><h2>${escapeHtml(transfer.documentNo)} • ${escapeHtml(storeName)}</h2></div></div>
           <div><strong>${escapeHtml(transfer.statusLabel)}</strong><br />${escapeHtml(new Date(transfer.updatedAt).toLocaleString())}</div>
         </header>
         <dl>
           <div><dt>Source</dt><dd>${escapeHtml(transfer.sourceStoreName)}</dd></div>
           <div><dt>Destination</dt><dd>${escapeHtml(transfer.destinationStoreName)}</dd></div>
           <div><dt>Requested</dt><dd>${formatNumber.format(transfer.requestedQuantity)}</dd></div>
-          <div><dt>Outstanding</dt><dd>${formatNumber.format(transfer.outstandingIssueQuantity + transfer.outstandingReceiptQuantity)}</dd></div>
+          <div><dt>Issued</dt><dd>${formatNumber.format(transfer.issuedQuantity)}</dd></div>
         </dl>
+        <section class="logistics">
+          ${logisticsRows
+            .map(
+              ([label, value]) =>
+                `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
+            )
+            .join("")}
+        </section>
         <table>
           <thead><tr><th>Item</th><th>From / To</th><th>Requested</th><th>Issued</th><th>Received</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
-        <div class="actions"><button onclick="window.print()">Print transfer</button></div>
+        <section class="signatures"><div>Issued by</div><div>Driver</div><div>Received by</div></section>
+        <div class="actions"><button onclick="window.print()">Print waybill</button></div>
       </main>
     </body>
   </html>`;
@@ -1553,6 +1692,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [sourceTransactionId, setSourceTransactionId] = useState<string | null>(null);
   const [fulfillingSalesOrderId, setFulfillingSalesOrderId] = useState<string | null>(null);
   const [transactionReference, setTransactionReference] = useState("");
+  const [transactionServiceType, setTransactionServiceType] = useState("COMBO");
   const [transactionNote, setTransactionNote] = useState("");
   const [transactionReferenceMatches, setTransactionReferenceMatches] = useState<
     OnlineStoreTransactionReferenceSummary[]
@@ -1661,6 +1801,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [transferQuantity, setTransferQuantity] = useState("1");
   const [transferReference, setTransferReference] = useState("");
   const [transferRequiredDate, setTransferRequiredDate] = useState(activeDate);
+  const [transferDeliveryNoteNo, setTransferDeliveryNoteNo] = useState("");
+  const [transferTransporterName, setTransferTransporterName] = useState("");
+  const [transferVehicleRegistrationNo, setTransferVehicleRegistrationNo] = useState("");
+  const [transferDriverName, setTransferDriverName] = useState("");
+  const [transferDriverContact, setTransferDriverContact] = useState("");
   const [transferNote, setTransferNote] = useState("");
   const [transferRequestDialogOpen, setTransferRequestDialogOpen] = useState(false);
   const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<TransferEntryTab>("header");
@@ -1668,6 +1813,14 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [selectedTransferDocumentKey, setSelectedTransferDocumentKey] = useState<string | null>(null);
   const [transferReceiptQuantities, setTransferReceiptQuantities] = useState<Record<string, string>>({});
   const [transferActionNote, setTransferActionNote] = useState("");
+  const [selectedTransferFeedbackKey, setSelectedTransferFeedbackKey] = useState<string | null>(null);
+  const [transferFeedbackWaterTest, setTransferFeedbackWaterTest] = useState("");
+  const [transferFeedbackQuantityBefore, setTransferFeedbackQuantityBefore] = useState("");
+  const [transferFeedbackExpectedReceived, setTransferFeedbackExpectedReceived] = useState("");
+  const [transferFeedbackExpectedStock, setTransferFeedbackExpectedStock] = useState("");
+  const [transferFeedbackQuantityAfter, setTransferFeedbackQuantityAfter] = useState("");
+  const [transferFeedbackActualReceived, setTransferFeedbackActualReceived] = useState("");
+  const [transferFeedbackNote, setTransferFeedbackNote] = useState("");
   const [countedQuantity, setCountedQuantity] = useState("0");
   const [countNote, setCountNote] = useState("");
   const [activeCountEntryTab, setActiveCountEntryTab] = useState<CountEntryTab>("header");
@@ -1681,7 +1834,46 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [isLoadingRemoteInventory, setIsLoadingRemoteInventory] = useState(false);
   const [inventoryMessage, setInventoryMessage] = useState("");
   const [isPostingInventory, setIsPostingInventory] = useState(false);
-  const renderedWorkspace = workspaceNav.find((item) => item.id === activeWorkspace) ?? workspaceNav[0];
+  const visibleWorkspaceNav = useMemo(
+    () =>
+      workspaceNav.filter(
+        (item) =>
+          !item.requiresFuelOperationsVisibility || workspace.capabilities.hasFuelOperationsVisibility
+      ),
+    [workspace.capabilities.hasFuelOperationsVisibility]
+  );
+  const onlineStoreFuelViews = useMemo<FuelOperationsViewKey[]>(() => {
+    const views: FuelOperationsViewKey[] = [];
+
+    if (workspace.capabilities.canManageFuelTanks) {
+      views.push("tanks");
+    }
+
+    if (workspace.capabilities.canCaptureFuelDips) {
+      views.push("dips");
+    }
+
+    if (workspace.capabilities.canCaptureFuelMeterReadings) {
+      views.push("meter-readings");
+    }
+
+    if (workspace.capabilities.canCaptureSupplierFuelReceipts) {
+      views.push("supplier-receipts");
+    }
+
+    if (workspace.capabilities.canManageFuelReconciliation) {
+      views.push("reconciliation");
+    }
+
+    return views;
+  }, [
+    workspace.capabilities.canCaptureFuelDips,
+    workspace.capabilities.canCaptureFuelMeterReadings,
+    workspace.capabilities.canCaptureSupplierFuelReceipts,
+    workspace.capabilities.canManageFuelReconciliation,
+    workspace.capabilities.canManageFuelTanks
+  ]);
+  const renderedWorkspace = visibleWorkspaceNav.find((item) => item.id === activeWorkspace) ?? visibleWorkspaceNav[0] ?? workspaceNav[0];
   const localClock = clockFormatter.format(currentTime);
   const dashboardScopeLabel =
     dashboardDateFrom === dashboardDateTo ? `shop ${dashboardDateFrom}` : `${dashboardDateFrom} to ${dashboardDateTo}`;
@@ -1811,7 +2003,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           )
           .values.join(", ")
       : "#d6e0d6 0 100%";
-  const sellableProducts = workspace.products.filter((product) => product.quantityOnHand > 0);
+  const sellableProducts = workspace.products.filter(isSellableCatalogProduct);
   const filteredProducts = sellableProducts.filter((product) => {
     const query = searchQuery.trim().toLowerCase();
     const departmentMatch = !catalogDepartment || product.department === catalogDepartment;
@@ -2132,8 +2324,22 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     return statusMatch && queryMatch;
   });
   const transferDocumentGroups = buildTransferDocumentGroups(transferRequestRows);
+  const transferListHasIssueAction = transferDocumentGroups.some((transfer) =>
+    transfer.lines.some((line) => line.role === "SOURCE") || transfer.outstandingIssueQuantity > 0
+  );
+  const transferListHasReceiveAction = transferDocumentGroups.some((transfer) =>
+    transfer.lines.some((line) => line.role === "DESTINATION") || transfer.outstandingReceiptQuantity > 0
+  );
+  const transferProcessHeader =
+    transferListHasIssueAction && !transferListHasReceiveAction
+      ? "Issue"
+      : transferListHasReceiveAction && !transferListHasIssueAction
+        ? "Receive"
+        : "Issue / Receive";
   const selectedTransferDocument =
     transferDocumentGroups.find((group) => group.key === selectedTransferDocumentKey) ?? null;
+  const selectedTransferFeedbackDocument =
+    transferDocumentGroups.find((group) => group.key === selectedTransferFeedbackKey) ?? null;
   const selectedTransferSourceStore =
     workspace.transferStores.find((store) => store.storeId === transferSourceStoreId) ?? workspace.transferStores[0] ?? null;
   const selectedTransferSourceLocation =
@@ -2388,7 +2594,9 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     return parseAmount(draft.amount) > 0 && tender?.paymentMethod === "CASH" && tender.allowChange;
   });
   const storeCreditLimitExceededBy =
-    selectedCustomer?.creditLimitAmount === null || selectedCustomer?.creditLimitAmount === undefined
+    selectedCustomer?.creditLimitAmount === null ||
+    selectedCustomer?.creditLimitAmount === undefined ||
+    selectedCustomer.creditLimitAmount <= 0
       ? 0
       : Math.max(0, selectedCustomer.receivableBalanceAmount + storeCreditAmount - selectedCustomer.creditLimitAmount);
   const missingBankAccountTender = paymentDrafts.some((draft) => {
@@ -2849,6 +3057,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
   function resetTransactionDetails() {
     setTransactionReference("");
+    setTransactionServiceType("COMBO");
     setTransactionNote("");
     setTransactionReferenceMatches([]);
     setTransactionReferenceSearchDismissed(false);
@@ -3074,6 +3283,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           depositAmount: parseAmount(salesOrderDepositAmount),
           depositTenderMethodCode: parseAmount(salesOrderDepositAmount) > 0 ? salesOrderDepositTenderCode : null,
           depositReference: salesOrderDepositReference.trim() || null,
+          serviceType: transactionServiceType,
           note: transactionNotePayload()
         })
       });
@@ -4074,6 +4284,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           loyaltyRedemptionAmount,
           managerOverride: buildManagerOverridePayload(),
           reference: transactionReference.trim() || null,
+          serviceType: transactionServiceType,
           note: transactionNotePayload(),
           details: transactionNote.trim() || null
         })
@@ -4868,7 +5079,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     transferWindow.document.write(
       buildTransferDocumentWindowHtml({
         transfer,
-        storeName: workspace.store?.name ?? "Online store"
+        storeName: workspace.store?.name ?? "Online store",
+        companyLogoUrl: localReceiptLogoUrl ?? workspace.branding.companyLogoUrl
       })
     );
     transferWindow.document.close();
@@ -5003,6 +5215,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           lines,
           externalReference: transferReference,
           requiredAt: transferRequiredDate,
+          deliveryNoteNo: transferDeliveryNoteNo,
+          transporterName: transferTransporterName,
+          vehicleRegistrationNo: transferVehicleRegistrationNo,
+          driverName: transferDriverName,
+          driverContact: transferDriverContact,
           note: transferNote
         })
       });
@@ -5019,6 +5236,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       setTransferRequestDialogOpen(false);
       setActiveTransferEntryTab("header");
       setTransferReference("");
+      setTransferDeliveryNoteNo("");
+      setTransferTransporterName("");
+      setTransferVehicleRegistrationNo("");
+      setTransferDriverName("");
+      setTransferDriverContact("");
       setTransferQuantity("1");
       setTransferNote("");
       router.refresh();
@@ -5055,6 +5277,15 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         body: JSON.stringify({
           quantity,
           serialNumbers,
+          ...(action === "issue"
+            ? {
+                transporterName: selectedTransferDocument?.transporterName ?? null,
+                vehicleRegistrationNo: selectedTransferDocument?.vehicleRegistrationNo ?? null,
+                driverName: selectedTransferDocument?.driverName ?? null,
+                driverContact: selectedTransferDocument?.driverContact ?? null,
+                deliveryNoteNo: selectedTransferDocument?.deliveryNoteNo ?? null
+              }
+            : {}),
           note: transferActionNote || null
         })
       });
@@ -5115,6 +5346,15 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           body: JSON.stringify({
             quantity,
             serialNumbers: [],
+            ...(action === "issue"
+              ? {
+                  transporterName: transferDocument.transporterName,
+                  vehicleRegistrationNo: transferDocument.vehicleRegistrationNo,
+                  driverName: transferDocument.driverName,
+                  driverContact: transferDocument.driverContact,
+                  deliveryNoteNo: transferDocument.deliveryNoteNo
+                }
+              : {}),
             note: transferActionNote || null
           })
         });
@@ -5146,6 +5386,78 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       router.refresh();
     } catch (error) {
       setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not process that transfer.");
+    } finally {
+      setIsPostingInventory(false);
+    }
+  }
+
+  function openTransferFeedbackDialog(transferDocument: TransferDocumentGroup) {
+    const expectedReceived = transferDocument.expectedQuantityReceived ?? transferDocument.issuedQuantity;
+    const quantityBefore = transferDocument.quantityBeforeDelivery;
+    const quantityAfter = transferDocument.quantityAfterDelivery;
+    const expectedStock =
+      transferDocument.expectedStockQuantity ??
+      (quantityBefore === null ? null : roundQuantity(quantityBefore + expectedReceived));
+    const actualReceived =
+      transferDocument.actualQuantityReceived ??
+      (quantityBefore === null || quantityAfter === null
+        ? null
+        : roundQuantity(quantityAfter - quantityBefore));
+
+    setSelectedTransferFeedbackKey(transferDocument.key);
+    setTransferFeedbackWaterTest(transferDocument.waterTestResult ?? "");
+    setTransferFeedbackQuantityBefore(quantityBefore === null ? "" : String(quantityBefore));
+    setTransferFeedbackExpectedReceived(String(expectedReceived));
+    setTransferFeedbackExpectedStock(expectedStock === null ? "" : String(expectedStock));
+    setTransferFeedbackQuantityAfter(quantityAfter === null ? "" : String(quantityAfter));
+    setTransferFeedbackActualReceived(actualReceived === null ? "" : String(actualReceived));
+    setTransferFeedbackNote(transferDocument.feedbackNote ?? "");
+  }
+
+  async function postTransferFeedback(action: "SAVE" | "CONFIRM") {
+    const transferDocument = selectedTransferFeedbackDocument;
+    const transferId = transferDocument?.lines[0]?.transferId;
+
+    if (!transferDocument || !transferId) {
+      setInventoryMessage("Choose a fuel transfer before saving feedback.");
+      return;
+    }
+
+    setIsPostingInventory(true);
+    setInventoryMessage(`${action === "CONFIRM" ? "Confirming" : "Saving"} transfer feedback...`);
+
+    try {
+      const response = await fetch(
+        `/api/fuel-operations/station-deliveries/${encodeURIComponent(transferId)}/feedback`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            action,
+            waterTestResult: transferFeedbackWaterTest || null,
+            quantityBeforeDelivery: transferFeedbackQuantityBefore || null,
+            expectedQuantityReceived: transferFeedbackExpectedReceived || null,
+            expectedStockQuantity: transferFeedbackExpectedStock || null,
+            quantityAfterDelivery: transferFeedbackQuantityAfter || null,
+            actualQuantityReceived: transferFeedbackActualReceived || null,
+            feedbackNote: transferFeedbackNote || null,
+            feedbackOperatorName: workspace.operator.displayName
+          })
+        }
+      );
+      const payload = (await response.json()) as { message?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not save transfer feedback.");
+      }
+
+      setInventoryMessage(payload.message ?? "Transfer feedback saved.");
+      setSelectedTransferFeedbackKey(null);
+      router.refresh();
+    } catch (error) {
+      setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not save transfer feedback.");
     } finally {
       setIsPostingInventory(false);
     }
@@ -5496,6 +5808,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         transfer.outstandingReceiptQuantity > 0 &&
         !transfer.isSerialized
     ).length;
+    const canCaptureFeedback =
+      isFuelTransferDocument(selectedTransferDocument) &&
+      selectedTransferDocument.issuedQuantity > 0 &&
+      selectedTransferDocument.lines.some((transfer) => transfer.role === "SOURCE");
 
     return (
       <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
@@ -5523,6 +5839,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   Receive all
                 </button>
               ) : null}
+              {canCaptureFeedback ? (
+                <button className="rms-button is-primary" onClick={() => openTransferFeedbackDialog(selectedTransferDocument)} type="button">
+                  Feedback
+                </button>
+              ) : null}
               <button className="rms-button" onClick={() => openTransferDocumentWindow(selectedTransferDocument)} type="button">Print</button>
               <button className="rms-button" onClick={() => setSelectedTransferDocumentKey(null)} type="button">Close</button>
             </div>
@@ -5535,6 +5856,13 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               label="Outstanding"
               tone={selectedTransferDocument.outstandingIssueQuantity + selectedTransferDocument.outstandingReceiptQuantity > 0 ? "warning" : "good"}
               value={formatNumber.format(selectedTransferDocument.outstandingIssueQuantity + selectedTransferDocument.outstandingReceiptQuantity)}
+            />
+            <DocumentStat label="Vehicle" value={selectedTransferDocument.vehicleRegistrationNo ?? "Not captured"} />
+            <DocumentStat label="Driver" value={selectedTransferDocument.driverName ?? "Not captured"} />
+            <DocumentStat
+              label="Feedback"
+              tone={selectedTransferDocument.feedbackStatus === "POSTED" || selectedTransferDocument.feedbackStatus === "CONFIRMED" ? "good" : "warning"}
+              value={selectedTransferDocument.feedbackStatus}
             />
           </div>
           <label className="rms-note-field rms-transfer-note">
@@ -5592,6 +5920,99 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 </div>
               );
             })}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderTransferFeedbackDialog() {
+    if (!selectedTransferFeedbackDocument) {
+      return null;
+    }
+
+    const beforeQuantity = Number(transferFeedbackQuantityBefore);
+    const afterQuantity = Number(transferFeedbackQuantityAfter);
+    const expectedReceived = Number(transferFeedbackExpectedReceived);
+    const actualReceivedFromStock =
+      Number.isFinite(beforeQuantity) && Number.isFinite(afterQuantity)
+        ? roundQuantity(afterQuantity - beforeQuantity)
+        : null;
+    const actualReceived =
+      transferFeedbackActualReceived.trim() && Number.isFinite(Number(transferFeedbackActualReceived))
+        ? Number(transferFeedbackActualReceived)
+        : actualReceivedFromStock;
+    const variance =
+      actualReceived !== null && Number.isFinite(expectedReceived)
+        ? roundQuantity(actualReceived - expectedReceived)
+        : null;
+
+    return (
+      <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
+        <section className="rms-dialog rms-wide-dialog rms-document-dialog rms-transfer-feedback-dialog">
+          <div className="rms-panel-title">
+            <div><span>Fuel delivery feedback</span><h2>{selectedTransferFeedbackDocument.documentNo}</h2></div>
+            <button className="rms-button" onClick={() => setSelectedTransferFeedbackKey(null)} type="button">Close</button>
+          </div>
+          <div className="rms-document-summary-grid">
+            <DocumentStat label="Source" value={selectedTransferFeedbackDocument.sourceStoreName} />
+            <DocumentStat label="Destination" value={selectedTransferFeedbackDocument.destinationStoreName} />
+            <DocumentStat label="Issued" value={formatNumber.format(selectedTransferFeedbackDocument.issuedQuantity)} />
+            <DocumentStat
+              label="Variance"
+              tone={variance === null || variance === 0 ? "good" : "warning"}
+              value={variance === null ? "-" : formatNumber.format(variance)}
+            />
+          </div>
+          <div className="rms-form-grid rms-transfer-feedback-grid">
+            <label>
+              <span>Water test</span>
+              <select onChange={(event) => setTransferFeedbackWaterTest(event.target.value)} value={transferFeedbackWaterTest}>
+                <option value="">Not captured</option>
+                <option value="NEGATIVE">Negative</option>
+                <option value="POSITIVE">Positive</option>
+              </select>
+            </label>
+            <label><span>Qty before delivery</span><input min="0" onChange={(event) => {
+              const nextBefore = event.target.value;
+              setTransferFeedbackQuantityBefore(nextBefore);
+              const before = Number(nextBefore);
+              const expected = Number(transferFeedbackExpectedReceived);
+              if (Number.isFinite(before) && Number.isFinite(expected)) {
+                setTransferFeedbackExpectedStock(String(roundQuantity(before + expected)));
+              }
+            }} step="0.001" type="number" value={transferFeedbackQuantityBefore} /></label>
+            <label><span>Expected qty received</span><input min="0" onChange={(event) => {
+              const nextExpected = event.target.value;
+              setTransferFeedbackExpectedReceived(nextExpected);
+              const before = Number(transferFeedbackQuantityBefore);
+              const expected = Number(nextExpected);
+              if (Number.isFinite(before) && Number.isFinite(expected)) {
+                setTransferFeedbackExpectedStock(String(roundQuantity(before + expected)));
+              }
+            }} step="0.001" type="number" value={transferFeedbackExpectedReceived} /></label>
+            <label><span>Expected stock</span><input min="0" onChange={(event) => setTransferFeedbackExpectedStock(event.target.value)} step="0.001" type="number" value={transferFeedbackExpectedStock} /></label>
+            <label><span>Qty after delivery</span><input min="0" onChange={(event) => {
+              const nextAfter = event.target.value;
+              setTransferFeedbackQuantityAfter(nextAfter);
+              const before = Number(transferFeedbackQuantityBefore);
+              const after = Number(nextAfter);
+              if (Number.isFinite(before) && Number.isFinite(after)) {
+                setTransferFeedbackActualReceived(String(roundQuantity(after - before)));
+              }
+            }} step="0.001" type="number" value={transferFeedbackQuantityAfter} /></label>
+            <label><span>Actual qty received</span><input min="0" onChange={(event) => setTransferFeedbackActualReceived(event.target.value)} step="0.001" type="number" value={transferFeedbackActualReceived} /></label>
+            <label><span>Variance</span><input readOnly value={variance === null ? "" : String(variance)} /></label>
+            <label className="rms-note-field rms-transfer-feedback-note"><span>Feedback note</span><textarea onChange={(event) => setTransferFeedbackNote(event.target.value)} rows={3} value={transferFeedbackNote} /></label>
+          </div>
+          <div className="rms-dialog-actions">
+            <button className="rms-button" onClick={() => setSelectedTransferFeedbackKey(null)} type="button">Cancel</button>
+            <button className="rms-button" disabled={isPostingInventory} onClick={() => void postTransferFeedback("SAVE")} type="button">
+              Save
+            </button>
+            <button className="rms-button is-primary" disabled={isPostingInventory} onClick={() => void postTransferFeedback("CONFIRM")} type="button">
+              Confirm
+            </button>
           </div>
         </section>
       </div>
@@ -5890,7 +6311,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         </div>
 
         <nav aria-label="Desktop workspaces" className="rms-nav">
-          {workspaceNav.map((item) => (
+          {visibleWorkspaceNav.map((item) => (
             <button
               aria-current={activeWorkspace === item.id ? "page" : undefined}
               aria-label={sidebarCollapsed ? item.label : undefined}
@@ -6102,6 +6523,20 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   placeholder="Start typing customer name, no, phone, or email"
                   value={customerQuery}
                 />
+                <label className="rms-pos-service-select">
+                  <span>Service type</span>
+                  <select
+                    disabled={isRecalledBasket}
+                    onChange={(event) => setTransactionServiceType(event.target.value)}
+                    value={transactionServiceType}
+                  >
+                    {onlineStoreServiceTypeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button className="rms-button" disabled={isRecalledBasket} onClick={() => {
                   setSelectedCustomer(null);
                   setCustomerQuery("");
@@ -6138,7 +6573,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 <div className="rms-customer-suggestions is-product">
                   {filteredProducts.slice(0, 5).map((product) => (
                     <button disabled={isRecalledBasket} key={product.productId} onClick={() => addProduct(product, parseAmount(scanQuantity) || 1)} type="button">
-                      <div><strong>{product.productName}</strong><span>{product.productCode} · Stock {formatNumber.format(product.quantityOnHand)}</span></div>
+                      <div><strong>{product.productName}</strong><span>{product.productCode} · {formatCatalogAvailability(product)}</span></div>
                       <small>{product.mustEnterPriceAtPos ? "Enter price" : formatMoney(product.price, currencyCode)}</small>
                     </button>
                   ))}
@@ -6355,12 +6790,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <button className="rms-product-tile" disabled={isRecalledBasket} key={product.productId} onClick={() => addProduct(product)} type="button">
                     {product.imageUrl ? <img alt="" src={product.imageUrl} /> : <span className="rms-product-placeholder">No image</span>}
                     <strong>{product.productName}</strong>
-                    <span>Stock {formatNumber.format(product.quantityOnHand)}</span>
+                    <span>{formatCatalogAvailability(product)}</span>
                     <b>{product.mustEnterPriceAtPos ? "Enter price" : formatMoney(product.price, currencyCode)}</b>
                   </button>
                 )) : (
                   <div className="rms-empty-catalog">
-                    No stock is available for this online store location.
+                    No stock or service items are available for this online store location.
                   </div>
                 )}
               </div>
@@ -6441,6 +6876,19 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                       ))}
                     </div>
                   ) : null}
+                  <label className="rms-note-field">
+                    <span>Service type</span>
+                    <select
+                      onChange={(event) => setTransactionServiceType(event.target.value)}
+                      value={transactionServiceType}
+                    >
+                      {onlineStoreServiceTypeOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="rms-note-field"><span>Details</span><textarea onChange={(event) => setTransactionNote(event.target.value)} placeholder="Additional transaction details for the receipt" value={transactionNote} /></label>
                   <div className="rms-dialog-actions">
                     <button className="rms-button" onClick={() => setActiveDrawer(null)} type="button">Cancel</button>
@@ -7068,6 +7516,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                             <label><span>Destination</span><select onChange={(event) => setTransferDestinationLocationId(event.target.value)} value={selectedTransferDestinationLocation?.locationId ?? transferDestinationLocationId}>{workspace.inventoryLocations.map((location) => <option key={location.locationId} value={location.locationId}>{location.locationName}</option>)}</select></label>
                             <label><span>Required date</span><input onChange={(event) => setTransferRequiredDate(event.target.value)} type="date" value={transferRequiredDate} /></label>
                             <label><span>Reference</span><input onChange={(event) => setTransferReference(event.target.value)} value={transferReference} /></label>
+                            <label><span>Waybill no.</span><input onChange={(event) => setTransferDeliveryNoteNo(event.target.value)} value={transferDeliveryNoteNo} /></label>
+                            <label><span>Transporter</span><input onChange={(event) => setTransferTransporterName(event.target.value)} value={transferTransporterName} /></label>
+                            <label><span>Vehicle no.</span><input onChange={(event) => setTransferVehicleRegistrationNo(event.target.value)} value={transferVehicleRegistrationNo} /></label>
+                            <label><span>Driver</span><input onChange={(event) => setTransferDriverName(event.target.value)} value={transferDriverName} /></label>
+                            <label><span>Driver contact</span><input onChange={(event) => setTransferDriverContact(event.target.value)} value={transferDriverContact} /></label>
                             <label><span>Note</span><input onChange={(event) => setTransferNote(event.target.value)} value={transferNote} /></label>
                           </div>
                         ) : null}
@@ -7107,10 +7560,26 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                     </div>
                   ) : null}
                   <div className="rms-table rms-stock-request-table">
-                    <div className="rms-table-head"><span>Transfer</span><span>Source</span><span>Destination</span><span>Status</span><span>Requested</span><span>Outstanding</span><span>View</span><span>Receive</span><span>Print</span></div>
+                    <div className="rms-table-head"><span>Transfer</span><span>Source</span><span>Destination</span><span>Status</span><span>Requested</span><span>Outstanding</span><span>View</span><span>{transferProcessHeader}</span><span /><span /></div>
                     {transferDocumentGroups.map((transfer) => {
-                      const canProcessTransfer = transfer.outstandingIssueQuantity > 0 || transfer.outstandingReceiptQuantity > 0;
-                      const processLabel = transfer.outstandingReceiptQuantity > 0 ? "Receive" : "Process";
+                      const canIssueTransfer =
+                        transfer.lines.some((line) => line.role === "SOURCE") &&
+                        transfer.outstandingIssueQuantity > 0;
+                      const canReceiveTransfer =
+                        transfer.lines.some((line) => line.role === "DESTINATION") &&
+                        transfer.outstandingReceiptQuantity > 0;
+                      const canProcessTransfer = canIssueTransfer || canReceiveTransfer;
+                      const processLabel = canIssueTransfer
+                        ? "Issue"
+                        : canReceiveTransfer
+                          ? "Receive"
+                          : transfer.lines.some((line) => line.role === "SOURCE")
+                            ? "Issue"
+                            : "Receive";
+                      const canCaptureFeedback =
+                        isFuelTransferDocument(transfer) &&
+                        transfer.issuedQuantity > 0 &&
+                        transfer.lines.some((line) => line.role === "SOURCE");
 
                       return (
                         <div className="rms-table-row" key={transfer.key}>
@@ -7131,6 +7600,14 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                           >
                             <ReceiveIcon />
                           </ActionIconButton>
+                          <button
+                            className="rms-row-button"
+                            disabled={isPostingInventory || !canCaptureFeedback}
+                            onClick={() => openTransferFeedbackDialog(transfer)}
+                            type="button"
+                          >
+                            Feedback
+                          </button>
                           <ActionIconButton label={`Print ${transfer.documentNo}`} onClick={() => openTransferDocumentWindow(transfer)} tone="print">
                             <PrintIcon />
                           </ActionIconButton>
@@ -7258,8 +7735,31 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         {renderPurchaseOrderDialog()}
         {renderGoodsReceiptDialog()}
         {renderTransferDocumentDialog()}
+        {renderTransferFeedbackDialog()}
         {renderRemoteInventoryDialog()}
         {renderInventorySerialDialog()}
+
+        {activeWorkspace === "fuel" ? (
+          <div className="rms-workspace">
+            {onlineStoreFuelViews.length > 0 ? (
+              <FuelOperationsWorkspace
+                availableViews={onlineStoreFuelViews}
+                defaultView={onlineStoreFuelViews[0] ?? "tanks"}
+                embedInShell
+                pageDescription="Station fuel controls for tanks, dips, meter readings, supplier receipts, and reconciliation."
+                pageHeading="Fuel"
+                workspace={workspace.fuelOperationsWorkspace}
+              />
+            ) : (
+              <section className="rms-panel">
+                <EmptyState
+                  detail="Ask HQ to grant the fuel tank, dip, meter-reading, supplier-receipt, or reconciliation permission for this online-store role."
+                  title="No fuel workspace permission"
+                />
+              </section>
+            )}
+          </div>
+        ) : null}
 
         {activeWorkspace === "manager" ? (
           <div className="rms-workspace rms-tabbed-workspace">
@@ -7409,7 +7909,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   </div>
                   {correctionSelection?.correctionType === "EXCHANGE" ? (
                     <div className="rms-manager-form">
-                      <label><span>Replacement</span><select onChange={(event) => setExchangeProductId(event.target.value)} value={exchangeProductId}><option value="">Select item</option>{workspace.products.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · stock {formatNumber.format(product.quantityOnHand)}</option>)}</select></label>
+                      <label><span>Replacement</span><select onChange={(event) => setExchangeProductId(event.target.value)} value={exchangeProductId}><option value="">Select item</option>{workspace.products.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {formatCatalogAvailability(product)}</option>)}</select></label>
                       <label><span>Quantity</span><input onChange={(event) => setExchangeQuantity(event.target.value)} type="number" value={exchangeQuantity} /></label>
                     </div>
                   ) : null}

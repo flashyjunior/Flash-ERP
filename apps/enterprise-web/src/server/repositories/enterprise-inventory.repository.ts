@@ -422,6 +422,24 @@ export type EnterpriseInventoryWorkspaceData = {
     sourceNodeCode: string | null;
     destinationNodeCode: string | null;
     externalReference: string | null;
+    transporterName: string | null;
+    vehicleRegistrationNo: string | null;
+    driverName: string | null;
+    driverContact: string | null;
+    deliveryNoteNo: string | null;
+    workflowType: string | null;
+    feedbackStatus: string;
+    waterTestResult: string | null;
+    quantityBeforeDelivery: number | null;
+    expectedQuantityReceived: number | null;
+    expectedStockQuantity: number | null;
+    quantityAfterDelivery: number | null;
+    actualQuantityReceived: number | null;
+    feedbackVarianceQuantity: number | null;
+    feedbackNote: string | null;
+    feedbackRecordedAt: string | null;
+    feedbackRecordedAtLabel: string;
+    feedbackOperatorName: string | null;
     requestedAt: string;
     requestedAtLabel: string;
     requiredAt: string | null;
@@ -825,16 +843,29 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
     }),
     prisma.interStoreTransfer.findMany({
       where: {
-        retailOrgId: enterpriseNode.retailOrgId
+        retailOrgId: enterpriseNode.retailOrgId,
+        OR: [
+          {
+            status: {
+              in: ["DRAFT", "REQUESTED", "PART_ISSUED", "ISSUED", "PART_RECEIVED"]
+            }
+          },
+          {
+            updatedAt: {
+              gte: new Date(Date.now() - 30 * 86_400_000)
+            }
+          }
+        ]
       },
       orderBy: [{ updatedAt: "desc" }, { transferNo: "desc" }],
-      take: 100,
+      take: 500,
       select: {
         id: true,
         transferNo: true,
         transferBatchNo: true,
         lineNo: true,
         origin: true,
+        workflowType: true,
         status: true,
         externalReference: true,
         requestedQuantity: true,
@@ -842,6 +873,22 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         receivedQuantity: true,
         sourceNodeCode: true,
         destinationNodeCode: true,
+        transporterName: true,
+        vehicleRegistrationNo: true,
+        driverName: true,
+        driverContact: true,
+        deliveryNoteNo: true,
+        feedbackStatus: true,
+        waterTestResult: true,
+        quantityBeforeDelivery: true,
+        expectedQuantityReceived: true,
+        expectedStockQuantity: true,
+        quantityAfterDelivery: true,
+        actualQuantityReceived: true,
+        feedbackVarianceQuantity: true,
+        feedbackNote: true,
+        feedbackRecordedAt: true,
+        feedbackOperatorName: true,
         requestedAt: true,
         requiredAt: true,
         sourceStore: {
@@ -1398,6 +1445,42 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
       sourceNodeCode: transfer.sourceNodeCode,
       destinationNodeCode: transfer.destinationNodeCode,
       externalReference: transfer.externalReference,
+      transporterName: transfer.transporterName,
+      vehicleRegistrationNo: transfer.vehicleRegistrationNo,
+      driverName: transfer.driverName,
+      driverContact: transfer.driverContact,
+      deliveryNoteNo: transfer.deliveryNoteNo,
+      workflowType: transfer.workflowType,
+      feedbackStatus: transfer.feedbackStatus,
+      waterTestResult: transfer.waterTestResult,
+      quantityBeforeDelivery:
+        transfer.quantityBeforeDelivery === null
+          ? null
+          : Number(Number(transfer.quantityBeforeDelivery).toFixed(3)),
+      expectedQuantityReceived:
+        transfer.expectedQuantityReceived === null
+          ? null
+          : Number(Number(transfer.expectedQuantityReceived).toFixed(3)),
+      expectedStockQuantity:
+        transfer.expectedStockQuantity === null
+          ? null
+          : Number(Number(transfer.expectedStockQuantity).toFixed(3)),
+      quantityAfterDelivery:
+        transfer.quantityAfterDelivery === null
+          ? null
+          : Number(Number(transfer.quantityAfterDelivery).toFixed(3)),
+      actualQuantityReceived:
+        transfer.actualQuantityReceived === null
+          ? null
+          : Number(Number(transfer.actualQuantityReceived).toFixed(3)),
+      feedbackVarianceQuantity:
+        transfer.feedbackVarianceQuantity === null
+          ? null
+          : Number(Number(transfer.feedbackVarianceQuantity).toFixed(3)),
+      feedbackNote: transfer.feedbackNote,
+      feedbackRecordedAt: toIsoString(transfer.feedbackRecordedAt),
+      feedbackRecordedAtLabel: formatRelativeTime(transfer.feedbackRecordedAt),
+      feedbackOperatorName: transfer.feedbackOperatorName,
       requestedAt: transfer.requestedAt.toISOString(),
       requestedAtLabel: formatRelativeTime(transfer.requestedAt),
       requiredAt: toIsoString(transfer.requiredAt),

@@ -178,12 +178,12 @@ export async function getEnterpriseDatabaseReadiness(): Promise<EnterpriseDataba
   const checkedAt = new Date().toISOString();
 
   try {
-    const [migrationRows, tableRows, columnRows] = await Promise.all([
-      prisma.$queryRaw<Array<{ migration_name: string }>>`
-        SELECT migration_name
-        FROM [dbo].[_prisma_migrations]
-        WHERE migration_name IN (${Prisma.join(requiredMigrationNames)})
-          AND finished_at IS NOT NULL
+    const [migrationTableRows, tableRows, columnRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ table_name: string }>>`
+        SELECT TABLE_NAME AS table_name
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo'
+          AND TABLE_NAME = '_prisma_migrations'
       `,
       prisma.$queryRaw<Array<{ table_name: string }>>`
         SELECT TABLE_NAME AS table_name
@@ -200,6 +200,15 @@ export async function getEnterpriseDatabaseReadiness(): Promise<EnterpriseDataba
           ])})
       `,
     ]);
+    const migrationTableExists = migrationTableRows.length > 0;
+    const migrationRows = migrationTableExists
+      ? await prisma.$queryRaw<Array<{ migration_name: string }>>`
+          SELECT migration_name
+          FROM [dbo].[_prisma_migrations]
+          WHERE migration_name IN (${Prisma.join(requiredMigrationNames)})
+            AND finished_at IS NOT NULL
+        `
+      : [];
 
     const appliedMigrations = new Set(
       migrationRows.map((row) => row.migration_name),
@@ -208,9 +217,9 @@ export async function getEnterpriseDatabaseReadiness(): Promise<EnterpriseDataba
     const existingColumns = new Set(
       columnRows.map((row) => `${row.table_name}.${row.column_name}`),
     );
-    const missingMigrationNames = requiredMigrationNames.filter(
-      (migration) => !appliedMigrations.has(migration),
-    );
+    const missingMigrationNames = migrationTableExists
+      ? requiredMigrationNames.filter((migration) => !appliedMigrations.has(migration))
+      : [];
     const missingTables = requiredTables.filter(
       (table) => !existingTables.has(table),
     );

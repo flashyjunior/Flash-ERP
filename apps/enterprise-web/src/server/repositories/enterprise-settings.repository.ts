@@ -395,7 +395,7 @@ function readCompanyProfileSettings(
     region: readString(payload, "region"),
     countryCode: readString(payload, "countryCode"),
     postalCode: readString(payload, "postalCode"),
-    baseCurrencyCode: readString(payload, "baseCurrencyCode", retailOrg.baseCurrencyCode),
+    baseCurrencyCode: retailOrg.baseCurrencyCode || readString(payload, "baseCurrencyCode", "USD"),
     timezone: readString(payload, "timezone", retailOrg.timezone)
   };
 }
@@ -881,6 +881,11 @@ export type EnterpriseSettingsWorkspaceData = {
     storeCode: string;
     storeName: string;
   }>;
+  currencyOptions: Array<{
+    currencyCode: string;
+    label: string;
+    isBaseCurrency: boolean;
+  }>;
   postureMessages: string[];
   priorities: string[];
   statusMessage: string;
@@ -924,6 +929,7 @@ export function buildUnavailableEnterpriseSettingsWorkspace(
     smsSettings: defaultSmsSettings,
     optionsSettings: defaultOptionSettings,
     storeOptions: [],
+    currencyOptions: [],
     postureMessages: [
       "Enterprise company and integration settings will appear here once Flash ERP can read the control-plane database."
     ],
@@ -944,39 +950,52 @@ export async function getEnterpriseSettingsWorkspace(): Promise<EnterpriseSettin
     );
   }
 
-  const [activeStores, activeRetailUsers, activeReceiptTemplates, storeOptions] = await Promise.all([
-    prisma.store.count({
-      where: {
-        retailOrgId: enterpriseNode.retailOrgId,
-        status: RecordStatus.ACTIVE
-      }
-    }),
-    prisma.retailUser.count({
-      where: {
-        retailOrgId: enterpriseNode.retailOrgId,
-        deletedAt: null,
-        accountStatus: "ACTIVE"
-      }
-    }),
-    prisma.receiptTemplate.count({
-      where: {
-        retailOrgId: enterpriseNode.retailOrgId,
-        status: RecordStatus.ACTIVE
-      }
-    }),
-    prisma.store.findMany({
-      where: {
-        retailOrgId: enterpriseNode.retailOrgId,
-        status: RecordStatus.ACTIVE
-      },
-      orderBy: [{ name: "asc" }, { code: "asc" }],
-      select: {
-        id: true,
-        code: true,
-        name: true
-      }
-    })
-  ]);
+  const [activeStores, activeRetailUsers, activeReceiptTemplates, storeOptions, currencyRows] =
+    await Promise.all([
+      prisma.store.count({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          status: RecordStatus.ACTIVE
+        }
+      }),
+      prisma.retailUser.count({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          deletedAt: null,
+          accountStatus: "ACTIVE"
+        }
+      }),
+      prisma.receiptTemplate.count({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          status: RecordStatus.ACTIVE
+        }
+      }),
+      prisma.store.findMany({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          status: RecordStatus.ACTIVE
+        },
+        orderBy: [{ name: "asc" }, { code: "asc" }],
+        select: {
+          id: true,
+          code: true,
+          name: true
+        }
+      }),
+      prisma.erpCurrency.findMany({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          status: RecordStatus.ACTIVE
+        },
+        orderBy: [{ isBaseCurrency: "desc" }, { code: "asc" }],
+        select: {
+          code: true,
+          name: true,
+          isBaseCurrency: true
+        }
+      })
+    ]);
 
   const companyProfile = readCompanyProfileSettings(
     enterpriseNode.retailOrg.companySettingsJson,
@@ -1023,6 +1042,11 @@ export async function getEnterpriseSettingsWorkspace(): Promise<EnterpriseSettin
       storeCode: store.code,
       storeName: store.name
     })),
+    currencyOptions: currencyRows.map((currency) => ({
+      currencyCode: currency.code,
+      label: `${currency.code} - ${currency.name}`,
+      isBaseCurrency: currency.isBaseCurrency
+    })),
     postureMessages: [
       `${activeStores} active store(s), ${activeRetailUsers} active retail user(s), and ${activeReceiptTemplates} active receipt template(s) are currently governed from enterprise settings.`,
       ldapSettings.enabled
@@ -1044,6 +1068,11 @@ export async function getEnterpriseSettingsWorkspace(): Promise<EnterpriseSettin
 export type UpdateEnterpriseCompanyProfileRequest = CompanyProfileSettings & {
   baseCurrencyCode: string;
   timezone: string;
+};
+
+export type UpdateEnterpriseCompanyMediaRequest = {
+  companyLogoUrl?: string | null;
+  loginBackgroundImageUrl?: string | null;
 };
 
 export type EnterprisePublicBranding = {
@@ -1080,10 +1109,27 @@ export async function updateEnterpriseCompanyProfile(
         input.tradingName ?? previousJson.tradingName,
         "trading name"
       );
-      const baseCurrencyCode = normalizeRequiredText(
+      const requestedBaseCurrencyCode = normalizeRequiredText(
         input.baseCurrencyCode ?? previousJson.baseCurrencyCode,
         "base currency code"
-      );
+      ).toUpperCase();
+      const configuredBaseCurrency = await tx.erpCurrency.findFirst({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          code: requestedBaseCurrencyCode,
+          status: RecordStatus.ACTIVE
+        },
+        select: {
+          id: true,
+          code: true
+        }
+      });
+
+      if (!configuredBaseCurrency) {
+        throw new Error("Choose an active currency from Multi Currency setup.");
+      }
+
+      const baseCurrencyCode = configuredBaseCurrency.code;
       const timezone = normalizeRequiredText(
         input.timezone ?? previousJson.timezone,
         "timezone"
@@ -1152,6 +1198,46 @@ export async function updateEnterpriseCompanyProfile(
         }
       });
 
+      await tx.erpCurrency.updateMany({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          id: {
+            not: configuredBaseCurrency.id
+          }
+        },
+        data: {
+          isBaseCurrency: false
+        }
+      });
+
+      await tx.erpCurrency.update({
+        where: {
+          id: configuredBaseCurrency.id
+        },
+        data: {
+          exchangeRateToBase: "1.000000",
+          isBaseCurrency: true
+        }
+      });
+
+      await tx.erpCompany.updateMany({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId
+        },
+        data: {
+          baseCurrencyCode
+        }
+      });
+
+      await tx.erpAccountingSettings.updateMany({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId
+        },
+        data: {
+          baseCurrencyCode
+        }
+      });
+
       await writeSecurityLog(tx, {
         retailOrgId: enterpriseNode.retailOrgId,
         kind: SecurityLogKind.AUDIT,
@@ -1176,6 +1262,64 @@ export async function updateEnterpriseCompanyProfile(
     });
   } catch (error) {
     throw toSettingsMutationError(error, "Flash ERP could not update the company profile.");
+  }
+}
+
+export async function updateEnterpriseCompanyMedia(
+  input: UpdateEnterpriseCompanyMediaRequest
+): Promise<EnterpriseSettingsMutationResponse> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const enterpriseNode = await getWritableEnterpriseNode(tx);
+      const currentOrg = await getWritableRetailOrgSettings(tx, enterpriseNode.retailOrgId);
+      const previousJson = readCompanyProfileSettings(currentOrg.companySettingsJson, currentOrg);
+      const updatedJson = {
+        ...previousJson,
+        companyLogoUrl:
+          input.companyLogoUrl === undefined
+            ? previousJson.companyLogoUrl
+            : (normalizeOptionalText(input.companyLogoUrl) ?? ""),
+        loginBackgroundImageUrl:
+          input.loginBackgroundImageUrl === undefined
+            ? previousJson.loginBackgroundImageUrl
+            : (normalizeOptionalText(input.loginBackgroundImageUrl) ?? "")
+      };
+      const changedFields = changedAuditFields(previousJson, updatedJson);
+
+      await tx.retailOrg.update({
+        where: {
+          id: enterpriseNode.retailOrgId
+        },
+        data: {
+          companySettingsJson: serializeJsonField(updatedJson)
+        }
+      });
+
+      await writeSecurityLog(tx, {
+        retailOrgId: enterpriseNode.retailOrgId,
+        kind: SecurityLogKind.AUDIT,
+        category: "SETTINGS",
+        action: "COMPANY_MEDIA_UPDATED",
+        actorLabel: "Enterprise settings",
+        targetType: "Company",
+        targetRef: previousJson.legalName,
+        sourceNodeCode: enterpriseNode.code,
+        message: "Updated company profile media.",
+        details: toAuditJson({
+          changedFields,
+          changedFieldsLabel: changedFields.join(", "),
+          companyLogoUpdated: input.companyLogoUrl !== undefined,
+          loginBackgroundUpdated: input.loginBackgroundImageUrl !== undefined
+        })
+      });
+
+      return {
+        message: "Flash ERP saved the company profile media.",
+        serverProcessedAt: new Date().toISOString()
+      };
+    });
+  } catch (error) {
+    throw toSettingsMutationError(error, "Flash ERP could not update the company profile media.");
   }
 }
 

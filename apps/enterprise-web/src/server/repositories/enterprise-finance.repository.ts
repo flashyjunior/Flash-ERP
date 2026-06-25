@@ -48,66 +48,66 @@ type JournalDraftLine = {
 const standardChartOfAccounts: GlAccountDefinition[] = [
   {
     code: "1000",
-    name: "Cash and bank clearing",
+    name: "Cash",
     accountType: GlAccountType.ASSET,
     normalBalance: GlNormalBalance.DEBIT,
-    description: "Store tender clearing for completed POS receipts and refunds."
+    description: "Cash on hand and primary cash clearing."
   },
   {
     code: "1100",
-    name: "Accounts receivable",
+    name: "Accounts Receivable",
     accountType: GlAccountType.ASSET,
     normalBalance: GlNormalBalance.DEBIT,
-    description: "Customer account balances created from credit sales."
+    description: "Customer receivables control account."
   },
   {
     code: "1200",
-    name: "Inventory asset",
+    name: "Inventory",
     accountType: GlAccountType.ASSET,
     normalBalance: GlNormalBalance.DEBIT,
-    description: "Canonical inventory value from HQ and store stock movements."
+    description: "Inventory and stocked item value."
   },
   {
     code: "2000",
-    name: "Accounts payable",
+    name: "Accounts Payable",
     accountType: GlAccountType.LIABILITY,
     normalBalance: GlNormalBalance.CREDIT,
-    description: "Supplier payable clearing for goods receipt and return-to-vendor postings."
+    description: "Supplier and vendor payable control account."
   },
   {
     code: "2100",
-    name: "Sales tax payable",
+    name: "Sales Tax Payable",
     accountType: GlAccountType.LIABILITY,
     normalBalance: GlNormalBalance.CREDIT,
-    description: "Tax collected on completed POS receipts."
+    description: "Sales tax collected and payable."
   },
   {
     code: "4000",
-    name: "Sales revenue",
+    name: "Sales Revenue",
     accountType: GlAccountType.REVENUE,
     normalBalance: GlNormalBalance.CREDIT,
-    description: "Net merchandise sales excluding tax."
+    description: "Revenue from sales of goods."
   },
   {
     code: "5000",
-    name: "Cost of goods sold",
+    name: "Cost of Goods Sold",
     accountType: GlAccountType.COST_OF_SALES,
     normalBalance: GlNormalBalance.DEBIT,
-    description: "Inventory cost consumed by sales and reversed by returns."
+    description: "Cost of goods sold."
   },
   {
     code: "5100",
-    name: "Inventory adjustments",
-    accountType: GlAccountType.EXPENSE,
+    name: "Purchases",
+    accountType: GlAccountType.COST_OF_SALES,
     normalBalance: GlNormalBalance.DEBIT,
-    description: "Shrinkage, count variance, and operational stock adjustments."
+    description: "Purchases of goods for resale or use."
   },
   {
-    code: "6100",
-    name: "Operating expenses",
+    code: "8000",
+    name: "Other Expenses",
     accountType: GlAccountType.EXPENSE,
     normalBalance: GlNormalBalance.DEBIT,
-    description: "RMS-tracked operating expense clearing."
+    description: "Other expenses."
   }
 ];
 
@@ -852,7 +852,7 @@ async function materializeOperatingExpenseJournals(input: {
 
     addLine({
       lines,
-      accountCode: "6100",
+      accountCode: "8000",
       storeId: expense.storeId,
       debitAmount: amount,
       memo

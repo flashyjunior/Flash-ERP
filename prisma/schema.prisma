@@ -8,27 +8,27 @@ datasource db {
 }
 
 model RetailOrg {
-  id                                String                       @id @default(uuid())
-  code                              String                       @unique
+  id                                String                             @id @default(uuid())
+  code                              String                             @unique
   name                              String
   baseCurrencyCode                  String
   timezone                          String
-  companySettingsJson               String?                      @db.NVarChar(Max)
-  ldapSettingsJson                  String?                      @db.NVarChar(Max)
-  smtpSettingsJson                  String?                      @db.NVarChar(Max)
-  smsSettingsJson                   String?                      @db.NVarChar(Max)
-  optionsSettingsJson               String?                      @db.NVarChar(Max)
-  passwordPolicyJson                String?                      @db.NVarChar(Max)
-  loyaltyProgramEnabled             Boolean                      @default(true)
-  loyaltyPointsPerCurrencyUnit      Decimal                      @default(1) @db.Decimal(12, 4)
-  loyaltyRedemptionEnabled          Boolean                      @default(false)
-  loyaltyRedemptionPointsStep       Int                          @default(100)
-  loyaltyRedemptionValueAmount      Decimal                      @default(1) @db.Decimal(12, 2)
-  loyaltyMinimumRedeemPoints        Int                          @default(100)
-  loyaltyMaximumRedeemPercentOfSale Decimal                      @default(100) @db.Decimal(5, 2)
-  status                            String                       @default("ACTIVE")
-  createdAt                         DateTime                     @default(now())
-  updatedAt                         DateTime                     @updatedAt
+  companySettingsJson               String?                            @db.NVarChar(Max)
+  ldapSettingsJson                  String?                            @db.NVarChar(Max)
+  smtpSettingsJson                  String?                            @db.NVarChar(Max)
+  smsSettingsJson                   String?                            @db.NVarChar(Max)
+  optionsSettingsJson               String?                            @db.NVarChar(Max)
+  passwordPolicyJson                String?                            @db.NVarChar(Max)
+  loyaltyProgramEnabled             Boolean                            @default(true)
+  loyaltyPointsPerCurrencyUnit      Decimal                            @default(1) @db.Decimal(12, 4)
+  loyaltyRedemptionEnabled          Boolean                            @default(false)
+  loyaltyRedemptionPointsStep       Int                                @default(100)
+  loyaltyRedemptionValueAmount      Decimal                            @default(1) @db.Decimal(12, 2)
+  loyaltyMinimumRedeemPoints        Int                                @default(100)
+  loyaltyMaximumRedeemPercentOfSale Decimal                            @default(100) @db.Decimal(5, 2)
+  status                            String                             @default("ACTIVE")
+  createdAt                         DateTime                           @default(now())
+  updatedAt                         DateTime                           @updatedAt
   stores                            Store[]
   warehouses                        Warehouse[]
   terminals                         Terminal[]
@@ -38,6 +38,7 @@ model RetailOrg {
   roles                             Role[]
   customers                         Customer[]
   customerAccountEntries            CustomerAccountEntry[]
+  customerAccountPaymentAllocations CustomerAccountPaymentAllocation[]
   suppliers                         Supplier[]
   taxProfiles                       TaxProfile[]
   tenderMethods                     TenderMethod[]
@@ -49,6 +50,21 @@ model RetailOrg {
   bankBranches                      BankBranch[]
   bankAccounts                      BankAccount[]
   promotions                        PromotionCampaign[]
+  fuelTanks                         ErpFuelTank[]
+  fuelPumps                         ErpFuelPump[]
+  fuelNozzles                       ErpFuelNozzle[]
+  fuelTankDips                      ErpFuelTankDip[]
+  fuelMeterReadings                 ErpFuelMeterReading[]
+  fuelDeliveries                    ErpFuelDelivery[]
+  fuelDeliveryLines                 ErpFuelDeliveryLine[]
+  fuelStations                      ErpFuelStation[]
+  fuelStationDeliveries             ErpFuelStationDelivery[]
+  fuelStationDeliveryLines          ErpFuelStationDeliveryLine[]
+  fuelSales                         ErpFuelSale[]
+  fuelSaleLines                     ErpFuelSaleLine[]
+  fuelSalePayments                  ErpFuelSalePayment[]
+  fuelDailyReconciliations          ErpFuelDailyReconciliation[]
+  fuelReconciliationLines           ErpFuelReconciliationLine[]
   productDepartments                ProductDepartment[]
   productCategories                 ProductCategory[]
   inventoryCatalogs                 InventoryCatalog[]
@@ -58,7 +74,7 @@ model RetailOrg {
   productAttributeDefinitions       ProductAttributeDefinition[]
   productMatrixVariants             ProductMatrixVariant[]
   priceLists                        PriceList[]
-  storeProductPrices                 StoreProductPrice[]
+  storeProductPrices                StoreProductPrice[]
   inventoryLocations                InventoryLocation[]
   inventoryLedgerEntries            InventoryLedgerEntry[]
   inventorySerialUnits              InventorySerialUnit[]
@@ -73,9 +89,48 @@ model RetailOrg {
   salesOrders                       SalesOrder[]
   eodReconciliations                EodReconciliation[]
   bankingDeposits                   BankingDeposit[]
+  erpCompanies                      ErpCompany[]
+  erpCurrencies                     ErpCurrency[]
+  erpFiscalYears                    ErpFiscalYear[]
+  erpFiscalPeriods                  ErpFiscalPeriod[]
+  erpAccountingSettings             ErpAccountingSettings[]
+  erpFuelOperationsSettings         ErpFuelOperationsSettings[]
+  glJournalBatches                  GlJournalBatch[]
   glAccounts                        GlAccount[]
   glJournalEntries                  GlJournalEntry[]
   operatingExpenses                 OperatingExpense[]
+  erpProductProfiles                ErpProductProfile[]
+  erpOperatingSites                 ErpOperatingSite[]
+  erpStorageUnits                   ErpStorageUnit[]
+  erpArApPostingProfiles            ErpArApPostingProfile[]
+  erpPartyAccountingProfiles        ErpPartyAccountingProfile[]
+  erpDocumentSequences              ErpDocumentSequence[]
+  erpOperationalDocuments           ErpOperationalDocument[]
+  erpOperationalDocumentLines       ErpOperationalDocumentLine[]
+  erpSettlementAllocations          ErpSettlementAllocation[]
+  erpCashbookAccounts               ErpCashbookAccount[]
+  erpCashbookEntries                ErpCashbookEntry[]
+  erpBankStatements                 ErpBankStatement[]
+  erpBankStatementLines             ErpBankStatementLine[]
+  erpBankReconciliationMatches      ErpBankReconciliationMatch[]
+  erpTaxRegistrations               ErpTaxRegistration[]
+  erpTaxCodes                       ErpTaxCode[]
+  erpTaxGroups                      ErpTaxGroup[]
+  erpTaxGroupLines                  ErpTaxGroupLine[]
+  erpTaxTransactions                ErpTaxTransaction[]
+  erpFixedAssetClasses              ErpFixedAssetClass[]
+  erpFixedAssets                    ErpFixedAsset[]
+  erpFixedAssetBooks                ErpFixedAssetBook[]
+  erpFixedAssetTransactions         ErpFixedAssetTransaction[]
+  erpFinanceDimensions              ErpFinanceDimension[]
+  erpBudgetVersions                 ErpBudgetVersion[]
+  erpBudgetLines                    ErpBudgetLine[]
+  erpBudgetPeriodAmounts            ErpBudgetPeriodAmount[]
+  erpPayrollGlMappings              ErpPayrollGlMapping[]
+  erpPayrollPostingBatches          ErpPayrollPostingBatch[]
+  erpPayrollPostingLines            ErpPayrollPostingLine[]
+  erpRecurringJournalTemplates      ErpRecurringJournalTemplate[]
+  erpRecurringJournalTemplateLines  ErpRecurringJournalTemplateLine[]
   transactionReferenceCaptures      TransactionReferenceCapture[]
   securityLogs                      SecurityLog[]
   licenseEvents                     LicenseEvent[]
@@ -178,6 +233,7 @@ model BankAccount {
   posPayments            PosPayment[]
   bankingDeposits        BankingDeposit[]
   customerAccountEntries CustomerAccountEntry[]
+  erpCashbookAccounts    ErpCashbookAccount[]
 
   @@unique([retailOrgId, accountNumber])
   @@index([retailOrgId, status])
@@ -241,6 +297,7 @@ model Store {
   stockCountSessions                StockCountSession[]
   outboundInterStoreTransfers       InterStoreTransfer[]    @relation("InterStoreTransferSourceStore")
   inboundInterStoreTransfers        InterStoreTransfer[]    @relation("InterStoreTransferDestinationStore")
+  fuelStations                      ErpFuelStation[]        @relation("FuelStationStore")
   goodsReceipts                     GoodsReceipt[]
   posShifts                         PosShift[]
   posTransactions                   PosTransaction[]
@@ -251,7 +308,7 @@ model Store {
   operatingExpenses                 OperatingExpense[]
   giftCertificates                  GiftCertificate[]
   inventoryCatalogLinks             InventoryCatalogStore[]
-  storeProductPrices                 StoreProductPrice[]
+  storeProductPrices                StoreProductPrice[]
   licenseEvents                     LicenseEvent[]
 
   @@unique([retailOrgId, code])
@@ -263,60 +320,125 @@ model Store {
 }
 
 model GlAccount {
-  id            String          @id @default(uuid())
-  retailOrgId   String
-  code          String
-  name          String
-  accountType   String
-  normalBalance String
-  externalCode  String?
-  description   String?
-  status        String          @default("ACTIVE")
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-  retailOrg     RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  journalLines  GlJournalLine[]
+  id                            String                            @id @default(uuid())
+  retailOrgId                   String
+  companyId                     String?
+  code                          String
+  name                          String
+  accountType                   String
+  normalBalance                 String
+  accountGroup                  String?
+  isControlAccount              Boolean                           @default(false)
+  allowManualPosting            Boolean                           @default(true)
+  sortOrder                     Int                               @default(0)
+  externalCode                  String?
+  description                   String?
+  status                        String                            @default("ACTIVE")
+  createdAt                     DateTime                          @default(now())
+  updatedAt                     DateTime                          @updatedAt
+  retailOrg                     RetailOrg                         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                       ErpCompany?                       @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  journalLines                  GlJournalLine[]
+  cashbookAccounts              ErpCashbookAccount[]
+  budgetLines                   ErpBudgetLine[]
+  budgetPeriodAmounts           ErpBudgetPeriodAmount[]
+  payrollGlMappings             ErpPayrollGlMapping[]
+  payrollPostingLines           ErpPayrollPostingLine[]
+  recurringJournalTemplateLines ErpRecurringJournalTemplateLine[]
 
   @@unique([retailOrgId, code])
+  @@index([companyId])
   @@index([retailOrgId, accountType, status])
 }
 
+model GlJournalBatch {
+  id          String           @id @default(uuid())
+  retailOrgId String
+  companyId   String?
+  batchNo     String
+  sourceType  String           @default("MANUAL")
+  postingDate DateTime
+  description String
+  status      String           @default("DRAFT")
+  totalDebit  Decimal          @default(0) @db.Decimal(18, 2)
+  totalCredit Decimal          @default(0) @db.Decimal(18, 2)
+  postedAt    DateTime?
+  reversedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  retailOrg   RetailOrg        @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company     ErpCompany?      @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  entries     GlJournalEntry[]
+
+  @@unique([retailOrgId, batchNo])
+  @@index([retailOrgId, status, postingDate])
+  @@index([companyId, status])
+}
+
 model GlJournalEntry {
-  id              String          @id @default(uuid())
-  retailOrgId     String
-  journalNo       String
-  sourceType      String
-  sourceId        String
-  sourceReference String?
-  postingDate     DateTime
-  description     String
-  status          String          @default("POSTED")
-  postedAt        DateTime        @default(now())
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
-  retailOrg       RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  lines           GlJournalLine[]
+  id                       String                     @id @default(uuid())
+  retailOrgId              String
+  companyId                String?
+  journalBatchId           String?
+  fiscalPeriodId           String?
+  journalNo                String
+  journalType              String                     @default("GENERAL")
+  sourceType               String
+  sourceId                 String
+  sourceReference          String?
+  reversalOfJournalEntryId String?
+  postingDate              DateTime
+  description              String
+  status                   String                     @default("POSTED")
+  postedBy                 String?
+  reversalReason           String?
+  postedAt                 DateTime                   @default(now())
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
+  retailOrg                RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany?                @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  journalBatch             GlJournalBatch?            @relation(fields: [journalBatchId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  fiscalPeriod             ErpFiscalPeriod?           @relation(fields: [fiscalPeriodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversalOfJournalEntry   GlJournalEntry?            @relation("GlJournalEntryReversal", fields: [reversalOfJournalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversalEntries          GlJournalEntry[]           @relation("GlJournalEntryReversal")
+  lines                    GlJournalLine[]
+  operationalDocuments     ErpOperationalDocument[]
+  settlementAllocations    ErpSettlementAllocation[]
+  cashbookEntries          ErpCashbookEntry[]
+  taxTransactions          ErpTaxTransaction[]
+  fixedAssetTransactions   ErpFixedAssetTransaction[]
+  payrollPostingBatches    ErpPayrollPostingBatch[]
 
   @@unique([retailOrgId, journalNo])
   @@unique([retailOrgId, sourceType, sourceId])
+  @@index([companyId])
+  @@index([journalBatchId])
+  @@index([fiscalPeriodId])
+  @@index([reversalOfJournalEntryId])
   @@index([retailOrgId, postingDate, status])
 }
 
 model GlJournalLine {
-  id             String         @id @default(uuid())
-  journalEntryId String
-  accountId      String
-  storeId        String?
-  debitAmount    Decimal        @default(0) @db.Decimal(18, 2)
-  creditAmount   Decimal        @default(0) @db.Decimal(18, 2)
-  memo           String?
-  createdAt      DateTime       @default(now())
-  journalEntry   GlJournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
-  account        GlAccount      @relation(fields: [accountId], references: [id], onDelete: NoAction)
-  store          Store?         @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  id                 String               @id @default(uuid())
+  journalEntryId     String
+  accountId          String
+  storeId            String?
+  financeDimensionId String?
+  dimensionType      String?
+  dimensionCode      String?
+  debitAmount        Decimal              @default(0) @db.Decimal(18, 2)
+  creditAmount       Decimal              @default(0) @db.Decimal(18, 2)
+  memo               String?
+  createdAt          DateTime             @default(now())
+  journalEntry       GlJournalEntry       @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account            GlAccount            @relation(fields: [accountId], references: [id], onDelete: NoAction)
+  store              Store?               @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  financeDimension   ErpFinanceDimension? @relation(fields: [financeDimensionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([accountId])
   @@index([storeId])
+  @@index([financeDimensionId])
+  @@index([dimensionType, dimensionCode])
   @@index([journalEntryId])
 }
 
@@ -346,6 +468,1722 @@ model OperatingExpense {
   @@unique([retailOrgId, expenseNo])
   @@index([retailOrgId, expenseDate, status])
   @@index([storeId])
+}
+
+model ErpCompany {
+  id                            String                            @id @default(uuid())
+  retailOrgId                   String
+  code                          String
+  legalName                     String
+  tradingName                   String?
+  companyType                   String                            @default("LEGAL_ENTITY")
+  registrationNo                String?
+  taxRegistrationNo             String?
+  baseCurrencyCode              String
+  timezone                      String
+  phone                         String?
+  email                         String?
+  addressLine1                  String?
+  city                          String?
+  region                        String?
+  countryCode                   String?
+  isPrimary                     Boolean                           @default(false)
+  status                        String                            @default("ACTIVE")
+  createdAt                     DateTime                          @default(now())
+  updatedAt                     DateTime                          @updatedAt
+  retailOrg                     RetailOrg                         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  accountingSettings            ErpAccountingSettings?
+  fiscalYears                   ErpFiscalYear[]
+  fiscalPeriods                 ErpFiscalPeriod[]
+  glAccounts                    GlAccount[]
+  glJournalBatches              GlJournalBatch[]
+  glJournalEntries              GlJournalEntry[]
+  productProfiles               ErpProductProfile[]
+  operatingSites                ErpOperatingSite[]
+  arApPostingProfiles           ErpArApPostingProfile[]
+  partyProfiles                 ErpPartyAccountingProfile[]
+  documentSequences             ErpDocumentSequence[]
+  operationalDocuments          ErpOperationalDocument[]
+  settlementAllocations         ErpSettlementAllocation[]
+  cashbookAccounts              ErpCashbookAccount[]
+  cashbookEntries               ErpCashbookEntry[]
+  bankStatements                ErpBankStatement[]
+  bankStatementLines            ErpBankStatementLine[]
+  reconciliationMatches         ErpBankReconciliationMatch[]
+  taxRegistration               ErpTaxRegistration?
+  taxCodes                      ErpTaxCode[]
+  taxGroups                     ErpTaxGroup[]
+  taxGroupLines                 ErpTaxGroupLine[]
+  taxTransactions               ErpTaxTransaction[]
+  fixedAssetClasses             ErpFixedAssetClass[]
+  fixedAssets                   ErpFixedAsset[]
+  fixedAssetBooks               ErpFixedAssetBook[]
+  fixedAssetTransactions        ErpFixedAssetTransaction[]
+  financeDimensions             ErpFinanceDimension[]
+  budgetVersions                ErpBudgetVersion[]
+  budgetLines                   ErpBudgetLine[]
+  budgetPeriodAmounts           ErpBudgetPeriodAmount[]
+  payrollGlMappings             ErpPayrollGlMapping[]
+  payrollPostingBatches         ErpPayrollPostingBatch[]
+  payrollPostingLines           ErpPayrollPostingLine[]
+  recurringJournalTemplates     ErpRecurringJournalTemplate[]
+  recurringJournalTemplateLines ErpRecurringJournalTemplateLine[]
+  fuelTanks                     ErpFuelTank[]
+  fuelPumps                     ErpFuelPump[]
+  fuelNozzles                   ErpFuelNozzle[]
+  fuelTankDips                  ErpFuelTankDip[]
+  fuelMeterReadings             ErpFuelMeterReading[]
+  fuelDeliveries                ErpFuelDelivery[]
+  fuelDeliveryLines             ErpFuelDeliveryLine[]
+  fuelStations                  ErpFuelStation[]
+  fuelStationDeliveries         ErpFuelStationDelivery[]
+  fuelStationDeliveryLines      ErpFuelStationDeliveryLine[]
+  fuelSales                     ErpFuelSale[]
+  fuelSaleLines                 ErpFuelSaleLine[]
+  fuelSalePayments              ErpFuelSalePayment[]
+  fuelOperationsSettings        ErpFuelOperationsSettings?
+  fuelDailyReconciliations      ErpFuelDailyReconciliation[]
+  fuelReconciliationLines       ErpFuelReconciliationLine[]
+
+  @@unique([retailOrgId, code])
+  @@index([retailOrgId, status])
+}
+
+model ErpCurrency {
+  id                 String    @id @default(uuid())
+  retailOrgId        String
+  code               String
+  name               String
+  symbol             String?
+  decimalPlaces      Int       @default(2)
+  exchangeRateToBase Decimal   @default(1) @db.Decimal(18, 6)
+  isBaseCurrency     Boolean   @default(false)
+  status             String    @default("ACTIVE")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  retailOrg          RetailOrg @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+
+  @@unique([retailOrgId, code])
+  @@index([retailOrgId, status])
+}
+
+model ErpFiscalYear {
+  id                String                @id @default(uuid())
+  retailOrgId       String
+  companyId         String
+  code              String
+  name              String
+  startsOn          DateTime
+  endsOn            DateTime
+  status            String                @default("OPEN")
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  retailOrg         RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company           ErpCompany            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  periods           ErpFiscalPeriod[]
+  documentSequences ErpDocumentSequence[]
+  budgetVersions    ErpBudgetVersion[]
+  budgetLines       ErpBudgetLine[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+}
+
+model ErpFiscalPeriod {
+  id                  String                  @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  fiscalYearId        String
+  periodNo            Int
+  code                String
+  name                String
+  startsOn            DateTime
+  endsOn              DateTime
+  status              String                  @default("OPEN")
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  retailOrg           RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fiscalYear          ErpFiscalYear           @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
+  journalEntries      GlJournalEntry[]
+  budgetPeriodAmounts ErpBudgetPeriodAmount[]
+
+  @@unique([companyId, code])
+  @@unique([fiscalYearId, periodNo])
+  @@index([retailOrgId, status])
+}
+
+model ErpAccountingSettings {
+  id                          String     @id @default(uuid())
+  retailOrgId                 String
+  companyId                   String     @unique
+  baseCurrencyCode            String
+  fiscalYearStartMonth        Int        @default(1)
+  journalNumberPrefix         String     @default("GL")
+  nextJournalSequence         Int        @default(1)
+  retainedEarningsAccountCode String?
+  arControlAccountCode        String?
+  apControlAccountCode        String?
+  cashControlAccountCode      String?
+  inventoryControlAccountCode String?
+  taxControlAccountCode       String?
+  status                      String     @default("ACTIVE")
+  createdAt                   DateTime   @default(now())
+  updatedAt                   DateTime   @updatedAt
+  retailOrg                   RetailOrg  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                     ErpCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelOperationsSettings {
+  id                         String            @id @default(uuid())
+  retailOrgId                String
+  companyId                  String            @unique
+  defaultSaleSourceSiteId    String?
+  defaultDispatchSiteId      String?
+  saleReceiptPaperKind       String            @default("THERMAL")
+  deliveryReceiptPaperKind   String            @default("THERMAL")
+  salesOrderReceiptPaperKind String            @default("A4")
+  status                     String            @default("ACTIVE")
+  createdAt                  DateTime          @default(now())
+  updatedAt                  DateTime          @updatedAt
+  retailOrg                  RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                    ErpCompany        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  defaultSaleSourceSite      ErpOperatingSite? @relation("FuelSettingsDefaultSaleSourceSite", fields: [defaultSaleSourceSiteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  defaultDispatchSite        ErpOperatingSite? @relation("FuelSettingsDefaultDispatchSite", fields: [defaultDispatchSiteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([retailOrgId, status])
+  @@index([defaultSaleSourceSiteId])
+  @@index([defaultDispatchSiteId])
+}
+
+model ErpArApPostingProfile {
+  id                            String                      @id @default(uuid())
+  retailOrgId                   String
+  companyId                     String
+  code                          String
+  name                          String
+  profileType                   String                      @default("CUSTOMER")
+  description                   String?
+  receivablesControlAccountCode String?
+  payablesControlAccountCode    String?
+  customerAdvanceAccountCode    String?
+  supplierAdvanceAccountCode    String?
+  withholdingTaxAccountCode     String?
+  customerDiscountAccountCode   String?
+  supplierDiscountAccountCode   String?
+  writeOffAccountCode           String?
+  exchangeGainAccountCode       String?
+  exchangeLossAccountCode       String?
+  isDefault                     Boolean                     @default(false)
+  status                        String                      @default("ACTIVE")
+  createdAt                     DateTime                    @default(now())
+  updatedAt                     DateTime                    @updatedAt
+  retailOrg                     RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                       ErpCompany                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  partyAccountingProfiles       ErpPartyAccountingProfile[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, profileType, status])
+  @@index([companyId, profileType, isDefault])
+}
+
+model ErpPartyAccountingProfile {
+  id                    String                    @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  partyType             String
+  partyNo               String
+  partyName             String
+  customerId            String?
+  supplierId            String?
+  postingProfileId      String?
+  taxProfileId          String?
+  creditTermsCode       String?
+  paymentTermsCode      String?
+  creditLimitAmount     Decimal?                  @db.Decimal(18, 2)
+  creditStatus          String                    @default("ACTIVE")
+  allowCredit           Boolean                   @default(false)
+  statementDeliveryMode String                    @default("EMAIL")
+  invoiceDeliveryMode   String                    @default("EMAIL")
+  status                String                    @default("ACTIVE")
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  retailOrg             RetailOrg                 @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer              Customer?                 @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  supplier              Supplier?                 @relation(fields: [supplierId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  postingProfile        ErpArApPostingProfile?    @relation(fields: [postingProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  taxProfile            TaxProfile?               @relation(fields: [taxProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operationalDocuments  ErpOperationalDocument[]
+  settlementAllocations ErpSettlementAllocation[]
+  taxTransactions       ErpTaxTransaction[]
+
+  @@unique([companyId, partyType, partyNo])
+  @@index([retailOrgId, partyType, status])
+  @@index([customerId])
+  @@index([supplierId])
+  @@index([postingProfileId])
+  @@index([taxProfileId])
+}
+
+model ErpDocumentSequence {
+  id            String        @id @default(uuid())
+  retailOrgId   String
+  companyId     String
+  fiscalYearId  String
+  documentType  String
+  prefix        String
+  suffix        String?
+  nextSequence  Int           @default(1)
+  paddingLength Int           @default(6)
+  resetPolicy   String        @default("FISCAL_YEAR")
+  lastIssuedNo  String?
+  lastIssuedAt  DateTime?
+  status        String        @default("ACTIVE")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  retailOrg     RetailOrg     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company       ErpCompany    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fiscalYear    ErpFiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([companyId, documentType, fiscalYearId])
+  @@index([retailOrgId, documentType, status])
+  @@index([fiscalYearId])
+}
+
+model ErpRecurringJournalTemplate {
+  id                   String                            @id @default(uuid())
+  retailOrgId          String
+  companyId            String
+  templateCode         String
+  name                 String
+  description          String?                           @db.NVarChar(Max)
+  frequency            String                            @default("MONTHLY")
+  startDate            DateTime
+  endDate              DateTime?
+  nextRunDate          DateTime
+  lastRunDate          DateTime?
+  lastGeneratedBatchNo String?
+  lastGeneratedAt      DateTime?
+  sourceReference      String?
+  journalType          String                            @default("RECURRING")
+  status               String                            @default("ACTIVE")
+  createdAt            DateTime                          @default(now())
+  updatedAt            DateTime                          @updatedAt
+  retailOrg            RetailOrg                         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company              ErpCompany                        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines                ErpRecurringJournalTemplateLine[]
+
+  @@unique([companyId, templateCode])
+  @@index([retailOrgId, frequency, status])
+  @@index([companyId, nextRunDate, status])
+}
+
+model ErpRecurringJournalTemplateLine {
+  id                         String                      @id @default(uuid())
+  retailOrgId                String
+  companyId                  String
+  recurringJournalTemplateId String
+  accountId                  String?
+  lineNo                     Int
+  accountCode                String
+  debitAmount                Decimal                     @default(0) @db.Decimal(18, 2)
+  creditAmount               Decimal                     @default(0) @db.Decimal(18, 2)
+  memo                       String?
+  status                     String                      @default("ACTIVE")
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  retailOrg                  RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                    ErpCompany                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  template                   ErpRecurringJournalTemplate @relation(fields: [recurringJournalTemplateId], references: [id], onDelete: Cascade)
+  account                    GlAccount?                  @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([recurringJournalTemplateId, lineNo])
+  @@index([companyId, accountCode, status])
+  @@index([accountId])
+  @@index([retailOrgId, status])
+}
+
+model ErpOperationalDocument {
+  id                    String                       @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  partyProfileId        String?
+  postingJournalEntryId String?
+  documentNo            String
+  documentType          String                       @default("SALES_INVOICE")
+  documentDirection     String                       @default("SALES")
+  partyType             String
+  partyNo               String
+  partyName             String
+  documentDate          DateTime
+  postingDate           DateTime
+  dueDate               DateTime?
+  currencyCode          String
+  exchangeRate          Decimal                      @default(1) @db.Decimal(18, 6)
+  externalReference     String?
+  memo                  String?                      @db.NVarChar(Max)
+  subtotalAmount        Decimal                      @default(0) @db.Decimal(18, 2)
+  discountAmount        Decimal                      @default(0) @db.Decimal(18, 2)
+  taxAmount             Decimal                      @default(0) @db.Decimal(18, 2)
+  chargeAmount          Decimal                      @default(0) @db.Decimal(18, 2)
+  totalAmount           Decimal                      @default(0) @db.Decimal(18, 2)
+  status                String                       @default("DRAFT")
+  postedAt              DateTime?
+  postedBy              String?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  retailOrg             RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  partyProfile          ErpPartyAccountingProfile?   @relation(fields: [partyProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  postingJournalEntry   GlJournalEntry?              @relation(fields: [postingJournalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines                 ErpOperationalDocumentLine[]
+  settlementAllocations ErpSettlementAllocation[]
+
+  @@unique([retailOrgId, documentNo])
+  @@index([companyId, documentType, status])
+  @@index([retailOrgId, documentDate, status])
+  @@index([partyProfileId])
+  @@index([postingJournalEntryId])
+}
+
+model ErpOperationalDocumentLine {
+  id                    String                 @id @default(uuid())
+  retailOrgId           String
+  operationalDocumentId String
+  productProfileId      String?
+  lineNo                Int
+  itemCode              String?
+  description           String
+  quantity              Decimal                @default(1) @db.Decimal(18, 3)
+  unitPrice             Decimal                @default(0) @db.Decimal(18, 4)
+  discountAmount        Decimal                @default(0) @db.Decimal(18, 2)
+  taxAmount             Decimal                @default(0) @db.Decimal(18, 2)
+  chargeAmount          Decimal                @default(0) @db.Decimal(18, 2)
+  lineAmount            Decimal                @default(0) @db.Decimal(18, 2)
+  taxCodeId             String?
+  taxCode               String?
+  postingAccountCode    String?
+  taxAccountCode        String?
+  status                String                 @default("ACTIVE")
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  retailOrg             RetailOrg              @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  document              ErpOperationalDocument @relation(fields: [operationalDocumentId], references: [id], onDelete: Cascade)
+  productProfile        ErpProductProfile?     @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  taxCodeSetup          ErpTaxCode?            @relation(fields: [taxCodeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  taxTransactions       ErpTaxTransaction[]
+
+  @@index([operationalDocumentId, lineNo])
+  @@index([retailOrgId, status])
+  @@index([productProfileId])
+  @@index([taxCodeId])
+}
+
+model ErpTaxRegistration {
+  id                          String     @id @default(uuid())
+  retailOrgId                 String
+  companyId                   String     @unique
+  registrationNo              String?
+  authorityName               String?
+  countryCode                 String?
+  taxCurrencyCode             String
+  defaultInputTaxAccountCode  String?
+  defaultOutputTaxAccountCode String?
+  taxPayableAccountCode       String?
+  taxReceivableAccountCode    String?
+  filingFrequency             String     @default("MONTHLY")
+  status                      String     @default("ACTIVE")
+  createdAt                   DateTime   @default(now())
+  updatedAt                   DateTime   @updatedAt
+  retailOrg                   RetailOrg  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                     ErpCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([retailOrgId, status])
+}
+
+model ErpTaxCode {
+  id                       String                       @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  code                     String
+  name                     String
+  taxType                  String                       @default("VAT")
+  calculationMode          String                       @default("PERCENTAGE")
+  ratePercent              Decimal                      @default(0) @db.Decimal(9, 4)
+  recoverablePercent       Decimal                      @default(100) @db.Decimal(9, 4)
+  inputTaxAccountCode      String?
+  outputTaxAccountCode     String?
+  payableAccountCode       String?
+  receivableAccountCode    String?
+  effectiveFrom            DateTime?
+  effectiveTo              DateTime?
+  status                   String                       @default("ACTIVE")
+  createdAt                DateTime                     @default(now())
+  updatedAt                DateTime                     @updatedAt
+  retailOrg                RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  groupLines               ErpTaxGroupLine[]
+  operationalDocumentLines ErpOperationalDocumentLine[]
+  taxTransactions          ErpTaxTransaction[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, taxType, status])
+  @@index([companyId, status])
+}
+
+model ErpTaxGroup {
+  id          String            @id @default(uuid())
+  retailOrgId String
+  companyId   String
+  code        String
+  name        String
+  description String?
+  status      String            @default("ACTIVE")
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  retailOrg   RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company     ErpCompany        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines       ErpTaxGroupLine[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+}
+
+model ErpTaxGroupLine {
+  id          String      @id @default(uuid())
+  retailOrgId String
+  companyId   String
+  taxGroupId  String
+  taxCodeId   String
+  lineNo      Int
+  status      String      @default("ACTIVE")
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  retailOrg   RetailOrg   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company     ErpCompany  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  taxGroup    ErpTaxGroup @relation(fields: [taxGroupId], references: [id], onDelete: Cascade)
+  taxCode     ErpTaxCode  @relation(fields: [taxCodeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([taxGroupId, taxCodeId])
+  @@index([companyId, status])
+  @@index([taxCodeId])
+  @@index([retailOrgId, status])
+}
+
+model ErpTaxTransaction {
+  id              String                      @id @default(uuid())
+  retailOrgId     String
+  companyId       String
+  taxCodeId       String?
+  documentLineId  String?
+  partyProfileId  String?
+  journalEntryId  String?
+  sourceType      String
+  sourceId        String
+  sourceReference String?
+  transactionDate DateTime
+  postingDate     DateTime
+  taxDirection    String                      @default("OUTPUT")
+  taxableAmount   Decimal                     @default(0) @db.Decimal(18, 2)
+  taxAmount       Decimal                     @default(0) @db.Decimal(18, 2)
+  currencyCode    String
+  taxAccountCode  String
+  memo            String?                     @db.NVarChar(Max)
+  status          String                      @default("POSTED")
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+  retailOrg       RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company         ErpCompany                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  taxCode         ErpTaxCode?                 @relation(fields: [taxCodeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  documentLine    ErpOperationalDocumentLine? @relation(fields: [documentLineId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  partyProfile    ErpPartyAccountingProfile?  @relation(fields: [partyProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  journalEntry    GlJournalEntry?             @relation(fields: [journalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([companyId, taxDirection, postingDate])
+  @@index([retailOrgId, sourceType, sourceId])
+  @@index([taxCodeId])
+  @@index([documentLineId])
+  @@index([partyProfileId])
+  @@index([journalEntryId])
+}
+
+model ErpFixedAssetClass {
+  id                                 String          @id @default(uuid())
+  retailOrgId                        String
+  companyId                          String
+  code                               String
+  name                               String
+  description                        String?
+  assetType                          String          @default("TANGIBLE")
+  depreciationMethod                 String          @default("STRAIGHT_LINE")
+  defaultUsefulLifeMonths            Int             @default(60)
+  defaultResidualValue               Decimal         @default(0) @db.Decimal(18, 2)
+  acquisitionAccountCode             String          @default("1500")
+  accumulatedDepreciationAccountCode String          @default("1590")
+  depreciationExpenseAccountCode     String          @default("6100")
+  gainOnDisposalAccountCode          String          @default("7010")
+  lossOnDisposalAccountCode          String          @default("8010")
+  status                             String          @default("ACTIVE")
+  createdAt                          DateTime        @default(now())
+  updatedAt                          DateTime        @updatedAt
+  retailOrg                          RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                            ErpCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assets                             ErpFixedAsset[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, assetType, status])
+  @@index([companyId, status])
+}
+
+model ErpFixedAsset {
+  id                      String                     @id @default(uuid())
+  retailOrgId             String
+  companyId               String
+  assetClassId            String
+  assetNo                 String
+  name                    String
+  description             String?                    @db.NVarChar(Max)
+  serialNo                String?
+  modelNo                 String?
+  manufacturer            String?
+  locationCode            String?
+  custodianName           String?
+  acquisitionDate         DateTime
+  inServiceDate           DateTime?
+  depreciationStartDate   DateTime?
+  currencyCode            String
+  acquisitionCost         Decimal                    @default(0) @db.Decimal(18, 2)
+  residualValue           Decimal                    @default(0) @db.Decimal(18, 2)
+  usefulLifeMonths        Int                        @default(60)
+  depreciationMethod      String                     @default("STRAIGHT_LINE")
+  accumulatedDepreciation Decimal                    @default(0) @db.Decimal(18, 2)
+  netBookValue            Decimal                    @default(0) @db.Decimal(18, 2)
+  status                  String                     @default("ACTIVE")
+  retiredAt               DateTime?
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  retailOrg               RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                 ErpCompany                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assetClass              ErpFixedAssetClass         @relation(fields: [assetClassId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  depreciationBooks       ErpFixedAssetBook[]
+  transactions            ErpFixedAssetTransaction[]
+
+  @@unique([companyId, assetNo])
+  @@index([retailOrgId, status])
+  @@index([assetClassId])
+  @@index([companyId, acquisitionDate])
+  @@index([companyId, locationCode])
+}
+
+model ErpFixedAssetBook {
+  id                      String        @id @default(uuid())
+  retailOrgId             String
+  companyId               String
+  fixedAssetId            String
+  bookCode                String        @default("COMPANY")
+  bookName                String
+  depreciationMethod      String        @default("STRAIGHT_LINE")
+  usefulLifeMonths        Int           @default(60)
+  residualValue           Decimal       @default(0) @db.Decimal(18, 2)
+  depreciationStartDate   DateTime?
+  lastDepreciationDate    DateTime?
+  accumulatedDepreciation Decimal       @default(0) @db.Decimal(18, 2)
+  netBookValue            Decimal       @default(0) @db.Decimal(18, 2)
+  status                  String        @default("ACTIVE")
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+  retailOrg               RetailOrg     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                 ErpCompany    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fixedAsset              ErpFixedAsset @relation(fields: [fixedAssetId], references: [id], onDelete: Cascade)
+
+  @@unique([fixedAssetId, bookCode])
+  @@index([companyId, status])
+  @@index([retailOrgId, status])
+}
+
+model ErpFixedAssetTransaction {
+  id                            String          @id @default(uuid())
+  retailOrgId                   String
+  companyId                     String
+  fixedAssetId                  String
+  journalEntryId                String?
+  transactionNo                 String
+  transactionType               String          @default("ACQUISITION")
+  bookCode                      String          @default("COMPANY")
+  transactionDate               DateTime
+  postingDate                   DateTime
+  currencyCode                  String
+  amount                        Decimal         @default(0) @db.Decimal(18, 2)
+  accumulatedDepreciationAmount Decimal         @default(0) @db.Decimal(18, 2)
+  proceedsAmount                Decimal         @default(0) @db.Decimal(18, 2)
+  gainLossAmount                Decimal         @default(0) @db.Decimal(18, 2)
+  proceedsAccountCode           String?
+  fromLocationCode              String?
+  toLocationCode                String?
+  fromCustodianName             String?
+  toCustodianName               String?
+  sourceType                    String          @default("MANUAL")
+  sourceReference               String?
+  memo                          String?         @db.NVarChar(Max)
+  status                        String          @default("DRAFT")
+  postedAt                      DateTime?
+  postedBy                      String?
+  createdAt                     DateTime        @default(now())
+  updatedAt                     DateTime        @updatedAt
+  retailOrg                     RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                       ErpCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fixedAsset                    ErpFixedAsset   @relation(fields: [fixedAssetId], references: [id], onDelete: Cascade)
+  journalEntry                  GlJournalEntry? @relation(fields: [journalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([retailOrgId, transactionNo])
+  @@index([companyId, transactionType, status])
+  @@index([companyId, bookCode, transactionType])
+  @@index([fixedAssetId, transactionDate])
+  @@index([journalEntryId])
+  @@index([retailOrgId, postingDate, status])
+}
+
+model ErpFinanceDimension {
+  id                  String                  @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  dimensionType       String
+  code                String
+  name                String
+  description         String?                 @db.NVarChar(Max)
+  status              String                  @default("ACTIVE")
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  retailOrg           RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  glJournalLines      GlJournalLine[]
+  budgetLines         ErpBudgetLine[]
+  budgetPeriodAmounts ErpBudgetPeriodAmount[]
+
+  @@unique([companyId, dimensionType, code])
+  @@index([retailOrgId, dimensionType, status])
+  @@index([companyId, status])
+}
+
+model ErpBudgetVersion {
+  id            String                  @id @default(uuid())
+  retailOrgId   String
+  companyId     String
+  fiscalYearId  String
+  code          String
+  name          String
+  description   String?                 @db.NVarChar(Max)
+  budgetType    String                  @default("OPERATING")
+  scenario      String                  @default("BASE")
+  currencyCode  String
+  totalAmount   Decimal                 @default(0) @db.Decimal(18, 2)
+  status        String                  @default("DRAFT")
+  approvedAt    DateTime?
+  approvedBy    String?
+  lockedAt      DateTime?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  retailOrg     RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company       ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fiscalYear    ErpFiscalYear           @relation(fields: [fiscalYearId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines         ErpBudgetLine[]
+  periodAmounts ErpBudgetPeriodAmount[]
+
+  @@unique([companyId, fiscalYearId, code])
+  @@index([fiscalYearId])
+  @@index([retailOrgId, budgetType, status])
+  @@index([companyId, fiscalYearId, status])
+}
+
+model ErpBudgetLine {
+  id                 String                  @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  fiscalYearId       String
+  budgetVersionId    String
+  accountId          String?
+  accountCode        String
+  financeDimensionId String?
+  dimensionType      String?
+  dimensionCode      String?
+  dimensionKey       String                  @default("ACCOUNT_ONLY")
+  lineNo             Int
+  description        String?                 @db.NVarChar(Max)
+  annualAmount       Decimal                 @default(0) @db.Decimal(18, 2)
+  spreadMethod       String                  @default("EVEN")
+  status             String                  @default("ACTIVE")
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  retailOrg          RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fiscalYear         ErpFiscalYear           @relation(fields: [fiscalYearId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  budgetVersion      ErpBudgetVersion        @relation(fields: [budgetVersionId], references: [id], onDelete: Cascade)
+  account            GlAccount?              @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  financeDimension   ErpFinanceDimension?    @relation(fields: [financeDimensionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  periodAmounts      ErpBudgetPeriodAmount[]
+
+  @@unique([budgetVersionId, accountCode, dimensionKey])
+  @@index([fiscalYearId])
+  @@index([companyId, fiscalYearId, status])
+  @@index([accountId])
+  @@index([financeDimensionId])
+  @@index([companyId, dimensionType, dimensionCode])
+  @@index([retailOrgId, accountCode, status])
+}
+
+model ErpBudgetPeriodAmount {
+  id                 String               @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  budgetVersionId    String
+  budgetLineId       String
+  fiscalPeriodId     String
+  accountId          String?
+  accountCode        String
+  financeDimensionId String?
+  dimensionType      String?
+  dimensionCode      String?
+  dimensionKey       String               @default("ACCOUNT_ONLY")
+  periodNo           Int
+  periodAmount       Decimal              @default(0) @db.Decimal(18, 2)
+  status             String               @default("ACTIVE")
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  retailOrg          RetailOrg            @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  budgetVersion      ErpBudgetVersion     @relation(fields: [budgetVersionId], references: [id], onDelete: Cascade)
+  budgetLine         ErpBudgetLine        @relation(fields: [budgetLineId], references: [id], onDelete: Cascade)
+  fiscalPeriod       ErpFiscalPeriod      @relation(fields: [fiscalPeriodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  account            GlAccount?           @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  financeDimension   ErpFinanceDimension? @relation(fields: [financeDimensionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([budgetLineId, fiscalPeriodId])
+  @@index([fiscalPeriodId])
+  @@index([companyId, fiscalPeriodId, status])
+  @@index([budgetVersionId, accountCode, dimensionKey])
+  @@index([accountId])
+  @@index([financeDimensionId])
+  @@index([companyId, dimensionType, dimensionCode])
+  @@index([retailOrgId, accountCode, status])
+}
+
+model ErpPayrollGlMapping {
+  id               String                  @id @default(uuid())
+  retailOrgId      String
+  companyId        String
+  code             String
+  name             String
+  description      String?                 @db.NVarChar(Max)
+  componentType    String                  @default("EARNING")
+  accountId        String?
+  accountCode      String
+  defaultEntrySide String                  @default("DEBIT")
+  status           String                  @default("ACTIVE")
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  retailOrg        RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company          ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  account          GlAccount?              @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payrollLines     ErpPayrollPostingLine[]
+
+  @@unique([companyId, code])
+  @@index([companyId, componentType, status])
+  @@index([accountId])
+  @@index([retailOrgId, code, status])
+}
+
+model ErpPayrollPostingBatch {
+  id                 String                  @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  journalEntryId     String?
+  batchNo            String
+  payPeriodCode      String
+  payPeriodStart     DateTime
+  payPeriodEnd       DateTime
+  paymentDate        DateTime?
+  postingDate        DateTime
+  currencyCode       String
+  sourceSystem       String                  @default("MANUAL")
+  sourceReference    String?
+  description        String?                 @db.NVarChar(Max)
+  employeeCount      Int                     @default(0)
+  grossPay           Decimal                 @default(0) @db.Decimal(18, 2)
+  employeeDeductions Decimal                 @default(0) @db.Decimal(18, 2)
+  employerCosts      Decimal                 @default(0) @db.Decimal(18, 2)
+  netPay             Decimal                 @default(0) @db.Decimal(18, 2)
+  totalDebit         Decimal                 @default(0) @db.Decimal(18, 2)
+  totalCredit        Decimal                 @default(0) @db.Decimal(18, 2)
+  status             String                  @default("DRAFT")
+  postedAt           DateTime?
+  postedBy           String?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  retailOrg          RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  journalEntry       GlJournalEntry?         @relation(fields: [journalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines              ErpPayrollPostingLine[]
+
+  @@unique([retailOrgId, batchNo])
+  @@index([companyId, payPeriodStart, payPeriodEnd])
+  @@index([companyId, status, postingDate])
+  @@index([journalEntryId])
+  @@index([retailOrgId, sourceSystem, sourceReference])
+}
+
+model ErpPayrollPostingLine {
+  id                    String                 @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  payrollPostingBatchId String
+  mappingId             String?
+  accountId             String?
+  lineNo                Int
+  employeeReference     String?
+  departmentCode        String?
+  componentCode         String
+  componentName         String
+  componentType         String                 @default("EARNING")
+  accountCode           String
+  entrySide             String                 @default("DEBIT")
+  debitAmount           Decimal                @default(0) @db.Decimal(18, 2)
+  creditAmount          Decimal                @default(0) @db.Decimal(18, 2)
+  memo                  String?                @db.NVarChar(Max)
+  status                String                 @default("ACTIVE")
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  retailOrg             RetailOrg              @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payrollPostingBatch   ErpPayrollPostingBatch @relation(fields: [payrollPostingBatchId], references: [id], onDelete: Cascade)
+  mapping               ErpPayrollGlMapping?   @relation(fields: [mappingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  account               GlAccount?             @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([payrollPostingBatchId, lineNo])
+  @@index([mappingId])
+  @@index([accountId])
+  @@index([companyId, componentType, status])
+  @@index([retailOrgId, componentCode, status])
+}
+
+model ErpSettlementAllocation {
+  id                    String                     @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  partyProfileId        String?
+  operationalDocumentId String
+  postingJournalEntryId String?
+  allocationNo          String
+  allocationType        String                     @default("CUSTOMER_RECEIPT")
+  partyType             String
+  partyNo               String
+  partyName             String
+  allocationDate        DateTime
+  postingDate           DateTime
+  currencyCode          String
+  paymentAccountCode    String                     @default("1000")
+  amount                Decimal                    @db.Decimal(18, 2)
+  discountAmount        Decimal                    @default(0) @db.Decimal(18, 2)
+  writeOffAmount        Decimal                    @default(0) @db.Decimal(18, 2)
+  memo                  String?                    @db.NVarChar(Max)
+  status                String                     @default("DRAFT")
+  postedAt              DateTime?
+  postedBy              String?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  retailOrg             RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  partyProfile          ErpPartyAccountingProfile? @relation(fields: [partyProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operationalDocument   ErpOperationalDocument     @relation(fields: [operationalDocumentId], references: [id], onDelete: Cascade)
+  postingJournalEntry   GlJournalEntry?            @relation(fields: [postingJournalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  cashbookEntries       ErpCashbookEntry[]
+
+  @@unique([retailOrgId, allocationNo])
+  @@index([companyId, allocationType, status])
+  @@index([operationalDocumentId])
+  @@index([partyProfileId])
+  @@index([postingJournalEntryId])
+  @@index([retailOrgId, allocationDate, status])
+}
+
+model ErpCashbookAccount {
+  id                    String                       @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  bankAccountId         String?
+  glAccountId           String?
+  code                  String
+  name                  String
+  accountType           String                       @default("CASH")
+  currencyCode          String
+  glAccountCode         String                       @default("1000")
+  accountNumber         String?
+  bankName              String?
+  branchName            String?
+  mobileProviderName    String?
+  mobileWalletNumber    String?
+  pettyCashCustodian    String?
+  openingBalance        Decimal                      @default(0) @db.Decimal(18, 2)
+  reconciliationEnabled Boolean                      @default(true)
+  isDefault             Boolean                      @default(false)
+  lastReconciledAt      DateTime?
+  status                String                       @default("ACTIVE")
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  retailOrg             RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  bankAccount           BankAccount?                 @relation(fields: [bankAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  glAccount             GlAccount?                   @relation(fields: [glAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  entries               ErpCashbookEntry[]
+  bankStatements        ErpBankStatement[]
+  bankStatementLines    ErpBankStatementLine[]
+  reconciliationMatches ErpBankReconciliationMatch[]
+  fuelSales             ErpFuelSale[]                @relation("FuelSalePaymentAccount")
+  fuelSalePayments      ErpFuelSalePayment[]         @relation("FuelSalePaymentLineAccount")
+  tenderMethods         TenderMethod[]               @relation("TenderMethodCashbookAccount")
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, accountType, status])
+  @@index([companyId, isDefault])
+  @@index([bankAccountId])
+  @@index([glAccountId])
+}
+
+model ErpCashbookEntry {
+  id                      String                       @id @default(uuid())
+  retailOrgId             String
+  companyId               String
+  cashbookAccountId       String
+  postingJournalEntryId   String?
+  settlementAllocationId  String?
+  entryNo                 String
+  entryType               String                       @default("RECEIPT")
+  direction               String                       @default("INFLOW")
+  entryDate               DateTime
+  postingDate             DateTime
+  valueDate               DateTime?
+  currencyCode            String
+  amount                  Decimal                      @db.Decimal(18, 2)
+  offsetAccountCode       String
+  counterpartyName        String?
+  workflowType            String                       @default("STANDARD")
+  workflowReference       String?
+  linkedCashbookAccountId String?
+  linkedCashbookEntryId   String?
+  pettyCashCustodian      String?
+  providerName            String?
+  providerReference       String?
+  externalReference       String?
+  clearingReference       String?
+  memo                    String?                      @db.NVarChar(Max)
+  reconciliationStatus    String                       @default("UNRECONCILED")
+  clearedAt               DateTime?
+  status                  String                       @default("DRAFT")
+  postedAt                DateTime?
+  postedBy                String?
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
+  retailOrg               RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                 ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  cashbookAccount         ErpCashbookAccount           @relation(fields: [cashbookAccountId], references: [id], onDelete: Cascade)
+  postingJournalEntry     GlJournalEntry?              @relation(fields: [postingJournalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  settlementAllocation    ErpSettlementAllocation?     @relation(fields: [settlementAllocationId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reconciliationMatches   ErpBankReconciliationMatch[]
+
+  @@unique([retailOrgId, entryNo])
+  @@index([companyId, entryType, status])
+  @@index([cashbookAccountId, entryDate])
+  @@index([companyId, workflowType, workflowReference])
+  @@index([linkedCashbookAccountId])
+  @@index([linkedCashbookEntryId])
+  @@index([postingJournalEntryId])
+  @@index([settlementAllocationId])
+  @@index([retailOrgId, entryDate, reconciliationStatus])
+}
+
+model ErpBankStatement {
+  id                    String                       @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  cashbookAccountId     String
+  statementNo           String
+  statementType         String                       @default("BANK_STATEMENT")
+  statementDate         DateTime
+  fromDate              DateTime
+  toDate                DateTime
+  currencyCode          String
+  openingBalance        Decimal                      @default(0) @db.Decimal(18, 2)
+  closingBalance        Decimal                      @default(0) @db.Decimal(18, 2)
+  sourceType            String                       @default("MANUAL")
+  externalReference     String?
+  memo                  String?                      @db.NVarChar(Max)
+  status                String                       @default("OPEN")
+  importedAt            DateTime?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  retailOrg             RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  cashbookAccount       ErpCashbookAccount           @relation(fields: [cashbookAccountId], references: [id], onDelete: Cascade)
+  lines                 ErpBankStatementLine[]
+  reconciliationMatches ErpBankReconciliationMatch[]
+
+  @@unique([retailOrgId, statementNo])
+  @@index([companyId, status, statementDate])
+  @@index([cashbookAccountId, fromDate, toDate])
+  @@index([retailOrgId, sourceType, status])
+}
+
+model ErpBankStatementLine {
+  id                    String                       @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  bankStatementId       String
+  cashbookAccountId     String
+  lineNo                Int
+  transactionDate       DateTime
+  valueDate             DateTime?
+  direction             String                       @default("INFLOW")
+  amount                Decimal                      @db.Decimal(18, 2)
+  description           String
+  reference             String?
+  counterpartyName      String?
+  matchStatus           String                       @default("UNMATCHED")
+  ignoredReason         String?
+  status                String                       @default("ACTIVE")
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  retailOrg             RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  bankStatement         ErpBankStatement             @relation(fields: [bankStatementId], references: [id], onDelete: Cascade)
+  cashbookAccount       ErpCashbookAccount           @relation(fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reconciliationMatches ErpBankReconciliationMatch[]
+
+  @@unique([bankStatementId, lineNo])
+  @@index([companyId, matchStatus, transactionDate])
+  @@index([cashbookAccountId, transactionDate])
+  @@index([retailOrgId, reference, matchStatus])
+}
+
+model ErpBankReconciliationMatch {
+  id                String               @id @default(uuid())
+  retailOrgId       String
+  companyId         String
+  cashbookAccountId String
+  bankStatementId   String
+  statementLineId   String
+  cashbookEntryId   String
+  matchedAmount     Decimal              @db.Decimal(18, 2)
+  matchType         String               @default("MANUAL")
+  matchedBy         String?
+  matchedAt         DateTime             @default(now())
+  reversedAt        DateTime?
+  reversalReason    String?
+  status            String               @default("ACTIVE")
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  retailOrg         RetailOrg            @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company           ErpCompany           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  cashbookAccount   ErpCashbookAccount   @relation(fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bankStatement     ErpBankStatement     @relation(fields: [bankStatementId], references: [id], onDelete: Cascade)
+  statementLine     ErpBankStatementLine @relation(fields: [statementLineId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  cashbookEntry     ErpCashbookEntry     @relation(fields: [cashbookEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([companyId, status, matchedAt])
+  @@index([cashbookAccountId, status])
+  @@index([bankStatementId])
+  @@index([statementLineId])
+  @@index([cashbookEntryId])
+  @@index([retailOrgId, status])
+}
+
+model ErpProductProfile {
+  id                       String                       @id @default(uuid())
+  retailOrgId              String
+  companyId                String?
+  code                     String
+  name                     String
+  productFamily            String
+  variantName              String?
+  defaultUomCode           String
+  trackingMode             String                       @default("QUANTITY")
+  attributesJson           String?                      @db.NVarChar(Max)
+  status                   String                       @default("ACTIVE")
+  createdAt                DateTime                     @default(now())
+  updatedAt                DateTime                     @updatedAt
+  retailOrg                RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany?                  @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  storageUnits             ErpStorageUnit[]
+  documentLines            ErpOperationalDocumentLine[]
+  fuelTanks                ErpFuelTank[]
+  fuelNozzles              ErpFuelNozzle[]
+  fuelDeliveryLines        ErpFuelDeliveryLine[]
+  fuelStationDeliveryLines ErpFuelStationDeliveryLine[]
+  fuelSaleLines            ErpFuelSaleLine[]
+  fuelReconciliationLines  ErpFuelReconciliationLine[]
+
+  @@unique([retailOrgId, code])
+  @@index([retailOrgId, productFamily, status])
+  @@index([companyId])
+}
+
+model ErpOperatingSite {
+  id                       String                       @id @default(uuid())
+  retailOrgId              String
+  companyId                String?
+  code                     String
+  name                     String
+  siteType                 String                       @default("LOCATION")
+  location                 String?
+  city                     String?
+  region                   String?
+  countryCode              String?
+  status                   String                       @default("ACTIVE")
+  createdAt                DateTime                     @default(now())
+  updatedAt                DateTime                     @updatedAt
+  retailOrg                RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany?                  @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  storageUnits             ErpStorageUnit[]
+  fuelTanks                ErpFuelTank[]
+  fuelPumps                ErpFuelPump[]
+  fuelDeliveries           ErpFuelDelivery[]
+  fuelStations             ErpFuelStation[]             @relation("FuelStationOperatingSite")
+  fuelStationDeliveries    ErpFuelStationDelivery[]     @relation("FuelStationDeliverySourceSite")
+  fuelSales                ErpFuelSale[]                @relation("FuelSaleSourceSite")
+  fuelDailyReconciliations ErpFuelDailyReconciliation[]
+  defaultSaleFuelSettings  ErpFuelOperationsSettings[]  @relation("FuelSettingsDefaultSaleSourceSite")
+  defaultDispatchSettings  ErpFuelOperationsSettings[]  @relation("FuelSettingsDefaultDispatchSite")
+
+  @@unique([retailOrgId, code])
+  @@index([retailOrgId, status])
+  @@index([companyId])
+}
+
+model ErpStorageUnit {
+  id                   String             @id @default(uuid())
+  retailOrgId          String
+  operatingSiteId      String
+  productProfileId     String?
+  code                 String
+  name                 String
+  capacityQuantity     Decimal            @default(0) @db.Decimal(18, 3)
+  safeCapacityQuantity Decimal?           @db.Decimal(18, 3)
+  uomCode              String             @default("EA")
+  status               String             @default("ACTIVE")
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  retailOrg            RetailOrg          @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  operatingSite        ErpOperatingSite   @relation(fields: [operatingSiteId], references: [id], onDelete: Cascade)
+  productProfile       ErpProductProfile? @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@unique([operatingSiteId, code])
+  @@index([retailOrgId, status])
+  @@index([productProfileId])
+}
+
+model ErpFuelTank {
+  id                   String                       @id @default(uuid())
+  retailOrgId          String
+  companyId            String
+  operatingSiteId      String?
+  productProfileId     String?
+  code                 String
+  name                 String
+  tankType             String                       @default("UNDERGROUND")
+  capacityQuantity     Decimal                      @db.Decimal(18, 3)
+  safeCapacityQuantity Decimal?                     @db.Decimal(18, 3)
+  reorderLevelQuantity Decimal?                     @db.Decimal(18, 3)
+  uomCode              String                       @default("LTR")
+  openingQuantity      Decimal                      @default(0) @db.Decimal(18, 3)
+  currentBookQuantity  Decimal                      @default(0) @db.Decimal(18, 3)
+  lastDipAt            DateTime?
+  status               String                       @default("ACTIVE")
+  notes                String?                      @db.NVarChar(Max)
+  createdAt            DateTime                     @default(now())
+  updatedAt            DateTime                     @updatedAt
+  retailOrg            RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company              ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operatingSite        ErpOperatingSite?            @relation(fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  productProfile       ErpProductProfile?           @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  nozzles              ErpFuelNozzle[]
+  dips                 ErpFuelTankDip[]
+  meterReadings        ErpFuelMeterReading[]
+  deliveryLines        ErpFuelDeliveryLine[]
+  stationDeliveryLines ErpFuelStationDeliveryLine[] @relation("FuelStationDeliverySourceTank")
+  reconciliationLines  ErpFuelReconciliationLine[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([operatingSiteId, status])
+  @@index([productProfileId])
+}
+
+model ErpFuelPump {
+  id              String            @id @default(uuid())
+  retailOrgId     String
+  companyId       String
+  operatingSiteId String?
+  code            String
+  name            String
+  pumpType        String            @default("DISPENSER")
+  manufacturer    String?
+  serialNo        String?
+  status          String            @default("ACTIVE")
+  notes           String?           @db.NVarChar(Max)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  retailOrg       RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company         ErpCompany        @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operatingSite   ErpOperatingSite? @relation(fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  nozzles         ErpFuelNozzle[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([operatingSiteId, status])
+}
+
+model ErpFuelNozzle {
+  id                  String                @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  pumpId              String
+  tankId              String
+  productProfileId    String?
+  code                String
+  name                String
+  meterUomCode        String                @default("LTR")
+  openingMeterReading Decimal               @default(0) @db.Decimal(18, 3)
+  currentMeterReading Decimal               @default(0) @db.Decimal(18, 3)
+  status              String                @default("ACTIVE")
+  notes               String?               @db.NVarChar(Max)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  retailOrg           RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  pump                ErpFuelPump           @relation(fields: [pumpId], references: [id], onDelete: Cascade)
+  tank                ErpFuelTank           @relation(fields: [tankId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  productProfile      ErpProductProfile?    @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  meterReadings       ErpFuelMeterReading[]
+
+  @@unique([pumpId, code])
+  @@index([companyId, status])
+  @@index([tankId, status])
+  @@index([productProfileId])
+}
+
+model ErpFuelTankDip {
+  id                 String      @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  tankId             String
+  dipReference       String?
+  dipDate            DateTime
+  dipQuantity        Decimal     @db.Decimal(18, 3)
+  waterQuantity      Decimal     @default(0) @db.Decimal(18, 3)
+  temperatureReading Decimal?    @db.Decimal(18, 3)
+  bookQuantity       Decimal     @db.Decimal(18, 3)
+  varianceQuantity   Decimal     @db.Decimal(18, 3)
+  evidenceImageUrl   String?
+  evidenceFileName   String?
+  evidenceCapturedAt DateTime?
+  evidenceUploadedAt DateTime?
+  recordedBy         String?
+  status             String      @default("POSTED")
+  notes              String?     @db.NVarChar(Max)
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  retailOrg          RetailOrg   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany  @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tank               ErpFuelTank @relation(fields: [tankId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, dipDate])
+  @@index([tankId, dipDate])
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelMeterReading {
+  id                  String        @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  nozzleId            String
+  tankId              String
+  readingDate         DateTime
+  shiftReference      String?
+  openingMeterReading Decimal       @db.Decimal(18, 3)
+  closingMeterReading Decimal       @db.Decimal(18, 3)
+  salesQuantity       Decimal       @db.Decimal(18, 3)
+  adjustmentQuantity  Decimal       @default(0) @db.Decimal(18, 3)
+  unitSellingPrice    Decimal       @default(0) @db.Decimal(18, 4)
+  salesAmount         Decimal       @default(0) @db.Decimal(18, 2)
+  evidenceImageUrl    String?
+  evidenceFileName    String?
+  evidenceCapturedAt  DateTime?
+  evidenceUploadedAt  DateTime?
+  recordedBy          String?
+  status              String        @default("POSTED")
+  notes               String?       @db.NVarChar(Max)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  retailOrg           RetailOrg     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany    @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  nozzle              ErpFuelNozzle @relation(fields: [nozzleId], references: [id], onDelete: Cascade)
+  tank                ErpFuelTank   @relation(fields: [tankId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([companyId, readingDate])
+  @@index([nozzleId, readingDate])
+  @@index([tankId, readingDate])
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelDelivery {
+  id                     String                @id @default(uuid())
+  retailOrgId            String
+  companyId              String
+  operatingSiteId        String?
+  deliveryNo             String
+  supplierName           String?
+  supplierDocumentNo     String?
+  transporterName        String?
+  vehicleRegistrationNo  String?
+  deliveryDate           DateTime
+  status                 String                @default("POSTED")
+  currencyCode           String
+  totalOrderedQuantity   Decimal               @default(0) @db.Decimal(18, 3)
+  totalDeliveredQuantity Decimal               @default(0) @db.Decimal(18, 3)
+  totalAcceptedQuantity  Decimal               @default(0) @db.Decimal(18, 3)
+  totalVarianceQuantity  Decimal               @default(0) @db.Decimal(18, 3)
+  totalCostAmount        Decimal               @default(0) @db.Decimal(18, 2)
+  notes                  String?               @db.NVarChar(Max)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  retailOrg              RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                ErpCompany            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operatingSite          ErpOperatingSite?     @relation(fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  lines                  ErpFuelDeliveryLine[]
+
+  @@unique([companyId, deliveryNo])
+  @@index([companyId, deliveryDate])
+  @@index([operatingSiteId, deliveryDate])
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelDeliveryLine {
+  id                String             @id @default(uuid())
+  retailOrgId       String
+  companyId         String
+  deliveryId        String
+  tankId            String
+  productProfileId  String?
+  orderedQuantity   Decimal            @default(0) @db.Decimal(18, 3)
+  deliveredQuantity Decimal            @db.Decimal(18, 3)
+  acceptedQuantity  Decimal            @db.Decimal(18, 3)
+  varianceQuantity  Decimal            @db.Decimal(18, 3)
+  unitCost          Decimal            @default(0) @db.Decimal(18, 4)
+  lineCostAmount    Decimal            @default(0) @db.Decimal(18, 2)
+  notes             String?            @db.NVarChar(Max)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  retailOrg         RetailOrg          @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company           ErpCompany         @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  delivery          ErpFuelDelivery    @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  tank              ErpFuelTank        @relation(fields: [tankId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  productProfile    ErpProductProfile? @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([deliveryId])
+  @@index([tankId])
+  @@index([productProfileId])
+}
+
+model ErpFuelStation {
+  id                  String                   @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  customerId          String?
+  storeId             String?
+  inventoryLocationId String?
+  operatingSiteId     String?
+  stationCode         String
+  stationName         String
+  stationType         String                   @default("CUSTOMER")
+  location            String?
+  city                String?
+  gpsLatitude         Decimal?                 @db.Decimal(10, 7)
+  gpsLongitude        Decimal?                 @db.Decimal(10, 7)
+  contactName         String?
+  phone               String?
+  paymentTermsCode    String?
+  creditLimitAmount   Decimal?                 @db.Decimal(18, 2)
+  status              String                   @default("ACTIVE")
+  notes               String?                  @db.NVarChar(Max)
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  retailOrg           RetailOrg                @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany               @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer            Customer?                @relation("FuelStationCustomer", fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  store               Store?                   @relation("FuelStationStore", fields: [storeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  inventoryLocation   InventoryLocation?       @relation("FuelStationDefaultLocation", fields: [inventoryLocationId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  operatingSite       ErpOperatingSite?        @relation("FuelStationOperatingSite", fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  deliveries          ErpFuelStationDelivery[]
+  interStoreTransfers InterStoreTransfer[]     @relation("FuelStationInterStoreTransfer")
+  sales               ErpFuelSale[]
+
+  @@unique([companyId, stationCode])
+  @@index([retailOrgId, status])
+  @@index([customerId])
+  @@index([storeId])
+  @@index([inventoryLocationId])
+  @@index([operatingSiteId])
+}
+
+model ErpFuelStationDelivery {
+  id                     String                       @id @default(uuid())
+  retailOrgId            String
+  companyId              String
+  stationId              String
+  customerId             String?
+  sourceOperatingSiteId  String?
+  deliveryNo             String
+  deliveryDate           DateTime
+  requestedDeliveryDate  DateTime?
+  dueDate                DateTime?
+  status                 String                       @default("POSTED")
+  invoiceStatus          String                       @default("NOT_INVOICED")
+  paymentMode            String                       @default("CREDIT")
+  paymentStatus          String                       @default("UNPAID")
+  paymentReference       String?
+  paymentReceivedAt      DateTime?
+  financeDocumentId      String?
+  customerReference      String?
+  deliveryNoteNo         String?
+  transporterName        String?
+  vehicleRegistrationNo  String?
+  driverName             String?
+  currencyCode           String
+  totalOrderedQuantity   Decimal                      @default(0) @db.Decimal(18, 3)
+  totalLoadedQuantity    Decimal                      @default(0) @db.Decimal(18, 3)
+  totalDeliveredQuantity Decimal                      @default(0) @db.Decimal(18, 3)
+  totalVarianceQuantity  Decimal                      @default(0) @db.Decimal(18, 3)
+  totalSalesAmount       Decimal                      @default(0) @db.Decimal(18, 2)
+  totalCostAmount        Decimal                      @default(0) @db.Decimal(18, 2)
+  marginAmount           Decimal                      @default(0) @db.Decimal(18, 2)
+  amountReceived         Decimal                      @default(0) @db.Decimal(18, 2)
+  outstandingAmount      Decimal                      @default(0) @db.Decimal(18, 2)
+  notes                  String?                      @db.NVarChar(Max)
+  createdAt              DateTime                     @default(now())
+  updatedAt              DateTime                     @updatedAt
+  retailOrg              RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  station                ErpFuelStation               @relation(fields: [stationId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer               Customer?                    @relation("FuelStationDeliveryCustomer", fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sourceOperatingSite    ErpOperatingSite?            @relation("FuelStationDeliverySourceSite", fields: [sourceOperatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  lines                  ErpFuelStationDeliveryLine[]
+  sales                  ErpFuelSale[]                @relation("FuelSaleLinkedStationDelivery")
+
+  @@unique([companyId, deliveryNo])
+  @@index([companyId, deliveryDate])
+  @@index([stationId, deliveryDate])
+  @@index([customerId, paymentStatus])
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelStationDeliveryLine {
+  id                String                 @id @default(uuid())
+  retailOrgId       String
+  companyId         String
+  stationDeliveryId String
+  sourceTankId      String
+  productProfileId  String?
+  orderedQuantity   Decimal                @default(0) @db.Decimal(18, 3)
+  loadedQuantity    Decimal                @db.Decimal(18, 3)
+  deliveredQuantity Decimal                @db.Decimal(18, 3)
+  varianceQuantity  Decimal                @db.Decimal(18, 3)
+  unitSellingPrice  Decimal                @default(0) @db.Decimal(18, 4)
+  salesAmount       Decimal                @default(0) @db.Decimal(18, 2)
+  unitCost          Decimal                @default(0) @db.Decimal(18, 4)
+  costAmount        Decimal                @default(0) @db.Decimal(18, 2)
+  marginAmount      Decimal                @default(0) @db.Decimal(18, 2)
+  notes             String?                @db.NVarChar(Max)
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  retailOrg         RetailOrg              @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company           ErpCompany             @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  stationDelivery   ErpFuelStationDelivery @relation(fields: [stationDeliveryId], references: [id], onDelete: Cascade)
+  sourceTank        ErpFuelTank            @relation("FuelStationDeliverySourceTank", fields: [sourceTankId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  productProfile    ErpProductProfile?     @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([stationDeliveryId])
+  @@index([sourceTankId])
+  @@index([productProfileId])
+}
+
+model ErpFuelSale {
+  id                       String                  @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  sourceOperatingSiteId    String
+  customerId               String?
+  stationId                String?
+  linkedStationDeliveryId  String?
+  paymentCashbookAccountId String?
+  saleNo                   String
+  loadingDate              DateTime
+  dispatchDate             DateTime?
+  serviceType              String                  @default("COMBO")
+  customerName             String
+  paymentReceivedAmount    Decimal                 @default(0) @db.Decimal(18, 2)
+  balanceAmount            Decimal                 @default(0) @db.Decimal(18, 2)
+  paymentDate              DateTime?
+  paymentReference         String?
+  paymentDetails           String?                 @db.NVarChar(Max)
+  truckLoaded              String?
+  currencyCode             String
+  totalQuantity            Decimal                 @default(0) @db.Decimal(18, 3)
+  totalAmount              Decimal                 @default(0) @db.Decimal(18, 2)
+  paymentStatus            String                  @default("UNPAID")
+  status                   String                  @default("POSTED")
+  notes                    String?                 @db.NVarChar(Max)
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
+  retailOrg                RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany              @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sourceOperatingSite      ErpOperatingSite        @relation("FuelSaleSourceSite", fields: [sourceOperatingSiteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer                 Customer?               @relation("FuelSaleCustomer", fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  station                  ErpFuelStation?         @relation(fields: [stationId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  linkedStationDelivery    ErpFuelStationDelivery? @relation("FuelSaleLinkedStationDelivery", fields: [linkedStationDeliveryId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  paymentCashbookAccount   ErpCashbookAccount?     @relation("FuelSalePaymentAccount", fields: [paymentCashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines                    ErpFuelSaleLine[]
+  payments                 ErpFuelSalePayment[]
+
+  @@unique([companyId, saleNo])
+  @@index([companyId, loadingDate])
+  @@index([sourceOperatingSiteId, loadingDate])
+  @@index([customerId, paymentStatus])
+  @@index([stationId])
+  @@index([linkedStationDeliveryId])
+  @@index([paymentCashbookAccountId])
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelSaleLine {
+  id                  String            @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  fuelSaleId          String
+  productProfileId    String
+  productCodeSnapshot String
+  productNameSnapshot String
+  quantity            Decimal           @db.Decimal(18, 3)
+  unitPrice           Decimal           @db.Decimal(18, 4)
+  lineAmount          Decimal           @db.Decimal(18, 2)
+  notes               String?           @db.NVarChar(Max)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  retailOrg           RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany        @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  fuelSale            ErpFuelSale       @relation(fields: [fuelSaleId], references: [id], onDelete: Cascade)
+  productProfile      ErpProductProfile @relation(fields: [productProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([fuelSaleId])
+  @@index([productProfileId])
+  @@index([companyId, productProfileId])
+}
+
+model ErpFuelSalePayment {
+  id                       String              @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  fuelSaleId               String
+  cashbookAccountId        String?
+  tenderMethodId           String?
+  tenderMethodCodeSnapshot String?
+  tenderMethodNameSnapshot String?
+  paymentMode              String
+  amount                   Decimal             @db.Decimal(18, 2)
+  reference                String?
+  receivedAt               DateTime?
+  notes                    String?             @db.NVarChar(Max)
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  retailOrg                RetailOrg           @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany          @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  fuelSale                 ErpFuelSale         @relation(fields: [fuelSaleId], references: [id], onDelete: Cascade)
+  cashbookAccount          ErpCashbookAccount? @relation("FuelSalePaymentLineAccount", fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenderMethod             TenderMethod?       @relation(fields: [tenderMethodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([fuelSaleId])
+  @@index([cashbookAccountId])
+  @@index([tenderMethodId])
+  @@index([companyId, receivedAt])
+  @@index([retailOrgId])
+}
+
+model ErpFuelDailyReconciliation {
+  id                           String                      @id @default(uuid())
+  retailOrgId                  String
+  companyId                    String
+  operatingSiteId              String?
+  reconciliationNo             String
+  reconciliationDate           DateTime
+  status                       String                      @default("POSTED")
+  totalOpeningQuantity         Decimal                     @default(0) @db.Decimal(18, 3)
+  totalDeliveredQuantity       Decimal                     @default(0) @db.Decimal(18, 3)
+  totalStationDeliveryQuantity Decimal                     @default(0) @db.Decimal(18, 3)
+  totalMeterSalesQuantity      Decimal                     @default(0) @db.Decimal(18, 3)
+  totalBookClosingQuantity     Decimal                     @default(0) @db.Decimal(18, 3)
+  totalDipClosingQuantity      Decimal                     @default(0) @db.Decimal(18, 3)
+  totalGainLossQuantity        Decimal                     @default(0) @db.Decimal(18, 3)
+  totalSalesAmount             Decimal                     @default(0) @db.Decimal(18, 2)
+  totalCostAmount              Decimal                     @default(0) @db.Decimal(18, 2)
+  marginAmount                 Decimal                     @default(0) @db.Decimal(18, 2)
+  marginPercent                Decimal                     @default(0) @db.Decimal(9, 4)
+  notes                        String?                     @db.NVarChar(Max)
+  createdAt                    DateTime                    @default(now())
+  updatedAt                    DateTime                    @updatedAt
+  retailOrg                    RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                      ErpCompany                  @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operatingSite                ErpOperatingSite?           @relation(fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  lines                        ErpFuelReconciliationLine[]
+
+  @@unique([companyId, reconciliationNo])
+  @@unique([companyId, operatingSiteId, reconciliationDate])
+  @@index([companyId, reconciliationDate])
+  @@index([retailOrgId, status])
+}
+
+model ErpFuelReconciliationLine {
+  id                         String                     @id @default(uuid())
+  retailOrgId                String
+  companyId                  String
+  reconciliationId           String
+  tankId                     String
+  productProfileId           String?
+  openingQuantity            Decimal                    @default(0) @db.Decimal(18, 3)
+  deliveredQuantity          Decimal                    @default(0) @db.Decimal(18, 3)
+  stationDeliveryQuantity    Decimal                    @default(0) @db.Decimal(18, 3)
+  meterSalesQuantity         Decimal                    @default(0) @db.Decimal(18, 3)
+  bookClosingQuantity        Decimal                    @default(0) @db.Decimal(18, 3)
+  dipClosingQuantity         Decimal                    @default(0) @db.Decimal(18, 3)
+  gainLossQuantity           Decimal                    @default(0) @db.Decimal(18, 3)
+  averageCostRate            Decimal                    @default(0) @db.Decimal(18, 4)
+  stationDeliverySalesAmount Decimal                    @default(0) @db.Decimal(18, 2)
+  stationDeliveryCostAmount  Decimal                    @default(0) @db.Decimal(18, 2)
+  salesAmount                Decimal                    @default(0) @db.Decimal(18, 2)
+  costAmount                 Decimal                    @default(0) @db.Decimal(18, 2)
+  marginAmount               Decimal                    @default(0) @db.Decimal(18, 2)
+  marginPercent              Decimal                    @default(0) @db.Decimal(9, 4)
+  notes                      String?                    @db.NVarChar(Max)
+  createdAt                  DateTime                   @default(now())
+  updatedAt                  DateTime                   @updatedAt
+  retailOrg                  RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                    ErpCompany                 @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reconciliation             ErpFuelDailyReconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  tank                       ErpFuelTank                @relation(fields: [tankId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  productProfile             ErpProductProfile?         @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([reconciliationId])
+  @@index([tankId])
+  @@index([productProfileId])
 }
 
 model Warehouse {
@@ -570,43 +2408,48 @@ model RetailUserSession {
 }
 
 model Customer {
-  id                      String                 @id @default(uuid())
-  retailOrgId             String
-  storeId                 String?
-  customerNo              String
-  customerType            String                 @default("INDIVIDUAL")
-  fullName                String
-  phone                   String?
-  email                   String?
-  addressLine1            String?
-  city                    String?
-  countryCode             String?
-  loyaltyEnrolled         Boolean                @default(false)
-  loyaltyTier             String?
-  loyaltyPointsBalance    Int                    @default(0)
-  allowCreditSales        Boolean                @default(false)
-  creditLimitAmount       Decimal?               @db.Decimal(12, 2)
-  receivableBalanceAmount Decimal                @default(0) @db.Decimal(12, 2)
-  note                    String?
-  status                  String                 @default("ACTIVE")
-  originNodeCode          String?
-  lastModifiedByNodeCode  String?
-  recordVersion           Int                    @default(1)
-  createdAt               DateTime               @default(now())
-  updatedAt               DateTime               @updatedAt
-  deletedAt               DateTime?
-  retailOrg               RetailOrg              @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  store                   Store?                 @relation(fields: [storeId], references: [id], onDelete: SetNull)
-  posTransactions         PosTransaction[]
-  accountEntries          CustomerAccountEntry[]
-  salesOrders             SalesOrder[]
+  id                        String                             @id @default(uuid())
+  retailOrgId               String
+  storeId                   String?
+  customerNo                String
+  customerType              String                             @default("INDIVIDUAL")
+  fullName                  String
+  phone                     String?
+  email                     String?
+  addressLine1              String?
+  city                      String?
+  countryCode               String?
+  loyaltyEnrolled           Boolean                            @default(false)
+  loyaltyTier               String?
+  loyaltyPointsBalance      Int                                @default(0)
+  allowCreditSales          Boolean                            @default(false)
+  creditLimitAmount         Decimal?                           @db.Decimal(12, 2)
+  receivableBalanceAmount   Decimal                            @default(0) @db.Decimal(12, 2)
+  note                      String?
+  status                    String                             @default("ACTIVE")
+  originNodeCode            String?
+  lastModifiedByNodeCode    String?
+  recordVersion             Int                                @default(1)
+  createdAt                 DateTime                           @default(now())
+  updatedAt                 DateTime                           @updatedAt
+  deletedAt                 DateTime?
+  retailOrg                 RetailOrg                          @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store                     Store?                             @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  posTransactions           PosTransaction[]
+  accountEntries            CustomerAccountEntry[]
+  accountPaymentAllocations CustomerAccountPaymentAllocation[]
+  salesOrders               SalesOrder[]
+  erpAccountingProfiles     ErpPartyAccountingProfile[]
+  fuelStations              ErpFuelStation[]                   @relation("FuelStationCustomer")
+  fuelStationDeliveries     ErpFuelStationDelivery[]           @relation("FuelStationDeliveryCustomer")
+  fuelSales                 ErpFuelSale[]                      @relation("FuelSaleCustomer")
 
   @@unique([retailOrgId, customerNo])
   @@index([storeId])
 }
 
 model CustomerAccountEntry {
-  id                            String          @id @default(uuid())
+  id                            String                             @id @default(uuid())
   retailOrgId                   String
   customerId                    String
   storeId                       String?
@@ -622,21 +2465,23 @@ model CustomerAccountEntry {
   bankBranchNameSnapshot        String?
   bankAccountNumberSnapshot     String?
   bankAccountNameSnapshot       String?
-  receivableDeltaAmount         Decimal         @default(0) @db.Decimal(12, 2)
-  loyaltyPointsDelta            Int             @default(0)
-  resultingReceivableBalance    Decimal         @default(0) @db.Decimal(12, 2)
-  resultingLoyaltyPointsBalance Int             @default(0)
+  receivableDeltaAmount         Decimal                            @default(0) @db.Decimal(12, 2)
+  loyaltyPointsDelta            Int                                @default(0)
+  resultingReceivableBalance    Decimal                            @default(0) @db.Decimal(12, 2)
+  resultingLoyaltyPointsBalance Int                                @default(0)
   note                          String?
   originNodeCode                String?
   occurredAt                    DateTime
-  createdAt                     DateTime        @default(now())
-  updatedAt                     DateTime        @updatedAt
-  retailOrg                     RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  customer                      Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  store                         Store?          @relation(fields: [storeId], references: [id], onDelete: SetNull)
-  terminal                      Terminal?       @relation(fields: [terminalId], references: [id], onDelete: SetNull)
-  posTransaction                PosTransaction? @relation(fields: [posTransactionId], references: [id], onDelete: SetNull)
-  bankAccount                   BankAccount?    @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  createdAt                     DateTime                           @default(now())
+  updatedAt                     DateTime                           @updatedAt
+  retailOrg                     RetailOrg                          @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  customer                      Customer                           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  store                         Store?                             @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  terminal                      Terminal?                          @relation(fields: [terminalId], references: [id], onDelete: SetNull)
+  posTransaction                PosTransaction?                    @relation(fields: [posTransactionId], references: [id], onDelete: SetNull)
+  bankAccount                   BankAccount?                       @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  invoicePaymentAllocations     CustomerAccountPaymentAllocation[] @relation("CustomerAccountInvoiceAllocation")
+  paymentInvoiceAllocations     CustomerAccountPaymentAllocation[] @relation("CustomerAccountPaymentAllocation")
 
   @@index([customerId, occurredAt])
   @@index([posTransactionId])
@@ -646,8 +2491,29 @@ model CustomerAccountEntry {
   @@index([terminalId])
 }
 
+model CustomerAccountPaymentAllocation {
+  id             String               @id @default(uuid())
+  retailOrgId    String
+  customerId     String
+  paymentEntryId String
+  invoiceEntryId String
+  amount         Decimal              @db.Decimal(12, 2)
+  note           String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  retailOrg      RetailOrg            @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  customer       Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  paymentEntry   CustomerAccountEntry @relation("CustomerAccountPaymentAllocation", fields: [paymentEntryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  invoiceEntry   CustomerAccountEntry @relation("CustomerAccountInvoiceAllocation", fields: [invoiceEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([paymentEntryId, invoiceEntryId])
+  @@index([customerId, invoiceEntryId])
+  @@index([invoiceEntryId])
+  @@index([retailOrgId, createdAt])
+}
+
 model Supplier {
-  id                     String            @id @default(uuid())
+  id                     String                      @id @default(uuid())
   retailOrgId            String
   supplierNo             String
   name                   String
@@ -658,48 +2524,51 @@ model Supplier {
   city                   String?
   countryCode            String?
   leadTimeDays           Int?
-  status                 String            @default("ACTIVE")
+  status                 String                      @default("ACTIVE")
   originNodeCode         String?
   lastModifiedByNodeCode String?
-  recordVersion          Int               @default(1)
-  createdAt              DateTime          @default(now())
-  updatedAt              DateTime          @updatedAt
+  recordVersion          Int                         @default(1)
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
   deletedAt              DateTime?
-  retailOrg              RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  retailOrg              RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
   productSuppliers       ProductSupplier[]
   purchaseOrders         PurchaseOrder[]
   supplierClaims         SupplierClaim[]
   supplierReturns        SupplierReturn[]
   goodsReceipts          GoodsReceipt[]
+  erpAccountingProfiles  ErpPartyAccountingProfile[]
 
   @@unique([retailOrgId, supplierNo])
 }
 
 model TaxProfile {
-  id                     String    @id @default(uuid())
+  id                     String                      @id @default(uuid())
   retailOrgId            String
   code                   String
   name                   String
   description            String?
-  ratePercent            Decimal   @db.Decimal(5, 2)
-  isDefault              Boolean   @default(false)
-  isTaxInclusive         Boolean   @default(false)
-  status                 String    @default("ACTIVE")
+  ratePercent            Decimal                     @db.Decimal(5, 2)
+  isDefault              Boolean                     @default(false)
+  isTaxInclusive         Boolean                     @default(false)
+  status                 String                      @default("ACTIVE")
   originNodeCode         String?
   lastModifiedByNodeCode String?
-  recordVersion          Int       @default(1)
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
+  recordVersion          Int                         @default(1)
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
   deletedAt              DateTime?
-  retailOrg              RetailOrg @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  retailOrg              RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
   products               Product[]
+  erpPartyProfiles       ErpPartyAccountingProfile[]
 
   @@unique([retailOrgId, code])
 }
 
 model TenderMethod {
-  id                       String       @id @default(uuid())
+  id                       String               @id @default(uuid())
   retailOrgId              String
+  cashbookAccountId        String?
   code                     String
   name                     String
   paymentMethod            String
@@ -710,26 +2579,29 @@ model TenderMethod {
   gatewaySecretMask        String?
   gatewayWebhookSecretMask String?
   gatewayCallbackUrl       String?
-  gatewayActive            Boolean      @default(false)
-  gatewayStatus            String       @default("DISABLED")
-  gatewayConfigJson        String?      @db.NVarChar(Max)
+  gatewayActive            Boolean              @default(false)
+  gatewayStatus            String               @default("DISABLED")
+  gatewayConfigJson        String?              @db.NVarChar(Max)
   description              String?
-  requiresReference        Boolean      @default(false)
-  allowChange              Boolean      @default(false)
-  allowRefund              Boolean      @default(true)
-  allowOpenCashDrawer      Boolean      @default(false)
-  sortOrder                Int          @default(0)
-  status                   String       @default("ACTIVE")
+  requiresReference        Boolean              @default(false)
+  allowChange              Boolean              @default(false)
+  allowRefund              Boolean              @default(true)
+  allowOpenCashDrawer      Boolean              @default(false)
+  sortOrder                Int                  @default(0)
+  status                   String               @default("ACTIVE")
   originNodeCode           String?
   lastModifiedByNodeCode   String?
-  recordVersion            Int          @default(1)
-  createdAt                DateTime     @default(now())
-  updatedAt                DateTime     @updatedAt
+  recordVersion            Int                  @default(1)
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
   deletedAt                DateTime?
-  retailOrg                RetailOrg    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  retailOrg                RetailOrg            @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  cashbookAccount          ErpCashbookAccount?  @relation("TenderMethodCashbookAccount", fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   posPayments              PosPayment[]
+  fuelSalePayments         ErpFuelSalePayment[]
 
   @@unique([retailOrgId, code])
+  @@index([cashbookAccountId])
 }
 
 model PromotionCampaign {
@@ -1247,6 +3119,7 @@ model InventoryLocation {
   posTransactionLines         PosTransactionLine[]
   outboundInterStoreTransfers InterStoreTransfer[]   @relation("InterStoreTransferSourceLocation")
   inboundInterStoreTransfers  InterStoreTransfer[]   @relation("InterStoreTransferDestinationLocation")
+  fuelStations                ErpFuelStation[]       @relation("FuelStationDefaultLocation")
   goodsReceipts               GoodsReceipt[]
 
   @@unique([retailOrgId, code])
@@ -1388,16 +3261,44 @@ model InterStoreTransfer {
   sourceInventoryLocationId      String
   destinationInventoryLocationId String
   productId                      String
+  fuelStationId                  String?
+  sourceFuelTankId               String?
   transferNo                     String
   transferBatchNo                String?
   lineNo                         Int               @default(1)
   externalReference              String?
+  workflowType                   String?
   origin                         String
   status                         String            @default("REQUESTED")
   requestedQuantity              Decimal           @db.Decimal(18, 3)
   issuedQuantity                 Decimal           @default(0) @db.Decimal(18, 3)
   receivedQuantity               Decimal           @default(0) @db.Decimal(18, 3)
   unitCost                       Decimal?          @db.Decimal(18, 2)
+  transporterName                String?
+  vehicleRegistrationNo          String?
+  driverName                     String?
+  driverContact                  String?
+  deliveryNoteNo                 String?
+  feedbackStatus                 String            @default("PENDING")
+  valuationStatus                String            @default("PENDING")
+  issueJournalEntryId            String?
+  receiptJournalEntryId          String?
+  issuedValuationAmount          Decimal?          @db.Decimal(18, 2)
+  receivedValuationAmount        Decimal?          @db.Decimal(18, 2)
+  varianceValuationAmount        Decimal?          @db.Decimal(18, 2)
+  valuationPostedAt              DateTime?
+  waterTestResult                String?
+  quantityBeforeDelivery         Decimal?          @db.Decimal(18, 3)
+  expectedQuantityReceived       Decimal?          @db.Decimal(18, 3)
+  expectedStockQuantity          Decimal?          @db.Decimal(18, 3)
+  quantityAfterDelivery          Decimal?          @db.Decimal(18, 3)
+  actualQuantityReceived         Decimal?          @db.Decimal(18, 3)
+  feedbackVarianceQuantity       Decimal?          @db.Decimal(18, 3)
+  feedbackNote                   String?           @db.NVarChar(Max)
+  feedbackRecordedAt             DateTime?
+  feedbackConfirmedAt            DateTime?
+  feedbackPostedAt               DateTime?
+  feedbackOperatorName           String?
   issuedSerialNumbersSnapshot    String?           @db.NVarChar(Max)
   receivedSerialNumbersSnapshot  String?           @db.NVarChar(Max)
   requestNote                    String?
@@ -1422,6 +3323,7 @@ model InterStoreTransfer {
   sourceInventoryLocation        InventoryLocation @relation("InterStoreTransferSourceLocation", fields: [sourceInventoryLocationId], references: [id], onDelete: NoAction)
   destinationInventoryLocation   InventoryLocation @relation("InterStoreTransferDestinationLocation", fields: [destinationInventoryLocationId], references: [id], onDelete: NoAction)
   product                        Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
+  fuelStation                    ErpFuelStation?   @relation("FuelStationInterStoreTransfer", fields: [fuelStationId], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@unique([retailOrgId, transferNo])
   @@index([retailOrgId, transferBatchNo])
@@ -1430,6 +3332,11 @@ model InterStoreTransfer {
   @@index([sourceInventoryLocationId, updatedAt])
   @@index([destinationInventoryLocationId, updatedAt])
   @@index([productId])
+  @@index([fuelStationId])
+  @@index([sourceFuelTankId, requestedAt])
+  @@index([retailOrgId, workflowType, status])
+  @@index([issueJournalEntryId])
+  @@index([receiptJournalEntryId])
 }
 
 model GoodsReceipt {

@@ -22,6 +22,9 @@ import {
 import {
   getEnterpriseSupplierWorkspace
 } from "@/server/repositories/enterprise-suppliers.repository";
+import {
+  getErpArApDocumentsWorkspace
+} from "@/server/repositories/erp-ar-ap-documents.repository";
 import { type Prisma } from "@prisma/client";
 import { readJsonStringArray } from "./json-field";
 
@@ -510,6 +513,38 @@ export type EnterpriseReportingDashboardData = {
     lastTransactionAt: string | null;
     lastTransactionAtLabel: string;
   }>;
+  customerStatementRows: Array<{
+    transactionId: string;
+    partyNo: string;
+    partyName: string;
+    transactionDate: string;
+    referenceNo: string;
+    documentType: string;
+    sourceType: string;
+    memo: string | null;
+    debitAmount: number;
+    creditAmount: number;
+    runningBalance: number;
+    journalEntryId: string | null;
+    journalNo: string | null;
+    status: string;
+  }>;
+  supplierStatementRows: Array<{
+    transactionId: string;
+    partyNo: string;
+    partyName: string;
+    transactionDate: string;
+    referenceNo: string;
+    documentType: string;
+    sourceType: string;
+    memo: string | null;
+    debitAmount: number;
+    creditAmount: number;
+    runningBalance: number;
+    journalEntryId: string | null;
+    journalNo: string | null;
+    status: string;
+  }>;
   inventoryRiskRows: Array<{
     locationCode: string;
     locationName: string;
@@ -667,6 +702,8 @@ export function buildUnavailableEnterpriseReportingDashboard(
     userReportRows: [],
     storePerformanceRows: [],
     receivableRows: [],
+    customerStatementRows: [],
+    supplierStatementRows: [],
     inventoryRiskRows: [],
     promotionRows: [],
     exceptionRows: [],
@@ -1265,7 +1302,8 @@ export async function getEnterpriseReportingDashboard(
     promotionWorkspace,
     purchasesWorkspace,
     supplierWorkspace,
-    securityWorkspace
+    securityWorkspace,
+    arApDocumentsWorkspace
   ] = await Promise.all([
     getEnterpriseSyncDashboard(),
     getEnterpriseOperationsDashboard(input),
@@ -1275,7 +1313,8 @@ export async function getEnterpriseReportingDashboard(
     getEnterprisePromotionWorkspace(),
     getEnterprisePurchasesWorkspace(),
     getEnterpriseSupplierWorkspace(),
-    getEnterpriseSecurityWorkspace()
+    getEnterpriseSecurityWorkspace(),
+    getErpArApDocumentsWorkspace()
   ]);
 
   const currencyCode = operationsDashboard.currencyCode || posWorkspace.currencyCode || "USD";
@@ -1357,6 +1396,29 @@ export async function getEnterpriseReportingDashboard(
       lastTransactionAt: row.lastTransactionAt,
       lastTransactionAtLabel: row.lastTransactionAtLabel
     }));
+  const statementReportRows = arApDocumentsWorkspace.statementLineRows.map((row) => ({
+    transactionId: row.transactionId,
+    partyNo: row.partyNo,
+    partyName: row.partyName,
+    transactionDate: row.transactionDate,
+    referenceNo: row.referenceNo,
+    documentType: row.documentType,
+    sourceType: row.sourceType,
+    memo: row.memo,
+    debitAmount: row.debitAmount,
+    creditAmount: row.creditAmount,
+    runningBalance: row.runningBalance,
+    journalEntryId: row.journalEntryId,
+    journalNo: row.journalNo,
+    status: row.status,
+    partyType: row.partyType
+  }));
+  const customerStatementRows = statementReportRows
+    .filter((row) => row.partyType === "CUSTOMER")
+    .map(({ partyType: _partyType, ...row }) => row);
+  const supplierStatementRows = statementReportRows
+    .filter((row) => row.partyType === "SUPPLIER")
+    .map(({ partyType: _partyType, ...row }) => row);
 
   const inventoryRiskRows = inventoryWorkspace.locationRows
     .filter((row) => row.negativePositions > 0 || row.productCount > 0)
@@ -1994,7 +2056,8 @@ export async function getEnterpriseReportingDashboard(
     promotionWorkspace.refreshedAt,
     purchasesWorkspace.refreshedAt,
     supplierWorkspace.refreshedAt,
-    securityWorkspace.refreshedAt
+    securityWorkspace.refreshedAt,
+    arApDocumentsWorkspace.refreshedAt
   ]
     .map((value) => parseIso(value))
     .filter((value): value is Date => value instanceof Date)
@@ -2052,6 +2115,8 @@ export async function getEnterpriseReportingDashboard(
     userReportRows,
     storePerformanceRows,
     receivableRows,
+    customerStatementRows,
+    supplierStatementRows,
     inventoryRiskRows,
     promotionRows,
     exceptionRows,
@@ -2059,7 +2124,7 @@ export async function getEnterpriseReportingDashboard(
     closeoutRows,
     postureMessages,
     priorities,
-    statusMessage: `Flash ERP enterprise reporting now consolidates posted sales, tender mix, COGS, margin, tracked expenses, inventory movement, purchasing, suppliers, users, customer receivables, promotions, and branch exceptions from ${syncDashboard.metrics.activeStores} active store node(s).`,
+    statusMessage: `Flash ERP enterprise reporting now consolidates posted sales, tender mix, COGS, margin, tracked expenses, inventory movement, purchasing, suppliers, AR/AP statements, users, customer receivables, promotions, and branch exceptions from ${syncDashboard.metrics.activeStores} active store node(s).`,
     refreshedAt
   };
 }

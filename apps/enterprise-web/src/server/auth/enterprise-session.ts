@@ -129,6 +129,7 @@ export type EnterpriseSessionSnapshot = {
   isOnlineStoreUser: boolean;
   roleCodes: string[];
   permissionCount: number;
+  permissionCodes: string[];
   lastActiveAt: string;
   lastLoginAt: string | null;
   expiresAt: string;
@@ -1821,6 +1822,7 @@ export async function getEnterpriseSessionSnapshot(
     isOnlineStoreUser: session.isOnlineStoreUser,
     roleCodes: session.roleCodes,
     permissionCount: session.permissionCodes.length,
+    permissionCodes: session.permissionCodes,
     lastActiveAt: session.lastActiveAt.toISOString(),
     lastLoginAt: session.lastLoginAt?.toISOString() ?? null,
     expiresAt: session.expiresAt.toISOString()
@@ -1938,6 +1940,35 @@ export async function assertEnterprisePermission(
   }
 
   const required = requiredPermissions.filter(Boolean);
+  if (required.length === 0) {
+    return session;
+  }
+
+  const hasAny = required.some((permission) => session.permissionCodes.includes(permission));
+  const hasAll = required.every((permission) => session.permissionCodes.includes(permission));
+  const isAuthorized = options?.any ? hasAny : hasAll;
+
+  if (!isAuthorized) {
+    throw new EnterpriseAuthError("Flash ERP requires additional privileges.", 403);
+  }
+
+  return session;
+}
+
+export async function assertEnterpriseOrOnlineStorePermission(
+  enterprisePermissions: string[],
+  onlineStorePermissions: string[],
+  options?: { any?: boolean }
+) {
+  const session = await getEnterpriseSession();
+  if (!session) {
+    throw new EnterpriseAuthError("Flash ERP requires a signed-in session.", 401);
+  }
+
+  const required = (
+    session.isOnlineStoreUser ? onlineStorePermissions : enterprisePermissions
+  ).filter(Boolean);
+
   if (required.length === 0) {
     return session;
   }

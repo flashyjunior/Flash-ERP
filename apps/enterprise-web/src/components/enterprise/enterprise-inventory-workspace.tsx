@@ -3,7 +3,7 @@
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
 import { Activity, Boxes, Package, Plus, Store } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
@@ -365,6 +365,11 @@ export function EnterpriseInventoryWorkspace({
   const [transferReference, setTransferReference] = useState("");
   const [transferNote, setTransferNote] = useState("");
   const [transferRequiredAt, setTransferRequiredAt] = useState("");
+  const [transferTransporterName, setTransferTransporterName] = useState("");
+  const [transferVehicleRegistrationNo, setTransferVehicleRegistrationNo] = useState("");
+  const [transferDriverName, setTransferDriverName] = useState("");
+  const [transferDriverContact, setTransferDriverContact] = useState("");
+  const [transferDeliveryNoteNo, setTransferDeliveryNoteNo] = useState("");
   const [transferDialogOpen, setTransferDialogOpen] = useState(false);
   const [editingTransferBatchNo, setEditingTransferBatchNo] = useState<string | null>(null);
   const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<"header" | "details">(
@@ -647,12 +652,40 @@ export function EnterpriseInventoryWorkspace({
   const selectedDestinationLocation = interStoreLocationOptions.find(
     (option) => option.value === transferDestinationLocation
   );
-  const canSaveInterStoreRequest =
-    transferLines.length > 0 &&
-    transferSourceLocation.length > 0 &&
-    transferDestinationLocation.length > 0 &&
-    selectedSourceLocation?.storeCode !== selectedDestinationLocation?.storeCode &&
-    !transferSubmitting;
+  const editingTransferRows = useMemo(() => {
+    if (!editingTransferBatchNo) {
+      return [] as InterStoreTransferRow[];
+    }
+
+    return workspace.interStoreTransferRows
+      .filter((transfer) => (transfer.transferBatchNo ?? transfer.transferNo) === editingTransferBatchNo)
+      .sort((left, right) => left.lineNo - right.lineNo);
+  }, [editingTransferBatchNo, workspace.interStoreTransferRows]);
+  const isTransferDialogReadOnly = Boolean(
+    editingTransferBatchNo &&
+      editingTransferRows.length > 0 &&
+      !editingTransferRows.every((transfer) => transfer.status === "DRAFT")
+  );
+  const interStoreRequestBlockReason = transferSubmitting
+    ? "Transfer request is already saving."
+    : isTransferDialogReadOnly
+      ? "This transfer has already been committed, so it is read-only."
+      : !transferSourceLocation
+        ? "Choose the source shop/location."
+        : !transferDestinationLocation
+          ? "Choose the destination shop/location."
+          : !selectedSourceLocation
+            ? "Choose a valid source shop/location."
+            : !selectedDestinationLocation
+              ? "Choose a valid destination shop/location."
+              : transferSourceLocation === transferDestinationLocation
+                ? "Source and destination locations must be different."
+                : selectedSourceLocation.storeCode === selectedDestinationLocation.storeCode
+                  ? "Inter-store transfers need different source and destination shops. Use the local inter-location transfer flow for locations inside the same shop."
+                  : transferLines.length === 0
+                    ? "Add at least one item line before saving."
+                    : "";
+  const canSaveInterStoreRequest = !interStoreRequestBlockReason;
   const interStoreTransferHeaderRows = useMemo(() => {
     const groupedRows = new Map<string, InterStoreTransferRow[]>();
 
@@ -710,6 +743,9 @@ export function EnterpriseInventoryWorkspace({
       };
     });
   }, [workspace.interStoreTransferRows]);
+  const transferDetailBaseHref =
+    dedicatedView && defaultView === "in-transit" ? "/inventory/in-transit" : "/inventory/transfers";
+  const editingTransferFeedback = editingTransferRows[0] ?? null;
 
   function resetTransferDraft() {
     setEditingTransferBatchNo(null);
@@ -720,6 +756,11 @@ export function EnterpriseInventoryWorkspace({
     setTransferReference("");
     setTransferNote("");
     setTransferRequiredAt("");
+    setTransferTransporterName("");
+    setTransferVehicleRegistrationNo("");
+    setTransferDriverName("");
+    setTransferDriverContact("");
+    setTransferDeliveryNoteNo("");
     setTransferLines([]);
     setActiveTransferEntryTab("header");
   }
@@ -730,7 +771,7 @@ export function EnterpriseInventoryWorkspace({
     setTransferDialogOpen(true);
   }
 
-  function prepareTransferForEdit(row: InterStoreTransferRow) {
+  const prepareTransferForEdit = useCallback((row: InterStoreTransferRow) => {
     const transferBatchNo = row.transferBatchNo ?? row.transferNo;
     const batchLines = workspace.interStoreTransferRows
       .filter((transfer) => (transfer.transferBatchNo ?? transfer.transferNo) === transferBatchNo)
@@ -742,6 +783,11 @@ export function EnterpriseInventoryWorkspace({
     setTransferReference(row.externalReference ?? "");
     setTransferNote("");
     setTransferRequiredAt(row.requiredAt ? row.requiredAt.slice(0, 10) : "");
+    setTransferTransporterName(row.transporterName ?? "");
+    setTransferVehicleRegistrationNo(row.vehicleRegistrationNo ?? "");
+    setTransferDriverName(row.driverName ?? "");
+    setTransferDriverContact(row.driverContact ?? "");
+    setTransferDeliveryNoteNo(row.deliveryNoteNo ?? "");
     setTransferProductCode("");
     setTransferQuantity("1");
     setTransferLines(
@@ -755,7 +801,7 @@ export function EnterpriseInventoryWorkspace({
     setActiveTransferEntryTab("header");
     setTransferStatus({ tone: "idle", message: "" });
     setTransferDialogOpen(true);
-  }
+  }, [workspace.interStoreTransferRows]);
 
   useEffect(() => {
     const openTransfer = searchParams.get("openTransfer");
@@ -775,7 +821,7 @@ export function EnterpriseInventoryWorkspace({
     if (transfer) {
       prepareTransferForEdit(transfer);
     }
-  }, [interStoreTransferHeaderRows, searchParams]);
+  }, [interStoreTransferHeaderRows, prepareTransferForEdit, searchParams]);
 
   function addPurchaseOrderLine() {
     const quantity = Number(poQuantity);
@@ -926,7 +972,7 @@ export function EnterpriseInventoryWorkspace({
     if (!canSaveInterStoreRequest) {
       setTransferStatus({
         tone: "error",
-        message: "Choose different source and destination shops, then add at least one item."
+        message: interStoreRequestBlockReason || "Complete the transfer request before saving."
       });
       return;
     }
@@ -948,6 +994,11 @@ export function EnterpriseInventoryWorkspace({
           sourceLocationCode: transferSourceLocation,
           destinationLocationCode: transferDestinationLocation,
           externalReference: transferReference.trim() || null,
+          transporterName: transferTransporterName.trim() || null,
+          vehicleRegistrationNo: transferVehicleRegistrationNo.trim() || null,
+          driverName: transferDriverName.trim() || null,
+          driverContact: transferDriverContact.trim() || null,
+          deliveryNoteNo: transferDeliveryNoteNo.trim() || null,
           note: transferNote.trim() || null,
           operatorName: "HQ inventory",
           requiredAt: transferRequiredAt || null,
@@ -1119,16 +1170,29 @@ export function EnterpriseInventoryWorkspace({
       {
         accessorKey: "transferNo",
         header: "Transfer number",
-        cell: ({ row }) => (
-          <div className="min-w-0">
-            <p className="truncate font-medium text-stone-900">
-              {row.original.transferKey}
-            </p>
-            <p className="truncate text-xs text-stone-500">
-              {row.original.lineCount} detail line{row.original.lineCount === 1 ? "" : "s"}
-            </p>
-          </div>
-        ),
+        cell: ({ row }) => {
+          const detailHref = `${transferDetailBaseHref}?openTransfer=${encodeURIComponent(row.original.transferKey)}`;
+
+          return (
+            <div className="min-w-0">
+              <a
+                className="truncate font-semibold text-[var(--brand)] underline-offset-4 transition hover:text-[var(--brand-deep)] hover:underline"
+                href={detailHref}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  router.push(detailHref);
+                  prepareTransferForEdit(row.original);
+                }}
+              >
+                {row.original.transferKey}
+              </a>
+              <p className="truncate text-xs text-stone-500">
+                {row.original.lineCount} detail line{row.original.lineCount === 1 ? "" : "s"}
+              </p>
+            </div>
+          );
+        },
         meta: { disableTruncate: true }
       },
       {
@@ -1141,6 +1205,21 @@ export function EnterpriseInventoryWorkspace({
             </p>
             <p className="truncate text-xs text-stone-500">
               Required {row.original.requiredAtLabel}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "vehicleRegistrationNo",
+        header: "Logistics",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">
+              {row.original.vehicleRegistrationNo ?? row.original.deliveryNoteNo ?? "Not set"}
+            </p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.driverName ?? row.original.driverContact ?? row.original.transporterName ?? "No driver"}
             </p>
           </div>
         ),
@@ -1179,6 +1258,23 @@ export function EnterpriseInventoryWorkspace({
           <span className="inline-flex rounded-full bg-stone-100 px-2.5 py-1 text-xs font-semibold text-stone-700">
             {row.original.statusLabel}
           </span>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "feedbackStatus",
+        header: "Feedback",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">
+              {row.original.feedbackStatus ?? "PENDING"}
+            </p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.feedbackVarianceQuantity === null
+                ? row.original.feedbackRecordedAtLabel
+                : `Variance ${quantityFormatter.format(row.original.feedbackVarianceQuantity)}`}
+            </p>
+          </div>
         ),
         meta: { disableTruncate: true }
       },
@@ -1230,7 +1326,7 @@ export function EnterpriseInventoryWorkspace({
           )
       }
     ],
-    [committingTransferBatchNo, transferSubmitting]
+    [committingTransferBatchNo, prepareTransferForEdit, router, transferDetailBaseHref, transferSubmitting]
   );
 
   const stockCountSessionColumns = useMemo<ColumnDef<StockCountSessionRow>[]>(
@@ -1629,7 +1725,7 @@ export function EnterpriseInventoryWorkspace({
           </p>
         </div>
         <ActionDialog
-          description="Header captures source, destination, reference, required date, and note; Content captures the item lines."
+          description="Header captures source, destination, logistics, reference, required date, and note; Content captures the item lines."
           onOpenChange={(open) => {
             if (open) {
               openNewTransferDialog();
@@ -1639,7 +1735,13 @@ export function EnterpriseInventoryWorkspace({
             }
           }}
           open={transferDialogOpen}
-          title={editingTransferBatchNo ? "Edit transfer request" : "Create transfer request"}
+          title={
+            isTransferDialogReadOnly
+              ? "View transfer request"
+              : editingTransferBatchNo
+                ? "Edit transfer request"
+                : "Create transfer request"
+          }
           triggerClassName="border-[var(--brand)] bg-[var(--brand)] text-white hover:border-[var(--brand-deep)] hover:bg-[var(--brand-deep)] hover:text-white"
           triggerIcon={Plus}
           triggerLabel="New transfer request"
@@ -1664,11 +1766,12 @@ export function EnterpriseInventoryWorkspace({
             </div>
 
             {activeTransferEntryTab === "header" ? (
-              <div className="grid gap-3 lg:grid-cols-2">
+              <div className="grid gap-3 lg:grid-cols-3">
                 <label className="grid gap-1 text-sm font-semibold text-stone-700">
                   Ship from
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     onChange={(event) => setTransferSourceLocation(event.target.value)}
                     value={transferSourceLocation}
                   >
@@ -1684,6 +1787,7 @@ export function EnterpriseInventoryWorkspace({
                   Ship to
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     onChange={(event) => setTransferDestinationLocation(event.target.value)}
                     value={transferDestinationLocation}
                   >
@@ -1699,6 +1803,7 @@ export function EnterpriseInventoryWorkspace({
                   Reference
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     onChange={(event) => setTransferReference(event.target.value)}
                     placeholder="Optional reference"
                     value={transferReference}
@@ -1708,26 +1813,121 @@ export function EnterpriseInventoryWorkspace({
                   Required date
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     onChange={(event) => setTransferRequiredAt(event.target.value)}
                     type="date"
                     value={transferRequiredAt}
                   />
                 </label>
-                <label className="grid gap-1 text-sm font-semibold text-stone-700 lg:col-span-2">
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Delivery note / waybill
+                  <input
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
+                    onChange={(event) => setTransferDeliveryNoteNo(event.target.value)}
+                    placeholder="Waybill or delivery note"
+                    value={transferDeliveryNoteNo}
+                  />
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Transporter
+                  <input
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
+                    onChange={(event) => setTransferTransporterName(event.target.value)}
+                    placeholder="Transport company"
+                    value={transferTransporterName}
+                  />
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Vehicle number
+                  <input
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
+                    onChange={(event) => setTransferVehicleRegistrationNo(event.target.value)}
+                    placeholder="Vehicle registration"
+                    value={transferVehicleRegistrationNo}
+                  />
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Driver name
+                  <input
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
+                    onChange={(event) => setTransferDriverName(event.target.value)}
+                    placeholder="Driver name"
+                    value={transferDriverName}
+                  />
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Driver contact
+                  <input
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
+                    onChange={(event) => setTransferDriverContact(event.target.value)}
+                    placeholder="Phone number"
+                    value={transferDriverContact}
+                  />
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-stone-700 lg:col-span-3">
                   Note
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     onChange={(event) => setTransferNote(event.target.value)}
                     placeholder="Reason, customer demand, or delivery instruction"
                     value={transferNote}
                   />
                 </label>
+                {editingTransferFeedback ? (
+                  <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 lg:col-span-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                      Feedback
+                    </p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-4">
+                      <div>
+                        <span className="text-xs text-stone-500">Status</span>
+                        <p className="text-sm font-semibold text-stone-900">
+                          {editingTransferFeedback.feedbackStatus}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-xs text-stone-500">Water test</span>
+                        <p className="text-sm font-semibold text-stone-900">
+                          {editingTransferFeedback.waterTestResult ?? "Not captured"}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-xs text-stone-500">Actual received</span>
+                        <p className="text-sm font-semibold text-stone-900">
+                          {editingTransferFeedback.actualQuantityReceived === null
+                            ? "Not captured"
+                            : quantityFormatter.format(editingTransferFeedback.actualQuantityReceived)}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-xs text-stone-500">Variance</span>
+                        <p className="text-sm font-semibold text-stone-900">
+                          {editingTransferFeedback.feedbackVarianceQuantity === null
+                            ? "Not captured"
+                            : quantityFormatter.format(editingTransferFeedback.feedbackVarianceQuantity)}
+                        </p>
+                      </div>
+                    </div>
+                    {editingTransferFeedback.feedbackNote ? (
+                      <p className="mt-3 text-sm text-stone-600">
+                        {editingTransferFeedback.feedbackNote}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="space-y-4">
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_8rem_auto]">
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     onChange={(event) => setTransferProductCode(event.target.value)}
                     value={transferProductCode}
                   >
@@ -1740,6 +1940,7 @@ export function EnterpriseInventoryWorkspace({
                   </select>
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferDialogReadOnly}
                     min="0.001"
                     onChange={(event) => setTransferQuantity(event.target.value)}
                     step="0.001"
@@ -1748,7 +1949,7 @@ export function EnterpriseInventoryWorkspace({
                   />
                   <button
                     className="rounded-xl bg-stone-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
-                    disabled={!transferProductCode || transferSubmitting}
+                    disabled={!transferProductCode || transferSubmitting || isTransferDialogReadOnly}
                     onClick={addTransferLine}
                     type="button"
                   >
@@ -1771,6 +1972,7 @@ export function EnterpriseInventoryWorkspace({
                         </span>
                         <button
                           className="rounded-lg border border-stone-200 px-3 py-1.5 text-xs font-semibold text-stone-700"
+                          disabled={isTransferDialogReadOnly}
                           onClick={() =>
                             setTransferLines((currentLines) =>
                               currentLines.filter((currentLine) => currentLine.id !== line.id)
@@ -1806,6 +2008,7 @@ export function EnterpriseInventoryWorkspace({
                   className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-semibold text-stone-700 disabled:bg-stone-100"
                   disabled={!canSaveInterStoreRequest}
                   onClick={() => void saveInterStoreRequest(true)}
+                  title={interStoreRequestBlockReason || undefined}
                   type="button"
                 >
                   {transferSubmitting ? "Saving" : "Save draft"}
@@ -1814,12 +2017,16 @@ export function EnterpriseInventoryWorkspace({
                   className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[var(--brand-deep)] disabled:cursor-not-allowed disabled:bg-stone-300"
                   disabled={!canSaveInterStoreRequest}
                   onClick={() => void saveInterStoreRequest(false)}
+                  title={interStoreRequestBlockReason || undefined}
                   type="button"
                 >
                   {transferSubmitting ? "Committing" : "Commit request"}
                 </button>
               </div>
             </div>
+            {interStoreRequestBlockReason && !transferSubmitting ? (
+              <p className="text-xs font-medium text-stone-500">{interStoreRequestBlockReason}</p>
+            ) : null}
             {transferStatus.message ? (
               <p
                 className={`text-sm font-semibold ${

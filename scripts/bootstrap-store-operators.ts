@@ -66,7 +66,13 @@ const supervisorPermissionCodes = [
   "inventory.transfer.issue",
   "inventory.transfer.receive",
   "inventory.grn.receive",
-  "inventory.supplier-return.manage"
+  "inventory.supplier-return.manage",
+  "fuel.station.view",
+  "fuel.tank.manage",
+  "fuel.dip.capture",
+  "fuel.meter-reading.capture",
+  "fuel.supplier-receipt.capture",
+  "fuel.reconciliation.manage"
 ] as const;
 
 const onlineCashierPermissionCodes = [

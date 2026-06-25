@@ -23,6 +23,8 @@ const prisma = new PrismaClient({
   adapter: new PrismaMssql(datasourceUrl)
 });
 
+const seedRetailDemoData = process.env.FLASH_ERP_SEED_RETAIL_DEMO_DATA === "true";
+
 const permissionSeeds = securityPermissionCatalog.map((permission) => ({
   code: permission.code,
   name: permission.name,
@@ -30,8 +32,8 @@ const permissionSeeds = securityPermissionCatalog.map((permission) => ({
 }));
 
 const demoCompanySettings = {
-  legalName: "Flash Retail",
-  tradingName: "Flash Retail",
+  legalName: "Flash ERP Group",
+  tradingName: "Flash ERP",
   companyLogoUrl: "/uploads/company/1777391355107-8c1b492c-fc23-459b-864a-c475c24f4a95.png",
   loginBackgroundImageUrl: "/images/retail-login-bg.jpg"
 };
@@ -278,11 +280,43 @@ const catalogProductSeeds = [
   }
 ] as const;
 
+const fuelCatalogProductSeeds = [
+  {
+    code: "AGO",
+    sku: "AGO",
+    name: "Automotive Gas Oil",
+    shortName: "AGO",
+    category: "DIESEL"
+  },
+  {
+    code: "KERO",
+    sku: "KERO",
+    name: "Kerosene",
+    shortName: "Kerosene",
+    category: "KEROSENE"
+  },
+  {
+    code: "LPG",
+    sku: "LPG",
+    name: "Liquefied Petroleum Gas",
+    shortName: "LPG",
+    category: "LPG"
+  },
+  {
+    code: "PMS",
+    sku: "PMS",
+    name: "Premium Motor Spirit",
+    shortName: "PMS",
+    category: "PETROL"
+  }
+] as const;
+
 const tenderMethodSeeds = [
   {
     code: "CASH",
     name: "Cash",
     paymentMethod: PaymentMethod.CASH,
+    requiresReference: false,
     allowChange: true,
     allowOpenCashDrawer: true,
     sortOrder: 10
@@ -291,6 +325,7 @@ const tenderMethodSeeds = [
     code: "VISA-MASTERCARD",
     name: "Visa / Mastercard",
     paymentMethod: PaymentMethod.CARD,
+    requiresReference: true,
     allowChange: false,
     allowOpenCashDrawer: false,
     sortOrder: 20
@@ -299,6 +334,7 @@ const tenderMethodSeeds = [
     code: "MOMO",
     name: "Mobile Money",
     paymentMethod: PaymentMethod.MOBILE_MONEY,
+    requiresReference: true,
     allowChange: false,
     allowOpenCashDrawer: false,
     sortOrder: 30
@@ -307,9 +343,97 @@ const tenderMethodSeeds = [
     code: "BANK-TRANSFER",
     name: "Bank Transfer",
     paymentMethod: PaymentMethod.BANK_TRANSFER,
+    requiresReference: true,
     allowChange: false,
     allowOpenCashDrawer: false,
     sortOrder: 40
+  },
+  {
+    code: "CUSTOMER-CREDIT",
+    name: "Customer Credit",
+    paymentMethod: PaymentMethod.STORE_CREDIT,
+    requiresReference: false,
+    allowChange: false,
+    allowOpenCashDrawer: false,
+    sortOrder: 50
+  }
+] as const;
+
+const fuelStationSeeds = [
+  {
+    stationCode: "FS-ACCRA-01",
+    stationName: "Accra North Filling Station",
+    customerNo: "FST-ACCRA-001",
+    customerName: "Accra North Filling Station",
+    phone: "+233302100110",
+    city: "Accra",
+    location: "North Industrial Area",
+    gpsLatitude: "5.6051000",
+    gpsLongitude: "-0.2012000",
+    creditLimitAmount: "100000.00"
+  },
+  {
+    stationCode: "FS-TEMA-01",
+    stationName: "Tema Harbour Filling Station",
+    customerNo: "FST-TEMA-001",
+    customerName: "Tema Harbour Filling Station",
+    phone: "+233303200220",
+    city: "Tema",
+    location: "Harbour Road",
+    gpsLatitude: "5.6698000",
+    gpsLongitude: "-0.0166000",
+    creditLimitAmount: "85000.00"
+  },
+  {
+    stationCode: "FS-KUMASI-01",
+    stationName: "Kumasi Depot Filling Station",
+    customerNo: "FST-KUMASI-001",
+    customerName: "Kumasi Depot Filling Station",
+    phone: "+233322300330",
+    city: "Kumasi",
+    location: "Asafo",
+    gpsLatitude: "6.6885000",
+    gpsLongitude: "-1.6244000",
+    creditLimitAmount: "75000.00"
+  }
+] as const;
+
+const fuelTankSeeds = [
+  {
+    code: "TANK-PMS-01",
+    name: "PMS Tank 01",
+    productCode: "PMS",
+    storeIndex: 0,
+    capacityQuantity: "45000.000",
+    safeCapacityQuantity: "40500.000",
+    reorderLevelQuantity: "9000.000"
+  },
+  {
+    code: "TANK-AGO-01",
+    name: "AGO Tank 01",
+    productCode: "AGO",
+    storeIndex: 0,
+    capacityQuantity: "60000.000",
+    safeCapacityQuantity: "54000.000",
+    reorderLevelQuantity: "12000.000"
+  },
+  {
+    code: "TANK-KERO-01",
+    name: "Kerosene Tank 01",
+    productCode: "KERO",
+    storeIndex: 1,
+    capacityQuantity: "30000.000",
+    safeCapacityQuantity: "27000.000",
+    reorderLevelQuantity: "6000.000"
+  },
+  {
+    code: "TANK-LPG-01",
+    name: "LPG Tank 01",
+    productCode: "LPG",
+    storeIndex: 1,
+    capacityQuantity: "25000.000",
+    safeCapacityQuantity: "22500.000",
+    reorderLevelQuantity: "5000.000"
   }
 ] as const;
 
@@ -357,6 +481,680 @@ function toQuantity(value: number) {
   return value.toFixed(3);
 }
 
+async function ensureUnitOfMeasureSeedDefaults(retailOrgId: string, nodeCode: string) {
+  const eachUnit = await prisma.unitOfMeasure.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId,
+        code: "EA"
+      }
+    },
+    update: {
+      name: "Each",
+      description: "Each/count unit for discrete stock items.",
+      decimalPrecision: 0,
+      allowFractionalSale: false,
+      status: "ACTIVE",
+      lastModifiedByNodeCode: nodeCode,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId,
+      code: "EA",
+      name: "Each",
+      description: "Each/count unit for discrete stock items.",
+      decimalPrecision: 0,
+      allowFractionalSale: false,
+      status: "ACTIVE",
+      originNodeCode: nodeCode,
+      lastModifiedByNodeCode: nodeCode
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const literUnit = await prisma.unitOfMeasure.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId,
+        code: "LTR"
+      }
+    },
+    update: {
+      name: "Litre",
+      description: "Base fuel volume unit.",
+      decimalPrecision: 3,
+      allowFractionalSale: true,
+      status: "ACTIVE",
+      lastModifiedByNodeCode: nodeCode,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId,
+      code: "LTR",
+      name: "Litre",
+      description: "Base fuel volume unit.",
+      decimalPrecision: 3,
+      allowFractionalSale: true,
+      status: "ACTIVE",
+      originNodeCode: nodeCode,
+      lastModifiedByNodeCode: nodeCode
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const kilolitreUnit = await prisma.unitOfMeasure.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId,
+        code: "KL"
+      }
+    },
+    update: {
+      name: "Kilolitre",
+      description: "Bulk fuel volume unit.",
+      decimalPrecision: 3,
+      allowFractionalSale: true,
+      status: "ACTIVE",
+      lastModifiedByNodeCode: nodeCode,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId,
+      code: "KL",
+      name: "Kilolitre",
+      description: "Bulk fuel volume unit.",
+      decimalPrecision: 3,
+      allowFractionalSale: true,
+      status: "ACTIVE",
+      originNodeCode: nodeCode,
+      lastModifiedByNodeCode: nodeCode
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const eachSchedule = await prisma.unitOfMeasureSchedule.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId,
+        code: "EACH"
+      }
+    },
+    update: {
+      name: "Each",
+      description: "Default count schedule for discrete stock items.",
+      baseUnitOfMeasureId: eachUnit.id,
+      isDefaultForStock: false,
+      status: "ACTIVE",
+      lastModifiedByNodeCode: nodeCode,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId,
+      code: "EACH",
+      name: "Each",
+      description: "Default count schedule for discrete stock items.",
+      baseUnitOfMeasureId: eachUnit.id,
+      isDefaultForStock: false,
+      status: "ACTIVE",
+      originNodeCode: nodeCode,
+      lastModifiedByNodeCode: nodeCode
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const fuelVolumeSchedule = await prisma.unitOfMeasureSchedule.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId,
+        code: "FUEL-VOLUME"
+      }
+    },
+    update: {
+      name: "Fuel Volume",
+      description: "Fuel volume schedule for pump, tank, sale, and delivery quantities.",
+      baseUnitOfMeasureId: literUnit.id,
+      isDefaultForStock: true,
+      status: "ACTIVE",
+      lastModifiedByNodeCode: nodeCode,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId,
+      code: "FUEL-VOLUME",
+      name: "Fuel Volume",
+      description: "Fuel volume schedule for pump, tank, sale, and delivery quantities.",
+      baseUnitOfMeasureId: literUnit.id,
+      isDefaultForStock: true,
+      status: "ACTIVE",
+      originNodeCode: nodeCode,
+      lastModifiedByNodeCode: nodeCode
+    },
+    select: {
+      id: true
+    }
+  });
+
+  for (const line of [
+    { scheduleId: eachSchedule.id, unitOfMeasureId: eachUnit.id, conversionFactor: "1.000000", isBaseUnit: true, sortOrder: 10 },
+    { scheduleId: fuelVolumeSchedule.id, unitOfMeasureId: literUnit.id, conversionFactor: "1.000000", isBaseUnit: true, sortOrder: 10 },
+    { scheduleId: fuelVolumeSchedule.id, unitOfMeasureId: kilolitreUnit.id, conversionFactor: "1000.000000", isBaseUnit: false, sortOrder: 20 }
+  ]) {
+    await prisma.unitOfMeasureScheduleLine.upsert({
+      where: {
+        scheduleId_unitOfMeasureId: {
+          scheduleId: line.scheduleId,
+          unitOfMeasureId: line.unitOfMeasureId
+        }
+      },
+      update: {
+        conversionFactor: line.conversionFactor,
+        isBaseUnit: line.isBaseUnit,
+        allowSale: true,
+        allowPurchase: true,
+        sortOrder: line.sortOrder
+      },
+      create: {
+        scheduleId: line.scheduleId,
+        unitOfMeasureId: line.unitOfMeasureId,
+        conversionFactor: line.conversionFactor,
+        isBaseUnit: line.isBaseUnit,
+        allowSale: true,
+        allowPurchase: true,
+        sortOrder: line.sortOrder
+      }
+    });
+  }
+
+  return {
+    eachUnitId: eachUnit.id,
+    eachScheduleId: eachSchedule.id,
+    literUnitId: literUnit.id,
+    fuelVolumeScheduleId: fuelVolumeSchedule.id
+  };
+}
+
+async function ensureFuelCatalogSeedDefaults(
+  retailOrgId: string,
+  nodeCode: string,
+  uomDefaults: Awaited<ReturnType<typeof ensureUnitOfMeasureSeedDefaults>>
+) {
+  const primaryCompany = await prisma.erpCompany.findFirst({
+    where: {
+      retailOrgId,
+      status: "ACTIVE"
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  for (const seed of fuelCatalogProductSeeds) {
+    await prisma.product.upsert({
+      where: {
+        retailOrgId_code: {
+          retailOrgId,
+          code: seed.code
+        }
+      },
+      update: {
+        sku: seed.sku,
+        name: seed.name,
+        shortName: seed.shortName,
+        productType: "STOCK",
+        department: "FUEL",
+        category: seed.category,
+        unitOfMeasure: "LTR",
+        baseUnitOfMeasureId: uomDefaults.literUnitId,
+        uomScheduleId: uomDefaults.fuelVolumeScheduleId,
+        taxable: true,
+        trackInventory: true,
+        status: "ACTIVE",
+        originNodeCode: nodeCode,
+        lastModifiedByNodeCode: nodeCode,
+        deletedAt: null
+      },
+      create: {
+        retailOrgId,
+        code: seed.code,
+        sku: seed.sku,
+        name: seed.name,
+        shortName: seed.shortName,
+        productType: "STOCK",
+        department: "FUEL",
+        category: seed.category,
+        unitOfMeasure: "LTR",
+        baseUnitOfMeasureId: uomDefaults.literUnitId,
+        uomScheduleId: uomDefaults.fuelVolumeScheduleId,
+        taxable: true,
+        trackInventory: true,
+        baseUnitPrice: "0.00",
+        baseCostPrice: "0.00",
+        status: "ACTIVE",
+        originNodeCode: nodeCode,
+        lastModifiedByNodeCode: nodeCode
+      }
+    });
+
+    if (primaryCompany) {
+      await prisma.erpProductProfile.upsert({
+        where: {
+          retailOrgId_code: {
+            retailOrgId,
+            code: seed.code
+          }
+        },
+        update: {
+          companyId: primaryCompany.id,
+          name: seed.name,
+          productFamily: "FUEL",
+          defaultUomCode: "LTR",
+          trackingMode: "BULK_LIQUID",
+          status: "ACTIVE"
+        },
+        create: {
+          retailOrgId,
+          companyId: primaryCompany.id,
+          code: seed.code,
+          name: seed.name,
+          productFamily: "FUEL",
+          defaultUomCode: "LTR",
+          trackingMode: "BULK_LIQUID",
+          status: "ACTIVE"
+        }
+      });
+    }
+  }
+}
+
+async function mapTenderSeedsToCashbookAccounts(retailOrgId: string) {
+  const primaryCompany = await prisma.erpCompany.findFirst({
+    where: {
+      retailOrgId,
+      status: "ACTIVE"
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  if (!primaryCompany) {
+    return;
+  }
+
+  const cashbookAccounts = await prisma.erpCashbookAccount.findMany({
+    where: {
+      companyId: primaryCompany.id,
+      status: "ACTIVE",
+      accountType: {
+        in: ["CASH", "BANK", "MOBILE_MONEY", "CARD_CLEARING", "OTHER"]
+      }
+    },
+    select: {
+      id: true,
+      code: true,
+      accountType: true
+    }
+  });
+  const accountByCode = new Map(cashbookAccounts.map((account) => [account.code, account] as const));
+  const accountByType = new Map(cashbookAccounts.map((account) => [account.accountType, account] as const));
+
+  for (const seed of tenderMethodSeeds) {
+    if (seed.paymentMethod === PaymentMethod.STORE_CREDIT) {
+      await prisma.tenderMethod.updateMany({
+        where: {
+          retailOrgId,
+          code: seed.code
+        },
+        data: {
+          cashbookAccountId: null,
+          requiresReference: seed.requiresReference
+        }
+      });
+      continue;
+    }
+
+    const account =
+      seed.paymentMethod === PaymentMethod.CASH
+        ? accountByCode.get("MAIN-CASH") ?? accountByType.get("CASH") ?? null
+        : seed.paymentMethod === PaymentMethod.BANK_TRANSFER
+          ? accountByCode.get("MAIN-BANK") ?? accountByType.get("BANK") ?? null
+          : seed.paymentMethod === PaymentMethod.MOBILE_MONEY
+            ? accountByCode.get("MAIN-MOMO") ?? accountByType.get("MOBILE_MONEY") ?? null
+            : seed.paymentMethod === PaymentMethod.CARD
+              ? accountByType.get("CARD_CLEARING") ?? accountByCode.get("MAIN-BANK") ?? accountByType.get("BANK") ?? null
+              : null;
+
+    await prisma.tenderMethod.updateMany({
+      where: {
+        retailOrgId,
+        code: seed.code
+      },
+      data: account
+        ? {
+            cashbookAccountId: account.id,
+            requiresReference: seed.requiresReference
+          }
+        : {
+            requiresReference: seed.requiresReference
+          }
+    });
+  }
+}
+
+async function ensureFuelMasterDataSeedDefaults(
+  retailOrgId: string,
+  nodeCode: string,
+  uomDefaults: Awaited<ReturnType<typeof ensureUnitOfMeasureSeedDefaults>>,
+  storesWithNodes: Array<{
+    store: { id: string; code: string; name: string };
+    salesLocation: { id: string; code: string; name: string; locationType: string | null };
+  }>
+) {
+  const primaryCompany = await prisma.erpCompany.findFirst({
+    where: {
+      retailOrgId,
+      status: "ACTIVE"
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  if (!primaryCompany) {
+    return;
+  }
+
+  await ensureFuelCatalogSeedDefaults(retailOrgId, nodeCode, uomDefaults);
+
+  const postingProfile = await prisma.erpArApPostingProfile.findFirst({
+    where: {
+      companyId: primaryCompany.id,
+      profileType: "CUSTOMER",
+      status: "ACTIVE"
+    },
+    orderBy: [{ isDefault: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  const siteByStoreIndex = new Map<number, { id: string; code: string }>();
+
+  for (const [index, entry] of storesWithNodes.slice(0, 3).entries()) {
+    const operatingSite = await prisma.erpOperatingSite.upsert({
+      where: {
+        retailOrgId_code: {
+          retailOrgId,
+          code: entry.salesLocation.code
+        }
+      },
+      update: {
+        companyId: primaryCompany.id,
+        name: entry.store.name,
+        siteType: entry.salesLocation.locationType ?? "INVENTORY_LOCATION",
+        location: entry.salesLocation.name,
+        status: "ACTIVE"
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        code: entry.salesLocation.code,
+        name: entry.store.name,
+        siteType: entry.salesLocation.locationType ?? "INVENTORY_LOCATION",
+        location: entry.salesLocation.name,
+        status: "ACTIVE"
+      },
+      select: {
+        id: true,
+        code: true
+      }
+    });
+
+    siteByStoreIndex.set(index, operatingSite);
+  }
+
+  for (const entry of storesWithNodes) {
+    const storeDimensionCode = entry.store.code.trim().toUpperCase();
+
+    for (const dimensionType of ["OPERATING_UNIT", "COST_CENTER"]) {
+      await prisma.erpFinanceDimension.upsert({
+        where: {
+          companyId_dimensionType_code: {
+            companyId: primaryCompany.id,
+            dimensionType,
+            code: storeDimensionCode
+          }
+        },
+        update: {
+          name: entry.store.name,
+          description:
+            dimensionType === "COST_CENTER"
+              ? `Shop P&L cost center for ${entry.store.name}.`
+              : `Shop operating unit for ${entry.store.name}.`,
+          status: "ACTIVE"
+        },
+        create: {
+          retailOrgId,
+          companyId: primaryCompany.id,
+          dimensionType,
+          code: storeDimensionCode,
+          name: entry.store.name,
+          description:
+            dimensionType === "COST_CENTER"
+              ? `Shop P&L cost center for ${entry.store.name}.`
+              : `Shop operating unit for ${entry.store.name}.`,
+          status: "ACTIVE"
+        }
+      });
+    }
+  }
+
+  const fuelProductProfiles = await prisma.erpProductProfile.findMany({
+    where: {
+      retailOrgId,
+      companyId: primaryCompany.id,
+      code: {
+        in: fuelCatalogProductSeeds.map((seed) => seed.code)
+      },
+      status: "ACTIVE"
+    },
+    select: {
+      id: true,
+      code: true,
+      defaultUomCode: true
+    }
+  });
+  const profileByCode = new Map(fuelProductProfiles.map((profile) => [profile.code, profile] as const));
+
+  for (const [index, seed] of fuelStationSeeds.entries()) {
+    const homeStore = storesWithNodes[index]?.store ?? storesWithNodes[0]?.store ?? null;
+    const homeLocation = storesWithNodes[index]?.salesLocation ?? storesWithNodes[0]?.salesLocation ?? null;
+    const customer = await prisma.customer.upsert({
+      where: {
+        retailOrgId_customerNo: {
+          retailOrgId,
+          customerNo: seed.customerNo
+        }
+      },
+      update: {
+        storeId: homeStore?.id ?? null,
+        customerType: "CORPORATE",
+        fullName: seed.customerName,
+        phone: seed.phone,
+        addressLine1: seed.location,
+        city: seed.city,
+        countryCode: "GH",
+        allowCreditSales: true,
+        creditLimitAmount: seed.creditLimitAmount,
+        status: "ACTIVE",
+        originNodeCode: nodeCode,
+        lastModifiedByNodeCode: nodeCode,
+        deletedAt: null
+      },
+      create: {
+        retailOrgId,
+        storeId: homeStore?.id ?? null,
+        customerNo: seed.customerNo,
+        customerType: "CORPORATE",
+        fullName: seed.customerName,
+        phone: seed.phone,
+        addressLine1: seed.location,
+        city: seed.city,
+        countryCode: "GH",
+        allowCreditSales: true,
+        creditLimitAmount: seed.creditLimitAmount,
+        receivableBalanceAmount: "0.00",
+        status: "ACTIVE",
+        originNodeCode: nodeCode,
+        lastModifiedByNodeCode: nodeCode
+      }
+    });
+
+    await prisma.erpPartyAccountingProfile.upsert({
+      where: {
+        companyId_partyType_partyNo: {
+          companyId: primaryCompany.id,
+          partyType: "CUSTOMER",
+          partyNo: customer.customerNo
+        }
+      },
+      update: {
+        partyName: customer.fullName,
+        customerId: customer.id,
+        postingProfileId: postingProfile?.id ?? null,
+        creditTermsCode: "NET-30",
+        paymentTermsCode: "NET-30",
+        creditLimitAmount: seed.creditLimitAmount,
+        allowCredit: true,
+        creditStatus: "ACTIVE",
+        status: "ACTIVE"
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        partyType: "CUSTOMER",
+        partyNo: customer.customerNo,
+        partyName: customer.fullName,
+        customerId: customer.id,
+        postingProfileId: postingProfile?.id ?? null,
+        creditTermsCode: "NET-30",
+        paymentTermsCode: "NET-30",
+        creditLimitAmount: seed.creditLimitAmount,
+        allowCredit: true,
+        creditStatus: "ACTIVE",
+        status: "ACTIVE"
+      }
+    });
+
+    await prisma.erpFuelStation.upsert({
+      where: {
+        companyId_stationCode: {
+          companyId: primaryCompany.id,
+          stationCode: seed.stationCode
+        }
+      },
+      update: {
+        customerId: customer.id,
+        storeId: homeStore?.id ?? null,
+        inventoryLocationId: homeLocation?.id ?? null,
+        operatingSiteId: null,
+        stationName: seed.stationName,
+        stationType: "CUSTOMER",
+        location: seed.location,
+        city: seed.city,
+        gpsLatitude: seed.gpsLatitude,
+        gpsLongitude: seed.gpsLongitude,
+        contactName: seed.stationName,
+        phone: seed.phone,
+        paymentTermsCode: "NET-30",
+        creditLimitAmount: seed.creditLimitAmount,
+        status: "ACTIVE",
+        notes: "Seeded filling station for Fuel Operations customer-credit workflows."
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        customerId: customer.id,
+        storeId: homeStore?.id ?? null,
+        inventoryLocationId: homeLocation?.id ?? null,
+        stationCode: seed.stationCode,
+        stationName: seed.stationName,
+        stationType: "CUSTOMER",
+        location: seed.location,
+        city: seed.city,
+        gpsLatitude: seed.gpsLatitude,
+        gpsLongitude: seed.gpsLongitude,
+        contactName: seed.stationName,
+        phone: seed.phone,
+        paymentTermsCode: "NET-30",
+        creditLimitAmount: seed.creditLimitAmount,
+        status: "ACTIVE",
+        notes: "Seeded filling station for Fuel Operations customer-credit workflows."
+      }
+    });
+  }
+
+  for (const seed of fuelTankSeeds) {
+    const operatingSite = siteByStoreIndex.get(seed.storeIndex) ?? siteByStoreIndex.get(0);
+    const productProfile = profileByCode.get(seed.productCode);
+
+    if (!operatingSite || !productProfile) {
+      continue;
+    }
+
+    await prisma.erpFuelTank.upsert({
+      where: {
+        companyId_code: {
+          companyId: primaryCompany.id,
+          code: seed.code
+        }
+      },
+      update: {
+        operatingSiteId: operatingSite.id,
+        productProfileId: productProfile.id,
+        name: seed.name,
+        tankType: "UNDERGROUND",
+        capacityQuantity: seed.capacityQuantity,
+        safeCapacityQuantity: seed.safeCapacityQuantity,
+        reorderLevelQuantity: seed.reorderLevelQuantity,
+        uomCode: productProfile.defaultUomCode,
+        openingQuantity: "0.000",
+        currentBookQuantity: "0.000",
+        status: "ACTIVE",
+        notes: "Seeded fuel tank; stock quantity should come through inventory receipts."
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        operatingSiteId: operatingSite.id,
+        productProfileId: productProfile.id,
+        code: seed.code,
+        name: seed.name,
+        tankType: "UNDERGROUND",
+        capacityQuantity: seed.capacityQuantity,
+        safeCapacityQuantity: seed.safeCapacityQuantity,
+        reorderLevelQuantity: seed.reorderLevelQuantity,
+        uomCode: productProfile.defaultUomCode,
+        openingQuantity: "0.000",
+        currentBookQuantity: "0.000",
+        status: "ACTIVE",
+        notes: "Seeded fuel tank; stock quantity should come through inventory receipts."
+      }
+    });
+  }
+}
+
 async function upsertPermissionSeeds() {
   for (const permission of permissionSeeds) {
     await prisma.permission.upsert({
@@ -392,16 +1190,16 @@ async function main() {
   await upsertPermissionSeeds();
 
   const retailOrg = await prisma.retailOrg.upsert({
-    where: { code: "flash-retail" },
+    where: { code: "flash-erp" },
     update: {
-      name: "Flash Retail",
+      name: "Flash ERP Group",
       baseCurrencyCode: process.env.FLASH_ERP_DEFAULT_CURRENCY ?? "USD",
       timezone: process.env.FLASH_ERP_DEFAULT_TIMEZONE ?? "Africa/Accra",
       companySettingsJson: serializeJson(demoCompanySettings)
     },
     create: {
-      code: "flash-retail",
-      name: "Flash Retail",
+      code: "flash-erp",
+      name: "Flash ERP Group",
       baseCurrencyCode: process.env.FLASH_ERP_DEFAULT_CURRENCY ?? "USD",
       timezone: process.env.FLASH_ERP_DEFAULT_TIMEZONE ?? "Africa/Accra",
       companySettingsJson: serializeJson(demoCompanySettings)
@@ -444,6 +1242,9 @@ async function main() {
     }
   });
 
+  const uomDefaults = await ensureUnitOfMeasureSeedDefaults(retailOrg.id, enterpriseNode.code);
+  await ensureFuelCatalogSeedDefaults(retailOrg.id, enterpriseNode.code, uomDefaults);
+
   const tenderMethodByCode = new Map<
     string,
     {
@@ -465,6 +1266,7 @@ async function main() {
       update: {
         name: seed.name,
         paymentMethod: seed.paymentMethod,
+        requiresReference: seed.requiresReference,
         allowChange: seed.allowChange,
         allowOpenCashDrawer: seed.allowOpenCashDrawer,
         sortOrder: seed.sortOrder,
@@ -476,6 +1278,7 @@ async function main() {
         code: seed.code,
         name: seed.name,
         paymentMethod: seed.paymentMethod,
+        requiresReference: seed.requiresReference,
         allowChange: seed.allowChange,
         allowOpenCashDrawer: seed.allowOpenCashDrawer,
         sortOrder: seed.sortOrder,
@@ -491,6 +1294,8 @@ async function main() {
       paymentMethod: tenderMethod.paymentMethod
     });
   }
+
+  await mapTenderSeedsToCashbookAccounts(retailOrg.id);
 
   const legacyProduct = await prisma.product.findFirst({
     where: {
@@ -537,8 +1342,9 @@ async function main() {
       baseCostPrice: string;
     }
   >();
+  const activeCatalogProductSeeds = seedRetailDemoData ? catalogProductSeeds : [];
 
-  for (const seed of catalogProductSeeds) {
+  for (const seed of activeCatalogProductSeeds) {
     const product = await prisma.product.upsert({
       where: {
         retailOrgId_code: {
@@ -693,139 +1499,141 @@ async function main() {
     }
   ];
 
-  for (const seed of promotionSeeds) {
-    await prisma.promotionCampaign.upsert({
-      where: {
-        retailOrgId_code: {
-          retailOrgId: retailOrg.id,
-          code: seed.code
-        }
-      },
-      update: {
-        name: seed.name,
-        description: seed.description,
-        discountType: seed.discountType,
-        targetScope: seed.targetScope,
-        discountValue: seed.discountValue,
-        minimumBasketAmount: seed.minimumBasketAmount,
-        minimumLineQuantity: seed.minimumLineQuantity,
-        buyQuantity: seed.buyQuantity,
-        rewardQuantity: seed.rewardQuantity,
-        targetDepartmentCode: seed.targetDepartmentCode,
-        targetCategoryCode: seed.targetCategoryCode,
-        targetProductCode: seed.targetProductCode,
-        eligibleStoreCodes: jsonArrayOrDbNull(seed.eligibleStoreCodes),
-        eligibleCustomerTypes: jsonArrayOrDbNull(seed.eligibleCustomerTypes),
-        eligibleLoyaltyTiers: jsonArrayOrDbNull(seed.eligibleLoyaltyTiers),
-        activeDaysOfWeek: jsonArrayOrDbNull(seed.activeDaysOfWeek),
-        activeFromMinutes: seed.activeFromMinutes,
-        activeToMinutes: seed.activeToMinutes,
-        couponRequired: seed.couponRequired,
-        couponCode: seed.couponCode,
-        allowWithLoyalty: seed.allowWithLoyalty,
-        applyOncePerBasket: seed.applyOncePerBasket,
-        priority: seed.priority,
-        status: "ACTIVE",
-        lastModifiedByNodeCode: enterpriseNode.code
-      },
-      create: {
-        retailOrgId: retailOrg.id,
-        code: seed.code,
-        name: seed.name,
-        description: seed.description,
-        discountType: seed.discountType,
-        targetScope: seed.targetScope,
-        discountValue: seed.discountValue,
-        minimumBasketAmount: seed.minimumBasketAmount,
-        minimumLineQuantity: seed.minimumLineQuantity,
-        buyQuantity: seed.buyQuantity,
-        rewardQuantity: seed.rewardQuantity,
-        targetDepartmentCode: seed.targetDepartmentCode,
-        targetCategoryCode: seed.targetCategoryCode,
-        targetProductCode: seed.targetProductCode,
-        eligibleStoreCodes: jsonArrayOrDbNull(seed.eligibleStoreCodes),
-        eligibleCustomerTypes: jsonArrayOrDbNull(seed.eligibleCustomerTypes),
-        eligibleLoyaltyTiers: jsonArrayOrDbNull(seed.eligibleLoyaltyTiers),
-        activeDaysOfWeek: jsonArrayOrDbNull(seed.activeDaysOfWeek),
-        activeFromMinutes: seed.activeFromMinutes,
-        activeToMinutes: seed.activeToMinutes,
-        couponRequired: seed.couponRequired,
-        couponCode: seed.couponCode,
-        allowWithLoyalty: seed.allowWithLoyalty,
-        applyOncePerBasket: seed.applyOncePerBasket,
-        priority: seed.priority,
-        status: "ACTIVE",
-        originNodeCode: enterpriseNode.code,
-        lastModifiedByNodeCode: enterpriseNode.code
-      }
-    });
-  }
-
-  for (const seed of supplierSeeds) {
-    const supplier = await prisma.supplier.upsert({
-      where: {
-        retailOrgId_supplierNo: {
-          retailOrgId: retailOrg.id,
-          supplierNo: seed.supplierNo
-        }
-      },
-      update: {
-        name: seed.name,
-        contactName: seed.contactName,
-        phone: seed.phone,
-        email: seed.email,
-        city: seed.city,
-        countryCode: seed.countryCode,
-        leadTimeDays: seed.leadTimeDays,
-        originNodeCode: enterpriseNode.code,
-        lastModifiedByNodeCode: enterpriseNode.code
-      },
-      create: {
-        retailOrgId: retailOrg.id,
-        supplierNo: seed.supplierNo,
-        name: seed.name,
-        contactName: seed.contactName,
-        phone: seed.phone,
-        email: seed.email,
-        city: seed.city,
-        countryCode: seed.countryCode,
-        leadTimeDays: seed.leadTimeDays,
-        originNodeCode: enterpriseNode.code,
-        lastModifiedByNodeCode: enterpriseNode.code
-      }
-    });
-
-    for (const productCode of seed.productCodes) {
-      const product = catalogProductByCode.get(productCode);
-
-      if (!product) {
-        continue;
-      }
-
-      await prisma.productSupplier.upsert({
+  if (seedRetailDemoData) {
+    for (const seed of promotionSeeds) {
+      await prisma.promotionCampaign.upsert({
         where: {
-          productId_supplierId: {
-            productId: product.id,
-            supplierId: supplier.id
+          retailOrgId_code: {
+            retailOrgId: retailOrg.id,
+            code: seed.code
           }
         },
         update: {
-          packCostPrice: product.baseCostPrice,
-          leadTimeDays: seed.leadTimeDays,
-          minimumOrderQuantity: "12.000",
-          isPrimary: true
+          name: seed.name,
+          description: seed.description,
+          discountType: seed.discountType,
+          targetScope: seed.targetScope,
+          discountValue: seed.discountValue,
+          minimumBasketAmount: seed.minimumBasketAmount,
+          minimumLineQuantity: seed.minimumLineQuantity,
+          buyQuantity: seed.buyQuantity,
+          rewardQuantity: seed.rewardQuantity,
+          targetDepartmentCode: seed.targetDepartmentCode,
+          targetCategoryCode: seed.targetCategoryCode,
+          targetProductCode: seed.targetProductCode,
+          eligibleStoreCodes: jsonArrayOrDbNull(seed.eligibleStoreCodes),
+          eligibleCustomerTypes: jsonArrayOrDbNull(seed.eligibleCustomerTypes),
+          eligibleLoyaltyTiers: jsonArrayOrDbNull(seed.eligibleLoyaltyTiers),
+          activeDaysOfWeek: jsonArrayOrDbNull(seed.activeDaysOfWeek),
+          activeFromMinutes: seed.activeFromMinutes,
+          activeToMinutes: seed.activeToMinutes,
+          couponRequired: seed.couponRequired,
+          couponCode: seed.couponCode,
+          allowWithLoyalty: seed.allowWithLoyalty,
+          applyOncePerBasket: seed.applyOncePerBasket,
+          priority: seed.priority,
+          status: "ACTIVE",
+          lastModifiedByNodeCode: enterpriseNode.code
         },
         create: {
-          productId: product.id,
-          supplierId: supplier.id,
-          supplierSku: product.code,
-          supplierProductName: product.name,
-          packCostPrice: product.baseCostPrice,
-          leadTimeDays: seed.leadTimeDays,
-          minimumOrderQuantity: "12.000",
-          isPrimary: true
+          retailOrgId: retailOrg.id,
+          code: seed.code,
+          name: seed.name,
+          description: seed.description,
+          discountType: seed.discountType,
+          targetScope: seed.targetScope,
+          discountValue: seed.discountValue,
+          minimumBasketAmount: seed.minimumBasketAmount,
+          minimumLineQuantity: seed.minimumLineQuantity,
+          buyQuantity: seed.buyQuantity,
+          rewardQuantity: seed.rewardQuantity,
+          targetDepartmentCode: seed.targetDepartmentCode,
+          targetCategoryCode: seed.targetCategoryCode,
+          targetProductCode: seed.targetProductCode,
+          eligibleStoreCodes: jsonArrayOrDbNull(seed.eligibleStoreCodes),
+          eligibleCustomerTypes: jsonArrayOrDbNull(seed.eligibleCustomerTypes),
+          eligibleLoyaltyTiers: jsonArrayOrDbNull(seed.eligibleLoyaltyTiers),
+          activeDaysOfWeek: jsonArrayOrDbNull(seed.activeDaysOfWeek),
+          activeFromMinutes: seed.activeFromMinutes,
+          activeToMinutes: seed.activeToMinutes,
+          couponRequired: seed.couponRequired,
+          couponCode: seed.couponCode,
+          allowWithLoyalty: seed.allowWithLoyalty,
+          applyOncePerBasket: seed.applyOncePerBasket,
+          priority: seed.priority,
+          status: "ACTIVE",
+          originNodeCode: enterpriseNode.code,
+          lastModifiedByNodeCode: enterpriseNode.code
         }
       });
+    }
+
+    for (const seed of supplierSeeds) {
+      const supplier = await prisma.supplier.upsert({
+        where: {
+          retailOrgId_supplierNo: {
+            retailOrgId: retailOrg.id,
+            supplierNo: seed.supplierNo
+          }
+        },
+        update: {
+          name: seed.name,
+          contactName: seed.contactName,
+          phone: seed.phone,
+          email: seed.email,
+          city: seed.city,
+          countryCode: seed.countryCode,
+          leadTimeDays: seed.leadTimeDays,
+          originNodeCode: enterpriseNode.code,
+          lastModifiedByNodeCode: enterpriseNode.code
+        },
+        create: {
+          retailOrgId: retailOrg.id,
+          supplierNo: seed.supplierNo,
+          name: seed.name,
+          contactName: seed.contactName,
+          phone: seed.phone,
+          email: seed.email,
+          city: seed.city,
+          countryCode: seed.countryCode,
+          leadTimeDays: seed.leadTimeDays,
+          originNodeCode: enterpriseNode.code,
+          lastModifiedByNodeCode: enterpriseNode.code
+        }
+      });
+
+      for (const productCode of seed.productCodes) {
+        const product = catalogProductByCode.get(productCode);
+
+        if (!product) {
+          continue;
+        }
+
+        await prisma.productSupplier.upsert({
+          where: {
+            productId_supplierId: {
+              productId: product.id,
+              supplierId: supplier.id
+            }
+          },
+          update: {
+            packCostPrice: product.baseCostPrice,
+            leadTimeDays: seed.leadTimeDays,
+            minimumOrderQuantity: "12.000",
+            isPrimary: true
+          },
+          create: {
+            productId: product.id,
+            supplierId: supplier.id,
+            supplierSku: product.code,
+            supplierProductName: product.name,
+            packCostPrice: product.baseCostPrice,
+            leadTimeDays: seed.leadTimeDays,
+            minimumOrderQuantity: "12.000",
+            isPrimary: true
+          }
+        });
+      }
     }
   }
 
@@ -909,6 +1717,12 @@ async function main() {
     "inventory.transfer.receive",
     "inventory.grn.receive",
     "inventory.supplier-return.manage",
+    "fuel.station.view",
+    "fuel.tank.manage",
+    "fuel.dip.capture",
+    "fuel.meter-reading.capture",
+    "fuel.supplier-receipt.capture",
+    "fuel.reconciliation.manage",
     "pos.shift.open",
     "pos.shift.close",
     "pos.sale.process",
@@ -945,6 +1759,12 @@ async function main() {
     "inventory.transfer.receive",
     "inventory.grn.receive",
     "inventory.supplier-return.manage",
+    "fuel.station.view",
+    "fuel.tank.manage",
+    "fuel.dip.capture",
+    "fuel.meter-reading.capture",
+    "fuel.supplier-receipt.capture",
+    "fuel.reconciliation.manage",
     "pos.shift.open",
     "pos.shift.close",
     "pos.sale.process",
@@ -1216,6 +2036,71 @@ async function main() {
   }
 
   const storeByCode = new Map(storesWithNodes.map((entry) => [entry.store.code, entry.store] as const));
+  await ensureFuelMasterDataSeedDefaults(
+    retailOrg.id,
+    enterpriseNode.code,
+    uomDefaults,
+    storesWithNodes
+  );
+
+  if (!seedRetailDemoData) {
+    await prisma.bankingDeposit.deleteMany({
+      where: {
+        retailOrgId: retailOrg.id,
+        depositNo: {
+          startsWith: "SEED-BANK-"
+        }
+      }
+    });
+    await prisma.eodReconciliation.deleteMany({
+      where: {
+        retailOrgId: retailOrg.id,
+        reconciliationNo: {
+          startsWith: "SEED-EOD-"
+        }
+      }
+    });
+    await prisma.inventoryLedgerEntry.deleteMany({
+      where: {
+        retailOrgId: retailOrg.id,
+        referenceType: {
+          in: ["seed", "seed-pos-sale"]
+        }
+      }
+    });
+    await prisma.syncInboundEvent.deleteMany({
+      where: {
+        id: {
+          startsWith: "seed-demo-"
+        }
+      }
+    });
+    await prisma.syncOutboxEvent.deleteMany({
+      where: {
+        id: {
+          startsWith: "seed-"
+        }
+      }
+    });
+    await prisma.posTransaction.deleteMany({
+      where: {
+        retailOrgId: retailOrg.id,
+        transactionNo: {
+          startsWith: "DEMO-"
+        }
+      }
+    });
+    await prisma.posShift.deleteMany({
+      where: {
+        retailOrgId: retailOrg.id,
+        shiftNo: {
+          startsWith: "SEED-"
+        }
+      }
+    });
+
+    return;
+  }
 
   const customerSeeds = [
     {

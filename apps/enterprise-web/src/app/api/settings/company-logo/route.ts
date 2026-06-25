@@ -3,6 +3,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { updateEnterpriseCompanyMedia } from "@/server/repositories/enterprise-settings.repository";
 
 export const runtime = "nodejs";
 
@@ -67,10 +68,15 @@ export async function POST(request: Request) {
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const mimeType = resolveMimeType(file, extension);
+    const logoUrl = `data:${mimeType};base64,${fileBuffer.toString("base64")}`;
+
+    await updateEnterpriseCompanyMedia({
+      companyLogoUrl: logoUrl
+    });
 
     return NextResponse.json({
-      url: `data:${mimeType};base64,${fileBuffer.toString("base64")}`,
-      message: `${file.name} uploaded successfully. Flash ERP attached it to the company profile.`
+      url: logoUrl,
+      message: `${file.name} uploaded successfully. Flash ERP saved it as the company logo.`
     });
   } catch (error) {
     return NextResponse.json(

@@ -190,7 +190,10 @@ const goodsReceiptFilter: FilterFn<GoodsReceiptRow> = (row, _columnId, filterVal
     row.original.locationCode,
     row.original.locationName,
     row.original.externalReference ?? "",
-    row.original.sourceNodeCode ?? ""
+    row.original.sourceNodeCode ?? "",
+    row.original.apInvoiceNo ?? "",
+    row.original.apInvoiceStatus,
+    row.original.apJournalNo ?? ""
   ]
     .join(" ")
     .toLowerCase()
@@ -231,6 +234,15 @@ type PurchaseLineDraft = {
   unitCost: number | null;
 };
 
+type HqReceiptLineDraft = {
+  purchaseOrderLineId: string;
+  productCode: string;
+  productName: string;
+  outstandingQuantity: number;
+  quantity: string;
+  unitCost: number | null;
+};
+
 function emptyStatus() {
   return { tone: "idle" as const, message: "" };
 }
@@ -253,10 +265,17 @@ export function EnterprisePurchasesWorkspace({
   const router = useRouter();
   const searchParams = useSearchParams();
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [hqReceiptDialogOpen, setHqReceiptDialogOpen] = useState(false);
   const [activeCreateTab, setActiveCreateTab] = useState<"header" | "details">("header");
   const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<PurchaseOrderRow | null>(null);
   const [selectedPurchaseOrder, setSelectedPurchaseOrder] = useState<PurchaseOrderRow | null>(null);
   const [selectedGoodsReceipt, setSelectedGoodsReceipt] = useState<GoodsReceiptRow | null>(null);
+  const [pendingApInvoiceReceipt, setPendingApInvoiceReceipt] = useState<GoodsReceiptRow | null>(null);
+  const [hqReceiptPurchaseOrder, setHqReceiptPurchaseOrder] = useState<PurchaseOrderRow | null>(null);
+  const [hqReceiptLines, setHqReceiptLines] = useState<HqReceiptLineDraft[]>([]);
+  const [hqReceiptReference, setHqReceiptReference] = useState("");
+  const [hqReceiptDate, setHqReceiptDate] = useState(new Date().toISOString().slice(0, 10));
+  const [hqReceiptNote, setHqReceiptNote] = useState("");
   const [shopCode, setShopCode] = useState("");
   const [locationCode, setLocationCode] = useState("");
   const [supplierNo, setSupplierNo] = useState("");
@@ -582,6 +601,186 @@ export function EnterprisePurchasesWorkspace({
     }
   }
 
+  function prepareHqGoodsReceipt(row: PurchaseOrderRow) {
+    const openLines = row.lines
+      .filter((line) => line.outstandingQuantity > 0)
+      .map((line) => ({
+        purchaseOrderLineId: line.purchaseOrderLineId,
+        productCode: line.productCode,
+        productName: line.productName,
+        outstandingQuantity: line.outstandingQuantity,
+        quantity: String(line.outstandingQuantity),
+        unitCost: line.unitCost
+      }));
+
+    if (openLines.length === 0) {
+      setStatus({ tone: "error", message: `${row.purchaseOrderNo} has no outstanding line quantity to receive.` });
+      return;
+    }
+
+    setHqReceiptPurchaseOrder(row);
+    setHqReceiptLines(openLines);
+    setHqReceiptReference(`HQ-${row.purchaseOrderNo}`);
+    setHqReceiptDate(new Date().toISOString().slice(0, 10));
+    setHqReceiptNote(`HQ goods receipt for ${row.purchaseOrderNo}.`);
+    setStatus(emptyStatus());
+    setHqReceiptDialogOpen(true);
+  }
+
+  async function postHqGoodsReceipt() {
+    if (!hqReceiptPurchaseOrder) {
+      return;
+    }
+
+    const receiptLines = hqReceiptLines
+      .map((line) => ({
+        ...line,
+        parsedQuantity: Number(line.quantity)
+      }))
+      .filter((line) => Number.isFinite(line.parsedQuantity) && line.parsedQuantity > 0);
+
+    if (receiptLines.length === 0) {
+      setStatus({ tone: "error", message: "Enter a received quantity for at least one PO line." });
+      return;
+    }
+
+    const overReceivedLine = receiptLines.find(
+      (line) => line.parsedQuantity - line.outstandingQuantity > 0.0001
+    );
+
+    if (overReceivedLine) {
+      setStatus({
+        tone: "error",
+        message: `${overReceivedLine.productCode} cannot receive more than ${quantityFormatter.format(
+          overReceivedLine.outstandingQuantity
+        )}.`
+      });
+      return;
+    }
+
+    setSubmitting(true);
+    setStatus(emptyStatus());
+
+    try {
+      const response = await fetch(
+        `/api/inventory/purchase-orders/${encodeURIComponent(hqReceiptPurchaseOrder.purchaseOrderId)}/goods-receipt`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            externalReference: hqReceiptReference.trim() || null,
+            note: hqReceiptNote.trim() || null,
+            operatorName: "HQ receiving",
+            receivedAt: hqReceiptDate,
+            lines: receiptLines.map((line) => ({
+              purchaseOrderLineId: line.purchaseOrderLineId,
+              quantity: line.parsedQuantity
+            }))
+          })
+        }
+      );
+      const payload = (await response.json()) as { message?: string; error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Flash ERP could not post the HQ goods receipt.");
+      }
+
+      setStatus({
+        tone: "success",
+        message: payload.message ?? "Flash ERP posted the HQ goods receipt."
+      });
+      setHqReceiptDialogOpen(false);
+      setHqReceiptPurchaseOrder(null);
+      setSelectedPurchaseOrder(null);
+      router.refresh();
+    } catch (error) {
+      setStatus({
+        tone: "error",
+        message: error instanceof Error ? error.message : "Flash ERP could not post the HQ goods receipt."
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function generateSupplierInvoice(row: GoodsReceiptRow) {
+    if (!row.supplierNo) {
+      setStatus({
+        tone: "error",
+        message: `${row.goodsReceiptNo} needs a supplier before Flash ERP can generate an AP invoice.`
+      });
+      return;
+    }
+
+    setPendingApInvoiceReceipt(null);
+    setSubmitting(true);
+    setStatus(emptyStatus());
+
+    try {
+      const response = await fetch(
+        `/api/purchases/goods-receipts/${encodeURIComponent(row.goodsReceiptId)}/supplier-invoice`,
+        {
+          method: "POST"
+        }
+      );
+      const payload = (await response.json()) as {
+        supplierInvoiceId?: string;
+        supplierInvoiceNo?: string;
+        supplierInvoiceStatus?: string;
+        journalEntryId?: string | null;
+        journalNo?: string | null;
+        message?: string;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Flash ERP could not generate the supplier invoice.");
+      }
+
+      setSelectedGoodsReceipt((current) =>
+        current?.goodsReceiptId === row.goodsReceiptId
+          ? {
+              ...current,
+              apInvoiceDocumentId: payload.supplierInvoiceId ?? current.apInvoiceDocumentId,
+              apInvoiceNo: payload.supplierInvoiceNo ?? current.apInvoiceNo,
+              apInvoiceStatus: payload.supplierInvoiceStatus ?? "POSTED",
+              apJournalEntryId: payload.journalEntryId ?? current.apJournalEntryId,
+              apJournalNo: payload.journalNo ?? current.apJournalNo
+            }
+          : current
+      );
+      setStatus({
+        tone: "success",
+        message: payload.message ?? `${row.goodsReceiptNo} generated a posted AP supplier invoice.`
+      });
+      router.refresh();
+    } catch (error) {
+      setStatus({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not generate the supplier invoice."
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function requestGenerateSupplierInvoice(row: GoodsReceiptRow) {
+    if (!row.supplierNo) {
+      setStatus({
+        tone: "error",
+        message: `${row.goodsReceiptNo} needs a supplier before Flash ERP can generate an AP invoice.`
+      });
+      return;
+    }
+
+    setPendingApInvoiceReceipt(row);
+  }
+
   async function raisePredictivePurchaseOrder(row: PredictivePurchaseRow) {
     if (!row.supplierNo) {
       setStatus({
@@ -869,6 +1068,21 @@ export function EnterprisePurchasesWorkspace({
                 </button>
               </>
             ) : null}
+            {["COMMITTED", "PART_RECEIVED"].includes(row.original.status) &&
+            row.original.outstandingQuantity > 0 ? (
+              <button
+                className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 disabled:opacity-60"
+                disabled={submitting}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  prepareHqGoodsReceipt(row.original);
+                }}
+                type="button"
+              >
+                HQ GRN
+              </button>
+            ) : null}
             <button
               className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-semibold text-stone-700"
               onClick={(event) => {
@@ -942,24 +1156,56 @@ export function EnterprisePurchasesWorkspace({
         meta: { disableTruncate: true }
       },
       {
-        id: "actions",
-        header: "Action",
+        accessorKey: "apInvoiceNo",
+        header: "AP invoice",
         cell: ({ row }) => (
-          <button
-            className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-semibold text-stone-700"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              printGoodsReceipt(row.original);
-            }}
-            type="button"
-          >
-            Print
-          </button>
-        )
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">
+              {row.original.apInvoiceNo ?? "Not invoiced"}
+            </p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.apInvoiceStatus === "POSTED"
+                ? `Journal ${row.original.apJournalNo ?? "posted"}`
+                : row.original.apInvoiceStatus}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        id: "actions",
+        header: "Actions",
+        cell: ({ row }) => (
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-semibold text-stone-700"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                printGoodsReceipt(row.original);
+              }}
+              type="button"
+            >
+              Print
+            </button>
+            <button
+              className="rounded-lg bg-[var(--brand)] px-3 py-1.5 text-xs font-semibold text-white disabled:bg-stone-300"
+              disabled={submitting || row.original.apInvoiceStatus === "POSTED" || !row.original.supplierNo}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                requestGenerateSupplierInvoice(row.original);
+              }}
+              type="button"
+            >
+              {row.original.apInvoiceStatus === "POSTED" ? "AP posted" : "Generate AP"}
+            </button>
+          </div>
+        ),
+        meta: { disableTruncate: true }
       }
     ],
-    [currencyFormatter]
+    [currencyFormatter, submitting]
   );
 
   const predictiveColumns = useMemo<ColumnDef<PredictivePurchaseRow>[]>(
@@ -1115,6 +1361,20 @@ export function EnterprisePurchasesWorkspace({
           value={numberFormatter.format(workspace.metrics.predictiveRecommendations)}
         />
       </section>
+
+      {status.message ? (
+        <p
+          className={`rounded-xl border px-4 py-3 text-sm font-semibold ${
+            status.tone === "error"
+              ? "border-rose-200 bg-rose-50 text-rose-700"
+              : status.tone === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-stone-200 bg-white text-stone-700"
+          }`}
+        >
+          {status.message}
+        </p>
+      ) : null}
 
       <WorkspaceTabs
         ariaLabel="Purchasing views"
@@ -1580,18 +1840,244 @@ export function EnterprisePurchasesWorkspace({
         </WorkspaceTabsContent>
 
         <WorkspaceTabsContent value="goods-receipt">
-          <SharedDataGrid
-            columns={goodsReceiptColumns}
-            data={workspace.goodsReceiptRows}
-            emptyLabel="No goods receipt notes have synced from shops yet."
-            exportFileName="flash-erp-goods-receipts"
-            globalFilterFn={goodsReceiptFilter}
-            initialPageSize={25}
-            pageSizeOptions={[25, 50, 100]}
-            searchPlaceholder="Search GRN, PO, supplier, receiving shop, node, or reference"
-          />
+          <div className="space-y-6">
+            <section className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-stone-950">Open purchase orders</h2>
+                <p className="mt-1 text-sm leading-6 text-stone-600">
+                  Post HQ goods receipts directly to the receiving location already set on the PO.
+                </p>
+              </div>
+              <SharedDataGrid
+                columns={purchaseOrderColumns}
+                data={workspace.purchaseOrderRows.filter(
+                  (row) => ["COMMITTED", "PART_RECEIVED"].includes(row.status) && row.outstandingQuantity > 0
+                )}
+                emptyLabel="No open purchase orders are waiting for HQ goods receipt."
+                exportFileName="flash-erp-open-purchase-orders-for-grn"
+                globalFilterFn={purchaseOrderFilter}
+                initialPageSize={10}
+                pageSizeOptions={[10, 25, 50]}
+                searchPlaceholder="Search PO, supplier, receiving shop, status, or reference"
+              />
+            </section>
+            <section className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-stone-950">Goods receipt history</h2>
+                <p className="mt-1 text-sm leading-6 text-stone-600">
+                  Review shop-synced and HQ-posted GRNs, print receipt notes, and generate posted AP supplier invoices for payment.
+                </p>
+              </div>
+              <SharedDataGrid
+                columns={goodsReceiptColumns}
+                data={workspace.goodsReceiptRows}
+                emptyLabel="No goods receipt notes are available yet."
+                exportFileName="flash-erp-goods-receipts"
+                globalFilterFn={goodsReceiptFilter}
+                initialPageSize={25}
+                pageSizeOptions={[25, 50, 100]}
+                searchPlaceholder="Search GRN, PO, supplier, receiving shop, node, or reference"
+              />
+            </section>
+          </div>
         </WorkspaceTabsContent>
       </WorkspaceTabs>
+
+      <ActionDialog
+        hideTrigger
+        onOpenChange={(open) => {
+          setHqReceiptDialogOpen(open);
+          if (!open) {
+            setHqReceiptPurchaseOrder(null);
+            setHqReceiptLines([]);
+            setHqReceiptReference("");
+            setHqReceiptNote("");
+          }
+        }}
+        open={hqReceiptDialogOpen}
+        title={hqReceiptPurchaseOrder ? `HQ GRN for ${hqReceiptPurchaseOrder.purchaseOrderNo}` : "HQ goods receipt"}
+        triggerLabel="Post HQ GRN"
+        widthClassName="max-w-5xl"
+      >
+        {hqReceiptPurchaseOrder ? (
+          <div className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                Received date
+                <input
+                  className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                  onChange={(event) => setHqReceiptDate(event.target.value)}
+                  type="date"
+                  value={hqReceiptDate}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                Reference
+                <input
+                  className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                  onChange={(event) => setHqReceiptReference(event.target.value)}
+                  value={hqReceiptReference}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                Receiving location
+                <input
+                  className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm font-medium text-stone-700 outline-none"
+                  readOnly
+                  value={`${hqReceiptPurchaseOrder.locationName} (${hqReceiptPurchaseOrder.locationCode})`}
+                />
+              </label>
+            </div>
+            <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
+              <div className="grid gap-3 border-b border-stone-100 bg-stone-50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-stone-500 lg:grid-cols-[minmax(0,1fr)_8rem_8rem_8rem]">
+                <span>Item</span>
+                <span>Outstanding</span>
+                <span>Receive</span>
+                <span>Unit cost</span>
+              </div>
+              {hqReceiptLines.map((line) => (
+                <div
+                  className="grid gap-3 border-b border-stone-100 px-4 py-3 text-sm last:border-b-0 lg:grid-cols-[minmax(0,1fr)_8rem_8rem_8rem]"
+                  key={line.purchaseOrderLineId}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold text-stone-900">{line.productName}</p>
+                    <p className="truncate text-xs text-stone-500">{line.productCode}</p>
+                  </div>
+                  <span>{quantityFormatter.format(line.outstandingQuantity)}</span>
+                  <input
+                    className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    min="0"
+                    onChange={(event) =>
+                      setHqReceiptLines((currentLines) =>
+                        currentLines.map((currentLine) =>
+                          currentLine.purchaseOrderLineId === line.purchaseOrderLineId
+                            ? { ...currentLine, quantity: event.target.value }
+                            : currentLine
+                        )
+                      )
+                    }
+                    step="0.001"
+                    type="number"
+                    value={line.quantity}
+                  />
+                  <span>{line.unitCost === null ? "Not set" : currencyFormatter.format(line.unitCost)}</span>
+                </div>
+              ))}
+            </div>
+            <label className="grid gap-1 text-sm font-semibold text-stone-700">
+              Note
+              <input
+                className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                onChange={(event) => setHqReceiptNote(event.target.value)}
+                value={hqReceiptNote}
+              />
+            </label>
+            {status.message ? (
+              <p
+                className={`rounded-xl border px-4 py-3 text-sm font-semibold ${
+                  status.tone === "error"
+                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                }`}
+              >
+                {status.message}
+              </p>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <button
+                className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-semibold text-stone-700"
+                onClick={() => setHqReceiptDialogOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white disabled:bg-stone-300"
+                disabled={submitting}
+                onClick={() => void postHqGoodsReceipt()}
+                type="button"
+              >
+                {submitting ? "Posting..." : "Post HQ GRN"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </ActionDialog>
+
+      <ActionDialog
+        description="Review the accounting impact before posting a supplier invoice from this goods receipt."
+        hideTrigger
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingApInvoiceReceipt(null);
+          }
+        }}
+        open={Boolean(pendingApInvoiceReceipt)}
+        title="Generate AP supplier invoice?"
+        triggerLabel="Generate AP supplier invoice"
+        widthClassName="max-w-2xl"
+      >
+        {pendingApInvoiceReceipt ? (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <div className="flex gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+                <p>
+                  This will post a supplier invoice for {pendingApInvoiceReceipt.goodsReceiptNo}, create
+                  the AP open item, and create the related Finance journal through the shared posting
+                  engine.
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <MetricCard
+                hint={pendingApInvoiceReceipt.purchaseOrderNo ?? "Direct receipt"}
+                icon={FileText}
+                label="GRN"
+                value={pendingApInvoiceReceipt.goodsReceiptNo}
+              />
+              <MetricCard
+                hint={pendingApInvoiceReceipt.supplierName ?? "Supplier missing"}
+                icon={Truck}
+                label="Supplier"
+                value={pendingApInvoiceReceipt.supplierNo ?? "Missing"}
+              />
+              <MetricCard
+                hint={`${pendingApInvoiceReceipt.lines.length} line${
+                  pendingApInvoiceReceipt.lines.length === 1 ? "" : "s"
+                }`}
+                icon={PackageCheck}
+                label="Quantity"
+                value={quantityFormatter.format(pendingApInvoiceReceipt.totalQuantity)}
+              />
+              <MetricCard
+                hint="Accounts Payable, inventory, and GL journal will be updated."
+                icon={FileText}
+                label="Posting"
+                value="AP + GL"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-semibold text-stone-700"
+                onClick={() => setPendingApInvoiceReceipt(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white disabled:bg-stone-300"
+                disabled={submitting}
+                onClick={() => void generateSupplierInvoice(pendingApInvoiceReceipt)}
+                type="button"
+              >
+                {submitting ? "Posting..." : "Generate and post AP"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </ActionDialog>
 
       <ActionDialog
         hideTrigger
@@ -1661,6 +2147,18 @@ export function EnterprisePurchasesWorkspace({
                   Push to shop
                 </button>
               ) : null}
+              {["COMMITTED", "PART_RECEIVED"].includes(selectedPurchaseOrder.status) &&
+              selectedPurchaseOrder.outstandingQuantity > 0 ? (
+                <button
+                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:bg-stone-300"
+                  disabled={submitting}
+                  onClick={() => prepareHqGoodsReceipt(selectedPurchaseOrder)}
+                  type="button"
+                >
+                  <PackageCheck className="h-4 w-4" />
+                  HQ GRN
+                </button>
+              ) : null}
               <button
                 className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-semibold text-stone-700"
                 onClick={() => printPurchaseOrder(selectedPurchaseOrder)}
@@ -1688,7 +2186,7 @@ export function EnterprisePurchasesWorkspace({
       >
         {selectedGoodsReceipt ? (
           <div className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-5">
               <MetricCard
                 hint={selectedGoodsReceipt.purchaseOrderNo ?? "Direct receipt"}
                 icon={FileText}
@@ -1713,6 +2211,16 @@ export function EnterprisePurchasesWorkspace({
                 label="Source node"
                 value={selectedGoodsReceipt.storeCode ?? "HQ"}
               />
+              <MetricCard
+                hint={
+                  selectedGoodsReceipt.apInvoiceNo
+                    ? `Journal ${selectedGoodsReceipt.apJournalNo ?? "pending"}`
+                    : "Generate AP invoice for supplier payment."
+                }
+                icon={FileText}
+                label="AP invoice"
+                value={selectedGoodsReceipt.apInvoiceNo ?? "Not invoiced"}
+              />
             </div>
             <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
               {selectedGoodsReceipt.lines.map((line) => (
@@ -1733,7 +2241,20 @@ export function EnterprisePurchasesWorkspace({
                 </div>
               ))}
             </div>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                className="inline-flex items-center gap-2 rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white disabled:bg-stone-300"
+                disabled={
+                  submitting ||
+                  selectedGoodsReceipt.apInvoiceStatus === "POSTED" ||
+                  !selectedGoodsReceipt.supplierNo
+                }
+                onClick={() => requestGenerateSupplierInvoice(selectedGoodsReceipt)}
+                type="button"
+              >
+                <FileText className="h-4 w-4" />
+                {selectedGoodsReceipt.apInvoiceStatus === "POSTED" ? "AP posted" : "Generate AP invoice"}
+              </button>
               <button
                 className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-semibold text-stone-700"
                 onClick={() => printGoodsReceipt(selectedGoodsReceipt)}

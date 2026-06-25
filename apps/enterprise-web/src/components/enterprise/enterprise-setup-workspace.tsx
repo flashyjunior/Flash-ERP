@@ -283,6 +283,7 @@ const emptyTender = (): CreateTenderMethodRequest => ({
   tenderMethodCode: "",
   name: "",
   paymentMethod: "CASH",
+  cashbookAccountId: "",
   gatewayProvider: null,
   gatewayMode: null,
   gatewayMerchantId: "",
@@ -422,6 +423,13 @@ export function EnterpriseSetupWorkspace({
     message: ""
   });
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const cashbookAccountOptions = [
+    { label: "Not mapped", value: "" },
+    ...workspace.cashbookAccountOptions.map((account) => ({
+      label: account.label,
+      value: account.cashbookAccountId
+    }))
+  ];
 
   useEffect(() => {
     setLoyaltyDraft(buildLoyaltyDraft(workspace.loyaltyPolicy));
@@ -840,6 +848,14 @@ export function EnterpriseSetupWorkspace({
         cell: ({ row }) => (row.original.requiresReference ? "Required" : "Optional")
       },
       {
+        accessorKey: "cashbookAccountCode",
+        header: "Finance account",
+        cell: ({ row }) =>
+          row.original.cashbookAccountCode
+            ? `${row.original.cashbookAccountCode} / GL ${row.original.glAccountCode ?? "Not mapped"}`
+            : "Not mapped"
+      },
+      {
         accessorKey: "gatewayProvider",
         header: "Gateway",
         cell: ({ row }) =>
@@ -883,6 +899,7 @@ export function EnterpriseSetupWorkspace({
                     tenderMethodCode: row.original.tenderMethodCode,
                     name: row.original.name,
                     paymentMethod: row.original.paymentMethod,
+                    cashbookAccountId: row.original.cashbookAccountId ?? "",
                     gatewayProvider: row.original.gatewayProvider,
                     gatewayMode: row.original.gatewayMode,
                     gatewayMerchantId: row.original.gatewayMerchantId ?? "",
@@ -2229,6 +2246,14 @@ export function EnterpriseSetupWorkspace({
               }
               options={paymentMethodOptions}
               value={tenderDraft.paymentMethod}
+            />
+            <DialogSelect
+              label="Finance cashbook account"
+              onChange={(value) =>
+                setTenderDraft((current) => ({ ...current, cashbookAccountId: value || null }))
+              }
+              options={cashbookAccountOptions}
+              value={tenderDraft.cashbookAccountId ?? ""}
             />
             <DialogTextInput
               label="Sort order"

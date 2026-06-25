@@ -176,8 +176,10 @@ export function deriveCustomerAccountPostingEffect(input) {
                 throw new Error(`Flash ERP cannot use Store Credit for ${customer.fullName} because that customer is not credit-enabled.`);
             }
             const projectedReceivableBalance = roundMoney(customer.receivableBalanceAmount + storeCreditTenderAmount);
-            if (customer.creditLimitAmount !== null &&
-                projectedReceivableBalance > roundMoney(customer.creditLimitAmount)) {
+            const creditLimitAmount = customer.creditLimitAmount === null ? null : roundMoney(customer.creditLimitAmount);
+            if (creditLimitAmount !== null &&
+                creditLimitAmount > 0 &&
+                projectedReceivableBalance > creditLimitAmount) {
                 throw new Error(`Flash ERP cannot exceed ${customer.fullName}'s credit limit with this Store Credit amount.`);
             }
             receivableDeltaAmount = storeCreditTenderAmount;

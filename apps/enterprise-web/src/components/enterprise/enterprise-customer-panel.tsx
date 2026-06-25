@@ -7,8 +7,14 @@ import { startTransition, useEffect, useMemo, useState } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import {
+  defaultAccountPaymentReceiptTemplateHtml,
+  documentTemplateRawHtml,
+  renderDocumentTemplateHtml
+} from "@/lib/templates/thermal-receipt-templates";
 import type {
   CreateEnterpriseCustomerRequest,
+  EnterpriseAccountPaymentReceipt,
   EnterpriseCustomerAccountEntryMutationResponse,
   EnterpriseCustomerMutationResponse,
   EnterpriseCustomerWorkspaceData,
@@ -31,6 +37,11 @@ type AccountEntryDraft = {
   entryMode: RecordEnterpriseCustomerAccountEntryRequest["entryMode"];
   amount: number | "";
   loyaltyPoints: number | "";
+  tenderMethodCode: string;
+  allocations: Array<{
+    invoiceEntryId: string;
+    amount: number | "";
+  }>;
   storeCode: string;
   reference: string;
   note: string;
@@ -82,12 +93,182 @@ function renderTimestamp(value: string | null, label: string) {
     return <span className="text-sm text-stone-500">{label}</span>;
   }
 
+  const timestamp = new Date(value).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+
   return (
     <div className="min-w-0">
-      <p className="truncate text-sm font-medium text-stone-800">{label}</p>
-      <p className="mt-0.5 truncate text-xs text-stone-500">{new Date(value).toLocaleString()}</p>
+      <p className="truncate text-sm font-medium text-stone-800">{timestamp}</p>
+      <p className="mt-0.5 truncate text-xs text-stone-500">{label}</p>
     </div>
   );
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatMoney(value: number, currencyCode: string) {
+  return new Intl.NumberFormat("en-GH", {
+    style: "currency",
+    currency: currencyCode || "GHS",
+    minimumFractionDigits: 2
+  }).format(value);
+}
+
+function formatDateTime(value: string | Date, timezone?: string | null) {
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      ...(timezone ? { timeZone: timezone } : {})
+    }).format(date);
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
+function renderReceiptTemplateLogo(companyLogoUrl: string | null | undefined, altLabel: string) {
+  if (!companyLogoUrl?.trim()) {
+    return "";
+  }
+
+  return `<div class="document-logo" style="margin-bottom:10px; text-align:center;">
+    <img
+      alt="${escapeHtml(altLabel)}"
+      onerror="this.remove()"
+      src="${escapeHtml(companyLogoUrl)}"
+      style="display:inline-block; max-height:132px; max-width:280px; object-fit:contain;"
+    />
+  </div>`;
+}
+
+function renderReceiptStoreContactHtml(receipt: EnterpriseAccountPaymentReceipt) {
+  const lines = [receipt.storeAddress, receipt.storeAddressLine2]
+    .map((line) => line?.trim())
+    .filter((line): line is string => Boolean(line));
+  const addressHtml = lines
+    .map((line) => `<span style="display:block; text-align:center;">${escapeHtml(line)}</span>`)
+    .join("");
+  const phoneHtml = receipt.storePhone
+    ? `<span style="display:block; margin-top:0.12rem; text-align:center;">${escapeHtml(receipt.storePhone)}</span>`
+    : "";
+
+  return addressHtml || phoneHtml
+    ? `<span style="display:block; text-align:center; line-height:1.42;">${addressHtml}${phoneHtml}</span>`
+    : "";
+}
+
+function buildAccountPaymentTemplateTokens(receipt: EnterpriseAccountPaymentReceipt) {
+  return {
+    RETAIL_ORG_NAME: receipt.retailOrgName,
+    COMPANY_LOGO_URL: receipt.companyLogoUrl,
+    COMPANY_LOGO_HTML: documentTemplateRawHtml(
+      renderReceiptTemplateLogo(receipt.companyLogoUrl, `${receipt.storeName} logo`)
+    ),
+    STORE_NAME: receipt.storeName,
+    STORE_CODE: receipt.storeCode,
+    STORE_LOCATION: receipt.storeLocation,
+    STORE_PHONE: receipt.storePhone,
+    STORE_ADDRESS: receipt.storeAddress,
+    STORE_ADDRESS_LINE_1: receipt.storeAddress,
+    STORE_ADDRESS_LINE_2: receipt.storeAddressLine2,
+    STORE_CONTACT: documentTemplateRawHtml(renderReceiptStoreContactHtml(receipt)),
+    TERMINAL_CODE: receipt.terminalCode,
+    RECEIPT_TITLE: "Account Payment Receipt",
+    RECEIPT_NO: receipt.entryNo,
+    ENTRY_NO: receipt.entryNo,
+    RECEIPT_DATE_TIME: formatDateTime(receipt.occurredAt, receipt.timezone),
+    SHIFT_NO: receipt.shiftNo,
+    CASHIER: receipt.cashierCode,
+    CUSTOMER_NO: receipt.customerNo,
+    CUSTOMER_NAME: receipt.customerName,
+    PAYMENT_METHOD: receipt.tenderMethodName ?? receipt.paymentMethod,
+    PAYMENT_REFERENCE: receipt.reference,
+    AMOUNT: formatMoney(receipt.amount, receipt.currencyCode),
+    TOTAL: formatMoney(receipt.amount, receipt.currencyCode),
+    REMAINING_BALANCE:
+      receipt.remainingBalanceAmount === null
+        ? ""
+        : formatMoney(receipt.remainingBalanceAmount, receipt.currencyCode),
+    NOTES: receipt.note,
+    RECEIPT_HEADER: receipt.receiptHeader,
+    RECEIPT_FOOTER: receipt.receiptFooter
+  };
+}
+
+function buildAccountPaymentWindowHtml(receipt: EnterpriseAccountPaymentReceipt) {
+  const templateHtml =
+    receipt.accountPaymentReceiptTemplateHtml?.trim() || defaultAccountPaymentReceiptTemplateHtml;
+  const logoHtml = /\{COMPANY_LOGO_HTML\}/i.test(templateHtml)
+    ? ""
+    : renderReceiptTemplateLogo(receipt.companyLogoUrl, `${receipt.storeName} logo`);
+  const receiptBodyHtml = `<div class="print-receipt-sheet">
+    ${logoHtml}
+    <div class="document-template-html document-template-html--receipt">
+      ${renderDocumentTemplateHtml(templateHtml, buildAccountPaymentTemplateTokens(receipt))}
+    </div>
+  </div>`;
+
+  return `<!doctype html>
+  <html>
+    <head>
+      <title>${escapeHtml(receipt.entryNo)} - Flash ERP account payment</title>
+      <style>
+        *{box-sizing:border-box} body{margin:0;background:#e8eef7;color:#0f172a;font-family:"Segoe UI",Inter,sans-serif}
+        .receipt-window{min-height:100vh;padding:42px 24px}
+        .receipt-toolbar{position:fixed;left:24px;right:24px;top:42px;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:16px;max-width:440px;border-radius:22px;background:white;padding:14px 18px;box-shadow:0 18px 40px rgba(15,23,42,.14)}
+        .receipt-toolbar-copy{display:grid;gap:2px}.receipt-toolbar-copy strong{font-size:15px}.receipt-toolbar-copy span{color:#475569;font-size:12px}
+        .receipt-toolbar-actions{display:flex;gap:10px}.receipt-toolbar button{min-height:44px;border:1px solid #cbd5e1;border-radius:999px;background:white;padding:0 18px;font-weight:800}
+        .receipt-toolbar .is-primary{border-color:#0f766e;background:#0f766e;color:white}
+        .print-receipt-sheet{width:286px;margin:90px auto 0;border-radius:22px;background:white;padding:10px 8px 12px;box-shadow:0 20px 45px rgba(15,23,42,.16)}
+        .document-template-html{font-family:"Segoe UI",Inter,sans-serif;font-size:10.5px;line-height:1.3;color:#111827}
+        @media print{.print-hidden{display:none!important}.receipt-window{padding:0;background:white}.print-receipt-sheet{box-shadow:none;margin:0;width:80mm;border-radius:0}@page{size:80mm auto;margin:0}}
+      </style>
+    </head>
+    <body>
+      <div class="receipt-window">
+        <div class="receipt-toolbar print-hidden">
+          <div class="receipt-toolbar-copy"><strong>${escapeHtml(receipt.entryNo)}</strong><span>Account payment receipt</span></div>
+          <div class="receipt-toolbar-actions"><button onclick="window.close()">Close</button><button class="is-primary" onclick="window.print()">Print receipt</button></div>
+        </div>
+        ${receiptBodyHtml}
+      </div>
+    </body>
+  </html>`;
+}
+
+function openAccountPaymentWindow(receipt: EnterpriseAccountPaymentReceipt) {
+  const receiptWindow = window.open("", "_blank", "width=520,height=700");
+
+  if (!receiptWindow) {
+    return;
+  }
+
+  receiptWindow.document.open();
+  receiptWindow.document.write(buildAccountPaymentWindowHtml(receipt));
+  receiptWindow.document.close();
 }
 
 function formatActivityLabel(value: string) {
@@ -220,6 +401,7 @@ const emptyCustomer = (): CreateEnterpriseCustomerRequest => ({
   loyaltyTier: "",
   loyaltyPointsBalance: 0,
   allowCreditSales: false,
+  paymentTermsCode: "DUE-ON-RECEIPT",
   creditLimitAmount: null,
   receivableBalanceAmount: 0,
   sourceReferenceCaptureId: null,
@@ -239,6 +421,8 @@ const emptyAccountEntryDraft = (): AccountEntryDraft => ({
   entryMode: "ACCOUNT_PAYMENT",
   amount: "",
   loyaltyPoints: "",
+  tenderMethodCode: "",
+  allocations: [],
   storeCode: "",
   reference: "",
   note: ""
@@ -297,6 +481,34 @@ export function EnterpriseCustomerPanel({
       }))
     ],
     [workspace.availableStores]
+  );
+  const paymentTermOptions = useMemo(
+    () =>
+      workspace.paymentTermOptions.length > 0
+        ? workspace.paymentTermOptions.map((term) => ({
+            value: term.code,
+            label: term.label
+          }))
+        : [{ value: "DUE-ON-RECEIPT", label: "DUE-ON-RECEIPT" }],
+    [workspace.paymentTermOptions]
+  );
+  const tenderOptions = useMemo(
+    () =>
+      workspace.tenderOptions.map((tender) => ({
+        value: tender.tenderMethodCode,
+        label: tender.label
+      })),
+    [workspace.tenderOptions]
+  );
+  const defaultTenderMethodCode = tenderOptions[0]?.value ?? "";
+  const getOpenInvoicesForCustomer = (customerNo: string) =>
+    workspace.creditStatementRows.filter(
+      (row) => row.customerNo === customerNo && row.debitAmount > 0 && row.openAmount > 0
+    );
+  const accountPaymentAllocationTotal = Number(
+    accountEntryDraft.allocations
+      .reduce((sum, allocation) => sum + (allocation.amount === "" ? 0 : Number(allocation.amount)), 0)
+      .toFixed(2)
   );
 
   const referenceCaptureColumns = useMemo<ColumnDef<ReferenceCaptureRow>[]>(
@@ -442,8 +654,13 @@ export function EnterpriseCustomerPanel({
             <p className="truncate text-xs text-stone-500">
               Receivable {row.original.receivableBalanceAmount.toFixed(2)}
               {row.original.creditLimitAmount !== null
-                ? ` • Limit ${row.original.creditLimitAmount.toFixed(2)}`
+                ? ` • Limit ${
+                    row.original.creditLimitAmount <= 0
+                      ? "No limit"
+                      : row.original.creditLimitAmount.toFixed(2)
+                  }`
                 : ""}
+              {row.original.paymentTermsCode ? ` • Terms ${row.original.paymentTermsCode}` : ""}
             </p>
           </div>
         ),
@@ -508,6 +725,7 @@ export function EnterpriseCustomerPanel({
                     loyaltyTier: row.original.loyaltyTier ?? "",
                     loyaltyPointsBalance: row.original.loyaltyPointsBalance,
                     allowCreditSales: row.original.allowCreditSales,
+                    paymentTermsCode: row.original.paymentTermsCode ?? "DUE-ON-RECEIPT",
                     creditLimitAmount: row.original.creditLimitAmount,
                     receivableBalanceAmount: row.original.receivableBalanceAmount,
                     note: row.original.note ?? "",
@@ -520,15 +738,22 @@ export function EnterpriseCustomerPanel({
               {
                 label: "Account payment or adjustment",
                 onSelect: () => {
+                  const openInvoices = getOpenInvoicesForCustomer(row.original.customerNo);
+                  const paymentAmount = Number(
+                    openInvoices.reduce((sum, invoice) => sum + invoice.openAmount, 0).toFixed(2)
+                  );
+
                   setAccountEntryDraft({
                     customerNo: row.original.customerNo,
                     customerName: row.original.fullName,
                     entryMode: "ACCOUNT_PAYMENT",
-                    amount:
-                      row.original.receivableBalanceAmount > 0
-                        ? row.original.receivableBalanceAmount
-                        : "",
+                    amount: paymentAmount > 0 ? paymentAmount : "",
                     loyaltyPoints: "",
+                    tenderMethodCode: defaultTenderMethodCode,
+                    allocations: openInvoices.map((invoice) => ({
+                      invoiceEntryId: invoice.entryId,
+                      amount: invoice.openAmount
+                    })),
                     storeCode: row.original.homeStoreCode ?? "",
                     reference: "",
                     note: ""
@@ -545,7 +770,7 @@ export function EnterpriseCustomerPanel({
         meta: { disableTruncate: true }
       }
     ],
-    []
+    [defaultTenderMethodCode, workspace.creditStatementRows]
   );
   const activityColumns = useMemo<ColumnDef<ActivityRow>[]>(
     () => [
@@ -679,6 +904,17 @@ export function EnterpriseCustomerPanel({
           row.original.creditAmount > 0 ? row.original.creditAmount.toFixed(2) : "0.00"
       },
       {
+        accessorKey: "openAmount",
+        header: "Open",
+        cell: ({ row }) =>
+          row.original.debitAmount > 0 ? row.original.openAmount.toFixed(2) : "-"
+      },
+      {
+        accessorKey: "invoiceStatus",
+        header: "Status",
+        cell: ({ row }) => row.original.invoiceStatus.replace(/_/g, " ")
+      },
+      {
         accessorKey: "resultingReceivableBalance",
         header: "Running balance",
         cell: ({ row }) => row.original.resultingReceivableBalance.toFixed(2)
@@ -710,13 +946,23 @@ export function EnterpriseCustomerPanel({
         cell: ({ row }) => row.original.debitAmount.toFixed(2)
       },
       {
-        accessorKey: "resultingReceivableBalance",
-        header: "Balance",
-        cell: ({ row }) => row.original.resultingReceivableBalance.toFixed(2)
+        accessorKey: "appliedAmount",
+        header: "Paid",
+        cell: ({ row }) => row.original.appliedAmount.toFixed(2)
+      },
+      {
+        accessorKey: "openAmount",
+        header: "Open",
+        cell: ({ row }) => row.original.openAmount.toFixed(2)
+      },
+      {
+        accessorKey: "invoiceStatus",
+        header: "Status",
+        cell: ({ row }) => row.original.invoiceStatus.replace(/_/g, " ")
       },
       {
         accessorKey: "occurredAtLabel",
-        header: "Date",
+        header: "Timestamp",
         cell: ({ row }) => renderTimestamp(row.original.occurredAt, row.original.occurredAtLabel),
         meta: { disableTruncate: true }
       }
@@ -741,13 +987,13 @@ export function EnterpriseCustomerPanel({
         cell: ({ row }) => row.original.creditAmount.toFixed(2)
       },
       {
-        accessorKey: "resultingReceivableBalance",
-        header: "Balance",
-        cell: ({ row }) => row.original.resultingReceivableBalance.toFixed(2)
+        accessorKey: "allocationSummary",
+        header: "Applied to",
+        cell: ({ row }) => row.original.allocationSummary ?? "Not allocated"
       },
       {
         accessorKey: "occurredAtLabel",
-        header: "Date",
+        header: "Timestamp",
         cell: ({ row }) => renderTimestamp(row.original.occurredAt, row.original.occurredAtLabel),
         meta: { disableTruncate: true }
       }
@@ -812,11 +1058,28 @@ export function EnterpriseCustomerPanel({
           body: JSON.stringify({
             entryMode: accountEntryDraft.entryMode,
             amount:
-              accountEntryDraft.amount === "" ? null : Number(accountEntryDraft.amount),
+              accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"
+                ? accountPaymentAllocationTotal
+                : accountEntryDraft.amount === ""
+                  ? null
+                  : Number(accountEntryDraft.amount),
             loyaltyPoints:
               accountEntryDraft.loyaltyPoints === ""
                 ? null
                 : Number(accountEntryDraft.loyaltyPoints),
+            tenderMethodCode:
+              accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"
+                ? accountEntryDraft.tenderMethodCode || null
+                : null,
+            allocations:
+              accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"
+                ? accountEntryDraft.allocations
+                    .filter((allocation) => allocation.amount !== "" && Number(allocation.amount) > 0)
+                    .map((allocation) => ({
+                      invoiceEntryId: allocation.invoiceEntryId,
+                      amount: Number(allocation.amount)
+                    }))
+                : [],
             storeCode: accountEntryDraft.storeCode || null,
             reference: accountEntryDraft.reference || null,
             note: accountEntryDraft.note || null
@@ -838,6 +1101,10 @@ export function EnterpriseCustomerPanel({
         message: payload.message ?? "Flash ERP posted the customer account activity."
       });
 
+      if (payload.receipt) {
+        openAccountPaymentWindow(payload.receipt);
+      }
+
       startTransition(() => {
         window.setTimeout(() => {
           setIsAccountEntryDialogOpen(false);
@@ -855,7 +1122,9 @@ export function EnterpriseCustomerPanel({
     }
   }
 
-  const accountEntryNeedsAmount = accountEntryDraft.entryMode !== "LOYALTY_ADJUSTMENT";
+  const accountEntryIsPayment = accountEntryDraft.entryMode === "ACCOUNT_PAYMENT";
+  const accountEntryNeedsAmount =
+    accountEntryDraft.entryMode !== "LOYALTY_ADJUSTMENT" && !accountEntryIsPayment;
   const accountEntryNeedsPoints = accountEntryDraft.entryMode === "LOYALTY_ADJUSTMENT";
   const accountEntryNeedsReasonNote =
     accountEntryDraft.entryMode === "RECEIVABLE_ADJUSTMENT" ||
@@ -863,6 +1132,12 @@ export function EnterpriseCustomerPanel({
   const accountEntrySaveDisabled =
     accountEntryState.status === "submitting" ||
     !accountEntryDraft.customerNo.trim() ||
+    (accountEntryIsPayment &&
+      (!accountEntryDraft.tenderMethodCode ||
+        accountPaymentAllocationTotal <= 0 ||
+        accountEntryDraft.allocations.every(
+          (allocation) => allocation.amount === "" || Number(allocation.amount) <= 0
+        ))) ||
     (accountEntryNeedsAmount &&
       (accountEntryDraft.amount === "" || Number(accountEntryDraft.amount) === 0)) ||
     (accountEntryNeedsPoints &&
@@ -870,6 +1145,7 @@ export function EnterpriseCustomerPanel({
     (accountEntryNeedsReasonNote && !accountEntryDraft.note.trim());
   const viewingCustomer =
     workspace.customerRows.find((customer) => customer.customerNo === viewingCustomerNo) ?? null;
+  const accountEntryOpenInvoices = getOpenInvoicesForCustomer(accountEntryDraft.customerNo);
   const viewingCustomerInvoices = viewingCustomer
     ? workspace.creditStatementRows.filter(
         (row) => row.customerNo === viewingCustomer.customerNo && row.debitAmount > 0
@@ -1136,6 +1412,14 @@ export function EnterpriseCustomerPanel({
               type="number"
               value={customerDraft.creditLimitAmount ?? ""}
             />
+            <DialogSelect
+              label="Payment terms"
+              onChange={(value) =>
+                setCustomerDraft((current) => ({ ...current, paymentTermsCode: value }))
+              }
+              options={paymentTermOptions}
+              value={customerDraft.paymentTermsCode ?? "DUE-ON-RECEIPT"}
+            />
             <DialogTextInput
               label="Receivable balance"
               onChange={(value) =>
@@ -1254,10 +1538,25 @@ export function EnterpriseCustomerPanel({
                   amount:
                     value === "LOYALTY_ADJUSTMENT"
                       ? ""
-                      : current.entryMode === "LOYALTY_ADJUSTMENT"
-                        ? ""
-                        : current.amount,
-                  loyaltyPoints: value === "LOYALTY_ADJUSTMENT" ? current.loyaltyPoints : ""
+                      : value === "ACCOUNT_PAYMENT"
+                        ? Number(
+                            getOpenInvoicesForCustomer(current.customerNo)
+                              .reduce((sum, invoice) => sum + invoice.openAmount, 0)
+                              .toFixed(2)
+                          ) || ""
+                        : current.entryMode === "LOYALTY_ADJUSTMENT"
+                          ? ""
+                          : current.amount,
+                  loyaltyPoints: value === "LOYALTY_ADJUSTMENT" ? current.loyaltyPoints : "",
+                  tenderMethodCode:
+                    value === "ACCOUNT_PAYMENT" ? current.tenderMethodCode || defaultTenderMethodCode : "",
+                  allocations:
+                    value === "ACCOUNT_PAYMENT"
+                      ? getOpenInvoicesForCustomer(current.customerNo).map((invoice) => ({
+                          invoiceEntryId: invoice.entryId,
+                          amount: invoice.openAmount
+                        }))
+                      : []
                 }))
               }
               options={accountEntryModeOptions}
@@ -1274,6 +1573,20 @@ export function EnterpriseCustomerPanel({
               }))]}
               value={accountEntryDraft.storeCode}
             />
+            {accountEntryDraft.entryMode === "ACCOUNT_PAYMENT" ? (
+              <DialogSelect
+                label="Tender/payment mode"
+                onChange={(value) =>
+                  setAccountEntryDraft((current) => ({ ...current, tenderMethodCode: value }))
+                }
+                options={
+                  tenderOptions.length > 0
+                    ? tenderOptions
+                    : [{ value: "", label: "No active tender methods mapped" }]
+                }
+                value={accountEntryDraft.tenderMethodCode}
+              />
+            ) : null}
             {accountEntryDraft.entryMode === "LOYALTY_ADJUSTMENT" ? (
               <DialogTextInput
                 label="Loyalty points delta"
@@ -1291,7 +1604,7 @@ export function EnterpriseCustomerPanel({
               <DialogTextInput
                 label={
                   accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"
-                    ? "Payment amount"
+                    ? "Allocated payment amount"
                     : "Receivable adjustment amount"
                 }
                 onChange={(value) =>
@@ -1300,13 +1613,18 @@ export function EnterpriseCustomerPanel({
                     amount: value.trim().length > 0 ? Number(value) : ""
                   }))
                 }
+                disabled={accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"}
                 placeholder={
                   accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"
-                    ? "Enter collected amount"
+                    ? "Driven by selected invoice allocations"
                     : "Use negative amount to reduce balance"
                 }
                 type="number"
-                value={accountEntryDraft.amount}
+                value={
+                  accountEntryDraft.entryMode === "ACCOUNT_PAYMENT"
+                    ? accountPaymentAllocationTotal
+                    : accountEntryDraft.amount
+                }
               />
             )}
             <DialogTextInput
@@ -1318,6 +1636,106 @@ export function EnterpriseCustomerPanel({
               value={accountEntryDraft.reference}
             />
           </div>
+
+          {accountEntryDraft.entryMode === "ACCOUNT_PAYMENT" ? (
+            <section className="rounded-[1.25rem] border border-emerald-100 bg-emerald-50/60 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">
+                    Invoice allocation
+                  </p>
+                  <p className="mt-1 text-sm text-emerald-900">
+                    Apply the payment to one or more open invoices.
+                  </p>
+                </div>
+                <span className="rounded-full bg-white px-3 py-1 text-sm font-semibold text-emerald-800">
+                  Total {accountPaymentAllocationTotal.toFixed(2)}
+                </span>
+              </div>
+
+              <div className="mt-4 overflow-x-auto rounded-2xl border border-emerald-100 bg-white">
+                <table className="min-w-full divide-y divide-stone-100 text-sm">
+                  <thead className="bg-stone-50 text-left text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">
+                    <tr>
+                      <th className="px-3 py-3">Invoice</th>
+                      <th className="px-3 py-3 text-right">Original</th>
+                      <th className="px-3 py-3 text-right">Paid</th>
+                      <th className="px-3 py-3 text-right">Open</th>
+                      <th className="px-3 py-3 text-right">Apply</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {accountEntryOpenInvoices.length > 0 ? (
+                      accountEntryOpenInvoices.map((invoice) => {
+                        const allocation = accountEntryDraft.allocations.find(
+                          (row) => row.invoiceEntryId === invoice.entryId
+                        );
+
+                        return (
+                          <tr key={invoice.entryId}>
+                            <td className="px-3 py-3">
+                              <p className="font-semibold text-stone-900">
+                                {invoice.transactionNo ?? "Manual invoice"}
+                              </p>
+                              <p className="text-xs text-stone-500">
+                                {invoice.storeName ?? "Enterprise"} - {invoice.occurredAtLabel}
+                              </p>
+                            </td>
+                            <td className="px-3 py-3 text-right">{invoice.originalAmount.toFixed(2)}</td>
+                            <td className="px-3 py-3 text-right">{invoice.appliedAmount.toFixed(2)}</td>
+                            <td className="px-3 py-3 text-right font-semibold text-stone-900">
+                              {invoice.openAmount.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-3 text-right">
+                              <input
+                                className="w-28 rounded-xl border border-stone-200 px-3 py-2 text-right outline-none transition focus:border-emerald-500 focus:shadow-[0_0_0_4px_rgba(16,185,129,0.12)]"
+                                max={invoice.openAmount}
+                                min={0}
+                                onChange={(event) => {
+                                  const value = event.target.value.trim();
+                                  setAccountEntryDraft((current) => {
+                                    const nextAmount =
+                                      value.length > 0
+                                        ? Math.min(invoice.openAmount, Math.max(0, Number(value)))
+                                        : "";
+                                    const existing = current.allocations.filter(
+                                      (row) => row.invoiceEntryId !== invoice.entryId
+                                    );
+
+                                    return {
+                                      ...current,
+                                      allocations: [
+                                        ...existing,
+                                        {
+                                          invoiceEntryId: invoice.entryId,
+                                          amount: Number.isFinite(Number(nextAmount))
+                                            ? nextAmount
+                                            : ""
+                                        }
+                                      ]
+                                    };
+                                  });
+                                }}
+                                step="0.01"
+                                type="number"
+                                value={allocation?.amount ?? ""}
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td className="px-3 py-5 text-center text-stone-500" colSpan={5}>
+                          This customer has no open invoice available for payment allocation.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
 
           <label className="space-y-2 text-sm text-stone-700">
             <span className="block font-semibold text-stone-900">
@@ -1406,7 +1824,9 @@ export function EnterpriseCustomerPanel({
                   Limit{" "}
                   {viewingCustomer.creditLimitAmount === null
                     ? "not set"
-                    : viewingCustomer.creditLimitAmount.toFixed(2)}
+                    : viewingCustomer.creditLimitAmount <= 0
+                      ? "No limit"
+                      : viewingCustomer.creditLimitAmount.toFixed(2)}
                 </p>
               </div>
               <div className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3">
