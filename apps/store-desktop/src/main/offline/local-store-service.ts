@@ -2239,6 +2239,10 @@ function getLineIntentForBasket(
   return "SALE";
 }
 
+function isServiceProductType(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase() === "SERVICE";
+}
+
 function getLineDirection(
   transactionType: BasketTransactionType,
   lineIntent: SyncPosLineIntent,
@@ -5541,7 +5545,7 @@ export class LocalStoreService {
           return false;
         }
 
-        if (sellableOnly) {
+        if (sellableOnly && !isServiceProductType(row.product_type)) {
           const salesLocationQuantity =
             salesLocationCode !== null
               ? this.getOptionalLocationQuantity(
@@ -9871,7 +9875,8 @@ export class LocalStoreService {
       const requestedQuantity = Number(
         (currentBasketProductQuantity + normalizedQuantity).toFixed(3),
       );
-      const tracksInventory = asBooleanFlag(match.track_inventory);
+      const tracksInventory =
+        asBooleanFlag(match.track_inventory) && !isServiceProductType(match.product_type);
       const isSerialized = asBooleanFlag(match.is_serialized);
       const salesLocationCode =
         match.sales_location_code ?? this.getDefaultSalesLocationCode();
@@ -10560,7 +10565,9 @@ export class LocalStoreService {
       }
 
       const match = this.requireBasketProductLookup(line.product_code_snapshot);
-      const tracksInventory = asBooleanFlag(match.track_inventory);
+      const tracksInventory =
+        asBooleanFlag(match.track_inventory) &&
+        !isServiceProductType(match.product_type);
       const isSerialized = asBooleanFlag(match.is_serialized);
       const currentUnitPrice = Number(asNumber(line.unit_price).toFixed(2));
       const currentDiscountAmount = Number(
@@ -11781,7 +11788,11 @@ export class LocalStoreService {
     const availableQuantity =
       match.sales_location_quantity ?? asNumber(match.quantity_on_hand);
 
-    if (availableQuantity < normalizedQuantity) {
+    if (
+      asBooleanFlag(match.track_inventory) &&
+      !isServiceProductType(match.product_type) &&
+      availableQuantity < normalizedQuantity
+    ) {
       throw new Error(
         `Only ${availableQuantity.toFixed(3)} unit(s) of ${match.product_name} are available in the local sales position.`,
       );
@@ -11879,6 +11890,7 @@ export class LocalStoreService {
         id: product.id,
         product_code: product.product_code,
         product_name: product.product_name,
+        product_type: product.product_type,
         department_code: product.department_code,
         category_code: product.category_code,
         taxable: product.taxable,
@@ -14797,7 +14809,9 @@ export class LocalStoreService {
           transactionType,
           lineIntent,
         );
-        const tracksInventory = asBooleanFlag(product.track_inventory);
+        const tracksInventory =
+          asBooleanFlag(product.track_inventory) &&
+          !isServiceProductType(product.product_type);
         const selectedSerialNumbers = validateSerializedLineInput({
           isSerialized: asBooleanFlag(product.is_serialized),
           productName: line.product_name_snapshot,
@@ -15197,6 +15211,7 @@ export class LocalStoreService {
       id: string;
       product_code: string;
       product_name: string;
+      product_type: string | null;
       department_code: string | null;
       category_code: string | null;
       taxable: number | string;
@@ -15421,7 +15436,10 @@ export class LocalStoreService {
           `CASH-${transactionNo}`,
           timestamp,
         );
-      if (asBooleanFlag(match.track_inventory)) {
+      if (
+        asBooleanFlag(match.track_inventory) &&
+        !isServiceProductType(match.product_type)
+      ) {
         if (
           match.sales_location_code &&
           !this.hasLocationBalance(

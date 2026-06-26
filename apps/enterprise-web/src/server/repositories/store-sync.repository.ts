@@ -1415,6 +1415,10 @@ function catalogPolicyAllowsProduct(
   );
 }
 
+function isServiceProductType(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase() === "SERVICE";
+}
+
 function normalizeDatabaseInstructionType(value: string | null | undefined) {
   const normalized = value?.trim().toUpperCase() ?? "SYNC_NOW";
 
@@ -2569,7 +2573,11 @@ async function queueAutomaticStoreMasterDataPublications(
     ),
   );
   const productsForStore = products
-    .filter((product) => catalogPolicyAllowsProduct(storeCatalogPolicy, product))
+    .filter(
+      (product) =>
+        catalogPolicyAllowsProduct(storeCatalogPolicy, product) ||
+        isServiceProductType(product.productType),
+    )
     .sort((left, right) => {
       const leftSortOrder =
         catalogSortOrderByProductCode.get(left.code.trim().toUpperCase()) ??

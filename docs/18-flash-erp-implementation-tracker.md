@@ -48,8 +48,8 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - Sidebar grouped-menu matching now selects the most specific active child route, so Finance/Settings groups reopen the exact clicked subgroup instead of the first prefix-matching child.
 - Database readiness checks now tolerate local SQL Server databases created with `prisma db push` where `[dbo].[_prisma_migrations]` does not exist, while still validating required tables and columns.
 - Trial Balance now has an account-type filter, Bank Reconciliation statement-save errors are visible inside the New Statement dialog, fuel catalog repair/seed guarantees active `FUEL` product hierarchy records, and HQ Reports includes an exportable Daily Station Fuel Report for tank dips, meter readings, book stock, and reconciliation review.
-- Online-store POS catalog now includes active `SERVICE` products even when no stock quantity exists, while stock/matrix catalog items remain quantity-gated; service sale lines are treated as non-stock lines for online-store stock validation and inventory movements.
-- Online-store fuel GRNs and inter-store transfer receipts now mirror received fuel into the matching active fuel tank for the receiving shop/product, and online-store fuel POS sales/fulfilled sales orders reduce the matching tank book quantity when that product is linked to a tank.
+- Online-store and desktop POS catalogs now include active `SERVICE` products even when no stock quantity exists, while stock/matrix catalog items remain quantity-gated; service sale lines are treated as non-stock lines for online-store and desktop stock validation/inventory movements.
+- Online-store fuel GRNs and inter-store transfer receipts now mirror received fuel into the matching active fuel tank for the receiving shop/product, online-store fuel POS sales/fulfilled sales orders reduce the matching tank book quantity when that product is linked to a tank, and station dip/meter captures stamp the logged-in operator automatically instead of requiring a `Recorded by` picker.
 - Online-store and synced shop POS sales now post through standard accounting: tender-mapped cashbook/GL accounts for cash, bank, mobile money, and card tenders; AR for Store Credit/unpaid customer balances; Sales Revenue or Service Revenue; Sales Tax Payable; COGS; Inventory; and posted cashbook entries tied to the sale journal.
 - POS sales no longer fail solely because a stock item has zero or missing cost; revenue, tax, tender/cashbook, and AR still post, while COGS/Inventory relief is skipped until a valid cost exists.
 - Journal Inquiry detail now surfaces related POS sale/COGS accounting lines for the same sale reference so revenue/tax/tender/AR and inventory-cost impact can be reviewed together when COGS posts in a separate inventory journal.
@@ -86,6 +86,24 @@ Verified:
 - `npm run prisma:validate`
 - `npm --workspace @flash-erp/enterprise-web run build`
 - Production build route list includes `/online-store`, `/api/online-store/sales`, `/api/online-store/corrections`, `/api/sync/store-nodes/[nodeCode]/push`, `/finance`, `/finance/cashbook`, and `/finance/journal-inquiry`.
+
+### 2026-06-26 Online Store Fuel Operator Auto-Stamp
+
+Status: Done
+
+Implemented:
+
+- Passed the logged-in online-store operator into the shared Fuel Operations workspace.
+- Changed station-side tank dip entry to show `Recorded by` as a read-only logged-in operator value instead of a dropdown.
+- Added backend fallback stamping for tank dips and meter readings so direct API saves use the signed-in operator when `recordedBy` is omitted.
+- Kept the HQ Fuel Operations `Recorded by` picker available for back-office entry.
+
+Verified:
+
+- `npm run prisma:validate`
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/online-store/fuel/dips`, `/online-store/fuel/meter-readings`, `/api/fuel-operations/dips`, and `/api/fuel-operations/meter-readings`.
 
 ### 2026-06-25 Finance Grid Polish and Fuel Daily Reporting
 
@@ -144,22 +162,26 @@ Verified:
 - `npm --workspace @flash-erp/enterprise-web run build`
 - Production build route list includes `/online-store`, `/api/online-store/sales`, `/api/online-store/goods-receipts`, and `/api/online-store/transfers/[transferId]/receive`.
 
-### 2026-06-25 Online Store Service POS Catalog
+### 2026-06-25 Online Store and Desktop Service POS Catalog
 
 Status: Done
 
 Implemented:
 
 - Changed Online Store POS catalog eligibility so active `SERVICE` products remain visible without Item Dynamic stock quantity.
+- Changed online-store and desktop sync catalog publication so active `SERVICE` products are sent to POS catalogs even when they have no stock-backed catalog quantity.
 - Kept positive-stock gating for stock/matrix POS catalog items.
 - Added service-aware stock-management checks so `SERVICE` sale, sales-order, exchange replacement, and held-sale fulfilment lines do not require stock or create inventory movements.
 - Changed POS catalog/search/replacement labels to show `Service` instead of `Stock 0` for service products.
+- Extended the same service visibility and non-stock sale handling to desktop POS offline, SQL Server, and PostgreSQL store engines, plus modern and legacy desktop POS catalog tiles.
 
 Verified:
 
 - `npm run prisma:validate`
 - `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm --workspace @flash-erp/store-desktop run typecheck`
 - `npm --workspace @flash-erp/enterprise-web run build`
+- `npm --workspace @flash-erp/store-desktop run build`
 - Production build route list includes `/online-store` and `/api/online-store/sales`.
 
 ### 2026-06-25 GRN AP Invoice and Online Store Fuel Menu Correction

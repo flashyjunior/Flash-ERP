@@ -258,6 +258,24 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
   currency: "GHS"
 });
 
+function isServiceCatalogItem(item: Pick<StoreCatalogBrowseItem, "productType">) {
+  return (item.productType ?? "").trim().toUpperCase() === "SERVICE";
+}
+
+function formatCatalogItemAvailability(
+  item: Pick<StoreCatalogBrowseItem, "productType" | "quantityOnHand" | "salesLocationQuantity" | "isSerialized">,
+) {
+  if (isServiceCatalogItem(item)) {
+    return "Service";
+  }
+
+  if (item.isSerialized) {
+    return "Serialized";
+  }
+
+  return `Stock ${numberFormatter.format(item.salesLocationQuantity ?? item.quantityOnHand)}`;
+}
+
 const touchKeyboardTargetLabels: Record<TouchKeyboardTarget, string> = {
   scanQuery: "barcode / product code",
   scanQuantity: "sale quantity",
@@ -5003,9 +5021,7 @@ export function App() {
                           <span className="desktop-pos-product-image">NO IMAGE</span>
                           <strong>{item.productName}</strong>
                           <small>{item.productCode}</small>
-                          <span>
-                            Stock {numberFormatter.format(item.salesLocationQuantity ?? item.quantityOnHand)}
-                          </span>
+                          <span>{formatCatalogItemAvailability(item)}</span>
                           <b>{currencyFormatter.format(item.unitPrice)}</b>
                         </button>
                       ))
@@ -5604,14 +5620,18 @@ export function App() {
                             <span>{item.departmentName ?? "Unassigned department"}</span>
                             <span>{item.categoryName ?? "Unassigned category"}</span>
                             {item.subcategory ? <span>{item.subcategory}</span> : null}
-                            <span>On hand: {numberFormatter.format(item.quantityOnHand)}</span>
-                            {item.salesLocationCode ? (
+                            {isServiceCatalogItem(item) ? (
+                              <span>Service</span>
+                            ) : (
+                              <span>On hand: {numberFormatter.format(item.quantityOnHand)}</span>
+                            )}
+                            {!isServiceCatalogItem(item) && item.salesLocationCode ? (
                               <span>
                                 Sales floor: {numberFormatter.format(item.salesLocationQuantity ?? 0)} in{" "}
                                 {item.salesLocationCode}
                               </span>
                             ) : null}
-                            {item.isSerialized ? <span>Serialized</span> : <span>Standard</span>}
+                            {item.isSerialized ? <span>Serialized</span> : isServiceCatalogItem(item) ? null : <span>Standard</span>}
                           </div>
                           <div className="desktop-task-actions">
                             <button

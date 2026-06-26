@@ -1382,6 +1382,7 @@ export function FuelOperationsWorkspace({
   embedInShell = false,
   shellActiveSection = "fuel-operations",
   shellEyebrow = "Module 5",
+  autoRecordedBy,
   workspace
 }: {
   availableViews?: ViewKey[];
@@ -1392,6 +1393,7 @@ export function FuelOperationsWorkspace({
   embedInShell?: boolean;
   shellActiveSection?: string;
   shellEyebrow?: string;
+  autoRecordedBy?: string | null;
   workspace: FuelOperationsWorkspaceData;
 }) {
   const router = useRouter();
@@ -1400,6 +1402,7 @@ export function FuelOperationsWorkspace({
     workspace.fuelSettings.defaultSaleSourceSiteId ?? workspace.siteOptions[0]?.operatingSiteId ?? "";
   const defaultDispatchSiteId =
     workspace.fuelSettings.defaultDispatchSiteId ?? defaultSaleSourceSiteId;
+  const automaticRecordedBy = autoRecordedBy?.trim() || null;
   const [activeView, setActiveView] = useState<ViewKey>(defaultView);
   const allowedViewSet = useMemo(
     () => (availableViews?.length ? new Set<ViewKey>(availableViews) : null),
@@ -1436,10 +1439,12 @@ export function FuelOperationsWorkspace({
     status: "ACTIVE"
   });
   const [dipDraft, setDipDraft] = useState<CreateFuelTankDipRequest>({
-    dipDate: workspace.defaultOperationDate
+    dipDate: workspace.defaultOperationDate,
+    recordedBy: automaticRecordedBy ?? undefined
   });
   const [meterDraft, setMeterDraft] = useState<CreateFuelMeterReadingRequest>({
-    readingDate: workspace.defaultOperationDate
+    readingDate: workspace.defaultOperationDate,
+    recordedBy: automaticRecordedBy ?? undefined
   });
   const [deliveryDraft, setDeliveryDraft] = useState<CreateFuelDeliveryRequest>({
     deliveryDate: workspace.defaultOperationDate,
@@ -1591,6 +1596,14 @@ export function FuelOperationsWorkspace({
       label: location.label,
       value: location.inventoryLocationId
     })) ?? [];
+
+  function applyAutomaticRecordedBy<T extends { recordedBy?: string | null }>(payload: T): T {
+    if (!automaticRecordedBy || payload.recordedBy?.trim()) {
+      return payload;
+    }
+
+    return { ...payload, recordedBy: automaticRecordedBy };
+  }
   const supplierReceiptTankOptions = tankOptions.filter(
     (tank) => !deliveryDraft.operatingSiteId || tank.operatingSiteId === deliveryDraft.operatingSiteId
   );
@@ -1877,7 +1890,7 @@ export function FuelOperationsWorkspace({
       evidenceImageUrl: row.evidenceImageUrl,
       evidenceFileName: row.evidenceFileName,
       evidenceCapturedAt: row.evidenceCapturedAt,
-      recordedBy: row.recordedBy,
+      recordedBy: row.recordedBy ?? automaticRecordedBy ?? undefined,
       notes: row.notes
     });
     setMutation(mutationIdle());
@@ -1898,7 +1911,7 @@ export function FuelOperationsWorkspace({
       evidenceImageUrl: row.evidenceImageUrl,
       evidenceFileName: row.evidenceFileName,
       evidenceCapturedAt: row.evidenceCapturedAt,
-      recordedBy: row.recordedBy,
+      recordedBy: row.recordedBy ?? automaticRecordedBy ?? undefined,
       notes: row.notes
     });
     setMutation(mutationIdle());
@@ -3916,7 +3929,10 @@ export function FuelOperationsWorkspace({
                     onOpenChange={(open) => {
                       setDipDialogOpen(open);
                       if (!open) {
-                        setDipDraft({ dipDate: workspace.defaultOperationDate });
+                        setDipDraft({
+                          dipDate: workspace.defaultOperationDate,
+                          recordedBy: automaticRecordedBy ?? undefined
+                        });
                         setMutation(mutationIdle());
                       }
                     }}
@@ -3969,14 +3985,21 @@ export function FuelOperationsWorkspace({
                         }
                         value={dipDraft.dipReference ?? ""}
                       />
-                      <DialogSelect
-                        label="Recorded by"
-                        onChange={(value) =>
-                          setDipDraft((current) => ({ ...current, recordedBy: value }))
-                        }
-                        options={userOptions}
-                        value={dipDraft.recordedBy ?? ""}
-                      />
+                      {automaticRecordedBy ? (
+                        <DialogReadOnlyValue
+                          label="Recorded by"
+                          value={dipDraft.recordedBy?.trim() || automaticRecordedBy}
+                        />
+                      ) : (
+                        <DialogSelect
+                          label="Recorded by"
+                          onChange={(value) =>
+                            setDipDraft((current) => ({ ...current, recordedBy: value }))
+                          }
+                          options={userOptions}
+                          value={dipDraft.recordedBy ?? ""}
+                        />
+                      )}
                       <EvidenceUploadField
                         evidenceKind="tank-dip"
                         fileName={dipDraft.evidenceFileName}
@@ -4006,8 +4029,10 @@ export function FuelOperationsWorkspace({
                       mutation={mutation}
                       onCancel={() => setDipDialogOpen(false)}
                       onSubmit={() =>
-                        void submitJson("/api/fuel-operations/dips", dipDraft, () =>
-                          setDipDialogOpen(false)
+                        void submitJson(
+                          "/api/fuel-operations/dips",
+                          applyAutomaticRecordedBy(dipDraft),
+                          () => setDipDialogOpen(false)
                         )
                       }
                       submitLabel="Record dip"
@@ -4017,7 +4042,10 @@ export function FuelOperationsWorkspace({
                     onOpenChange={(open) => {
                       setMeterDialogOpen(open);
                       if (!open) {
-                        setMeterDraft({ readingDate: workspace.defaultOperationDate });
+                        setMeterDraft({
+                          readingDate: workspace.defaultOperationDate,
+                          recordedBy: automaticRecordedBy ?? undefined
+                        });
                         setMutation(mutationIdle());
                       }
                     }}
@@ -4109,8 +4137,10 @@ export function FuelOperationsWorkspace({
                       mutation={mutation}
                       onCancel={() => setMeterDialogOpen(false)}
                       onSubmit={() =>
-                        void submitJson("/api/fuel-operations/meter-readings", meterDraft, () =>
-                          setMeterDialogOpen(false)
+                        void submitJson(
+                          "/api/fuel-operations/meter-readings",
+                          applyAutomaticRecordedBy(meterDraft),
+                          () => setMeterDialogOpen(false)
                         )
                       }
                       submitLabel="Record reading"

@@ -1331,6 +1331,10 @@ function normalizeCatalogCode(value: string | null | undefined) {
   return normalized ? normalized.toUpperCase() : null;
 }
 
+function isServiceProductType(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase() === "SERVICE";
+}
+
 function normalizePromotionCode(value: string | null | undefined) {
   const normalized = value?.trim() ?? "";
   return normalized ? normalized.toUpperCase() : "";
@@ -5392,7 +5396,7 @@ export class PostgresStoreService {
           return false;
         }
 
-        if (sellableOnly) {
+        if (sellableOnly && !isServiceProductType(row.product_type)) {
           const sellableQuantity =
             row.sales_location_quantity === null
               ? asNumber(row.quantity_on_hand)
@@ -9988,6 +9992,7 @@ export class PostgresStoreService {
     if (
       lineIntent === "SALE" &&
       asBooleanFlag(match.track_inventory) &&
+      !isServiceProductType(match.product_type) &&
       availableQuantity < requestedQuantity
     ) {
       throw new Error(
@@ -10162,6 +10167,7 @@ export class PostgresStoreService {
         product.id,
         product.product_code,
         product.product_name,
+        product.product_type,
         product.short_name,
         product.description,
         product.primary_image_url,
@@ -10186,6 +10192,8 @@ export class PostgresStoreService {
         AND balance.location_code = $1
        WHERE product.must_enter_price_at_pos = 0
          AND (
+          product.product_type = 'SERVICE'
+          OR
           product.track_inventory = 0
           OR COALESCE(balance.quantity_on_hand, product.quantity_on_hand) > 0
         )
@@ -10304,7 +10312,10 @@ export class PostgresStoreService {
       throw new Error("Flash ERP needs a manual discount of zero or greater.");
     }
 
-    if (asBooleanFlag(product.track_inventory)) {
+    if (
+      asBooleanFlag(product.track_inventory) &&
+      !isServiceProductType(product.product_type)
+    ) {
       const availableQuantity = asNumber(
         product.sales_location_quantity ?? product.quantity_on_hand,
       );
@@ -11539,7 +11550,10 @@ export class PostgresStoreService {
           (quantity * direction * -1).toFixed(3),
         );
 
-        if (asBooleanFlag(product.track_inventory)) {
+        if (
+          asBooleanFlag(product.track_inventory) &&
+          !isServiceProductType(product.product_type)
+        ) {
           await client.query(
             `UPDATE product_snapshot
              SET quantity_on_hand = quantity_on_hand + $1,

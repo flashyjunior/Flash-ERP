@@ -503,6 +503,30 @@ function formatNumber(value: number | null | undefined) {
   return numberFormatter.format(value ?? 0);
 }
 
+function isServiceCatalogItem(item: Pick<StoreCatalogBrowseItem, "productType">) {
+  return (item.productType ?? "").trim().toUpperCase() === "SERVICE";
+}
+
+function isCatalogItemSellable(
+  item: Pick<StoreCatalogBrowseItem, "productType" | "quantityOnHand" | "salesLocationQuantity">,
+) {
+  return isServiceCatalogItem(item) || (item.salesLocationQuantity ?? item.quantityOnHand) > 0;
+}
+
+function formatCatalogItemAvailability(
+  item: Pick<StoreCatalogBrowseItem, "productType" | "quantityOnHand" | "salesLocationQuantity" | "isSerialized">,
+) {
+  if (isServiceCatalogItem(item)) {
+    return "Service";
+  }
+
+  if (item.isSerialized) {
+    return "Serialized";
+  }
+
+  return `Stock ${formatNumber(item.salesLocationQuantity ?? item.quantityOnHand)}`;
+}
+
 function formatDiscountRate(rate: number) {
   return Number.isInteger(rate) ? rate.toFixed(0) : rate.toFixed(2);
 }
@@ -14547,9 +14571,7 @@ function POSWorkspace(props: {
     (capabilities?.cashierEligible === true ||
       capabilities?.canProcessSale === true ||
       capabilities?.canOpenShift === true);
-  const visibleCatalogItems = props.catalogItems.filter(
-    (item) => (item.salesLocationQuantity ?? item.quantityOnHand) > 0,
-  );
+  const visibleCatalogItems = props.catalogItems.filter(isCatalogItemSellable);
   const receiptLinkedCorrectionActive =
     (props.activeBasket?.transactionType === "RETURN" ||
       props.activeBasket?.transactionType === "EXCHANGE") &&
@@ -15385,9 +15407,7 @@ function POSWorkspace(props: {
                 />
                 <strong>{item.productName}</strong>
                 <span>
-                  {item.isSerialized
-                    ? "Serialized"
-                    : `Stock ${formatNumber(item.salesLocationQuantity ?? item.quantityOnHand)}`}
+                  {formatCatalogItemAvailability(item)}
                 </span>
                 <b>
                   {item.mustEnterPriceAtPos

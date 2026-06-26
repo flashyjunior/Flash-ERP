@@ -1118,6 +1118,10 @@ function normalizeCatalogCode(value: string | null | undefined) {
   return normalized ? normalized.toUpperCase() : null;
 }
 
+function isServiceProductType(value: string | null | undefined) {
+  return (value ?? "").trim().toUpperCase() === "SERVICE";
+}
+
 function normalizeTerminalCode(value: string | null | undefined) {
   return value?.trim() || null;
 }
@@ -5391,7 +5395,7 @@ export class MssqlStoreService {
           return false;
         }
 
-        if (sellableOnly) {
+        if (sellableOnly && !isServiceProductType(row.product_type)) {
           const sellableQuantity =
             row.sales_location_quantity === null
               ? asNumber(row.quantity_on_hand)
@@ -12005,6 +12009,7 @@ export class MssqlStoreService {
     if (
       lineIntent === "SALE" &&
       asBooleanFlag(match.track_inventory) &&
+      !isServiceProductType(match.product_type) &&
       availableQuantity < requestedQuantity
     ) {
       throw new Error(
@@ -12204,6 +12209,7 @@ export class MssqlStoreService {
         product.[id],
         product.[product_code],
         product.[product_name],
+        product.[product_type],
         product.[short_name],
         product.[description],
         product.[primary_image_url],
@@ -12231,6 +12237,8 @@ export class MssqlStoreService {
         AND balance.[location_code] = @salesLocationCode
        WHERE product.[must_enter_price_at_pos] = 0
          AND (
+          product.[product_type] = 'SERVICE'
+          OR
           product.[track_inventory] = 0
           OR ISNULL(balance.[quantity_on_hand], product.[quantity_on_hand]) > 0
         )
@@ -13046,7 +13054,10 @@ export class MssqlStoreService {
           (quantity * direction * -1).toFixed(3),
         );
 
-        if (asBooleanFlag(product.track_inventory)) {
+        if (
+          asBooleanFlag(product.track_inventory) &&
+          !isServiceProductType(product.product_type)
+        ) {
           await this.query(
             `UPDATE [dbo].[product_snapshot]
              SET [quantity_on_hand] = [quantity_on_hand] + @signedInventoryDelta,

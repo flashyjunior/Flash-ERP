@@ -78,6 +78,7 @@ export async function OnlineStoreFuelPage({
 
   return (
     <FuelOperationsWorkspace
+      autoRecordedBy={session.displayName}
       availableViews={[...availableViews]}
       dedicatedView={dedicatedView}
       defaultView={resolvedDefaultView}

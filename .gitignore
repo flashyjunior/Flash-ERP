@@ -30,6 +30,7 @@ apps/store-desktop/sync-runtime-node_modules/
 !apps/store-desktop/build/app-icon.png
 apps/store-desktop/.vite/
 apps/store-desktop/dist-electron/
+apps/enterprise-web/public/uploads/fuel-evidence/
 tmp/
 .tmp/
 artifacts/

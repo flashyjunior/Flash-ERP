@@ -3847,7 +3847,11 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     ])
   );
   const productsForCatalog = products
-    .filter((product) => catalogPolicyAllowsProduct(catalogPolicy, product))
+    .filter(
+      (product) =>
+        catalogPolicyAllowsProduct(catalogPolicy, product) ||
+        isServiceProductType(product.productType)
+    )
     .sort((left, right) => {
       const leftSortOrder =
         catalogSortOrderByProductCode.get(left.code.trim().toUpperCase()) ?? Number.MAX_SAFE_INTEGER;

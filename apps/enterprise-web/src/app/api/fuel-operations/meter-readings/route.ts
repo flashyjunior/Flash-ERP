@@ -5,12 +5,18 @@ import { createFuelMeterReading } from "@/server/repositories/erp-fuel-operation
 
 export async function POST(request: Request) {
   try {
-    await assertEnterpriseOrOnlineStorePermission(
+    const session = await assertEnterpriseOrOnlineStorePermission(
       ["settings.company.manage"],
       ["fuel.meter-reading.capture"]
     );
     const payload = await request.json();
-    const response = await createFuelMeterReading(payload);
+    const response = await createFuelMeterReading({
+      ...payload,
+      recordedBy:
+        typeof payload?.recordedBy === "string" && payload.recordedBy.trim()
+          ? payload.recordedBy
+          : session.displayName
+    });
 
     return NextResponse.json(response);
   } catch (error) {
