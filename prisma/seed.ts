@@ -681,11 +681,91 @@ async function ensureUnitOfMeasureSeedDefaults(retailOrgId: string, nodeCode: st
   };
 }
 
+function fuelCategoryName(code: string) {
+  const labels: Record<string, string> = {
+    DIESEL: "Diesel",
+    KEROSENE: "Kerosene",
+    LPG: "Liquefied Petroleum Gas",
+    PETROL: "Petrol"
+  };
+
+  return labels[code] ?? code;
+}
+
+async function ensureFuelProductHierarchySeedDefaults(retailOrgId: string, nodeCode: string) {
+  const fuelDepartment = await prisma.productDepartment.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId,
+        code: "FUEL"
+      }
+    },
+    update: {
+      name: "Fuel",
+      description: "Fuel and petroleum products.",
+      sortOrder: 10,
+      status: "ACTIVE",
+      lastModifiedByNodeCode: nodeCode,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId,
+      code: "FUEL",
+      name: "Fuel",
+      description: "Fuel and petroleum products.",
+      sortOrder: 10,
+      status: "ACTIVE",
+      originNodeCode: nodeCode,
+      lastModifiedByNodeCode: nodeCode
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const categoryCodes = Array.from(
+    new Set(fuelCatalogProductSeeds.map((seed) => seed.category))
+  );
+
+  for (const [index, categoryCode] of categoryCodes.entries()) {
+    await prisma.productCategory.upsert({
+      where: {
+        retailOrgId_code: {
+          retailOrgId,
+          code: categoryCode
+        }
+      },
+      update: {
+        departmentId: fuelDepartment.id,
+        name: fuelCategoryName(categoryCode),
+        description: `${fuelCategoryName(categoryCode)} fuel category.`,
+        sortOrder: (index + 1) * 10,
+        status: "ACTIVE",
+        lastModifiedByNodeCode: nodeCode,
+        deletedAt: null
+      },
+      create: {
+        retailOrgId,
+        departmentId: fuelDepartment.id,
+        code: categoryCode,
+        name: fuelCategoryName(categoryCode),
+        description: `${fuelCategoryName(categoryCode)} fuel category.`,
+        sortOrder: (index + 1) * 10,
+        status: "ACTIVE",
+        originNodeCode: nodeCode,
+        lastModifiedByNodeCode: nodeCode
+      }
+    });
+  }
+}
+
 async function ensureFuelCatalogSeedDefaults(
   retailOrgId: string,
   nodeCode: string,
   uomDefaults: Awaited<ReturnType<typeof ensureUnitOfMeasureSeedDefaults>>
 ) {
+  await ensureFuelProductHierarchySeedDefaults(retailOrgId, nodeCode);
+
   const primaryCompany = await prisma.erpCompany.findFirst({
     where: {
       retailOrgId,

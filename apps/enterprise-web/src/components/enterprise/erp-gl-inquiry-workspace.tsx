@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
@@ -32,6 +32,7 @@ type TrialBalanceRow = ErpGlInquiryWorkspaceData["trialBalanceRows"][number];
 type AccountActivityRow = ErpGlInquiryWorkspaceData["accountActivityRows"][number];
 type JournalRow = ErpGlInquiryWorkspaceData["journalRows"][number];
 type JournalDetailLine = NonNullable<ErpGlInquiryWorkspaceData["journalDetail"]>["lines"][number];
+type RelatedJournalDetailLine = NonNullable<ErpGlInquiryWorkspaceData["journalDetail"]>["relatedLines"][number];
 
 type InquiryViewMeta = {
   heading: string;
@@ -374,6 +375,25 @@ export function ErpGlInquiryWorkspace({
       }),
     [workspace.currencyCode]
   );
+  const [trialBalanceTypeFilter, setTrialBalanceTypeFilter] = useState("");
+  const trialBalanceTypeOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          workspace.trialBalanceRows
+            .map((row) => row.accountType)
+            .filter((accountType): accountType is string => Boolean(accountType))
+        )
+      ).sort((left, right) => formatEnumLabel(left).localeCompare(formatEnumLabel(right))),
+    [workspace.trialBalanceRows]
+  );
+  const filteredTrialBalanceRows = useMemo(
+    () =>
+      trialBalanceTypeFilter
+        ? workspace.trialBalanceRows.filter((row) => row.accountType === trialBalanceTypeFilter)
+        : workspace.trialBalanceRows,
+    [trialBalanceTypeFilter, workspace.trialBalanceRows]
+  );
   const trialBalanceColumns = useMemo<ColumnDef<TrialBalanceRow>[]>(
     () => [
       {
@@ -588,6 +608,54 @@ export function ErpGlInquiryWorkspace({
     ],
     [currencyFormatter]
   );
+  const relatedLineColumns = useMemo<ColumnDef<RelatedJournalDetailLine>[]>(
+    () => [
+      {
+        accessorKey: "journalNo",
+        header: "Journal",
+        cell: ({ row }) => (
+          <Link
+            className="font-semibold text-[var(--brand)] underline-offset-4 hover:underline"
+            href={buildInquiryHref(`/finance/journal-inquiry/${row.original.journalEntryId}`, workspace.filters)}
+          >
+            {row.original.journalNo}
+          </Link>
+        )
+      },
+      {
+        accessorKey: "sourceType",
+        header: "Source",
+        cell: ({ row }) => formatEnumLabel(row.original.sourceType)
+      },
+      {
+        accessorKey: "accountCode",
+        header: "Account",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.accountCode}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.accountName}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "debitAmount",
+        header: "Debit",
+        cell: ({ row }) => currencyFormatter.format(row.original.debitAmount)
+      },
+      {
+        accessorKey: "creditAmount",
+        header: "Credit",
+        cell: ({ row }) => currencyFormatter.format(row.original.creditAmount)
+      },
+      {
+        accessorKey: "memo",
+        header: "Memo",
+        cell: ({ row }) => row.original.memo ?? "Not set"
+      }
+    ],
+    [currencyFormatter, workspace.filters]
+  );
   const tabSummaries = {
     "trial-balance": inquiryViewMeta["trial-balance"].summary,
     "account-activity": inquiryViewMeta["account-activity"].summary,
@@ -668,12 +736,29 @@ export function ErpGlInquiryWorkspace({
             {activeView === "trial-balance" ? (
               <SharedDataGrid
                 columns={trialBalanceColumns}
-                data={workspace.trialBalanceRows}
+                data={filteredTrialBalanceRows}
                 emptyLabel="No trial balance rows match the current filters."
                 exportFileName="flash-erp-trial-balance"
                 globalFilterFn={trialBalanceFilter}
                 initialPageSize={20}
                 searchPlaceholder="Search accounts"
+                toolbarFilters={
+                  <label className="flex items-center gap-2 text-sm font-semibold text-stone-700">
+                    Type
+                    <select
+                      className="h-10 rounded-xl border border-stone-200 bg-white px-3 text-sm font-medium text-stone-800 outline-none transition focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand)]/15"
+                      onChange={(event) => setTrialBalanceTypeFilter(event.target.value)}
+                      value={trialBalanceTypeFilter}
+                    >
+                      <option value="">All types</option>
+                      {trialBalanceTypeOptions.map((accountType) => (
+                        <option key={accountType} value={accountType}>
+                          {formatEnumLabel(accountType)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                }
                 toolbarActions={
                   <Link
                     className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-semibold text-stone-700 transition hover:border-stone-400 hover:text-stone-950"
@@ -711,6 +796,7 @@ export function ErpGlInquiryWorkspace({
                   columns={detailLineColumns}
                   currencyFormatter={currencyFormatter}
                   filterFn={detailLineFilter}
+                  relatedColumns={relatedLineColumns}
                   workspace={workspace}
                 />
               ) : (
@@ -739,11 +825,13 @@ function JournalDetailView({
   columns,
   currencyFormatter,
   filterFn,
+  relatedColumns,
   workspace
 }: {
   columns: ColumnDef<JournalDetailLine>[];
   currencyFormatter: Intl.NumberFormat;
   filterFn: FilterFn<JournalDetailLine>;
+  relatedColumns: ColumnDef<RelatedJournalDetailLine>[];
   workspace: ErpGlInquiryWorkspaceData;
 }) {
   const detail = workspace.journalDetail;
@@ -841,6 +929,22 @@ function JournalDetailView({
         initialPageSize={20}
         searchPlaceholder="Search journal lines"
       />
+
+      {detail.relatedLines.length > 0 ? (
+        <section className="space-y-3">
+          <div>
+            <h3 className="text-base font-semibold text-stone-950">Related accounting lines</h3>
+          </div>
+          <SharedDataGrid
+            columns={relatedColumns}
+            data={detail.relatedLines}
+            emptyLabel="No related accounting lines are available."
+            exportFileName={`flash-erp-related-journal-${detail.journalNo}`}
+            initialPageSize={20}
+            searchPlaceholder="Search related lines"
+          />
+        </section>
+      ) : null}
     </div>
   );
 }

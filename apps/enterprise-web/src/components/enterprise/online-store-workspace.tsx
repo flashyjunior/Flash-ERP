@@ -899,6 +899,17 @@ function shouldRenderReceiptAmount(amount: number) {
   return Math.abs(amount) >= 0.005;
 }
 
+function calculateReceiptSummarySubtotal(input: {
+  totalAmount: number;
+  discountAmount: number;
+  taxAmount: number;
+  loyaltyRedemptionAmount?: number;
+}) {
+  return roundMoney(
+    input.totalAmount + input.discountAmount + (input.loyaltyRedemptionAmount ?? 0) - input.taxAmount
+  );
+}
+
 function renderReceiptTemplateTaxRow(amount: number, currencyCode: string) {
   if (!shouldRenderReceiptAmount(amount)) {
     return "";
@@ -997,6 +1008,12 @@ function buildOnlineReceiptTemplateTokens(receipt: Receipt) {
   const transactionReference = receipt.reference ?? receiptDetails.reference;
   const additionalDetails = receipt.reference === undefined ? receiptDetails.details : receipt.note;
   const money = (amount: number) => formatMoney(amount, receipt.currencyCode);
+  const summarySubtotal = calculateReceiptSummarySubtotal({
+    totalAmount: receipt.totalAmount,
+    discountAmount: receipt.discountAmount,
+    taxAmount: receipt.taxAmount,
+    loyaltyRedemptionAmount: receipt.loyaltyRedemptionAmount
+  });
   const storeContact = renderReceiptStoreContactHtml({
     addressLine1: receipt.storeAddress,
     addressLine2: receipt.storeAddressLine2,
@@ -1029,7 +1046,7 @@ function buildOnlineReceiptTemplateTokens(receipt: Receipt) {
     CUSTOMER_NO: "",
     ITEM_TABLE: documentTemplateRawHtml(renderReceiptTemplateItemTable(receipt, formatLineMoney)),
     PAYMENT_TABLE: documentTemplateRawHtml(renderReceiptTemplatePaymentTable(receipt, money)),
-    SUBTOTAL: money(receipt.subtotalAmount),
+    SUBTOTAL: money(summarySubtotal),
     PROMOTION_DISCOUNT: money(receipt.discountAmount),
     DISCOUNT: money(receipt.discountAmount),
     LOYALTY_POINTS_REDEEMED: receipt.loyaltyRedemptionPoints,
@@ -2530,7 +2547,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const promotionDiscountAmount = roundMoney(
     basketPricingLines.reduce((sum, line) => sum + line.discountAmount, 0)
   );
-  const subtotal = roundMoney(basket.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0));
   const taxAmount = roundMoney(
     basketPricingLines.reduce((sum, line) => sum + line.taxAmount, 0)
   );
@@ -2577,6 +2593,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     loyaltyRedemption.canRedeem &&
     loyaltyRedemption.maxRedeemablePoints > 0;
   const total = Math.max(0, grossTotal - loyaltyRedemptionAmount);
+  const summarySubtotal = calculateReceiptSummarySubtotal({
+    totalAmount: total,
+    discountAmount: promotionDiscountAmount,
+    taxAmount,
+    loyaltyRedemptionAmount
+  });
   const payableTotal = activeSalesOrder
     ? Math.max(0, total - (activeSalesOrder.depositAmount ?? 0))
     : total;
@@ -6652,7 +6674,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 })}
               </div>
               <div className="rms-total-strip is-sale-totals">
-                <div className="rms-stat"><span>Subtotal</span><strong>{formatMoney(subtotal, currencyCode)}</strong></div>
+                <div className="rms-stat"><span>Subtotal</span><strong>{formatMoney(summarySubtotal, currencyCode)}</strong></div>
                 <div className="rms-stat"><span>Discount</span><strong>{promotionDiscountAmount > 0 ? `-${formatMoney(promotionDiscountAmount, currencyCode)}` : formatMoney(0, currencyCode)}</strong></div>
                 <div className="rms-stat"><span>Tax</span><strong>{formatMoney(taxAmount, currencyCode)}</strong></div>
                 <div className="rms-stat is-good"><span>Total</span><strong>{formatMoney(total, currencyCode)}</strong></div>

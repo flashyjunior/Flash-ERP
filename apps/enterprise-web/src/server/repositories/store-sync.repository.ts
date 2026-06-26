@@ -153,6 +153,7 @@ import {
   captureTransactionReference,
   sendSaleSmsNotificationSafely
 } from "@/server/repositories/sale-sms.repository";
+import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 
 const allowedAggregateTypes = new Set([
   "retailOrg",
@@ -8709,6 +8710,34 @@ async function projectStorePosTransaction(
   const inventoryLocationIdByCode = new Map(
     inventoryLocations.map((location) => [location.code, location.id] as const),
   );
+  const tenderCodes = [
+    ...new Set(
+      payload.payments
+        .map((payment) => payment.tenderMethodCode?.trim().toUpperCase())
+        .filter((code): code is string => Boolean(code)),
+    ),
+  ];
+  const tenderMethodIdByCode =
+    tenderCodes.length > 0
+      ? new Map(
+          (
+            await tx.tenderMethod.findMany({
+              where: {
+                retailOrgId: target.storeNode.retailOrgId,
+                code: {
+                  in: tenderCodes,
+                },
+                status: RecordStatus.ACTIVE,
+                deletedAt: null,
+              },
+              select: {
+                id: true,
+                code: true,
+              },
+            })
+          ).map((method) => [method.code.toUpperCase(), method.id] as const),
+        )
+      : new Map<string, string>();
 
   await tx.posTransaction.create({
     data: {
@@ -8810,6 +8839,9 @@ async function projectStorePosTransaction(
         createMany: {
           data: payload.payments.map((payment) => ({
             id: payment.paymentId,
+            tenderMethodId: payment.tenderMethodCode
+              ? tenderMethodIdByCode.get(payment.tenderMethodCode.trim().toUpperCase()) ?? null
+              : null,
             ...(payment.bankAccountId
               ? { bankAccountId: payment.bankAccountId }
               : {}),
@@ -8871,6 +8903,11 @@ async function projectStorePosTransaction(
     customer,
     loyaltyPolicy,
     payload,
+  });
+  await postPosTransactionAccountingInTransaction(tx as Prisma.TransactionClient, {
+    retailOrgId: target.storeNode.retailOrgId,
+    transactionId: payload.transactionId,
+    postedBy: "Store sync POS"
   });
 
   await captureTransactionReference(tx, {
@@ -9076,6 +9113,17 @@ async function projectStoreInventoryLedgerEntry(
       occurredAt: new Date(payload.occurredAt),
     },
   });
+  if (
+    payload.referenceType === "POS_TRANSACTION" &&
+    (payload.movementType === InventoryMovementType.SALE ||
+      payload.movementType === InventoryMovementType.RETURN)
+  ) {
+    await postPosTransactionAccountingInTransaction(tx as Prisma.TransactionClient, {
+      retailOrgId: target.storeNode.retailOrgId,
+      transactionId: payload.referenceId,
+      postedBy: "Store sync inventory"
+    });
+  }
 
   if (product.isSerialized) {
     await applyEnterpriseSerializedLedgerMovement(tx, {

@@ -464,6 +464,35 @@ export type EnterpriseReportingDashboardData = {
     requestedAt: string;
     requestedAtLabel: string;
   }>;
+  fuelDailyReportRows: Array<{
+    tankId: string;
+    tankCode: string;
+    tankName: string;
+    siteCode: string | null;
+    siteName: string | null;
+    storeCode: string | null;
+    storeName: string | null;
+    stationCode: string | null;
+    stationName: string | null;
+    productCode: string | null;
+    productName: string | null;
+    uomCode: string;
+    capacityQuantity: number;
+    currentBookQuantity: number;
+    latestDipQuantity: number | null;
+    latestWaterQuantity: number | null;
+    latestDipVarianceQuantity: number | null;
+    latestDipAt: string | null;
+    meterSalesQuantity: number;
+    meterSalesAmount: number;
+    meterReadingCount: number;
+    latestMeterReadingAt: string | null;
+    reconciliationNo: string | null;
+    reconciliationDate: string | null;
+    reconciliationGainLossQuantity: number;
+    status: string;
+    lastActivityAt: string | null;
+  }>;
   supplierReportRows: Array<{
     supplierNo: string;
     name: string;
@@ -698,6 +727,7 @@ export function buildUnavailableEnterpriseReportingDashboard(
     purchaseOrderReportRows: [],
     goodsReceiptReportRows: [],
     transferReportRows: [],
+    fuelDailyReportRows: [],
     supplierReportRows: [],
     userReportRows: [],
     storePerformanceRows: [],
@@ -763,6 +793,254 @@ function buildCompletedTransactionWhere(
         }
       : {})
   };
+}
+
+async function getFuelDailyReportRows(
+  filters: EnterpriseReportingDashboardData["filters"]
+): Promise<EnterpriseReportingDashboardData["fuelDailyReportRows"]> {
+  const enterpriseContext = await getReportingEnterpriseContext();
+
+  if (!enterpriseContext) {
+    return [];
+  }
+
+  const dateFrom = parseDateStart(filters.dateFrom);
+  const dateTo = parseDateEnd(filters.dateTo);
+  const scopedDateWhere =
+    dateFrom || dateTo
+      ? {
+          ...(dateFrom ? { gte: dateFrom } : {}),
+          ...(dateTo ? { lte: dateTo } : {})
+        }
+      : undefined;
+
+  const [tanks, dips, meterReadings, reconciliationLines, inventoryLocations, stations] =
+    await Promise.all([
+      prisma.erpFuelTank.findMany({
+        where: {
+          retailOrgId: enterpriseContext.retailOrgId
+        },
+        include: {
+          operatingSite: true,
+          productProfile: true
+        },
+        orderBy: [{ code: "asc" }]
+      }),
+      prisma.erpFuelTankDip.findMany({
+        where: {
+          retailOrgId: enterpriseContext.retailOrgId,
+          ...(scopedDateWhere ? { dipDate: scopedDateWhere } : {})
+        },
+        include: {
+          tank: {
+            include: {
+              operatingSite: true,
+              productProfile: true
+            }
+          }
+        },
+        orderBy: [{ dipDate: "desc" }, { createdAt: "desc" }],
+        take: 1000
+      }),
+      prisma.erpFuelMeterReading.findMany({
+        where: {
+          retailOrgId: enterpriseContext.retailOrgId,
+          ...(scopedDateWhere ? { readingDate: scopedDateWhere } : {})
+        },
+        include: {
+          tank: {
+            include: {
+              operatingSite: true,
+              productProfile: true
+            }
+          },
+          nozzle: {
+            select: {
+              code: true,
+              name: true
+            }
+          }
+        },
+        orderBy: [{ readingDate: "desc" }, { createdAt: "desc" }],
+        take: 1000
+      }),
+      prisma.erpFuelReconciliationLine.findMany({
+        where: {
+          retailOrgId: enterpriseContext.retailOrgId,
+          reconciliation: {
+            ...(scopedDateWhere ? { reconciliationDate: scopedDateWhere } : {})
+          }
+        },
+        include: {
+          reconciliation: {
+            include: {
+              operatingSite: true
+            }
+          },
+          tank: {
+            include: {
+              operatingSite: true,
+              productProfile: true
+            }
+          },
+          productProfile: true
+        },
+        orderBy: [{ reconciliation: { reconciliationDate: "desc" } }, { createdAt: "desc" }],
+        take: 1000
+      }),
+      prisma.inventoryLocation.findMany({
+        where: {
+          retailOrgId: enterpriseContext.retailOrgId
+        },
+        select: {
+          code: true,
+          name: true,
+          store: {
+            select: {
+              code: true,
+              name: true
+            }
+          }
+        }
+      }),
+      prisma.erpFuelStation.findMany({
+        where: {
+          retailOrgId: enterpriseContext.retailOrgId,
+          status: RecordStatus.ACTIVE
+        },
+        include: {
+          store: true,
+          inventoryLocation: true,
+          operatingSite: true
+        }
+      })
+    ]);
+
+  const locationByCode = new Map(
+    inventoryLocations.map((location) => [location.code.toUpperCase(), location] as const)
+  );
+  const stationBySiteCode = new Map<string, (typeof stations)[number]>();
+
+  for (const station of stations) {
+    for (const code of [
+      station.inventoryLocation?.code,
+      station.operatingSite?.code,
+      station.store?.code
+    ]) {
+      if (code) {
+        stationBySiteCode.set(code.toUpperCase(), station);
+      }
+    }
+  }
+
+  const dipsByTank = new Map<string, typeof dips>();
+  const meterReadingsByTank = new Map<string, typeof meterReadings>();
+  const reconciliationLinesByTank = new Map<string, typeof reconciliationLines>();
+
+  for (const dip of dips) {
+    dipsByTank.set(dip.tankId, [...(dipsByTank.get(dip.tankId) ?? []), dip]);
+  }
+
+  for (const reading of meterReadings) {
+    meterReadingsByTank.set(reading.tankId, [
+      ...(meterReadingsByTank.get(reading.tankId) ?? []),
+      reading
+    ]);
+  }
+
+  for (const line of reconciliationLines) {
+    reconciliationLinesByTank.set(line.tankId, [
+      ...(reconciliationLinesByTank.get(line.tankId) ?? []),
+      line
+    ]);
+  }
+
+  return tanks
+    .map((tank) => {
+      const siteCode = tank.operatingSite?.code ?? null;
+      const location = siteCode ? locationByCode.get(siteCode.toUpperCase()) : null;
+      const station = siteCode ? stationBySiteCode.get(siteCode.toUpperCase()) : null;
+      const storeCode = station?.store?.code ?? location?.store?.code ?? null;
+      const storeName = station?.store?.name ?? location?.store?.name ?? null;
+      const tankDips = dipsByTank.get(tank.id) ?? [];
+      const tankMeterReadings = meterReadingsByTank.get(tank.id) ?? [];
+      const tankReconciliationLines = reconciliationLinesByTank.get(tank.id) ?? [];
+      const latestDip = tankDips[0] ?? null;
+      const latestMeterReading = tankMeterReadings[0] ?? null;
+      const latestReconciliationLine = tankReconciliationLines[0] ?? null;
+      const meterSalesQuantity = tankMeterReadings.reduce(
+        (sum, reading) => sum + Number(reading.salesQuantity),
+        0
+      );
+      const meterSalesAmount = tankMeterReadings.reduce(
+        (sum, reading) => sum + Number(reading.salesAmount),
+        0
+      );
+      const reconciliationGainLossQuantity = tankReconciliationLines.reduce(
+        (sum, line) => sum + Number(line.gainLossQuantity),
+        0
+      );
+      const activityDates = [
+        latestDip?.dipDate ?? null,
+        latestMeterReading?.readingDate ?? null,
+        latestReconciliationLine?.reconciliation.reconciliationDate ?? null,
+        tank.lastDipAt ?? null
+      ].filter((value): value is Date => value instanceof Date);
+      const lastActivityAt =
+        activityDates.sort((left, right) => right.getTime() - left.getTime())[0] ?? null;
+      const status = latestReconciliationLine
+        ? "Reconciled"
+        : latestDip || latestMeterReading
+          ? "Activity pending reconciliation"
+          : "No activity";
+
+      return {
+        tankId: tank.id,
+        tankCode: tank.code,
+        tankName: tank.name,
+        siteCode,
+        siteName: tank.operatingSite?.name ?? null,
+        storeCode,
+        storeName,
+        stationCode: station?.stationCode ?? null,
+        stationName: station?.stationName ?? null,
+        productCode: tank.productProfile?.code ?? null,
+        productName: tank.productProfile?.name ?? null,
+        uomCode: tank.uomCode,
+        capacityQuantity: roundQuantity(Number(tank.capacityQuantity)),
+        currentBookQuantity: roundQuantity(Number(tank.currentBookQuantity)),
+        latestDipQuantity: latestDip ? roundQuantity(Number(latestDip.dipQuantity)) : null,
+        latestWaterQuantity: latestDip ? roundQuantity(Number(latestDip.waterQuantity)) : null,
+        latestDipVarianceQuantity: latestDip
+          ? roundQuantity(Number(latestDip.varianceQuantity))
+          : null,
+        latestDipAt: latestDip?.dipDate.toISOString() ?? null,
+        meterSalesQuantity: roundQuantity(meterSalesQuantity),
+        meterSalesAmount: roundMoney(meterSalesAmount),
+        meterReadingCount: tankMeterReadings.length,
+        latestMeterReadingAt: latestMeterReading?.readingDate.toISOString() ?? null,
+        reconciliationNo: latestReconciliationLine?.reconciliation.reconciliationNo ?? null,
+        reconciliationDate:
+          latestReconciliationLine?.reconciliation.reconciliationDate.toISOString() ?? null,
+        reconciliationGainLossQuantity: roundQuantity(reconciliationGainLossQuantity),
+        status,
+        lastActivityAt: lastActivityAt?.toISOString() ?? null
+      };
+    })
+    .filter((row) =>
+      filters.storeCode
+        ? row.storeCode?.trim().toLowerCase() === filters.storeCode.trim().toLowerCase()
+        : true
+    )
+    .sort((left, right) => {
+      const storeCompare = (left.storeName ?? "").localeCompare(right.storeName ?? "");
+
+      if (storeCompare !== 0) {
+        return storeCompare;
+      }
+
+      return left.tankCode.localeCompare(right.tankCode);
+    });
 }
 
 async function getReportingFactRows(
@@ -1319,6 +1597,7 @@ export async function getEnterpriseReportingDashboard(
 
   const currencyCode = operationsDashboard.currencyCode || posWorkspace.currencyCode || "USD";
   const reportingFacts = await getReportingFactRows(operationsDashboard.filters);
+  const fuelDailyReportRows = await getFuelDailyReportRows(operationsDashboard.filters);
   const laneAggregateByStore = buildLaneAggregateByStore(posWorkspace.laneRows);
   const storeCodes = uniqueStrings([
     ...operationsDashboard.storeSummaries.map((row) => row.storeCode),
@@ -2024,6 +2303,7 @@ export async function getEnterpriseReportingDashboard(
     `${inventoryWorkspace.metrics.negativePositions} negative stock position(s) and ${inventoryWorkspace.metrics.openSupplierClaims} open supplier claim(s) are visible in enterprise inventory posture.`,
     `${reportingFacts.financialTotals.cogsAmount.toFixed(2)} ${currencyCode} in COGS and ${reportingFacts.financialTotals.grossMarginPercent.toFixed(2)}% gross margin are visible from current ledger facts.`,
     `${purchaseOrderReportRows.length} purchase order(s), ${goodsReceiptReportRows.length} goods receipt(s), and ${transferReportRows.length} transfer line(s) are ready for export from HQ reporting.`,
+    `${fuelDailyReportRows.length} fuel tank daily report row(s) are available for dips, meter readings, book stock, and reconciliation review.`,
     `${tenderReportRows.length} tender method(s), ${supplierReportRows.length} supplier(s), and ${userReportRows.length} user account(s) are available in reportable master-data views.`,
     `${promotionWorkspace.metrics.activePromotions} promotion(s) are active across Flash ERP enterprise pricing.`,
     ...syncDashboard.syncPostureMessages.slice(0, 1),
@@ -2111,6 +2391,7 @@ export async function getEnterpriseReportingDashboard(
     purchaseOrderReportRows,
     goodsReceiptReportRows,
     transferReportRows,
+    fuelDailyReportRows,
     supplierReportRows,
     userReportRows,
     storePerformanceRows,
@@ -2124,7 +2405,7 @@ export async function getEnterpriseReportingDashboard(
     closeoutRows,
     postureMessages,
     priorities,
-    statusMessage: `Flash ERP enterprise reporting now consolidates posted sales, tender mix, COGS, margin, tracked expenses, inventory movement, purchasing, suppliers, AR/AP statements, users, customer receivables, promotions, and branch exceptions from ${syncDashboard.metrics.activeStores} active store node(s).`,
+    statusMessage: `Flash ERP enterprise reporting now consolidates posted sales, tender mix, COGS, margin, tracked expenses, inventory movement, purchasing, fuel station daily controls, suppliers, AR/AP statements, users, customer receivables, promotions, and branch exceptions from ${syncDashboard.metrics.activeStores} active store node(s).`,
     refreshedAt
   };
 }

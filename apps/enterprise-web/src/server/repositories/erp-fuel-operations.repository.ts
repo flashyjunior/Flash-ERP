@@ -1092,6 +1092,81 @@ async function ensureFuelVolumeUomSchedule(tx: Prisma.TransactionClient, context
   };
 }
 
+function fuelCategoryName(code: string) {
+  const labels: Record<string, string> = {
+    DIESEL: "Diesel",
+    KEROSENE: "Kerosene",
+    LPG: "Liquefied Petroleum Gas",
+    PETROL: "Petrol"
+  };
+
+  return labels[code] ?? code;
+}
+
+async function ensureFuelProductHierarchy(
+  tx: Prisma.TransactionClient,
+  context: FuelContext
+) {
+  const fuelDepartment = await tx.productDepartment.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: context.retailOrgId,
+        code: "FUEL"
+      }
+    },
+    update: {
+      name: "Fuel",
+      description: "Fuel and petroleum products.",
+      sortOrder: 10,
+      status: activeStatus,
+      deletedAt: null
+    },
+    create: {
+      retailOrgId: context.retailOrgId,
+      code: "FUEL",
+      name: "Fuel",
+      description: "Fuel and petroleum products.",
+      sortOrder: 10,
+      status: activeStatus
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const categoryCodes = Array.from(
+    new Set(defaultFuelCatalogProducts.map((product) => product.category))
+  );
+
+  for (const [index, categoryCode] of categoryCodes.entries()) {
+    await tx.productCategory.upsert({
+      where: {
+        retailOrgId_code: {
+          retailOrgId: context.retailOrgId,
+          code: categoryCode
+        }
+      },
+      update: {
+        departmentId: fuelDepartment.id,
+        name: fuelCategoryName(categoryCode),
+        description: `${fuelCategoryName(categoryCode)} fuel category.`,
+        sortOrder: (index + 1) * 10,
+        status: activeStatus,
+        deletedAt: null
+      },
+      create: {
+        retailOrgId: context.retailOrgId,
+        departmentId: fuelDepartment.id,
+        code: categoryCode,
+        name: fuelCategoryName(categoryCode),
+        description: `${fuelCategoryName(categoryCode)} fuel category.`,
+        sortOrder: (index + 1) * 10,
+        status: activeStatus
+      }
+    });
+  }
+}
+
 function isFuelCatalogProduct(product: FuelCatalogProduct) {
   const values = [
     product.code,
@@ -1240,6 +1315,7 @@ async function ensureDefaultFuelCatalogProducts(
   context: FuelContext
 ) {
   const fuelUom = await ensureFuelVolumeUomSchedule(tx, context);
+  await ensureFuelProductHierarchy(tx, context);
 
   for (const product of defaultFuelCatalogProducts) {
     const sku = await getAvailableSkuForDefaultFuelProduct(tx, context.retailOrgId, product.code);

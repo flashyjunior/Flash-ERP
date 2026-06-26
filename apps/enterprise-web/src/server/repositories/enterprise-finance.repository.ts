@@ -9,6 +9,7 @@ import {
   assertEnterpriseDatabaseReady,
   isEnterpriseDatabaseSchemaNotReadyError
 } from "@/server/readiness/enterprise-database-readiness";
+import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 import {
   GlAccountType,
   GlJournalStatus,
@@ -541,7 +542,6 @@ async function createJournalEntryIfMissing(input: {
 
 async function materializeSalesJournals(input: {
   retailOrgId: string;
-  accountsByCode: Awaited<ReturnType<typeof ensureStandardChartOfAccounts>>;
   filters: FinanceFilters;
 }) {
   const completedAtFilter = buildDateRangeFilter(input.filters.dateFrom, input.filters.dateTo);
@@ -558,107 +558,22 @@ async function materializeSalesJournals(input: {
     },
     take: 1000,
     select: {
-      id: true,
-      transactionNo: true,
-      sourceTransactionNo: true,
-      transactionType: true,
-      subtotalAmount: true,
-      discountAmount: true,
-      taxAmount: true,
-      totalAmount: true,
-      paidAmount: true,
-      changeAmount: true,
-      completedAt: true,
-      storeId: true,
-      store: {
-        select: {
-          name: true
-        }
-      }
+      id: true
     }
   });
 
   let created = 0;
 
   for (const transaction of transactions) {
-    const postingDate = transaction.completedAt ?? new Date();
-    const totalAmount = Math.abs(Number(transaction.totalAmount));
-    const paidNetAmount = Math.max(
-      0,
-      Math.min(totalAmount, Number(transaction.paidAmount) - Number(transaction.changeAmount))
+    const result = await prisma.$transaction((tx) =>
+      postPosTransactionAccountingInTransaction(tx, {
+        retailOrgId: input.retailOrgId,
+        transactionId: transaction.id,
+        postedBy: "Enterprise finance"
+      })
     );
-    const receivableAmount = roundMoney(Math.max(0, totalAmount - paidNetAmount));
-    const taxAmount = roundMoney(Math.abs(Number(transaction.taxAmount)));
-    const netSalesAmount = roundMoney(Math.max(0, totalAmount - taxAmount));
-    const isReturn = transaction.transactionType === PosTransactionType.RETURN;
-    const lines: JournalDraftLine[] = [];
-    const memo = `${transaction.store.name} ${formatEnumLabel(transaction.transactionType)} ${transaction.transactionNo}`;
 
-    if (isReturn) {
-      addLine({
-        lines,
-        accountCode: "4000",
-        storeId: transaction.storeId,
-        debitAmount: netSalesAmount,
-        memo
-      });
-      addLine({
-        lines,
-        accountCode: "2100",
-        storeId: transaction.storeId,
-        debitAmount: taxAmount,
-        memo
-      });
-      addLine({
-        lines,
-        accountCode: "1000",
-        storeId: transaction.storeId,
-        creditAmount: totalAmount,
-        memo
-      });
-    } else {
-      addLine({
-        lines,
-        accountCode: "1000",
-        storeId: transaction.storeId,
-        debitAmount: paidNetAmount,
-        memo
-      });
-      addLine({
-        lines,
-        accountCode: "1100",
-        storeId: transaction.storeId,
-        debitAmount: receivableAmount,
-        memo
-      });
-      addLine({
-        lines,
-        accountCode: "4000",
-        storeId: transaction.storeId,
-        creditAmount: netSalesAmount,
-        memo
-      });
-      addLine({
-        lines,
-        accountCode: "2100",
-        storeId: transaction.storeId,
-        creditAmount: taxAmount,
-        memo
-      });
-    }
-
-    const wasCreated = await createJournalEntryIfMissing({
-      retailOrgId: input.retailOrgId,
-      accountsByCode: input.accountsByCode,
-      sourceType: "POS_SALE",
-      sourceId: transaction.id,
-      sourceReference: transaction.sourceTransactionNo ?? transaction.transactionNo,
-      postingDate,
-      description: `POS ${formatEnumLabel(transaction.transactionType)} ${transaction.transactionNo}`,
-      lines
-    });
-
-    if (wasCreated) {
+    if (result.salesJournalCreated) {
       created += 1;
     }
   }
@@ -896,23 +811,20 @@ async function materializeGlPostings(input: {
   filters: FinanceFilters;
 }) {
   const accountsByCode = await ensureStandardChartOfAccounts(input.retailOrgId);
-  const [salesCreated, inventoryCreated, expenseCreated] = await Promise.all([
-    materializeSalesJournals({
-      retailOrgId: input.retailOrgId,
-      accountsByCode,
-      filters: input.filters
-    }),
-    materializeInventoryJournals({
-      retailOrgId: input.retailOrgId,
-      accountsByCode,
-      filters: input.filters
-    }),
-    materializeOperatingExpenseJournals({
-      retailOrgId: input.retailOrgId,
-      accountsByCode,
-      filters: input.filters
-    })
-  ]);
+  const salesCreated = await materializeSalesJournals({
+    retailOrgId: input.retailOrgId,
+    filters: input.filters
+  });
+  const inventoryCreated = await materializeInventoryJournals({
+    retailOrgId: input.retailOrgId,
+    accountsByCode,
+    filters: input.filters
+  });
+  const expenseCreated = await materializeOperatingExpenseJournals({
+    retailOrgId: input.retailOrgId,
+    accountsByCode,
+    filters: input.filters
+  });
 
   return {
     accountsByCode,

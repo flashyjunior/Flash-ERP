@@ -47,6 +47,7 @@ import {
 } from "@/server/repositories/schema-compatibility.repository";
 import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
 import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
+import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 import {
   captureTransactionReference,
   sendSaleSmsNotificationSafely
@@ -6796,6 +6797,11 @@ async function completeOnlineStoreParkedTransaction(
       quantity: line.quantity
     }))
   });
+  await postPosTransactionAccountingInTransaction(tx, {
+    retailOrgId: session.retailOrgId,
+    transactionId: transaction.id,
+    postedBy: "Online store POS"
+  });
 
   if (openSalesOrder) {
     await tx.salesOrder.update({
@@ -7422,6 +7428,11 @@ export async function createOnlineStoreSale(
         product: line.product,
         quantity: line.quantity
       }))
+    });
+    await postPosTransactionAccountingInTransaction(tx, {
+      retailOrgId: session.retailOrgId,
+      transactionId: transaction.id,
+      postedBy: "Online store POS"
     });
 
     for (const line of pricedLines) {
@@ -9802,6 +9813,11 @@ export async function createOnlineStoreCorrection(
         data: inventoryMovements
       });
     }
+    await postPosTransactionAccountingInTransaction(tx, {
+      retailOrgId: session.retailOrgId,
+      transactionId: transaction.id,
+      postedBy: "Online store POS"
+    });
 
     await tx.securityLog.create({
       data: {

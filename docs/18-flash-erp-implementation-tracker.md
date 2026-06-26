@@ -1,6 +1,6 @@
 # Flash ERP Implementation Tracker
 
-Updated: 2026-06-25
+Updated: 2026-06-26
 
 This is the live progress ledger for the Flash ERP workspace. Keep it aligned with code as slices land. The tracker is intentionally industry-neutral: product, site, storage, customer, supplier, and document-posting foundations can later support oil, retail, services, distribution, manufacturing, or other operating models.
 
@@ -47,8 +47,12 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - Customer-account receivable activity, including fuel customer-credit sales, now feeds AR/AP statements, aging, and open-item visibility alongside posted operational documents; customer account payments now allocate explicitly to selected invoice rows, post tender-mapped cashbook/GL entries, and generate the shared account-payment receipt.
 - Sidebar grouped-menu matching now selects the most specific active child route, so Finance/Settings groups reopen the exact clicked subgroup instead of the first prefix-matching child.
 - Database readiness checks now tolerate local SQL Server databases created with `prisma db push` where `[dbo].[_prisma_migrations]` does not exist, while still validating required tables and columns.
+- Trial Balance now has an account-type filter, Bank Reconciliation statement-save errors are visible inside the New Statement dialog, fuel catalog repair/seed guarantees active `FUEL` product hierarchy records, and HQ Reports includes an exportable Daily Station Fuel Report for tank dips, meter readings, book stock, and reconciliation review.
 - Online-store POS catalog now includes active `SERVICE` products even when no stock quantity exists, while stock/matrix catalog items remain quantity-gated; service sale lines are treated as non-stock lines for online-store stock validation and inventory movements.
 - Online-store fuel GRNs and inter-store transfer receipts now mirror received fuel into the matching active fuel tank for the receiving shop/product, and online-store fuel POS sales/fulfilled sales orders reduce the matching tank book quantity when that product is linked to a tank.
+- Online-store and synced shop POS sales now post through standard accounting: tender-mapped cashbook/GL accounts for cash, bank, mobile money, and card tenders; AR for Store Credit/unpaid customer balances; Sales Revenue or Service Revenue; Sales Tax Payable; COGS; Inventory; and posted cashbook entries tied to the sale journal.
+- POS sales no longer fail solely because a stock item has zero or missing cost; revenue, tax, tender/cashbook, and AR still post, while COGS/Inventory relief is skipped until a valid cost exists.
+- Journal Inquiry detail now surfaces related POS sale/COGS accounting lines for the same sale reference so revenue/tax/tender/AR and inventory-cost impact can be reviewed together when COGS posts in a separate inventory journal.
 - HQ transfer draft dialogs now reopen with current detail lines after save/refresh, and online-store Fuel pages are scoped to the logged-in shop so tanks, pumps, nozzles, dips, meter readings, supplier receipts, reconciliation, shop prices, stock labels, and default site selections do not bleed across shops.
 - Local product and transaction data was reset on 2026-06-22 after Fuel Sale defaults were implemented: transactional POS, inventory, purchasing, fuel, finance posting, cashbook, bank reconciliation, tax, payroll-posting, fixed-asset transaction, sync-event, and product-dependent rows were cleared; the clean RMS fuel catalog now contains `AGO`, `KERO`, `LPG`, and `PMS` with matching ERP product-profile mirrors, seeded filling stations, and seeded zero-quantity tanks.
 - Repair/service maintenance tracking is intentionally deferred to a later dedicated Maintenance module instead of being mixed into fixed assets.
@@ -56,6 +60,52 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - The inherited RMS-era model names remain where they still own existing data/workflows. Rename them gradually as ERP ownership and migrations are designed.
 
 ## Maintenance Notes
+
+### 2026-06-26 Standard POS Sales Accounting
+
+Status: Done
+
+Implemented:
+
+- Added an idempotent POS sales accounting service that posts completed POS transactions through the shared Finance posting engine.
+- Posted sale settlement lines to the Tender Method's mapped Finance cashbook/GL account instead of a generic cash account.
+- Posted Store Credit and unpaid customer balances to AR, while walk-in cash/bank/mobile/card sales no longer require a customer account.
+- Posted transaction-level discounts and loyalty redemptions to the configured customer discount/loyalty account instead of treating them as receivables.
+- Split sale revenue between `Sales Revenue` and `Service Revenue` based on product type, and posted sales tax to the Finance tax control account.
+- Posted COGS and inventory relief from POS `InventoryLedgerEntry` rows using the inventory movement unit cost.
+- Skipped COGS posting for stock items with zero or missing cost instead of blocking the sale's revenue, tax, tender/cashbook, or AR posting.
+- Created posted Finance cashbook entries for tender rows mapped to cashbook accounts and linked them to the POS sale journal.
+- Wired the service into online-store immediate sales, held-sale checkout, sales-order fulfilment checkout, returns/exchanges, synced store POS transactions, and synced POS inventory ledger entries.
+- Replaced the Finance workspace's old generic POS sale materializer with the standard POS accounting service so unposted historical completed sales use the same rules.
+- Added related POS sale/COGS lines to Journal Inquiry detail so separate inventory-cost journals are visible from the sale journal reference.
+- Corrected online-store receipt and POS total summaries so tax-inclusive sales display a tax-exclusive subtotal that reconciles to total.
+
+Verified:
+
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm run prisma:validate`
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/online-store`, `/api/online-store/sales`, `/api/online-store/corrections`, `/api/sync/store-nodes/[nodeCode]/push`, `/finance`, `/finance/cashbook`, and `/finance/journal-inquiry`.
+
+### 2026-06-25 Finance Grid Polish and Fuel Daily Reporting
+
+Status: Done
+
+Implemented:
+
+- Added a Type dropdown filter to the Finance Trial Balance grid.
+- Rendered bank statement save errors inside the New Statement dialog so backend validation details are visible while the dialog is open.
+- Added seed/runtime repair for active `FUEL` product hierarchy records and fuel categories `DIESEL`, `KEROSENE`, `LPG`, and `PETROL`.
+- Added a HQ Reports Daily Station Fuel Report covering shop/station, tank, product, book quantity, latest dip/water/variance, meter sales, reconciliation gain/loss, and last activity.
+
+Verified:
+
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm run prisma:validate`
+- `npm run prisma:seed`
+- Live SQL/Prisma smoke confirmed active `FUEL` department and fuel categories.
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/finance/trial-balance`, `/finance/bank-reconciliation`, `/reports`, and `/catalog/products/[productCode]`.
 
 ### 2026-06-25 Transfer Draft Details and Shop-Scoped Online Fuel
 

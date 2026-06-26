@@ -837,6 +837,8 @@ export function ErpBankReconciliationWorkspace({
               widthClassName="max-w-6xl"
             >
               <div className="space-y-5">
+                <MutationMessage state={mutationState} />
+
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <DialogSelect
                     label="Cashbook account"

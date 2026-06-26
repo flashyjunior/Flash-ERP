@@ -49,6 +49,7 @@ type CashierVarianceRow = EnterpriseReportingDashboardData["cashierVarianceRows"
 type PurchaseOrderReportRow = EnterpriseReportingDashboardData["purchaseOrderReportRows"][number];
 type GoodsReceiptReportRow = EnterpriseReportingDashboardData["goodsReceiptReportRows"][number];
 type TransferReportRow = EnterpriseReportingDashboardData["transferReportRows"][number];
+type FuelDailyReportRow = EnterpriseReportingDashboardData["fuelDailyReportRows"][number];
 type SupplierReportRow = EnterpriseReportingDashboardData["supplierReportRows"][number];
 type UserReportRow = EnterpriseReportingDashboardData["userReportRows"][number];
 
@@ -70,6 +71,7 @@ type ReportId =
   | "goodsReceipts"
   | "suppliers"
   | "transfers"
+  | "fuelDaily"
   | "inventoryRisk"
   | "stockValuation"
   | "slowMovingItems"
@@ -125,6 +127,7 @@ const reportIds: ReportId[] = [
   "goodsReceipts",
   "suppliers",
   "transfers",
+  "fuelDaily",
   "inventoryRisk",
   "stockValuation",
   "slowMovingItems",
@@ -166,6 +169,7 @@ const reportsWithStoreScope = new Set<ReportId>([
   "purchaseOrders",
   "goodsReceipts",
   "transfers",
+  "fuelDaily",
   "inventoryRisk",
   "stockValuation",
   "slowMovingItems",
@@ -331,6 +335,14 @@ function renderTimestamp(value: string | null, label: string) {
       <p className="mt-0.5 truncate text-xs text-stone-500">{new Date(value).toLocaleString()}</p>
     </div>
   );
+}
+
+function formatReportDateTime(value: string | null) {
+  if (!value) {
+    return "Not recorded";
+  }
+
+  return new Date(value).toLocaleString();
 }
 
 function matchesReportQuery(values: Array<string | number | boolean | null | undefined>, filterValue: unknown) {
@@ -532,6 +544,25 @@ const transferReportFilter: FilterFn<TransferReportRow> = (row, _columnId, filte
       row.original.destinationLocationCode,
       row.original.productCode,
       row.original.productName
+    ],
+    filterValue
+  );
+
+const fuelDailyReportFilter: FilterFn<FuelDailyReportRow> = (row, _columnId, filterValue) =>
+  matchesReportQuery(
+    [
+      row.original.tankCode,
+      row.original.tankName,
+      row.original.siteCode,
+      row.original.siteName,
+      row.original.storeCode,
+      row.original.storeName,
+      row.original.stationCode,
+      row.original.stationName,
+      row.original.productCode,
+      row.original.productName,
+      row.original.reconciliationNo,
+      row.original.status
     ],
     filterValue
   );
@@ -1961,6 +1992,111 @@ export function EnterpriseReportingDashboard({
     []
   );
 
+  const fuelDailyReportColumns = useMemo<ColumnDef<FuelDailyReportRow>[]>(
+    () => [
+      {
+        accessorKey: "tankCode",
+        header: "Tank",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.tankCode}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.tankName}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "storeName",
+        header: "Shop / station",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">
+              {row.original.storeName ?? row.original.siteName ?? "Unassigned"}
+            </p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.stationName ?? row.original.siteCode ?? row.original.storeCode ?? "No station"}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "productName",
+        header: "Product",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">
+              {row.original.productName ?? "No product"}
+            </p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.productCode ?? "Not linked"} / {row.original.uomCode}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "currentBookQuantity",
+        header: "Book qty",
+        cell: ({ row }) => numberFormatter.format(row.original.currentBookQuantity)
+      },
+      {
+        accessorKey: "latestDipQuantity",
+        header: "Last dip",
+        cell: ({ row }) =>
+          row.original.latestDipQuantity === null
+            ? "Not dipped"
+            : numberFormatter.format(row.original.latestDipQuantity)
+      },
+      {
+        accessorKey: "latestWaterQuantity",
+        header: "Water",
+        cell: ({ row }) =>
+          row.original.latestWaterQuantity === null
+            ? "Not recorded"
+            : numberFormatter.format(row.original.latestWaterQuantity)
+      },
+      {
+        accessorKey: "meterSalesQuantity",
+        header: "Meter sales",
+        cell: ({ row }) => numberFormatter.format(row.original.meterSalesQuantity)
+      },
+      {
+        accessorKey: "meterSalesAmount",
+        header: "Meter value",
+        cell: ({ row }) => currencyFormatter.format(row.original.meterSalesAmount)
+      },
+      {
+        accessorKey: "reconciliationGainLossQuantity",
+        header: "Gain/loss",
+        cell: ({ row }) => numberFormatter.format(row.original.reconciliationGainLossQuantity)
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={
+              row.original.status === "Reconciled"
+                ? "success"
+                : row.original.status === "No activity"
+                  ? "default"
+                  : "warning"
+            }
+          />
+        )
+      },
+      {
+        accessorKey: "lastActivityAt",
+        header: "Last activity",
+        cell: ({ row }) => formatReportDateTime(row.original.lastActivityAt),
+        meta: { disableTruncate: true }
+      }
+    ],
+    [currencyFormatter]
+  );
+
   const supplierReportColumns = useMemo<ColumnDef<SupplierReportRow>[]>(
     () => [
       {
@@ -2202,6 +2338,17 @@ export function EnterpriseReportingDashboard({
         ]
       },
       {
+        label: "Fuel operations",
+        reports: [
+          {
+            id: "fuelDaily",
+            label: "Daily station fuel report",
+            description: "Tank dips, meter readings, book stock, and reconciliation gain/loss by shop.",
+            rowCount: dashboard.fuelDailyReportRows.length,
+          }
+        ]
+      },
+      {
         label: "Customers and security",
         reports: [
           {
@@ -2261,6 +2408,8 @@ export function EnterpriseReportingDashboard({
         return buildChoiceOptions(dashboard.supplierReportRows.map((row) => row.status));
       case "transfers":
         return buildChoiceOptions(dashboard.transferReportRows.map((row) => row.status));
+      case "fuelDaily":
+        return buildChoiceOptions(dashboard.fuelDailyReportRows.map((row) => row.status));
       case "users":
         return buildChoiceOptions(dashboard.userReportRows.map((row) => row.accountStatus));
       case "promotions":
@@ -2356,6 +2505,19 @@ export function EnterpriseReportingDashboard({
             row.warehouseName
           ])
         );
+      case "fuelDaily":
+        return buildChoiceOptions(
+          dashboard.fuelDailyReportRows.flatMap((row) => [
+            row.storeCode,
+            row.storeName,
+            row.stationCode,
+            row.stationName,
+            row.siteCode,
+            row.siteName,
+            row.tankCode,
+            row.tankName
+          ])
+        );
       default:
         return [];
     }
@@ -2433,6 +2595,10 @@ export function EnterpriseReportingDashboard({
       case "slowMovingItems":
         return buildChoiceOptions(
           dashboard.slowMovingItemRows.flatMap((row) => [row.productCode, row.productName])
+        );
+      case "fuelDaily":
+        return buildChoiceOptions(
+          dashboard.fuelDailyReportRows.flatMap((row) => [row.productCode, row.productName])
         );
       default:
         return [];
@@ -3068,6 +3234,35 @@ export function EnterpriseReportingDashboard({
             initialPageSize={12}
             initialSorting={[{ id: "requestedAtLabel", desc: true }]}
             searchPlaceholder="Search transfers, products, source, destination, or status"
+          />
+        );
+      case "fuelDaily":
+        return (
+          <SharedDataGrid
+            columns={fuelDailyReportColumns}
+            data={dashboard.fuelDailyReportRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeCode, row.storeName, row.stationName, row.siteName]) &&
+                matchesDate(row.lastActivityAt ?? row.reconciliationDate ?? row.latestDipAt ?? row.latestMeterReadingAt) &&
+                matchesChoice(filters.status, [row.status]) &&
+                matchesChoice(filters.location, [
+                  row.storeCode,
+                  row.storeName,
+                  row.stationCode,
+                  row.stationName,
+                  row.siteCode,
+                  row.siteName,
+                  row.tankCode,
+                  row.tankName
+                ]) &&
+                matchesChoice(filters.product, [row.productCode, row.productName])
+            )}
+            emptyLabel="No fuel daily report rows are available for this scope."
+            exportFileName="flash-erp-hq-fuel-daily-report"
+            globalFilterFn={fuelDailyReportFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "lastActivityAt", desc: true }]}
+            searchPlaceholder="Search tanks, products, stations, shops, or reconciliation"
           />
         );
       case "inventoryRisk":

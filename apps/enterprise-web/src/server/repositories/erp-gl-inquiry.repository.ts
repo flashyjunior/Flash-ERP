@@ -148,6 +148,21 @@ export type ErpGlInquiryWorkspaceData = {
       creditAmount: number;
       memo: string | null;
     }>;
+    relatedLines: Array<{
+      journalLineId: string;
+      journalEntryId: string;
+      journalNo: string;
+      sourceType: string;
+      sourceReference: string | null;
+      postingDate: string;
+      accountCode: string;
+      accountName: string;
+      accountType: string;
+      normalBalance: string;
+      debitAmount: number;
+      creditAmount: number;
+      memo: string | null;
+    }>;
   } | null;
 };
 
@@ -672,6 +687,41 @@ export async function getErpGlInquiryWorkspace(
     };
   });
 
+  const relatedJournalLines =
+    journalDetail?.sourceReference &&
+    (journalDetail.sourceType === "POS_SALE" || journalDetail.sourceType === "INVENTORY_COGS")
+      ? await prisma.glJournalLine.findMany({
+          where: {
+            journalEntryId: {
+              not: journalDetail.id
+            },
+            journalEntry: {
+              retailOrgId: context.retailOrgId,
+              companyId: selectedCompany.id,
+              status: postedStatus,
+              sourceReference: journalDetail.sourceReference,
+              sourceType:
+                journalDetail.sourceType === "POS_SALE"
+                  ? "INVENTORY_COGS"
+                  : "POS_SALE"
+            }
+          },
+          orderBy: [{ id: "asc" }],
+          include: {
+            account: true,
+            journalEntry: {
+              select: {
+                id: true,
+                journalNo: true,
+                sourceType: true,
+                sourceReference: true,
+                postingDate: true
+              }
+            }
+          }
+        })
+      : [];
+
   const journalDetailData = journalDetail
     ? (() => {
         const debitAmount = roundMoney(
@@ -703,6 +753,21 @@ export async function getErpGlInquiryWorkspace(
           creditAmount,
           lines: journalDetail.lines.map((line) => ({
             journalLineId: line.id,
+            accountCode: line.account.code,
+            accountName: line.account.name,
+            accountType: line.account.accountType,
+            normalBalance: line.account.normalBalance,
+            debitAmount: roundMoney(Number(line.debitAmount)),
+            creditAmount: roundMoney(Number(line.creditAmount)),
+            memo: line.memo
+          })),
+          relatedLines: relatedJournalLines.map((line) => ({
+            journalLineId: line.id,
+            journalEntryId: line.journalEntry.id,
+            journalNo: line.journalEntry.journalNo,
+            sourceType: line.journalEntry.sourceType,
+            sourceReference: line.journalEntry.sourceReference,
+            postingDate: line.journalEntry.postingDate.toISOString(),
             accountCode: line.account.code,
             accountName: line.account.name,
             accountType: line.account.accountType,
