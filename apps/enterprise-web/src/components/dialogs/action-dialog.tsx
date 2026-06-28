@@ -73,7 +73,7 @@ export function ActionDialog({
 
   return (
     <>
-      {!hideTrigger ? (
+      {!hideTrigger && triggerLabel ? (
         <button
           className={cn(
             "inline-flex items-center gap-2 rounded-full border border-stone-300 bg-white px-4 py-2 text-sm font-semibold text-stone-800 transition hover:border-[var(--brand)] hover:text-stone-950",

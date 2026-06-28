@@ -17,6 +17,7 @@ export type EnterpriseSettingsView =
   | "sms"
   | "inventory-catalogs"
   | "fuel-operations"
+  | "leave-types"
   | "shop-prices"
   | "licenses"
   | "receipt-templates"
@@ -66,6 +67,7 @@ export const enterpriseSettingsMenuItems = [
   { key: "sms", label: "SMS", href: "/settings/sms" },
   { key: "inventory-catalogs", label: "Inventory Catalogs", href: "/settings/inventory-catalogs" },
   { key: "fuel-operations", label: "Fuel Operations", href: "/settings/fuel-operations" },
+  { key: "leave-types", label: "Leave Types", href: "/settings/leave-types" },
   { key: "licenses", label: "Licensing", href: "/settings/licenses" },
   { key: "receipt-templates", label: "Receipt Templates", href: "/settings/receipt-templates" },
   { key: "retail-users", label: "Retail Users", href: "/settings/retail-users" }
@@ -92,6 +94,11 @@ export const enterpriseSettingsMenuGroups: readonly EnterpriseNavigationMenuGrou
     key: "finance",
     label: "Finance Settings",
     items: enterpriseFinanceSettingsMenuItems
+  },
+  {
+    key: "system",
+    label: "System",
+    items: [{ key: "sync", label: "Sync", href: "/sync" }]
   }
 ] as const;
 
@@ -165,6 +172,87 @@ export const enterpriseFuelOperationsMenuItems = [
   { key: "fuel-reconciliation", label: "Reconciliation", href: "/fuel-operations#reconciliation" }
 ] as const;
 
+export const enterpriseHumanResourcesMenuItems = [
+  {
+    key: "hr-overview",
+    label: "Overview",
+    href: "/human-resources",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-employees",
+    label: "Employees",
+    href: "/human-resources/employees",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-organization",
+    label: "Departments & Positions",
+    href: "/human-resources/organization",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-attendance",
+    label: "Attendance",
+    href: "/human-resources/attendance",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-leave",
+    label: "Leave Management",
+    href: "/human-resources/leave",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-documents",
+    label: "HR Documents",
+    href: "/human-resources/documents",
+    requiredPermissions: ["hr.document.manage"]
+  },
+  {
+    key: "hr-exits",
+    label: "Employee Exits",
+    href: "/human-resources/exits",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-visitors",
+    label: "Visitor Register",
+    href: "/human-resources/visitors",
+    requiredPermissions: ["hr.visitor.view"]
+  },
+  {
+    key: "hr-payroll",
+    label: "Payroll",
+    href: "/human-resources/payroll",
+    requiredPermissions: ["hr.payroll.view"]
+  },
+  {
+    key: "hr-benefits",
+    label: "Benefits",
+    href: "/human-resources/benefits",
+    requiredPermissions: ["hr.view"]
+  },
+  {
+    key: "hr-loans",
+    label: "Loans & Advances",
+    href: "/human-resources/loans",
+    requiredPermissions: ["hr.employee-finance.view"]
+  },
+  {
+    key: "hr-expense-claims",
+    label: "Expense Claims",
+    href: "/human-resources/expense-claims",
+    requiredPermissions: ["hr.employee-finance.view"]
+  },
+  {
+    key: "hr-travel",
+    label: "Travel",
+    href: "/human-resources/travel",
+    requiredPermissions: ["hr.employee-finance.view"]
+  }
+] as const;
+
 export const enterpriseFinanceMenuGroups: readonly EnterpriseNavigationMenuGroup[] = [
   {
     key: "general-ledger",
@@ -207,6 +295,14 @@ export const enterpriseFinanceMenuGroups: readonly EnterpriseNavigationMenuGroup
     items: [
       { key: "budgets", label: "Budgets", href: "/finance/budgets" },
       { key: "payroll-gl", label: "Payroll GL", href: "/finance/payroll-gl" }
+    ]
+  },
+  {
+    key: "finance-operations",
+    label: "POS & Operations",
+    items: [
+      { key: "pos", label: "POS", href: "/pos" },
+      { key: "operations", label: "Operations", href: "/operations" }
     ]
   }
 ] as const;
@@ -347,6 +443,13 @@ export const enterpriseSettingsPageMeta: Record<
     description:
       "Configure default Fuel Operations source and dispatch sites used by sale and delivery entry.",
     href: "/settings/fuel-operations"
+  },
+  "leave-types": {
+    label: "Leave Types",
+    heading: "Leave Types",
+    description:
+      "Maintain leave categories, standard entitlements, attachment rules, and eligibility settings.",
+    href: "/settings/leave-types"
   },
   "shop-prices": {
     label: "Shop Prices",

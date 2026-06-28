@@ -123,12 +123,41 @@ model RetailOrg {
   erpFixedAssetBooks                ErpFixedAssetBook[]
   erpFixedAssetTransactions         ErpFixedAssetTransaction[]
   erpFinanceDimensions              ErpFinanceDimension[]
+  erpHrDepartments                  ErpHrDepartment[]
+  erpHrPositions                    ErpHrPosition[]
+  erpEmployeeCategories             ErpEmployeeCategory[]
+  erpEmployees                      ErpEmployee[]
+  erpEmployeePayrollProfiles        ErpEmployeePayrollProfile[]
+  erpEmployeePayItems               ErpEmployeePayItem[]
+  erpEmployeeAttendance             ErpEmployeeAttendance[]
+  erpAttendanceChangeLogs           ErpAttendanceChangeLog[]
+  erpLeaveTypes                     ErpLeaveType[]
+  erpEmployeeLeaveEntitlements      ErpEmployeeLeaveEntitlement[]
+  erpLeaveRequests                  ErpLeaveRequest[]
+  erpHrDocuments                    ErpHrDocument[]
+  erpEmployeeExits                  ErpEmployeeExit[]
+  erpVisitorVisits                  ErpVisitorVisit[]
+  erpVisitorStatusLogs              ErpVisitorStatusLog[]
   erpBudgetVersions                 ErpBudgetVersion[]
   erpBudgetLines                    ErpBudgetLine[]
   erpBudgetPeriodAmounts            ErpBudgetPeriodAmount[]
   erpPayrollGlMappings              ErpPayrollGlMapping[]
   erpPayrollPostingBatches          ErpPayrollPostingBatch[]
   erpPayrollPostingLines            ErpPayrollPostingLine[]
+  erpPayrollStatutoryRuleSets       ErpPayrollStatutoryRuleSet[]
+  erpPayrollTaxBands                ErpPayrollTaxBand[]
+  erpPayrollRuns                    ErpPayrollRun[]
+  erpPayrollRunEmployees            ErpPayrollRunEmployee[]
+  erpPayrollRunLines                ErpPayrollRunLine[]
+  erpPayrollFilings                 ErpPayrollFiling[]
+  erpBenefitPlans                   ErpBenefitPlan[]
+  erpEmployeeBenefitEnrollments     ErpEmployeeBenefitEnrollment[]
+  erpEmployeeLoans                  ErpEmployeeLoan[]
+  erpEmployeeLoanRepayments         ErpEmployeeLoanRepayment[]
+  erpExpenseClaims                  ErpExpenseClaim[]
+  erpExpenseClaimLines              ErpExpenseClaimLine[]
+  erpTravelRequests                 ErpTravelRequest[]
+  erpTravelExpenseLines             ErpTravelExpenseLine[]
   erpRecurringJournalTemplates      ErpRecurringJournalTemplate[]
   erpRecurringJournalTemplateLines  ErpRecurringJournalTemplateLine[]
   transactionReferenceCaptures      TransactionReferenceCapture[]
@@ -307,6 +336,8 @@ model Store {
   glJournalLines                    GlJournalLine[]
   operatingExpenses                 OperatingExpense[]
   giftCertificates                  GiftCertificate[]
+  hrEmployees                       ErpEmployee[]
+  hrAttendance                      ErpEmployeeAttendance[]
   inventoryCatalogLinks             InventoryCatalogStore[]
   storeProductPrices                StoreProductPrice[]
   licenseEvents                     LicenseEvent[]
@@ -520,12 +551,41 @@ model ErpCompany {
   fixedAssetBooks               ErpFixedAssetBook[]
   fixedAssetTransactions        ErpFixedAssetTransaction[]
   financeDimensions             ErpFinanceDimension[]
+  hrDepartments                 ErpHrDepartment[]
+  hrPositions                   ErpHrPosition[]
+  employeeCategories            ErpEmployeeCategory[]
+  employees                     ErpEmployee[]
+  employeePayrollProfiles       ErpEmployeePayrollProfile[]
+  employeePayItems              ErpEmployeePayItem[]
+  employeeAttendance            ErpEmployeeAttendance[]
+  attendanceChangeLogs          ErpAttendanceChangeLog[]
+  leaveTypes                    ErpLeaveType[]
+  employeeLeaveEntitlements     ErpEmployeeLeaveEntitlement[]
+  leaveRequests                 ErpLeaveRequest[]
+  hrDocuments                   ErpHrDocument[]
+  employeeExits                 ErpEmployeeExit[]
+  visitorVisits                 ErpVisitorVisit[]
+  visitorStatusLogs             ErpVisitorStatusLog[]
   budgetVersions                ErpBudgetVersion[]
   budgetLines                   ErpBudgetLine[]
   budgetPeriodAmounts           ErpBudgetPeriodAmount[]
   payrollGlMappings             ErpPayrollGlMapping[]
   payrollPostingBatches         ErpPayrollPostingBatch[]
   payrollPostingLines           ErpPayrollPostingLine[]
+  payrollStatutoryRuleSets      ErpPayrollStatutoryRuleSet[]
+  payrollTaxBands               ErpPayrollTaxBand[]
+  payrollRuns                   ErpPayrollRun[]
+  payrollRunEmployees           ErpPayrollRunEmployee[]
+  payrollRunLines               ErpPayrollRunLine[]
+  payrollFilings                ErpPayrollFiling[]
+  benefitPlans                  ErpBenefitPlan[]
+  employeeBenefitEnrollments    ErpEmployeeBenefitEnrollment[]
+  employeeLoans                 ErpEmployeeLoan[]
+  employeeLoanRepayments        ErpEmployeeLoanRepayment[]
+  expenseClaims                 ErpExpenseClaim[]
+  expenseClaimLines             ErpExpenseClaimLine[]
+  travelRequests                ErpTravelRequest[]
+  travelExpenseLines            ErpTravelExpenseLine[]
   recurringJournalTemplates     ErpRecurringJournalTemplate[]
   recurringJournalTemplateLines ErpRecurringJournalTemplateLine[]
   fuelTanks                     ErpFuelTank[]
@@ -1162,10 +1222,736 @@ model ErpFinanceDimension {
   glJournalLines      GlJournalLine[]
   budgetLines         ErpBudgetLine[]
   budgetPeriodAmounts ErpBudgetPeriodAmount[]
+  hrDepartment        ErpHrDepartment?
 
   @@unique([companyId, dimensionType, code])
   @@index([retailOrgId, dimensionType, status])
   @@index([companyId, status])
+}
+
+model ErpHrDepartment {
+  id                 String                  @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  financeDimensionId String                  @unique
+  code               String
+  name               String
+  description        String?                 @db.NVarChar(Max)
+  headEmployeeId     String?
+  status             String                  @default("ACTIVE")
+  createdBy          String?
+  updatedBy          String?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  retailOrg          RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  financeDimension   ErpFinanceDimension     @relation(fields: [financeDimensionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  positions          ErpHrPosition[]
+  headEmployee       ErpEmployee?            @relation("ErpHrDepartmentHead", fields: [headEmployeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  employees          ErpEmployee[]
+  attendanceRecords  ErpEmployeeAttendance[]
+  visitorVisits      ErpVisitorVisit[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([companyId, status])
+  @@index([headEmployeeId])
+}
+
+model ErpHrPosition {
+  id                  String          @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  departmentId        String
+  reportsToPositionId String?
+  code                String
+  title               String
+  description         String?         @db.NVarChar(Max)
+  status              String          @default("ACTIVE")
+  createdBy           String?
+  updatedBy           String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  retailOrg           RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  department          ErpHrDepartment @relation(fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reportsToPosition   ErpHrPosition?  @relation("ErpHrPositionHierarchy", fields: [reportsToPositionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  directReports       ErpHrPosition[] @relation("ErpHrPositionHierarchy")
+  employees           ErpEmployee[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([companyId, departmentId, status])
+  @@index([reportsToPositionId])
+}
+
+model ErpEmployeeCategory {
+  id          String        @id @default(uuid())
+  retailOrgId String
+  companyId   String
+  code        String
+  name        String
+  description String?       @db.NVarChar(Max)
+  status      String        @default("ACTIVE")
+  createdBy   String?
+  updatedBy   String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  retailOrg   RetailOrg     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company     ErpCompany    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employees   ErpEmployee[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([companyId, status])
+}
+
+model ErpEmployee {
+  id                       String                         @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  employeeNo               String
+  retailUserId             String?
+  primaryStoreId           String?
+  departmentId             String
+  positionId               String
+  employeeCategoryId       String
+  reportingManagerId       String?
+  firstName                String
+  middleName               String?
+  lastName                 String
+  displayName              String
+  gender                   String?
+  dateOfBirth              DateTime?
+  phone                    String?
+  email                    String?
+  addressLine1             String?
+  addressLine2             String?
+  city                     String?
+  region                   String?
+  countryCode              String?
+  emergencyContactName     String?
+  emergencyContactPhone    String?
+  emergencyContactRelation String?
+  employmentDate           DateTime
+  salaryType               String
+  status                   String                         @default("ACTIVE")
+  createdBy                String?
+  updatedBy                String?
+  createdAt                DateTime                       @default(now())
+  updatedAt                DateTime                       @updatedAt
+  retailOrg                RetailOrg                      @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany                     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  retailUser               RetailUser?                    @relation(fields: [retailUserId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  primaryStore             Store?                         @relation(fields: [primaryStoreId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  department               ErpHrDepartment                @relation(fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  position                 ErpHrPosition                  @relation(fields: [positionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  employeeCategory         ErpEmployeeCategory            @relation(fields: [employeeCategoryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reportingManager         ErpEmployee?                   @relation("ErpEmployeeManager", fields: [reportingManagerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  directReports            ErpEmployee[]                  @relation("ErpEmployeeManager")
+  headedDepartments        ErpHrDepartment[]              @relation("ErpHrDepartmentHead")
+  payrollProfile           ErpEmployeePayrollProfile?
+  recurringPayItems        ErpEmployeePayItem[]
+  attendanceRecords        ErpEmployeeAttendance[]
+  leaveEntitlements        ErpEmployeeLeaveEntitlement[]
+  leaveRequests            ErpLeaveRequest[]              @relation("ErpEmployeeLeaveRequests")
+  leaveApprovalRequests    ErpLeaveRequest[]              @relation("ErpLeaveRequestApprover")
+  hrDocuments              ErpHrDocument[]
+  exitRecord               ErpEmployeeExit?
+  hostedVisitorVisits      ErpVisitorVisit[]
+  payrollRunEmployees      ErpPayrollRunEmployee[]
+  benefitEnrollments       ErpEmployeeBenefitEnrollment[]
+  employeeLoans            ErpEmployeeLoan[]
+  loanRepayments           ErpEmployeeLoanRepayment[]
+  expenseClaims            ErpExpenseClaim[]
+  travelRequests           ErpTravelRequest[]
+
+  @@unique([companyId, employeeNo])
+  @@index([retailOrgId, status])
+  @@index([companyId, departmentId, status])
+  @@index([companyId, positionId, status])
+  @@index([employeeCategoryId])
+  @@index([reportingManagerId])
+  @@index([retailUserId])
+  @@index([primaryStoreId])
+}
+
+model ErpEmployeePayrollProfile {
+  id               String      @id @default(uuid())
+  retailOrgId      String
+  companyId        String
+  employeeId       String      @unique
+  basicSalary      Decimal     @default(0) @db.Decimal(18, 2)
+  currencyCode     String
+  paymentFrequency String      @default("MONTHLY")
+  taxResidency     String      @default("RESIDENT")
+  monthlyTaxRelief Decimal     @default(0) @db.Decimal(18, 2)
+  pensionStatus    String      @default("CONTRIBUTING")
+  tier2TrusteeName String?
+  tier2MemberNo    String?
+  taxId            String?
+  ssnitId          String?
+  bankName         String?
+  bankBranch       String?
+  bankAccountName  String?
+  bankAccountNo    String?
+  status           String      @default("ACTIVE")
+  createdBy        String?
+  updatedBy        String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  retailOrg        RetailOrg   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company          ErpCompany  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee         ErpEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([retailOrgId, status])
+  @@index([companyId, paymentFrequency, status])
+}
+
+model ErpEmployeePayItem {
+  id              String      @id @default(uuid())
+  retailOrgId     String
+  companyId       String
+  employeeId      String
+  componentType   String
+  code            String
+  name            String
+  calculationType String      @default("FIXED")
+  amount          Decimal     @default(0) @db.Decimal(18, 2)
+  percentage      Decimal     @default(0) @db.Decimal(8, 4)
+  isTaxable       Boolean     @default(true)
+  isPensionable   Boolean     @default(false)
+  effectiveFrom   DateTime?
+  effectiveTo     DateTime?
+  status          String      @default("ACTIVE")
+  createdBy       String?
+  updatedBy       String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  retailOrg       RetailOrg   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company         ErpCompany  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee        ErpEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, componentType, code])
+  @@index([retailOrgId, componentType, status])
+  @@index([companyId, employeeId, status])
+}
+
+model ErpBenefitPlan {
+  id                       String                         @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  code                     String
+  name                     String
+  providerName             String?
+  description              String?                        @db.NVarChar(Max)
+  employeeContributionType String                         @default("FIXED")
+  employeeContribution     Decimal                        @default(0) @db.Decimal(18, 2)
+  employerContributionType String                         @default("FIXED")
+  employerContribution     Decimal                        @default(0) @db.Decimal(18, 2)
+  isTaxable                Boolean                        @default(false)
+  isPensionable            Boolean                        @default(false)
+  effectiveFrom            DateTime?
+  effectiveTo              DateTime?
+  status                   String                         @default("ACTIVE")
+  createdBy                String?
+  updatedBy                String?
+  createdAt                DateTime                       @default(now())
+  updatedAt                DateTime                       @updatedAt
+  retailOrg                RetailOrg                      @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany                     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  enrollments              ErpEmployeeBenefitEnrollment[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([companyId, effectiveFrom, effectiveTo, status])
+}
+
+model ErpEmployeeBenefitEnrollment {
+  id                           String         @id @default(uuid())
+  retailOrgId                  String
+  companyId                    String
+  benefitPlanId                String
+  employeeId                   String
+  employeeContributionOverride Decimal?       @db.Decimal(18, 2)
+  employerContributionOverride Decimal?       @db.Decimal(18, 2)
+  effectiveFrom                DateTime
+  effectiveTo                  DateTime?
+  status                       String         @default("ACTIVE")
+  note                         String?        @db.NVarChar(Max)
+  createdBy                    String?
+  updatedBy                    String?
+  createdAt                    DateTime       @default(now())
+  updatedAt                    DateTime       @updatedAt
+  retailOrg                    RetailOrg      @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                      ErpCompany     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  benefitPlan                  ErpBenefitPlan @relation(fields: [benefitPlanId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  employee                     ErpEmployee    @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([benefitPlanId, employeeId, effectiveFrom])
+  @@index([retailOrgId, status])
+  @@index([companyId, employeeId, status])
+  @@index([benefitPlanId, status])
+}
+
+model ErpEmployeeLoan {
+  id                         String                     @id @default(uuid())
+  retailOrgId                String
+  companyId                  String
+  employeeId                 String
+  loanNo                     String
+  loanType                   String                     @default("LOAN")
+  requestDate                DateTime
+  principalAmount            Decimal                    @db.Decimal(18, 2)
+  interestAmount             Decimal                    @default(0) @db.Decimal(18, 2)
+  totalRepayable             Decimal                    @db.Decimal(18, 2)
+  installmentAmount          Decimal                    @db.Decimal(18, 2)
+  outstandingBalance         Decimal                    @db.Decimal(18, 2)
+  purpose                    String                     @db.NVarChar(Max)
+  note                       String?                    @db.NVarChar(Max)
+  status                     String                     @default("DRAFT")
+  approvedAt                 DateTime?
+  approvedBy                 String?
+  approvalNote               String?                    @db.NVarChar(Max)
+  disbursedAt                DateTime?
+  disbursedBy                String?
+  cashbookAccountId          String?
+  disbursementJournalEntryId String?
+  settledAt                  DateTime?
+  createdBy                  String?
+  updatedBy                  String?
+  createdAt                  DateTime                   @default(now())
+  updatedAt                  DateTime                   @updatedAt
+  retailOrg                  RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                    ErpCompany                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee                   ErpEmployee                @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  repayments                 ErpEmployeeLoanRepayment[]
+
+  @@unique([companyId, loanNo])
+  @@index([retailOrgId, status])
+  @@index([companyId, employeeId, status])
+  @@index([disbursementJournalEntryId])
+}
+
+model ErpEmployeeLoanRepayment {
+  id                   String          @id @default(uuid())
+  retailOrgId          String
+  companyId            String
+  employeeLoanId       String
+  employeeId           String
+  repaymentKey         String          @unique
+  payrollRunId         String?
+  payrollRunEmployeeId String?
+  repaymentDate        DateTime
+  amount               Decimal         @db.Decimal(18, 2)
+  sourceType           String          @default("PAYROLL")
+  reference            String?
+  journalEntryId       String?
+  createdBy            String?
+  createdAt            DateTime        @default(now())
+  retailOrg            RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company              ErpCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employeeLoan         ErpEmployeeLoan @relation(fields: [employeeLoanId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  employee             ErpEmployee     @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([retailOrgId, repaymentDate])
+  @@index([companyId, employeeId, repaymentDate])
+  @@index([employeeLoanId, repaymentDate])
+  @@index([payrollRunId])
+}
+
+model ErpExpenseClaim {
+  id                String                @id @default(uuid())
+  retailOrgId       String
+  companyId         String
+  employeeId        String
+  claimNo           String
+  claimDate         DateTime
+  currencyCode      String
+  purpose           String                @db.NVarChar(Max)
+  totalAmount       Decimal               @default(0) @db.Decimal(18, 2)
+  status            String                @default("DRAFT")
+  submittedAt       DateTime?
+  submittedBy       String?
+  decidedAt         DateTime?
+  decidedBy         String?
+  decisionNote      String?               @db.NVarChar(Max)
+  paidAt            DateTime?
+  paidBy            String?
+  paymentReference  String?
+  cashbookAccountId String?
+  journalEntryId    String?
+  createdBy         String?
+  updatedBy         String?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  retailOrg         RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company           ErpCompany            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee          ErpEmployee           @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines             ErpExpenseClaimLine[]
+
+  @@unique([companyId, claimNo])
+  @@index([retailOrgId, status, claimDate])
+  @@index([companyId, employeeId, status])
+  @@index([journalEntryId])
+}
+
+model ErpExpenseClaimLine {
+  id                 String          @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  expenseClaimId     String
+  lineNo             Int
+  expenseDate        DateTime
+  category           String
+  description        String
+  expenseAccountCode String
+  amount             Decimal         @db.Decimal(18, 2)
+  reference          String?
+  evidenceUrl        String?
+  createdAt          DateTime        @default(now())
+  retailOrg          RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  expenseClaim       ErpExpenseClaim @relation(fields: [expenseClaimId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseClaimId, lineNo])
+  @@index([companyId, expenseAccountCode, expenseDate])
+}
+
+model ErpTravelRequest {
+  id                       String                 @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  employeeId               String
+  travelNo                 String
+  destination              String
+  purpose                  String                 @db.NVarChar(Max)
+  startDate                DateTime
+  endDate                  DateTime
+  currencyCode             String
+  estimatedAmount          Decimal                @default(0) @db.Decimal(18, 2)
+  approvedAmount           Decimal                @default(0) @db.Decimal(18, 2)
+  advanceAmount            Decimal                @default(0) @db.Decimal(18, 2)
+  actualAmount             Decimal                @default(0) @db.Decimal(18, 2)
+  returnedAmount           Decimal                @default(0) @db.Decimal(18, 2)
+  employeePayableAmount    Decimal                @default(0) @db.Decimal(18, 2)
+  status                   String                 @default("DRAFT")
+  submittedAt              DateTime?
+  submittedBy              String?
+  approvedAt               DateTime?
+  approvedBy               String?
+  decisionNote             String?                @db.NVarChar(Max)
+  cashbookAccountId        String?
+  advanceJournalEntryId    String?
+  settlementJournalEntryId String?
+  returnJournalEntryId     String?
+  settledAt                DateTime?
+  settledBy                String?
+  createdBy                String?
+  updatedBy                String?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  retailOrg                RetailOrg              @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee                 ErpEmployee            @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  expenseLines             ErpTravelExpenseLine[]
+
+  @@unique([companyId, travelNo])
+  @@index([retailOrgId, status, startDate])
+  @@index([companyId, employeeId, status])
+  @@index([advanceJournalEntryId])
+  @@index([settlementJournalEntryId])
+}
+
+model ErpTravelExpenseLine {
+  id                 String           @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  travelRequestId    String
+  lineNo             Int
+  expenseDate        DateTime
+  category           String
+  description        String
+  expenseAccountCode String
+  amount             Decimal          @db.Decimal(18, 2)
+  reference          String?
+  evidenceUrl        String?
+  createdAt          DateTime         @default(now())
+  retailOrg          RetailOrg        @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  travelRequest      ErpTravelRequest @relation(fields: [travelRequestId], references: [id], onDelete: Cascade)
+
+  @@unique([travelRequestId, lineNo])
+  @@index([companyId, expenseAccountCode, expenseDate])
+}
+
+model ErpEmployeeAttendance {
+  id                String                   @id @default(uuid())
+  retailOrgId       String
+  companyId         String
+  employeeId        String
+  departmentId      String
+  storeId           String?
+  workDate          DateTime
+  attendanceStatus  String                   @default("PRESENT")
+  checkInAt         DateTime?
+  checkOutAt        DateTime?
+  lateMinutes       Int                      @default(0)
+  overtimeHours     Decimal                  @default(0) @db.Decimal(8, 2)
+  note              String?                  @db.NVarChar(Max)
+  entrySource       String                   @default("MANUAL")
+  externalReference String?
+  createdBy         String?
+  updatedBy         String?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  retailOrg         RetailOrg                @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company           ErpCompany               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee          ErpEmployee              @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  department        ErpHrDepartment          @relation(fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  store             Store?                   @relation(fields: [storeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  changeLogs        ErpAttendanceChangeLog[]
+
+  @@unique([companyId, employeeId, workDate])
+  @@index([retailOrgId, workDate, attendanceStatus])
+  @@index([companyId, departmentId, workDate])
+  @@index([storeId, workDate])
+}
+
+model ErpAttendanceChangeLog {
+  id               String                @id @default(uuid())
+  retailOrgId      String
+  companyId        String
+  attendanceId     String
+  action           String
+  previousSnapshot String?               @db.NVarChar(Max)
+  newSnapshot      String                @db.NVarChar(Max)
+  changedBy        String
+  changedAt        DateTime              @default(now())
+  retailOrg        RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company          ErpCompany            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  attendance       ErpEmployeeAttendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+
+  @@index([retailOrgId, changedAt])
+  @@index([companyId, attendanceId, changedAt])
+}
+
+model ErpLeaveType {
+  id                 String                        @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  code               String
+  name               String
+  description        String?                       @db.NVarChar(Max)
+  defaultDays        Decimal                       @default(0) @db.Decimal(8, 2)
+  isPaid             Boolean                       @default(true)
+  requiresAttachment Boolean                       @default(false)
+  genderEligibility  String                        @default("ALL")
+  status             String                        @default("ACTIVE")
+  createdBy          String?
+  updatedBy          String?
+  createdAt          DateTime                      @default(now())
+  updatedAt          DateTime                      @updatedAt
+  retailOrg          RetailOrg                     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany                    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  entitlements       ErpEmployeeLeaveEntitlement[]
+  requests           ErpLeaveRequest[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, status])
+  @@index([companyId, status])
+}
+
+model ErpEmployeeLeaveEntitlement {
+  id            String       @id @default(uuid())
+  retailOrgId   String
+  companyId     String
+  employeeId    String
+  leaveTypeId   String
+  leaveYear     Int
+  openingDays   Decimal      @default(0) @db.Decimal(8, 2)
+  allocatedDays Decimal      @default(0) @db.Decimal(8, 2)
+  adjustedDays  Decimal      @default(0) @db.Decimal(8, 2)
+  usedDays      Decimal      @default(0) @db.Decimal(8, 2)
+  pendingDays   Decimal      @default(0) @db.Decimal(8, 2)
+  status        String       @default("ACTIVE")
+  createdBy     String?
+  updatedBy     String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  retailOrg     RetailOrg    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company       ErpCompany   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee      ErpEmployee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveType     ErpLeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([employeeId, leaveTypeId, leaveYear])
+  @@index([retailOrgId, leaveYear, status])
+  @@index([companyId, employeeId, leaveYear])
+}
+
+model ErpLeaveRequest {
+  id                 String       @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  requestNo          String
+  employeeId         String
+  leaveTypeId        String
+  approverEmployeeId String?
+  requestDate        DateTime     @default(now())
+  startDate          DateTime
+  endDate            DateTime
+  requestedDays      Decimal      @db.Decimal(8, 2)
+  reason             String?      @db.NVarChar(Max)
+  status             String       @default("DRAFT")
+  decisionBy         String?
+  decisionAt         DateTime?
+  decisionNote       String?      @db.NVarChar(Max)
+  cancelledBy        String?
+  cancelledAt        DateTime?
+  cancellationReason String?      @db.NVarChar(Max)
+  createdBy          String?
+  updatedBy          String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  retailOrg          RetailOrg    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee           ErpEmployee  @relation("ErpEmployeeLeaveRequests", fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveType          ErpLeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  approverEmployee   ErpEmployee? @relation("ErpLeaveRequestApprover", fields: [approverEmployeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([companyId, requestNo])
+  @@index([retailOrgId, requestDate, status])
+  @@index([companyId, employeeId, startDate, endDate])
+  @@index([approverEmployeeId, status])
+  @@index([leaveTypeId, status])
+}
+
+model ErpHrDocument {
+  id            String      @id @default(uuid())
+  retailOrgId   String
+  companyId     String
+  employeeId    String
+  documentNo    String
+  documentType  String
+  title         String
+  referenceNo   String?
+  issueDate     DateTime?
+  expiryDate    DateTime?
+  fileName      String
+  mimeType      String?
+  fileSizeBytes Int?
+  storageKey    String?
+  externalUrl   String?
+  note          String?     @db.NVarChar(Max)
+  status        String      @default("ACTIVE")
+  uploadedBy    String
+  uploadedAt    DateTime    @default(now())
+  deletedBy     String?
+  deletedAt     DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  retailOrg     RetailOrg   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company       ErpCompany  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee      ErpEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, documentNo])
+  @@index([retailOrgId, status, uploadedAt])
+  @@index([companyId, employeeId, documentType, status])
+  @@index([companyId, expiryDate, status])
+  @@index([storageKey])
+}
+
+model ErpEmployeeExit {
+  id                     String      @id @default(uuid())
+  retailOrgId            String
+  companyId              String
+  employeeId             String      @unique
+  exitNo                 String
+  exitType               String
+  noticeDate             DateTime?
+  resignationDate        DateTime?
+  terminationDate        DateTime?
+  lastWorkingDate        DateTime
+  exitReason             String
+  note                   String?     @db.NVarChar(Max)
+  finalSettlementStatus  String      @default("NOT_STARTED")
+  assetReturnStatus      String      @default("NOT_STARTED")
+  status                 String      @default("DRAFT")
+  previousEmployeeStatus String      @default("ACTIVE")
+  confirmedBy            String?
+  confirmedAt            DateTime?
+  reopenedBy             String?
+  reopenedAt             DateTime?
+  createdBy              String?
+  updatedBy              String?
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+  retailOrg              RetailOrg   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                ErpCompany  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee               ErpEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, exitNo])
+  @@index([retailOrgId, status, lastWorkingDate])
+  @@index([companyId, exitType, status])
+  @@index([companyId, finalSettlementStatus, assetReturnStatus])
+}
+
+model ErpVisitorVisit {
+  id                 String                @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  visitorNo          String
+  visitorName        String
+  phone              String?
+  organization       String?
+  idType             String?
+  idNumber           String?
+  purpose            String                @db.NVarChar(Max)
+  hostEmployeeId     String?
+  hostDepartmentId   String?
+  expectedAt         DateTime?
+  checkInAt          DateTime?
+  checkOutAt         DateTime?
+  passNo             String?
+  status             String                @default("REGISTERED")
+  registeredBy       String
+  checkInBy          String?
+  checkOutBy         String?
+  cancelledBy        String?
+  cancelledAt        DateTime?
+  cancellationReason String?               @db.NVarChar(Max)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  retailOrg          RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  hostEmployee       ErpEmployee?          @relation(fields: [hostEmployeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  hostDepartment     ErpHrDepartment?      @relation(fields: [hostDepartmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  statusLogs         ErpVisitorStatusLog[]
+
+  @@unique([companyId, visitorNo])
+  @@index([retailOrgId, status, expectedAt])
+  @@index([companyId, hostDepartmentId, status])
+  @@index([hostEmployeeId, status])
+  @@index([checkInAt, checkOutAt])
+}
+
+model ErpVisitorStatusLog {
+  id             String          @id @default(uuid())
+  retailOrgId    String
+  companyId      String
+  visitorVisitId String
+  action         String
+  previousStatus String?
+  newStatus      String
+  note           String?         @db.NVarChar(Max)
+  changedBy      String
+  changedAt      DateTime        @default(now())
+  retailOrg      RetailOrg       @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company        ErpCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  visitorVisit   ErpVisitorVisit @relation(fields: [visitorVisitId], references: [id], onDelete: Cascade)
+
+  @@index([retailOrgId, changedAt])
+  @@index([companyId, visitorVisitId, changedAt])
 }
 
 model ErpBudgetVersion {
@@ -1326,6 +2112,7 @@ model ErpPayrollPostingBatch {
   company            ErpCompany              @relation(fields: [companyId], references: [id], onDelete: Cascade)
   journalEntry       GlJournalEntry?         @relation(fields: [journalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   lines              ErpPayrollPostingLine[]
+  payrollRuns        ErpPayrollRun[]
 
   @@unique([retailOrgId, batchNo])
   @@index([companyId, payPeriodStart, payPeriodEnd])
@@ -1366,6 +2153,222 @@ model ErpPayrollPostingLine {
   @@index([accountId])
   @@index([companyId, componentType, status])
   @@index([retailOrgId, componentCode, status])
+}
+
+model ErpPayrollStatutoryRuleSet {
+  id                       String              @id @default(uuid())
+  retailOrgId              String
+  companyId                String
+  code                     String
+  name                     String
+  countryCode              String              @default("GH")
+  currencyCode             String              @default("GHS")
+  effectiveFrom            DateTime
+  effectiveTo              DateTime?
+  employeePensionRate      Decimal             @default(5.5) @db.Decimal(8, 4)
+  employerPensionRate      Decimal             @default(13) @db.Decimal(8, 4)
+  ssnitRemittanceRate      Decimal             @default(13.5) @db.Decimal(8, 4)
+  tier2Rate                Decimal             @default(5) @db.Decimal(8, 4)
+  minimumInsurableEarnings Decimal             @default(0) @db.Decimal(18, 2)
+  maximumInsurableEarnings Decimal             @default(0) @db.Decimal(18, 2)
+  nonResidentTaxRate       Decimal             @default(25) @db.Decimal(8, 4)
+  casualWorkerTaxRate      Decimal             @default(5) @db.Decimal(8, 4)
+  payeFilingDueDay         Int                 @default(15)
+  pensionFilingDueDay      Int                 @default(14)
+  sourceName               String
+  sourceUrl                String?
+  pensionSourceUrl         String?
+  status                   String              @default("ACTIVE")
+  createdBy                String?
+  updatedBy                String?
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  retailOrg                RetailOrg           @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company                  ErpCompany          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  taxBands                 ErpPayrollTaxBand[]
+  payrollRuns              ErpPayrollRun[]
+
+  @@unique([companyId, code])
+  @@index([retailOrgId, effectiveFrom, status])
+  @@index([companyId, countryCode, effectiveFrom, effectiveTo])
+}
+
+model ErpPayrollTaxBand {
+  id                 String                     @id @default(uuid())
+  retailOrgId        String
+  companyId          String
+  statutoryRuleSetId String
+  sequenceNo         Int
+  bandAmount         Decimal?                   @db.Decimal(18, 2)
+  ratePercent        Decimal                    @db.Decimal(8, 4)
+  description        String?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  retailOrg          RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company            ErpCompany                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  statutoryRuleSet   ErpPayrollStatutoryRuleSet @relation(fields: [statutoryRuleSetId], references: [id], onDelete: Cascade)
+
+  @@unique([statutoryRuleSetId, sequenceNo])
+  @@index([companyId, statutoryRuleSetId])
+}
+
+model ErpPayrollRun {
+  id                    String                     @id @default(uuid())
+  retailOrgId           String
+  companyId             String
+  statutoryRuleSetId    String
+  postingBatchId        String?
+  runNo                 String
+  payPeriodCode         String
+  payPeriodStart        DateTime
+  payPeriodEnd          DateTime
+  paymentDate           DateTime
+  currencyCode          String
+  description           String?
+  status                String                     @default("DRAFT")
+  employeeCount         Int                        @default(0)
+  totalBasicPay         Decimal                    @default(0) @db.Decimal(18, 2)
+  totalGrossPay         Decimal                    @default(0) @db.Decimal(18, 2)
+  totalTaxablePay       Decimal                    @default(0) @db.Decimal(18, 2)
+  totalEmployeePension  Decimal                    @default(0) @db.Decimal(18, 2)
+  totalPayeTax          Decimal                    @default(0) @db.Decimal(18, 2)
+  totalOtherDeductions  Decimal                    @default(0) @db.Decimal(18, 2)
+  totalEmployeeBenefits Decimal                    @default(0) @db.Decimal(18, 2)
+  totalEmployerBenefits Decimal                    @default(0) @db.Decimal(18, 2)
+  totalLoanRepayments   Decimal                    @default(0) @db.Decimal(18, 2)
+  totalNetPay           Decimal                    @default(0) @db.Decimal(18, 2)
+  totalEmployerPension  Decimal                    @default(0) @db.Decimal(18, 2)
+  totalTier1Pension     Decimal                    @default(0) @db.Decimal(18, 2)
+  totalTier2Pension     Decimal                    @default(0) @db.Decimal(18, 2)
+  totalEmployerCost     Decimal                    @default(0) @db.Decimal(18, 2)
+  calculatedAt          DateTime?
+  calculatedBy          String?
+  approvedAt            DateTime?
+  approvedBy            String?
+  reopenedAt            DateTime?
+  reopenedBy            String?
+  postedAt              DateTime?
+  postedBy              String?
+  createdBy             String?
+  updatedBy             String?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  retailOrg             RetailOrg                  @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company               ErpCompany                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  statutoryRuleSet      ErpPayrollStatutoryRuleSet @relation(fields: [statutoryRuleSetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  postingBatch          ErpPayrollPostingBatch?    @relation(fields: [postingBatchId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  employees             ErpPayrollRunEmployee[]
+  filings               ErpPayrollFiling[]
+
+  @@unique([companyId, runNo])
+  @@unique([companyId, payPeriodCode])
+  @@index([retailOrgId, status, payPeriodEnd])
+  @@index([companyId, paymentDate, status])
+  @@index([statutoryRuleSetId])
+}
+
+model ErpPayrollRunEmployee {
+  id                  String              @id @default(uuid())
+  retailOrgId         String
+  companyId           String
+  payrollRunId        String
+  employeeId          String
+  employeeNo          String
+  employeeName        String
+  departmentCode      String
+  positionTitle       String
+  categoryCode        String
+  taxResidency        String
+  taxId               String?
+  ssnitId             String?
+  bankName            String?
+  bankAccountNo       String?
+  basicPay            Decimal             @default(0) @db.Decimal(18, 2)
+  recurringEarnings   Decimal             @default(0) @db.Decimal(18, 2)
+  grossPay            Decimal             @default(0) @db.Decimal(18, 2)
+  pensionableEarnings Decimal             @default(0) @db.Decimal(18, 2)
+  insurableEarnings   Decimal             @default(0) @db.Decimal(18, 2)
+  employeePension     Decimal             @default(0) @db.Decimal(18, 2)
+  employerPension     Decimal             @default(0) @db.Decimal(18, 2)
+  tier1Pension        Decimal             @default(0) @db.Decimal(18, 2)
+  tier2Pension        Decimal             @default(0) @db.Decimal(18, 2)
+  taxablePay          Decimal             @default(0) @db.Decimal(18, 2)
+  payeTax             Decimal             @default(0) @db.Decimal(18, 2)
+  recurringDeductions Decimal             @default(0) @db.Decimal(18, 2)
+  employeeBenefits    Decimal             @default(0) @db.Decimal(18, 2)
+  employerBenefits    Decimal             @default(0) @db.Decimal(18, 2)
+  loanRepayments      Decimal             @default(0) @db.Decimal(18, 2)
+  totalDeductions     Decimal             @default(0) @db.Decimal(18, 2)
+  netPay              Decimal             @default(0) @db.Decimal(18, 2)
+  employerCost        Decimal             @default(0) @db.Decimal(18, 2)
+  status              String              @default("CALCULATED")
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  retailOrg           RetailOrg           @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company             ErpCompany          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payrollRun          ErpPayrollRun       @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employee            ErpEmployee         @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  lines               ErpPayrollRunLine[]
+
+  @@unique([payrollRunId, employeeId])
+  @@index([companyId, employeeNo, status])
+  @@index([employeeId, createdAt])
+}
+
+model ErpPayrollRunLine {
+  id                   String                @id @default(uuid())
+  retailOrgId          String
+  companyId            String
+  payrollRunEmployeeId String
+  lineNo               Int
+  componentCode        String
+  componentName        String
+  componentType        String
+  calculationType      String                @default("FIXED")
+  ratePercent          Decimal               @default(0) @db.Decimal(8, 4)
+  basisAmount          Decimal               @default(0) @db.Decimal(18, 2)
+  amount               Decimal               @default(0) @db.Decimal(18, 2)
+  isTaxable            Boolean               @default(false)
+  isPensionable        Boolean               @default(false)
+  sourceType           String
+  sourceId             String?
+  createdAt            DateTime              @default(now())
+  retailOrg            RetailOrg             @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company              ErpCompany            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payrollRunEmployee   ErpPayrollRunEmployee @relation(fields: [payrollRunEmployeeId], references: [id], onDelete: Cascade)
+
+  @@unique([payrollRunEmployeeId, lineNo])
+  @@index([companyId, componentType, componentCode])
+}
+
+model ErpPayrollFiling {
+  id               String        @id @default(uuid())
+  retailOrgId      String
+  companyId        String
+  payrollRunId     String
+  filingNo         String
+  filingType       String
+  periodCode       String
+  dueDate          DateTime
+  liabilityAmount  Decimal       @default(0) @db.Decimal(18, 2)
+  status           String        @default("READY")
+  filedAt          DateTime?
+  filedBy          String?
+  filingReference  String?
+  paidAt           DateTime?
+  paidBy           String?
+  paymentReference String?
+  note             String?       @db.NVarChar(Max)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  retailOrg        RetailOrg     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  company          ErpCompany    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payrollRun       ErpPayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+
+  @@unique([payrollRunId, filingType])
+  @@unique([companyId, filingNo])
+  @@index([retailOrgId, status, dueDate])
+  @@index([companyId, filingType, periodCode])
 }
 
 model ErpSettlementAllocation {
@@ -2373,6 +3376,7 @@ model RetailUser {
   userRoles              RetailUserRole[]
   openedShifts           PosShift[]
   sessions               RetailUserSession[]
+  hrEmployees            ErpEmployee[]
 
   @@unique([retailOrgId, loginId])
   @@index([homeStoreId])

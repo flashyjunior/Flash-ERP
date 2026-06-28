@@ -472,6 +472,8 @@ export type FuelOperationsWorkspaceData = {
     pumpCode: string;
     tankCode: string;
     productCode: string | null;
+    operatingSiteId: string | null;
+    siteCode: string | null;
     openingMeterReading: number;
     currentMeterReading: number;
     status: string;
@@ -480,6 +482,11 @@ export type FuelOperationsWorkspaceData = {
     dipId: string;
     tankId: string;
     tankCode: string;
+    operatingSiteId: string | null;
+    siteCode: string | null;
+    siteName: string | null;
+    stationCode: string | null;
+    stationName: string | null;
     dipReference: string | null;
     dipDate: string;
     dipQuantity: number;
@@ -499,6 +506,11 @@ export type FuelOperationsWorkspaceData = {
     nozzleCode: string;
     tankId: string;
     tankCode: string;
+    operatingSiteId: string | null;
+    siteCode: string | null;
+    siteName: string | null;
+    stationCode: string | null;
+    stationName: string | null;
     readingDate: string;
     shiftReference: string | null;
     openingMeterReading: number;
@@ -3361,7 +3373,11 @@ export async function getFuelOperationsWorkspace(
           companyId: company.id
         },
         include: {
-          tank: true
+          tank: {
+            include: {
+              operatingSite: true
+            }
+          }
         },
         orderBy: [{ dipDate: "desc" }, { createdAt: "desc" }],
         take: 50
@@ -3372,7 +3388,11 @@ export async function getFuelOperationsWorkspace(
         },
         include: {
           nozzle: true,
-          tank: true
+          tank: {
+            include: {
+              operatingSite: true
+            }
+          }
         },
         orderBy: [{ readingDate: "desc" }, { createdAt: "desc" }],
         take: 50
@@ -3620,6 +3640,24 @@ export async function getFuelOperationsWorkspace(
         : scopedSiteOptions[0]?.operatingSiteId ?? null;
 
     const latestReconciliation = scopedReconciliations[0] ?? null;
+    const siteById = new Map(scopedSiteOptions.map((site) => [site.operatingSiteId, site] as const));
+    const stationBySiteId = new Map<string, (typeof scopedStations)[number]>();
+
+    for (const station of scopedStations) {
+      const directSiteId = station.operatingSiteId;
+      const locationSiteId = scopedSiteOptions.find(
+        (site) => site.code === station.inventoryLocation?.code
+      )?.operatingSiteId;
+      const storeSiteIds = scopedSiteOptions
+        .filter((site) => site.storeCode === station.store?.code)
+        .map((site) => site.operatingSiteId);
+
+      for (const siteId of [directSiteId, locationSiteId, ...storeSiteIds]) {
+        if (siteId && !stationBySiteId.has(siteId)) {
+          stationBySiteId.set(siteId, station);
+        }
+      }
+    }
 
     return {
       currencyCode: functionalCurrencyCode,
@@ -3810,48 +3848,68 @@ export async function getFuelOperationsWorkspace(
         pumpCode: nozzle.pump.code,
         tankCode: nozzle.tank.code,
         productCode: nozzle.productProfile?.code ?? null,
+        operatingSiteId: nozzle.tank.operatingSiteId,
+        siteCode: siteById.get(nozzle.tank.operatingSiteId ?? "")?.code ?? null,
         openingMeterReading: toNumber(nozzle.openingMeterReading),
         currentMeterReading: toNumber(nozzle.currentMeterReading),
         status: nozzle.status
       })),
-      dipRows: scopedDips.map((dip) => ({
-        dipId: dip.id,
-        tankId: dip.tankId,
-        tankCode: dip.tank.code,
-        dipReference: dip.dipReference,
-        dipDate: dip.dipDate.toISOString(),
-        dipQuantity: toNumber(dip.dipQuantity),
-        waterQuantity: toNumber(dip.waterQuantity),
-        bookQuantity: toNumber(dip.bookQuantity),
-        varianceQuantity: toNumber(dip.varianceQuantity),
-        evidenceImageUrl: dip.evidenceImageUrl,
-        evidenceFileName: dip.evidenceFileName,
-        evidenceCapturedAt: dip.evidenceCapturedAt?.toISOString() ?? null,
-        recordedBy: dip.recordedBy,
-        notes: dip.notes,
-        status: dip.status
-      })),
-      meterReadingRows: scopedMeterReadings.map((reading) => ({
-        meterReadingId: reading.id,
-        nozzleId: reading.nozzleId,
-        nozzleCode: `${reading.nozzle.code}`,
-        tankId: reading.tankId,
-        tankCode: reading.tank.code,
-        readingDate: reading.readingDate.toISOString(),
-        shiftReference: reading.shiftReference,
-        openingMeterReading: toNumber(reading.openingMeterReading),
-        closingMeterReading: toNumber(reading.closingMeterReading),
-        salesQuantity: toNumber(reading.salesQuantity),
-        adjustmentQuantity: toNumber(reading.adjustmentQuantity),
-        unitSellingPrice: toNumber(reading.unitSellingPrice),
-        salesAmount: toNumber(reading.salesAmount),
-        evidenceImageUrl: reading.evidenceImageUrl,
-        evidenceFileName: reading.evidenceFileName,
-        evidenceCapturedAt: reading.evidenceCapturedAt?.toISOString() ?? null,
-        recordedBy: reading.recordedBy,
-        notes: reading.notes,
-        status: reading.status
-      })),
+      dipRows: scopedDips.map((dip) => {
+        const station = stationBySiteId.get(dip.tank.operatingSiteId ?? "") ?? null;
+
+        return {
+          dipId: dip.id,
+          tankId: dip.tankId,
+          tankCode: dip.tank.code,
+          operatingSiteId: dip.tank.operatingSiteId,
+          siteCode: dip.tank.operatingSite?.code ?? null,
+          siteName: dip.tank.operatingSite?.name ?? null,
+          stationCode: station?.stationCode ?? null,
+          stationName: station?.stationName ?? null,
+          dipReference: dip.dipReference,
+          dipDate: dip.dipDate.toISOString(),
+          dipQuantity: toNumber(dip.dipQuantity),
+          waterQuantity: toNumber(dip.waterQuantity),
+          bookQuantity: toNumber(dip.bookQuantity),
+          varianceQuantity: toNumber(dip.varianceQuantity),
+          evidenceImageUrl: dip.evidenceImageUrl,
+          evidenceFileName: dip.evidenceFileName,
+          evidenceCapturedAt: dip.evidenceCapturedAt?.toISOString() ?? null,
+          recordedBy: dip.recordedBy,
+          notes: dip.notes,
+          status: dip.status
+        };
+      }),
+      meterReadingRows: scopedMeterReadings.map((reading) => {
+        const station = stationBySiteId.get(reading.tank.operatingSiteId ?? "") ?? null;
+
+        return {
+          meterReadingId: reading.id,
+          nozzleId: reading.nozzleId,
+          nozzleCode: `${reading.nozzle.code}`,
+          tankId: reading.tankId,
+          tankCode: reading.tank.code,
+          operatingSiteId: reading.tank.operatingSiteId,
+          siteCode: reading.tank.operatingSite?.code ?? null,
+          siteName: reading.tank.operatingSite?.name ?? null,
+          stationCode: station?.stationCode ?? null,
+          stationName: station?.stationName ?? null,
+          readingDate: reading.readingDate.toISOString(),
+          shiftReference: reading.shiftReference,
+          openingMeterReading: toNumber(reading.openingMeterReading),
+          closingMeterReading: toNumber(reading.closingMeterReading),
+          salesQuantity: toNumber(reading.salesQuantity),
+          adjustmentQuantity: toNumber(reading.adjustmentQuantity),
+          unitSellingPrice: toNumber(reading.unitSellingPrice),
+          salesAmount: toNumber(reading.salesAmount),
+          evidenceImageUrl: reading.evidenceImageUrl,
+          evidenceFileName: reading.evidenceFileName,
+          evidenceCapturedAt: reading.evidenceCapturedAt?.toISOString() ?? null,
+          recordedBy: reading.recordedBy,
+          notes: reading.notes,
+          status: reading.status
+        };
+      }),
       deliveryRows: scopedDeliveries.map((delivery) => {
         const uomCodes = Array.from(
           new Set(delivery.lines.map((line) => line.productProfile?.defaultUomCode ?? "LTR"))

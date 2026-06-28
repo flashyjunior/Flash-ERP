@@ -57,6 +57,7 @@ import {
 import {
   enterpriseFuelOperationsMenuItems,
   enterpriseFinanceMenuGroups,
+  enterpriseHumanResourcesMenuItems,
   enterpriseMasterMenuItems,
   enterpriseInventoryMenuItems,
   enterpriseOnlineFuelMenuItems,
@@ -197,29 +198,18 @@ const navigation: NavigationItem[] = [
     children: enterprisePurchasesMenuItems.map((item) => menuItemChild(item))
   },
   {
-    key: "pos",
-    label: "POS",
-    icon: ShoppingCart,
-    href: "/pos"
-  },
-  {
-    key: "sync",
-    label: "Sync",
-    icon: RefreshCcw,
-    href: "/sync"
-  },
-  {
-    key: "operations",
-    label: "Operations",
-    icon: Activity,
-    href: "/operations"
-  },
-  {
     key: "fuel-operations",
     label: "Fuel",
     icon: Fuel,
     href: "/fuel-operations",
     children: enterpriseFuelOperationsMenuItems.map((item) => menuItemChild(item))
+  },
+  {
+    key: "human-resources",
+    label: "Human Resources",
+    icon: Users,
+    href: "/human-resources/organization",
+    children: enterpriseHumanResourcesMenuItems.map((item) => menuItemChild(item))
   },
   {
     key: "reports",
@@ -268,6 +258,7 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   departments: Building2,
   "document-numbering": FileText,
   "financial-statements": BarChart3,
+  "finance-operations": Activity,
   finance: Landmark,
   "fiscal-calendar": CalendarDays,
   foundation: LayoutDashboard,
@@ -280,6 +271,16 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   "fuel-tanks": Warehouse,
   "general-ledger": BookOpen,
   "goods-receipt": PackageCheck,
+  "hr-organization": Building2,
+  "hr-overview": LayoutDashboard,
+  "hr-employees": Users,
+  "hr-attendance": CalendarDays,
+  "hr-documents": FileText,
+  "hr-leave": ClipboardList,
+  "hr-exits": LogOut,
+  "hr-visitors": Users,
+  "hr-payroll": Wallet,
+  "hr-reports": BarChart3,
   "in-transit": PackageCheck,
   "inventory-catalogs": ClipboardList,
   "journal-inquiry": Search,
@@ -287,6 +288,7 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   ldap: KeyRound,
   ledger: BookOpen,
   licenses: KeyRound,
+  "leave-types": CalendarDays,
   loyalty: Gift,
   "online-fuel-dips": Gauge,
   "online-fuel-meter-readings": Gauge,
@@ -298,6 +300,7 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   "online-users": Activity,
   "operating-foundation": Building2,
   "operational-documents": FileText,
+  operations: Activity,
   options: Settings2,
   organization: Building2,
   "party-profiles": Users,
@@ -305,6 +308,7 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   "payroll-gl": Users,
   "planning-payroll": BarChart3,
   "posting-setup": Settings2,
+  pos: ShoppingCart,
   "predictive-review": BarChart3,
   products: Package,
   promotions: Tags,
@@ -322,6 +326,8 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   "stock-count": ClipboardList,
   stores: Store,
   suppliers: UserCog,
+  sync: RefreshCcw,
+  system: Settings2,
   tax: Percent,
   "tax-setup": Percent,
   tenders: CreditCard,
@@ -462,28 +468,30 @@ export function EnterpriseShell({
   );
   const sidebarNavigation = useMemo(() => {
     const visibleNavigation = navigation.filter((item) => !item.hiddenInSidebar);
+    const filterChildrenByPermission = (item: NavigationItem) => ({
+      ...item,
+      children: item.children?.filter(
+        (child) =>
+          !child.requiredPermissions?.length ||
+          child.requiredPermissions.every((permissionCode) =>
+            sessionPermissionCodes.has(permissionCode)
+          )
+      )
+    });
 
     if (isOnlineStoreSession) {
       return visibleNavigation
         .filter((item) => item.key === "online-store" || item.key === "online-fuel-management")
-        .map((item) => ({
-          ...item,
-          children: item.children?.filter(
-            (child) =>
-              !child.requiredPermissions?.length ||
-              child.requiredPermissions.every((permissionCode) =>
-                sessionPermissionCodes.has(permissionCode)
-              )
-          )
-        }))
+        .map(filterChildrenByPermission)
         .filter(
           (item) => item.key !== "online-fuel-management" || Boolean(item.children?.length)
         );
     }
 
-    return visibleNavigation.filter(
-      (item) => item.key !== "online-store" && item.key !== "online-fuel-management"
-    );
+    return visibleNavigation
+      .filter((item) => item.key !== "online-store" && item.key !== "online-fuel-management")
+      .map(filterChildrenByPermission)
+      .filter((item) => !item.children || item.children.length > 0);
   }, [isOnlineStoreSession, sessionPermissionCodes]);
   const activeNavigationMatch = useMemo(
     () => findActiveNavigationMatch(pathname, sidebarNavigation, activeSection),

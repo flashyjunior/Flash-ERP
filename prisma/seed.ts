@@ -31,6 +31,119 @@ const permissionSeeds = securityPermissionCatalog.map((permission) => ({
   description: permission.description
 }));
 
+const hrPermissionCodes = [
+  "hr.view",
+  "hr.organization.manage",
+  "hr.employee.manage",
+  "hr.compensation.view",
+  "hr.compensation.manage",
+  "hr.attendance.manage",
+  "hr.leave.manage",
+  "hr.document.manage",
+  "hr.exit.manage",
+  "hr.visitor.view",
+  "hr.visitor.manage",
+  "hr.payroll.view",
+  "hr.payroll.manage",
+  "hr.payroll.approve",
+  "hr.payroll.file",
+  "hr.benefits.manage",
+  "hr.employee-finance.view",
+  "hr.employee-finance.manage",
+  "hr.employee-finance.approve"
+];
+
+const hrEmployeeCategorySeeds = [
+  {
+    code: "PERMANENT",
+    name: "Permanent",
+    description: "Employees engaged on an ongoing permanent basis."
+  },
+  {
+    code: "CONTRACT",
+    name: "Contract",
+    description: "Employees engaged under a fixed-term employment contract."
+  },
+  {
+    code: "CASUAL",
+    name: "Casual",
+    description: "Employees engaged for casual, temporary, or daily-rated work."
+  },
+  {
+    code: "INTERN",
+    name: "Intern",
+    description: "Employees engaged under an internship or attachment arrangement."
+  }
+];
+
+const hrLeaveTypeSeeds = [
+  {
+    code: "ANNUAL",
+    name: "Annual Leave",
+    description: "Paid annual leave entitlement.",
+    defaultDays: 20,
+    isPaid: true,
+    requiresAttachment: false,
+    genderEligibility: "ALL"
+  },
+  {
+    code: "SICK",
+    name: "Sick Leave",
+    description: "Leave for illness or medical recovery.",
+    defaultDays: 10,
+    isPaid: true,
+    requiresAttachment: true,
+    genderEligibility: "ALL"
+  },
+  {
+    code: "MATERNITY",
+    name: "Maternity Leave",
+    description: "Maternity leave entitlement.",
+    defaultDays: 84,
+    isPaid: true,
+    requiresAttachment: true,
+    genderEligibility: "FEMALE"
+  },
+  {
+    code: "PATERNITY",
+    name: "Paternity Leave",
+    description: "Paternity leave entitlement.",
+    defaultDays: 5,
+    isPaid: true,
+    requiresAttachment: true,
+    genderEligibility: "MALE"
+  }
+];
+
+const hrDepartmentSeeds = [
+  { code: "HR", name: "Human Resources", description: "People, organization, and workplace administration." },
+  { code: "FIN", name: "Finance", description: "Accounting, treasury, control, and financial reporting." },
+  { code: "OPS", name: "Operations", description: "Operational delivery, stores, and field supervision." },
+  { code: "SALES", name: "Sales & Marketing", description: "Commercial sales, customer growth, and marketing." }
+];
+
+const hrPositionSeeds = [
+  { code: "HR-MGR", title: "HR Manager", departmentCode: "HR", reportsToCode: null },
+  { code: "HR-OFFICER", title: "HR Officer", departmentCode: "HR", reportsToCode: "HR-MGR" },
+  { code: "FIN-MGR", title: "Finance Manager", departmentCode: "FIN", reportsToCode: null },
+  { code: "ACC-OFFICER", title: "Accounts Officer", departmentCode: "FIN", reportsToCode: "FIN-MGR" },
+  { code: "OPS-MGR", title: "Operations Manager", departmentCode: "OPS", reportsToCode: null },
+  { code: "STORE-SUP", title: "Store Supervisor", departmentCode: "OPS", reportsToCode: "OPS-MGR" },
+  { code: "SALES-MGR", title: "Sales Manager", departmentCode: "SALES", reportsToCode: null },
+  { code: "SALES-OFFICER", title: "Sales Officer", departmentCode: "SALES", reportsToCode: "SALES-MGR" }
+];
+
+const hrEmployeeSeeds = [
+  { firstName: "Ama", lastName: "Mensah", gender: "FEMALE", email: "ama.mensah@flash-erp.local", departmentCode: "HR", positionCode: "HR-MGR", managerEmail: null, departmentHead: true, assignPrimaryStore: false },
+  { firstName: "Abena", lastName: "Osei", gender: "FEMALE", email: "abena.osei@flash-erp.local", departmentCode: "HR", positionCode: "HR-OFFICER", managerEmail: "ama.mensah@flash-erp.local", departmentHead: false, assignPrimaryStore: false },
+  { firstName: "Kwame", lastName: "Asante", gender: "MALE", email: "kwame.asante@flash-erp.local", departmentCode: "FIN", positionCode: "FIN-MGR", managerEmail: null, departmentHead: true, assignPrimaryStore: false },
+  { firstName: "Efua", lastName: "Addo", gender: "FEMALE", email: "efua.addo@flash-erp.local", departmentCode: "FIN", positionCode: "ACC-OFFICER", managerEmail: "kwame.asante@flash-erp.local", departmentHead: false, assignPrimaryStore: false },
+  { firstName: "Akosua", lastName: "Owusu", gender: "FEMALE", email: "akosua.owusu@flash-erp.local", departmentCode: "OPS", positionCode: "OPS-MGR", managerEmail: null, departmentHead: true, assignPrimaryStore: false },
+  { firstName: "Kofi", lastName: "Nyarko", gender: "MALE", email: "kofi.nyarko@flash-erp.local", departmentCode: "OPS", positionCode: "STORE-SUP", managerEmail: "akosua.owusu@flash-erp.local", departmentHead: false, assignPrimaryStore: true },
+  { firstName: "Kojo", lastName: "Boateng", gender: "MALE", email: "kojo.boateng@flash-erp.local", departmentCode: "SALES", positionCode: "SALES-MGR", managerEmail: null, departmentHead: true, assignPrimaryStore: false },
+  { firstName: "Yaa", lastName: "Tetteh", gender: "FEMALE", email: "yaa.tetteh@flash-erp.local", departmentCode: "SALES", positionCode: "SALES-OFFICER", managerEmail: "kojo.boateng@flash-erp.local", departmentHead: false, assignPrimaryStore: false }
+];
+
 const demoCompanySettings = {
   legalName: "Flash ERP Group",
   tradingName: "Flash ERP",
@@ -1235,6 +1348,375 @@ async function ensureFuelMasterDataSeedDefaults(
   }
 }
 
+async function ensureHrOrganizationSeedDefaults(retailOrgId: string) {
+  const primaryCompany = await prisma.erpCompany.findFirst({
+    where: {
+      retailOrgId,
+      status: "ACTIVE"
+    },
+    orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  if (!primaryCompany) {
+    return;
+  }
+
+  for (const category of hrEmployeeCategorySeeds) {
+    await prisma.erpEmployeeCategory.upsert({
+      where: {
+        companyId_code: {
+          companyId: primaryCompany.id,
+          code: category.code
+        }
+      },
+      update: {},
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        ...category,
+        status: "ACTIVE",
+        createdBy: "SYSTEM-SEED",
+        updatedBy: "SYSTEM-SEED"
+      }
+    });
+  }
+
+  for (const leaveType of hrLeaveTypeSeeds) {
+    await prisma.erpLeaveType.upsert({
+      where: {
+        companyId_code: {
+          companyId: primaryCompany.id,
+          code: leaveType.code
+        }
+      },
+      update: {},
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        ...leaveType,
+        status: "ACTIVE",
+        createdBy: "SYSTEM-SEED",
+        updatedBy: "SYSTEM-SEED"
+      }
+    });
+  }
+
+  const departmentByCode = new Map<string, { id: string; financeDimensionId: string }>();
+  for (const departmentSeed of hrDepartmentSeeds) {
+    const dimension = await prisma.erpFinanceDimension.upsert({
+      where: {
+        companyId_dimensionType_code: {
+          companyId: primaryCompany.id,
+          dimensionType: "DEPARTMENT",
+          code: departmentSeed.code
+        }
+      },
+      update: {
+        name: departmentSeed.name,
+        description: departmentSeed.description,
+        status: "ACTIVE"
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        dimensionType: "DEPARTMENT",
+        code: departmentSeed.code,
+        name: departmentSeed.name,
+        description: departmentSeed.description,
+        status: "ACTIVE"
+      }
+    });
+    const department = await prisma.erpHrDepartment.upsert({
+      where: { companyId_code: { companyId: primaryCompany.id, code: departmentSeed.code } },
+      update: {},
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        financeDimensionId: dimension.id,
+        code: departmentSeed.code,
+        name: departmentSeed.name,
+        description: departmentSeed.description,
+        status: "ACTIVE",
+        createdBy: "SYSTEM-SEED",
+        updatedBy: "SYSTEM-SEED"
+      },
+      select: { id: true, financeDimensionId: true }
+    });
+    departmentByCode.set(departmentSeed.code, department);
+  }
+
+  const positionByCode = new Map<string, { id: string }>();
+  for (const positionSeed of hrPositionSeeds) {
+    const department = departmentByCode.get(positionSeed.departmentCode);
+    if (!department) continue;
+    const position = await prisma.erpHrPosition.upsert({
+      where: { companyId_code: { companyId: primaryCompany.id, code: positionSeed.code } },
+      update: {},
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        departmentId: department.id,
+        code: positionSeed.code,
+        title: positionSeed.title,
+        description: `${positionSeed.title} position.`,
+        status: "ACTIVE",
+        createdBy: "SYSTEM-SEED",
+        updatedBy: "SYSTEM-SEED"
+      },
+      select: { id: true }
+    });
+    positionByCode.set(positionSeed.code, position);
+  }
+  for (const positionSeed of hrPositionSeeds) {
+    if (!positionSeed.reportsToCode) continue;
+    const position = positionByCode.get(positionSeed.code);
+    const managerPosition = positionByCode.get(positionSeed.reportsToCode);
+    if (position && managerPosition) {
+      await prisma.erpHrPosition.updateMany({
+        where: { id: position.id, reportsToPositionId: null },
+        data: { reportsToPositionId: managerPosition.id, updatedBy: "SYSTEM-SEED" }
+      });
+    }
+  }
+
+  const fiscalYear = await prisma.erpFiscalYear.findFirst({
+    where: {
+      companyId: primaryCompany.id,
+      status: {
+        not: "CLOSED"
+      }
+    },
+    orderBy: [{ startsOn: "desc" }, { code: "desc" }],
+    select: {
+      id: true
+    }
+  });
+
+  if (!fiscalYear) {
+    return;
+  }
+
+  for (const sequence of [
+    { documentType: "HR_EMPLOYEE", prefix: "EMP" },
+    { documentType: "HR_VISITOR", prefix: "VIS" },
+    { documentType: "HR_LEAVE", prefix: "LV" },
+    { documentType: "HR_DOCUMENT", prefix: "HRD" },
+    { documentType: "HR_EXIT", prefix: "EXT" },
+    { documentType: "PAYROLL_RUN", prefix: "PAY" },
+    { documentType: "PAYROLL_FILING", prefix: "PF" },
+    { documentType: "EMPLOYEE_LOAN", prefix: "EL" },
+    { documentType: "EXPENSE_CLAIM", prefix: "EC" },
+    { documentType: "TRAVEL_REQUEST", prefix: "TRV" }
+  ]) {
+    await prisma.erpDocumentSequence.upsert({
+      where: {
+        companyId_documentType_fiscalYearId: {
+          companyId: primaryCompany.id,
+          documentType: sequence.documentType,
+          fiscalYearId: fiscalYear.id
+        }
+      },
+      update: {
+        prefix: sequence.prefix,
+        resetPolicy: ["HR_LEAVE", "PAYROLL_RUN", "PAYROLL_FILING", "EMPLOYEE_LOAN", "EXPENSE_CLAIM", "TRAVEL_REQUEST"].includes(sequence.documentType)
+          ? "FISCAL_YEAR"
+          : "NEVER",
+        status: "ACTIVE"
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        fiscalYearId: fiscalYear.id,
+        documentType: sequence.documentType,
+        prefix: sequence.prefix,
+        nextSequence: 1,
+        paddingLength: 6,
+        resetPolicy: ["HR_LEAVE", "PAYROLL_RUN", "PAYROLL_FILING", "EMPLOYEE_LOAN", "EXPENSE_CLAIM", "TRAVEL_REQUEST"].includes(sequence.documentType)
+          ? "FISCAL_YEAR"
+          : "NEVER",
+        status: "ACTIVE"
+      }
+    });
+  }
+
+  const statutoryRuleSet = await prisma.erpPayrollStatutoryRuleSet.upsert({
+    where: {
+      companyId_code: {
+        companyId: primaryCompany.id,
+        code: "GH-2026"
+      }
+    },
+    update: {
+      name: "Ghana Payroll Statutory Rules 2026",
+      countryCode: "GH",
+      currencyCode: "GHS",
+      effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+      effectiveTo: null,
+      employeePensionRate: "5.5000",
+      employerPensionRate: "13.0000",
+      ssnitRemittanceRate: "13.5000",
+      tier2Rate: "5.0000",
+      minimumInsurableEarnings: "587.80",
+      maximumInsurableEarnings: "69000.00",
+      nonResidentTaxRate: "25.0000",
+      casualWorkerTaxRate: "5.0000",
+      payeFilingDueDay: 15,
+      pensionFilingDueDay: 14,
+      sourceName: "GRA PAYE bands (effective 2024) and SSNIT/NPRA pension rules (2026 limits)",
+      sourceUrl: "https://gra.gov.gh/domestic-tax/tax-types/paye/",
+      pensionSourceUrl:
+        "https://www.ssnit.org.gh/wp-content/uploads/2026/01/Public-Notice-Min-Max-Insurable.pdf",
+      status: "ACTIVE",
+      updatedBy: "SYSTEM-SEED"
+    },
+    create: {
+      retailOrgId,
+      companyId: primaryCompany.id,
+      code: "GH-2026",
+      name: "Ghana Payroll Statutory Rules 2026",
+      countryCode: "GH",
+      currencyCode: "GHS",
+      effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+      employeePensionRate: "5.5000",
+      employerPensionRate: "13.0000",
+      ssnitRemittanceRate: "13.5000",
+      tier2Rate: "5.0000",
+      minimumInsurableEarnings: "587.80",
+      maximumInsurableEarnings: "69000.00",
+      nonResidentTaxRate: "25.0000",
+      casualWorkerTaxRate: "5.0000",
+      payeFilingDueDay: 15,
+      pensionFilingDueDay: 14,
+      sourceName: "GRA PAYE bands (effective 2024) and SSNIT/NPRA pension rules (2026 limits)",
+      sourceUrl: "https://gra.gov.gh/domestic-tax/tax-types/paye/",
+      pensionSourceUrl:
+        "https://www.ssnit.org.gh/wp-content/uploads/2026/01/Public-Notice-Min-Max-Insurable.pdf",
+      status: "ACTIVE",
+      createdBy: "SYSTEM-SEED",
+      updatedBy: "SYSTEM-SEED"
+    }
+  });
+
+  const monthlyPayeBands = [
+    { sequenceNo: 1, bandAmount: "490.00", ratePercent: "0.0000", description: "First GHS 490" },
+    { sequenceNo: 2, bandAmount: "110.00", ratePercent: "5.0000", description: "Next GHS 110" },
+    { sequenceNo: 3, bandAmount: "130.00", ratePercent: "10.0000", description: "Next GHS 130" },
+    { sequenceNo: 4, bandAmount: "3166.67", ratePercent: "17.5000", description: "Next GHS 3,166.67" },
+    { sequenceNo: 5, bandAmount: "16000.00", ratePercent: "25.0000", description: "Next GHS 16,000" },
+    { sequenceNo: 6, bandAmount: "30520.00", ratePercent: "30.0000", description: "Next GHS 30,520" },
+    { sequenceNo: 7, bandAmount: null, ratePercent: "35.0000", description: "Exceeding GHS 50,416.67" }
+  ];
+
+  for (const band of monthlyPayeBands) {
+    await prisma.erpPayrollTaxBand.upsert({
+      where: {
+        statutoryRuleSetId_sequenceNo: {
+          statutoryRuleSetId: statutoryRuleSet.id,
+          sequenceNo: band.sequenceNo
+        }
+      },
+      update: {
+        bandAmount: band.bandAmount,
+        ratePercent: band.ratePercent,
+        description: band.description
+      },
+      create: {
+        retailOrgId,
+        companyId: primaryCompany.id,
+        statutoryRuleSetId: statutoryRuleSet.id,
+        ...band
+      }
+    });
+  }
+
+  const permanentCategory = await prisma.erpEmployeeCategory.findUnique({
+    where: { companyId_code: { companyId: primaryCompany.id, code: "PERMANENT" } },
+    select: { id: true }
+  });
+  const employeeSequence = await prisma.erpDocumentSequence.findUnique({
+    where: {
+      companyId_documentType_fiscalYearId: {
+        companyId: primaryCompany.id,
+        documentType: "HR_EMPLOYEE",
+        fiscalYearId: fiscalYear.id
+      }
+    }
+  });
+  const primaryStore = await prisma.store.findFirst({
+    where: { retailOrgId, status: "ACTIVE" },
+    orderBy: { code: "asc" },
+    select: { id: true }
+  });
+  if (!permanentCategory || !employeeSequence) return;
+
+  const employeeByEmail = new Map<string, { id: string }>();
+  for (const employeeSeed of hrEmployeeSeeds) {
+    let employee = await prisma.erpEmployee.findFirst({
+      where: { companyId: primaryCompany.id, email: employeeSeed.email },
+      select: { id: true }
+    });
+    if (!employee) {
+      const department = departmentByCode.get(employeeSeed.departmentCode);
+      const position = positionByCode.get(employeeSeed.positionCode);
+      if (!department || !position) continue;
+      const updatedSequence = await prisma.erpDocumentSequence.update({
+        where: { id: employeeSequence.id },
+        data: { nextSequence: { increment: 1 } },
+        select: { prefix: true, nextSequence: true, paddingLength: true }
+      });
+      const sequenceNo = updatedSequence.nextSequence - 1;
+      const employeeNo = `${updatedSequence.prefix}-${String(sequenceNo).padStart(updatedSequence.paddingLength, "0")}`;
+      employee = await prisma.erpEmployee.create({
+        data: {
+          retailOrgId,
+          companyId: primaryCompany.id,
+          employeeNo,
+          primaryStoreId: employeeSeed.assignPrimaryStore ? primaryStore?.id ?? null : null,
+          departmentId: department.id,
+          positionId: position.id,
+          employeeCategoryId: permanentCategory.id,
+          firstName: employeeSeed.firstName,
+          lastName: employeeSeed.lastName,
+          displayName: `${employeeSeed.firstName} ${employeeSeed.lastName}`,
+          gender: employeeSeed.gender,
+          email: employeeSeed.email,
+          employmentDate: new Date("2026-01-02T00:00:00.000Z"),
+          salaryType: "SALARIED",
+          status: "ACTIVE",
+          createdBy: "SYSTEM-SEED",
+          updatedBy: "SYSTEM-SEED"
+        },
+        select: { id: true }
+      });
+    }
+    employeeByEmail.set(employeeSeed.email, employee);
+  }
+  for (const employeeSeed of hrEmployeeSeeds) {
+    const employee = employeeByEmail.get(employeeSeed.email);
+    const manager = employeeSeed.managerEmail
+      ? employeeByEmail.get(employeeSeed.managerEmail)
+      : null;
+    if (employee && manager) {
+      await prisma.erpEmployee.updateMany({
+        where: { id: employee.id, reportingManagerId: null },
+        data: { reportingManagerId: manager.id, updatedBy: "SYSTEM-SEED" }
+      });
+    }
+    if (employee && employeeSeed.departmentHead) {
+      const department = departmentByCode.get(employeeSeed.departmentCode);
+      if (department) {
+        await prisma.erpHrDepartment.updateMany({
+          where: { id: department.id, headEmployeeId: null },
+          data: { headEmployeeId: employee.id, updatedBy: "SYSTEM-SEED" }
+        });
+      }
+    }
+  }
+}
+
 async function upsertPermissionSeeds() {
   for (const permission of permissionSeeds) {
     await prisma.permission.upsert({
@@ -1271,12 +1753,7 @@ async function main() {
 
   const retailOrg = await prisma.retailOrg.upsert({
     where: { code: "flash-erp" },
-    update: {
-      name: "Flash ERP Group",
-      baseCurrencyCode: process.env.FLASH_ERP_DEFAULT_CURRENCY ?? "USD",
-      timezone: process.env.FLASH_ERP_DEFAULT_TIMEZONE ?? "Africa/Accra",
-      companySettingsJson: serializeJson(demoCompanySettings)
-    },
+    update: {},
     create: {
       code: "flash-erp",
       name: "Flash ERP Group",
@@ -1783,10 +2260,120 @@ async function main() {
     }
   });
 
+  const hrAdminRole = await prisma.role.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: retailOrg.id,
+        code: "HR_ADMIN"
+      }
+    },
+    update: {
+      name: "HR Administrator",
+      description: "Full Human Resources administration, compensation, and visitor-management access."
+    },
+    create: {
+      retailOrgId: retailOrg.id,
+      code: "HR_ADMIN",
+      name: "HR Administrator",
+      description: "Full Human Resources administration, compensation, and visitor-management access."
+    }
+  });
+
+  const hrOfficerRole = await prisma.role.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: retailOrg.id,
+        code: "HR_OFFICER"
+      }
+    },
+    update: {
+      name: "HR Officer",
+      description: "Day-to-day employee, attendance, leave, document, and exit administration."
+    },
+    create: {
+      retailOrgId: retailOrg.id,
+      code: "HR_OFFICER",
+      name: "HR Officer",
+      description: "Day-to-day employee, attendance, leave, document, and exit administration."
+    }
+  });
+
+  const hrManagerRole = await prisma.role.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: retailOrg.id,
+        code: "HR_MANAGER"
+      }
+    },
+    update: {
+      name: "HR Manager",
+      description: "HR oversight and attendance or leave approval access without compensation maintenance."
+    },
+    create: {
+      retailOrgId: retailOrg.id,
+      code: "HR_MANAGER",
+      name: "HR Manager",
+      description: "HR oversight and attendance or leave approval access without compensation maintenance."
+    }
+  });
+
+  const visitorReceptionRole = await prisma.role.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: retailOrg.id,
+        code: "VISITOR_RECEPTION"
+      }
+    },
+    update: {
+      name: "Visitor Reception",
+      description: "Reception and security access to register and manage visitor movements."
+    },
+    create: {
+      retailOrgId: retailOrg.id,
+      code: "VISITOR_RECEPTION",
+      name: "Visitor Reception",
+      description: "Reception and security access to register and manage visitor movements."
+    }
+  });
+
   await ensureRolePermissions(
     hqRole.id,
     permissionSeeds.map((permission) => permission.code)
   );
+  await ensureRolePermissions(hrAdminRole.id, hrPermissionCodes);
+  await ensureRolePermissions(hrOfficerRole.id, [
+    "hr.view",
+    "hr.organization.manage",
+    "hr.employee.manage",
+    "hr.compensation.view",
+    "hr.attendance.manage",
+    "hr.leave.manage",
+    "hr.document.manage",
+    "hr.exit.manage",
+    "hr.visitor.view",
+    "hr.visitor.manage",
+    "hr.payroll.view",
+    "hr.payroll.manage",
+    "hr.payroll.file",
+    "hr.benefits.manage",
+    "hr.employee-finance.view",
+    "hr.employee-finance.manage"
+  ]);
+  await ensureRolePermissions(hrManagerRole.id, [
+    "hr.view",
+    "hr.attendance.manage",
+    "hr.leave.manage",
+    "hr.visitor.view",
+    "hr.payroll.view",
+    "hr.payroll.approve",
+    "hr.employee-finance.view",
+    "hr.employee-finance.approve"
+  ]);
+  await ensureRolePermissions(visitorReceptionRole.id, [
+    "hr.view",
+    "hr.visitor.view",
+    "hr.visitor.manage"
+  ]);
   await ensureRolePermissions(storeManagerRole.id, [
     "inventory.view",
     "inventory.adjust",
@@ -1870,12 +2457,7 @@ async function main() {
           code: blueprint.storeCode
         }
       },
-      update: {
-        name: blueprint.storeName,
-        storeMode: blueprint.storeMode,
-        timezone: "Africa/Accra",
-        currencyCode: retailOrg.baseCurrencyCode
-      },
+      update: {},
       create: {
         retailOrgId: retailOrg.id,
         code: blueprint.storeCode,
@@ -2122,6 +2704,7 @@ async function main() {
     uomDefaults,
     storesWithNodes
   );
+  await ensureHrOrganizationSeedDefaults(retailOrg.id);
 
   if (!seedRetailDemoData) {
     await prisma.bankingDeposit.deleteMany({

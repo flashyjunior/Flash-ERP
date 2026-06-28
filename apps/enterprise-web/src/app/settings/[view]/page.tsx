@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { EnterpriseInventoryCatalogWorkspace } from "@/components/enterprise/enterprise-inventory-catalog-workspace";
 import { EnterpriseLicenseWorkspace } from "@/components/enterprise/enterprise-license-workspace";
 import { EnterpriseSettingsWorkspace } from "@/components/enterprise/enterprise-settings-workspace";
+import { ErpHrLeaveTypesSettingsWorkspace } from "@/components/enterprise/erp-hr-leave-types-settings-workspace";
 import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableEnterpriseCatalogWorkspace,
@@ -20,6 +21,10 @@ import {
   buildUnavailableFuelOperationsSettingsWorkspace,
   getFuelOperationsSettingsWorkspace
 } from "@/server/repositories/erp-fuel-operations.repository";
+import {
+  buildUnavailableErpLeaveTypesSettingsWorkspace,
+  getErpLeaveTypesSettingsWorkspace
+} from "@/server/repositories/erp-hr-leave.repository";
 import {
   buildUnavailableEnterpriseSetupWorkspace,
   getEnterpriseSetupWorkspace
@@ -59,6 +64,7 @@ export default async function SettingsSubmenuPage({
     sms: "settings.sms.manage",
     "inventory-catalogs": "master.product.manage",
     "fuel-operations": "settings.company.manage",
+    "leave-types": "hr.leave.manage",
     "shop-prices": "master.product.manage",
     licenses: "master.store.manage",
     "receipt-templates": "settings.receipt-template.manage",
@@ -67,6 +73,17 @@ export default async function SettingsSubmenuPage({
   };
 
   await requireEnterprisePermission([permissionByView[view]]);
+
+  if (view === "leave-types") {
+    const workspace = await getErpLeaveTypesSettingsWorkspace().catch((error: unknown) =>
+      buildUnavailableErpLeaveTypesSettingsWorkspace(
+        error instanceof Error
+          ? `Unable to load Flash ERP leave type settings: ${error.message}`
+          : "Unable to load Flash ERP leave type settings."
+      )
+    );
+    return <ErpHrLeaveTypesSettingsWorkspace workspace={workspace} />;
+  }
 
   if (view === "inventory-catalogs") {
     const workspace = await getEnterpriseCatalogWorkspace().catch((error: unknown) =>

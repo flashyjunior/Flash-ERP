@@ -522,6 +522,105 @@ const catalog = [
         sortOrder: 470
     },
     {
+        code: "hr.view",
+        name: "View human resources",
+        description: "View non-sensitive employee, organization, attendance, leave, exit, and visitor information.",
+        domain: "Human Resources",
+        group: "HR access",
+        surface: "enterprise",
+        sortOrder: 500
+    },
+    {
+        code: "hr.organization.manage",
+        name: "Manage HR organization",
+        description: "Create and maintain HR departments, positions, reporting structures, and employee categories.",
+        domain: "Human Resources",
+        group: "Organization",
+        surface: "enterprise",
+        sortOrder: 510
+    },
+    {
+        code: "hr.employee.manage",
+        name: "Manage employees",
+        description: "Create and maintain employee master and employment records.",
+        domain: "Human Resources",
+        group: "Employees",
+        surface: "enterprise",
+        sortOrder: 520
+    },
+    {
+        code: "hr.compensation.view",
+        name: "View compensation setup",
+        description: "View protected employee salary, allowance, deduction, statutory, and bank setup.",
+        domain: "Human Resources",
+        group: "Compensation",
+        surface: "enterprise",
+        sortOrder: 530
+    },
+    {
+        code: "hr.compensation.manage",
+        name: "Manage compensation setup",
+        description: "Maintain protected employee payroll setup data without running payroll.",
+        domain: "Human Resources",
+        group: "Compensation",
+        surface: "enterprise",
+        sortOrder: 540
+    },
+    {
+        code: "hr.attendance.manage",
+        name: "Manage attendance",
+        description: "Enter and correct daily employee attendance, lateness, absence, and overtime records.",
+        domain: "Human Resources",
+        group: "Attendance and leave",
+        surface: "enterprise",
+        sortOrder: 550
+    },
+    {
+        code: "hr.leave.manage",
+        name: "Manage leave",
+        description: "Maintain leave types, balances, requests, approvals, rejection, and cancellation.",
+        domain: "Human Resources",
+        group: "Attendance and leave",
+        surface: "enterprise",
+        sortOrder: 560
+    },
+    {
+        code: "hr.document.manage",
+        name: "Manage HR documents",
+        description: "Upload and maintain protected employee document metadata and files.",
+        domain: "Human Resources",
+        group: "Documents and exits",
+        surface: "enterprise",
+        sortOrder: 570
+    },
+    {
+        code: "hr.exit.manage",
+        name: "Manage employee exits",
+        description: "Record and finalize employee resignation, termination, settlement, and asset-return details.",
+        domain: "Human Resources",
+        group: "Documents and exits",
+        surface: "enterprise",
+        sortOrder: 580
+    },
+    {
+        code: "hr.visitor.view",
+        name: "View visitor register",
+        description: "View expected visitors, visitors currently on premises, and visit history.",
+        domain: "Human Resources",
+        group: "Visitor management",
+        surface: "enterprise",
+        sortOrder: 590
+    },
+    {
+        code: "hr.visitor.manage",
+        name: "Manage visitor register",
+        description: "Register, check in, check out, and cancel visitor records.",
+        domain: "Human Resources",
+        group: "Visitor management",
+        surface: "enterprise",
+        sortOrder: 600
+    },
+    {
         code: "catalog.manage",
         name: "Legacy catalog management",
         description: "Legacy compatibility permission for broad catalog maintenance access.",

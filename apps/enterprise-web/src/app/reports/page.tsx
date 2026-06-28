@@ -17,8 +17,20 @@ type ReportsPageProps = {
 };
 
 export default async function ReportsPage({ searchParams }: ReportsPageProps) {
-  await requireEnterprisePermission(["operations.dashboard.view"]);
+  const session = await requireEnterprisePermission(
+    ["operations.dashboard.view", "hr.view"],
+    { any: true }
+  );
+  const canViewOperationalReports = session.permissionCodes.includes("operations.dashboard.view");
+  const canViewHrReports = session.permissionCodes.includes("hr.view");
   const filters = (await searchParams) ?? {};
+
+  if (!canViewOperationalReports) {
+    const { EnterpriseHrReportsCatalog } = await import(
+      "@/components/enterprise/enterprise-hr-reports-catalog"
+    );
+    return <EnterpriseHrReportsCatalog />;
+  }
   const reportFilters = {
     storeCode: filters.shop ?? "",
     dateFrom: filters.from ?? "",
@@ -33,5 +45,11 @@ export default async function ReportsPage({ searchParams }: ReportsPageProps) {
     )
   );
 
-  return <EnterpriseReportingDashboard dashboard={dashboard} initialReportId={filters.report ?? null} />;
+  return (
+    <EnterpriseReportingDashboard
+      canViewHrReports={canViewHrReports}
+      dashboard={dashboard}
+      initialReportId={filters.report ?? null}
+    />
+  );
 }

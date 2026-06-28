@@ -478,6 +478,22 @@ async function ensureDefaultPayrollMappings(
       accountCode: "2020",
       defaultEntrySide: "CREDIT",
       description: "Employer payroll tax liability."
+    },
+    {
+      code: "EMPLOYEE_BENEFITS_LIABILITY",
+      name: "Employee benefits payable",
+      componentType: "LIABILITY",
+      accountCode: "2020",
+      defaultEntrySide: "CREDIT",
+      description: "Employee and employer benefit contributions awaiting remittance."
+    },
+    {
+      code: "EMPLOYEE_ADVANCE_RECOVERY",
+      name: "Employee advance recovery",
+      componentType: "DEDUCTION",
+      accountCode: "1350",
+      defaultEntrySide: "CREDIT",
+      description: "Payroll recovery of employee loans and salary advances."
     }
   ];
 

@@ -5,7 +5,8 @@ export type SecurityPermissionDomain =
   | "Inventory"
   | "POS"
   | "Sync"
-  | "Operations";
+  | "Operations"
+  | "Human Resources";
 
 export type SecurityPermissionSurface = "enterprise" | "store" | "both";
 
@@ -542,6 +543,177 @@ const catalog: SecurityPermissionDefinition[] = [
     group: "Dashboards",
     surface: "enterprise",
     sortOrder: 470
+  },
+  {
+    code: "hr.view",
+    name: "View human resources",
+    description: "View non-sensitive employee, organization, attendance, leave, exit, and visitor information.",
+    domain: "Human Resources",
+    group: "HR access",
+    surface: "enterprise",
+    sortOrder: 500
+  },
+  {
+    code: "hr.organization.manage",
+    name: "Manage HR organization",
+    description: "Create and maintain HR departments, positions, reporting structures, and employee categories.",
+    domain: "Human Resources",
+    group: "Organization",
+    surface: "enterprise",
+    sortOrder: 510
+  },
+  {
+    code: "hr.employee.manage",
+    name: "Manage employees",
+    description: "Create and maintain employee master and employment records.",
+    domain: "Human Resources",
+    group: "Employees",
+    surface: "enterprise",
+    sortOrder: 520
+  },
+  {
+    code: "hr.compensation.view",
+    name: "View compensation setup",
+    description: "View protected employee salary, allowance, deduction, statutory, and bank setup.",
+    domain: "Human Resources",
+    group: "Compensation",
+    surface: "enterprise",
+    sortOrder: 530
+  },
+  {
+    code: "hr.compensation.manage",
+    name: "Manage compensation setup",
+    description: "Maintain protected employee payroll setup data without running payroll.",
+    domain: "Human Resources",
+    group: "Compensation",
+    surface: "enterprise",
+    sortOrder: 540
+  },
+  {
+    code: "hr.attendance.manage",
+    name: "Manage attendance",
+    description: "Enter and correct daily employee attendance, lateness, absence, and overtime records.",
+    domain: "Human Resources",
+    group: "Attendance and leave",
+    surface: "enterprise",
+    sortOrder: 550
+  },
+  {
+    code: "hr.leave.manage",
+    name: "Manage leave",
+    description: "Maintain leave types, balances, requests, approvals, rejection, and cancellation.",
+    domain: "Human Resources",
+    group: "Attendance and leave",
+    surface: "enterprise",
+    sortOrder: 560
+  },
+  {
+    code: "hr.document.manage",
+    name: "Manage HR documents",
+    description: "Upload and maintain protected employee document metadata and files.",
+    domain: "Human Resources",
+    group: "Documents and exits",
+    surface: "enterprise",
+    sortOrder: 570
+  },
+  {
+    code: "hr.exit.manage",
+    name: "Manage employee exits",
+    description: "Record and finalize employee resignation, termination, settlement, and asset-return details.",
+    domain: "Human Resources",
+    group: "Documents and exits",
+    surface: "enterprise",
+    sortOrder: 580
+  },
+  {
+    code: "hr.visitor.view",
+    name: "View visitor register",
+    description: "View expected visitors, visitors currently on premises, and visit history.",
+    domain: "Human Resources",
+    group: "Visitor management",
+    surface: "enterprise",
+    sortOrder: 590
+  },
+  {
+    code: "hr.visitor.manage",
+    name: "Manage visitor register",
+    description: "Register, check in, check out, and cancel visitor records.",
+    domain: "Human Resources",
+    group: "Visitor management",
+    surface: "enterprise",
+    sortOrder: 600
+  },
+  {
+    code: "hr.payroll.view",
+    name: "View payroll",
+    description: "View protected payroll runs, employee calculations, payslips, and statutory filings.",
+    domain: "Human Resources",
+    group: "Payroll",
+    surface: "enterprise",
+    sortOrder: 610
+  },
+  {
+    code: "hr.payroll.manage",
+    name: "Manage payroll",
+    description: "Maintain statutory setup and calculate or recalculate draft payroll runs.",
+    domain: "Human Resources",
+    group: "Payroll",
+    surface: "enterprise",
+    sortOrder: 620
+  },
+  {
+    code: "hr.payroll.approve",
+    name: "Approve payroll",
+    description: "Approve, reopen, and post payroll runs to Finance.",
+    domain: "Human Resources",
+    group: "Payroll",
+    surface: "enterprise",
+    sortOrder: 630
+  },
+  {
+    code: "hr.payroll.file",
+    name: "Manage payroll filings",
+    description: "Export statutory schedules and record PAYE, SSNIT, and Tier-2 filing or payment references.",
+    domain: "Human Resources",
+    group: "Payroll",
+    surface: "enterprise",
+    sortOrder: 640
+  },
+  {
+    code: "hr.benefits.manage",
+    name: "Manage employee benefits",
+    description: "Maintain benefit plans and employee benefit enrollments used by payroll.",
+    domain: "Human Resources",
+    group: "Employee finance",
+    surface: "enterprise",
+    sortOrder: 650
+  },
+  {
+    code: "hr.employee-finance.view",
+    name: "View employee finance workflows",
+    description: "View employee loans, salary advances, expense claims, travel, and their Finance references.",
+    domain: "Human Resources",
+    group: "Employee finance",
+    surface: "enterprise",
+    sortOrder: 660
+  },
+  {
+    code: "hr.employee-finance.manage",
+    name: "Manage employee finance workflows",
+    description: "Create and maintain employee loans, salary advances, expense claims, and travel requests.",
+    domain: "Human Resources",
+    group: "Employee finance",
+    surface: "enterprise",
+    sortOrder: 670
+  },
+  {
+    code: "hr.employee-finance.approve",
+    name: "Approve employee finance workflows",
+    description: "Approve, pay, disburse, and settle employee finance transactions with Finance posting.",
+    domain: "Human Resources",
+    group: "Employee finance",
+    surface: "enterprise",
+    sortOrder: 680
   },
   {
     code: "catalog.manage",

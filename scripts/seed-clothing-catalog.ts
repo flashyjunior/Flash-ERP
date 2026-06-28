@@ -35,7 +35,15 @@ function barcodeFor(index: number) {
   return `899400${String(index).padStart(7, "0")}`;
 }
 
-const fallbackStoreSeeds = [
+type StoreSeed = {
+  code: string;
+  name: string;
+  city: string;
+  storeMode: string;
+  nodeCode: string;
+};
+
+const fallbackStoreSeeds: StoreSeed[] = [
   {
     code: "accra-central",
     name: "Accra Central",
@@ -57,7 +65,7 @@ const fallbackStoreSeeds = [
     storeMode: "OFFLINE_FIRST",
     nodeCode: "store-kumasi-adum-fashion-01"
   }
-] as const;
+];
 
 const departments = [
   {
@@ -789,12 +797,7 @@ async function ensureEnterpriseNode() {
     where: {
       code: "flash-retail"
     },
-    update: {
-      name: "Flash Retail",
-      baseCurrencyCode: process.env.FLASH_ERP_DEFAULT_CURRENCY ?? "GHS",
-      timezone: process.env.FLASH_ERP_DEFAULT_TIMEZONE ?? "Africa/Accra",
-      status: "ACTIVE"
-    },
+    update: {},
     create: {
       code: "flash-retail",
       name: "Flash Retail",
@@ -863,18 +866,7 @@ async function ensureStoreBundle(input: {
         code: input.storeCode
       }
     },
-    update: {
-      name: input.storeName,
-      city: input.city,
-      currencyCode: input.currencyCode,
-      timezone: input.timezone,
-      salesEnabled: true,
-      warehouseEnabled: true,
-      storeMode: input.storeMode,
-      status: "ACTIVE",
-      licenseStatus: "LICENSED",
-      receiptFooter: "Thank you for shopping Sheval Fashion."
-    },
+    update: {},
     create: {
       retailOrgId: input.retailOrgId,
       code: input.storeCode,

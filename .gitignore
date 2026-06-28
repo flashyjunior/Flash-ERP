@@ -31,6 +31,7 @@ apps/store-desktop/sync-runtime-node_modules/
 apps/store-desktop/.vite/
 apps/store-desktop/dist-electron/
 apps/enterprise-web/public/uploads/fuel-evidence/
+apps/enterprise-web/storage/hr-documents/
 tmp/
 .tmp/
 artifacts/

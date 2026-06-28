@@ -1,6 +1,6 @@
 # Flash ERP Implementation Tracker
 
-Updated: 2026-06-26
+Updated: 2026-06-27
 
 This is the live progress ledger for the Flash ERP workspace. Keep it aligned with code as slices land. The tracker is intentionally industry-neutral: product, site, storage, customer, supplier, and document-posting foundations can later support oil, retail, services, distribution, manufacturing, or other operating models.
 
@@ -17,6 +17,12 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - Database target: SQL Server `localhost\sql2017`, database `Flash-ERP`.
 - Current app URL: `http://localhost:3000`.
 - First foundation, AR/AP control setup, shared posting engine, party accounting profiles, document numbering, focused Finance setup pages, GL inquiry pages, generic operational document prototypes, AR/AP settlements, cashbook foundation, bank reconciliation, tax setup, fixed assets foundation, budgeting foundation, payroll GL integration foundation, financial statements, period close controls, recurring/adjusting journals, AR/AP document completion, banking workflow completion, fixed asset lifecycle completion, department/cost-center budgeting, and fuel operations foundation are complete.
+- Basic Human Resources, Visitor Management, HR reporting, full payroll, benefits, employee loans/advances, expense claims, and travel slices `035-050` are complete under [the Basic HR Implementation Tracker](./19-basic-hr-implementation-tracker.md).
+- Full payroll now includes effective-dated Ghana PAYE/SSNIT/Tier-2 rules, gross-to-net runs, protected approval/reopen controls, payslips, statutory schedules/exports, filed/paid tracking, benefits and loan deductions, and balanced posting through the existing Finance Payroll GL mappings and shared accounting engine.
+- HR Reports now live under the central Reports workspace in a Human Resources category, protected payslip generation no longer returns 404 for existing calculated payroll results, and HR/payroll controls have been rounded to match the rest of the application.
+- Benefits, employee loans/salary advances, expense claims, and travel workflows now carry Finance/GL implications through benefit liability mappings, cashbook-backed advance/claim/travel posting, employee receivable tracking, payroll loan recovery, and journal/cashbook drilldowns.
+- HQ Fuel Management now has a cross-page site filter; Tank Dips and Meter Readings expose both site and filling-station context in their grids and can be filtered by site.
+- Sync now appears under Settings, while POS and Operations appear inside Finance navigation without changing their route ownership.
 - Core Finance completion gate is complete. Retail Operations is intentionally deferred for a later module pass. Finance Multi Currency setup, base/functional currency selection from configured `ErpCurrency` rows, Fuel Operations foundation, outbound filling-station transfer tracking, store-sourced fuel sales/payment capture, HQ-direct GRN receiving into PO locations, dedicated Fuel Operations workflow pages, RMS source-location alignment, fuel sales-order fulfillment, site-filtered fuel tank selection, filling-station edit/GPS capture, POS-style Fuel Sale payment capture, functional-currency Fuel Sale defaults, tender-method payment account mappings, tank UOM derivation from selected fuel products, seeded filling-station/tank defaults, customer-credit tender AR posting, shop-linked filling-station transfer destinations, store/shop `COST_CENTER` P&L tracking, transfer-out waybill/feedback handling, actual inventory valuation/GL posting for fuel transfer-outs, online-store POS service type capture, online-store fuel station-side capture routes, online-store supervisor fuel permissions/menu gating, HQ fuel-sales menu removal, and default fuel source/dispatch site settings in Settings are complete as the first industry-specific post-Finance module work.
 - Fuel tank dips and nozzle meter readings now require uploaded photo evidence before saving, with backend validation to prevent bypassing the UI guard.
 - Fuel Operations product choices now follow the RMS catalog: fuel products are selected from active inventory-tracked Products/Item Dynamic stock, with ERP product profiles kept only as compatibility mirrors for existing fuel tables.
@@ -563,7 +569,23 @@ Verified:
 | 031. Fuel delivery transfer-out correction | Done | Correct HQ Fuel Delivery from commercial station sale to internal transfer-out issued to a filling-station shop, with waybill and destination feedback. | Transfer-out uses existing inter-store transfer lifecycle, reduces source stock/tank book quantity, appears in in-transit, online-store can receive it, and feedback can be saved/confirmed/posted. |
 | 032. Fuel transfer valuation and GL posting | Done | Post actual inventory value for HQ fuel transfer-outs and destination feedback through Finance. | Transfer issue and feedback post balanced GL journals using in-transit, source shop, destination shop, and variance accounts while preserving average cost and future FIFO planning. |
 | 033. Store/shop cost-center P&L tracking | Done | Treat stores as Finance cost centers for shop profitability instead of customer accounts. | Store cost centers are seeded/ensured, fuel revenue/COGS/variance postings carry shop cost centers, and Finance statements can filter P&L by shop. |
-| 034. Inventory stock ledger foundation | Next | Add generic item/site/storage quantity movement and stock balance foundations after Fuel Operations workflow correction. | Stock movement history is traceable by item/site/storage and future valuation can post through GL. |
+| 034. Inventory stock ledger foundation | Planned | Add generic item/site/storage quantity movement and stock balance foundations after Fuel Operations workflow correction. | Stock movement history is traceable by item/site/storage and future valuation can post through GL. |
+| 035. HR organization foundation | Done | Add the HR module shell, departments, positions, employee categories, permissions, and Finance department-dimension mapping. | HR organization setup is company-scoped, active departments drive shared dropdowns, and Finance mapping does not create a second department master. |
+| 036. Employee master and payroll setup data | Done | Add staff records, reporting lines, employment details, protected compensation setup, statutory IDs, and bank details without implementing payroll calculation. | Employee records are complete and permission-safe, and payroll setup can feed the existing Payroll GL boundary later. |
+| 037. Attendance foundation | Done | Capture auditable daily attendance, lateness, absence, check-in/out, overtime, and manual corrections. | Attendance can be maintained and summarized by employee, department, shop, status, and date. |
+| 038. Leave management foundation | Done | Add leave types, entitlements, balances, requests, approvals, rejection, and cancellation. | Approved leave consumes balance exactly once and request history remains traceable. |
+| 039. HR document register | Done | Store protected employee-document metadata and file links for contracts, IDs, certificates, warnings, and appraisals. | Documents are permission-gated, searchable, and reportable by type and expiry. |
+| 040. Employee exit management | Done | Track resignation/termination, exit reasons, settlement status, asset return, and finalization. | Exit completion updates employee status without deleting employment history. |
+| 041. Visitor management | Done | Register visitors and manage check-in, check-out, cancellation, host employee, and host HR department. | Reception can monitor visitors on premises and all status/timestamp changes are audited. |
+| 042. Basic HR reporting and completion gate | Done | Add HR overview metrics, operational reports, exports, audit review, and Payroll GL handoff readiness. | Reports reconcile to HR records and all schema/seed/typecheck/build/route gates pass. |
+| 043. Payroll statutory foundation | Done | Add effective-dated Ghana PAYE, SSNIT, pension, and filing-calendar setup. | Statutory rates are configurable, source-referenced, and selected by payroll period. |
+| 044. Payroll calculation and run control | Done | Calculate gross-to-net payroll and preserve employee/component snapshots through review and approval. | Employee calculations reconcile to locked payroll-run totals. |
+| 045. Payslips and statutory filing | Done | Add printable payslips plus PAYE/SSNIT/Tier-2 schedules, exports, and filed/paid tracking. | Outputs reconcile to the approved payroll run and statutory liability totals. |
+| 046. Payroll Finance integration | Done | Post approved payroll expense, net pay, deductions, employer cost, and liabilities through Finance. | One idempotent balanced payroll journal preserves run-to-Finance traceability. |
+| 047. Benefits administration | Done | Add benefit plans/enrollments with payroll and Finance contribution treatment. | Active employee/employer contributions reach payroll and balanced benefit expense/liability posting exactly once. |
+| 048. Employee loans and salary advances | Done | Add approval, disbursement, outstanding balance, payroll recovery, and settlement. | Employee receivable, cash, payroll deduction, and repayment balances reconcile. |
+| 049. Expense claims | Done | Add itemized claims, approval/rejection, payment, expense coding, and Finance posting. | Approved claims post balanced expense/cash journals and cannot be paid twice. |
+| 050. Travel management | Done | Add travel request, approval, advance, actual settlement, return, and Finance posting. | Travel advance, expense, payable, returned cash, and employee balance remain traceable. |
 
 ## Completed Slice Details
 
@@ -1440,7 +1462,11 @@ Verified:
 
 ### 034. Inventory Stock Ledger Foundation
 
-Status: Next
+Status: Planned
+
+Priority note:
+
+- Deferred behind the Basic Human Resources and Visitor Management module beginning with slice 035.
 
 Scope:
 
@@ -1455,6 +1481,283 @@ Acceptance:
 - Stock balances reconcile to movement history by product/site/storage.
 - Future inventory valuation postings can flow through the shared accounting engine.
 - Current average-cost issue values remain traceable from inventory ledger movements, and FIFO valuation is explicitly scoped for the later valuation pass.
+
+### 035. HR Organization Foundation
+
+Status: Done
+
+Tracker:
+
+- [Flash ERP Basic HR Implementation Tracker](./19-basic-hr-implementation-tracker.md)
+
+Scope:
+
+- Add the Human Resources module shell, organization setup, and permission boundaries.
+- Add company-scoped departments, positions, reporting structure preparation, and permanent/contract/casual/intern employee categories.
+- Keep HR Department as the organization source of truth and mirror it to Finance `DEPARTMENT` dimensions for budgeting and later payroll posting.
+- Reuse existing company, user, shop, Finance dimension, document-numbering, upload, and audit patterns.
+
+Acceptance:
+
+- HR departments and positions can be maintained with active/inactive controls and company scope.
+- Department mappings do not create competing HR and Finance department masters.
+- HR navigation and server APIs enforce the planned permission boundary.
+- Prisma format/validate/generate, database push or migration, seed, typecheck, build, and route gates pass when implementation starts.
+
+Implemented:
+
+- Added HR department, position, and employee-category schema, seed, repository, APIs, permissions, roles, navigation, and tabbed setup UI.
+- Synchronized HR departments to Finance `DEPARTMENT` dimensions as one organization source of truth.
+- Seeded employee/visitor numbering and reusable employee categories without demo staff.
+
+Verified:
+
+- Prisma format/validate/generate, SQL Server database push, domain build, seed, domain/enterprise typechecks, live repository smoke, completed production build artifacts, route manifests, and protected route smoke passed.
+
+### 036. Employee Master and Payroll Setup Data
+
+Status: Done
+
+Tracker:
+
+- [Flash ERP Basic HR Implementation Tracker](./19-basic-hr-implementation-tracker.md)
+
+Scope:
+
+- Add the HR-owned employee master, reporting manager, company/shop assignment, employment status, and optional application-user link.
+- Add permission-protected salary, recurring allowance/deduction, statutory, bank, currency, and payment-frequency setup without implementing payroll calculation.
+- Complete department-head assignment from active employee records and preserve the existing Payroll GL integration boundary.
+
+Implemented:
+
+- Added numbered employee records, reporting lines, department/position/category/shop assignment, optional login linkage, status controls, department heads, and protected payroll setup.
+- Added salary, currency, payment frequency, tax/SSNIT IDs, bank details, and recurring allowance/deduction rows without implementing gross-to-net payroll.
+- Added permission-gated APIs and the Employee Master workspace with separate Personal, Employment, and Payroll Setup tabs.
+- Seeded eight practical baseline staff across HR, Finance, Operations, and Sales with reporting lines and department heads, but without compensation or HR transaction data.
+
+Verified:
+
+- Live repository smoke confirmed employee numbering, authorized compensation visibility, and two recurring pay items; disposable records were cleaned.
+- Prisma format/validate/generate, SQL Server push, seed, domain build, enterprise typecheck, production build, and protected route smoke passed.
+
+### 037. Attendance Foundation
+
+Status: Done
+
+Implemented:
+
+- Added one attendance row per employee/work date with check-in/out, lateness, absence/leave/off-day states, overtime, shop/department snapshots, notes, and manual-entry attribution.
+- Added audited corrections with before/after snapshots and validation for duplicates, invalid times, inactive employees, and negative values.
+- Replaced one-at-a-time capture with a batch roster filtered by date and any combination of department, position, and shop.
+- Added Present checkboxes, batch defaults for check-in/out, editable time/late/overtime fields, work-time calculation, mark-all-present, and one save action that reloads existing records for later additions or corrections.
+
+Verified:
+
+- Live smoke created and corrected attendance, confirmed the final Late state and two change-log records, then cleaned the disposable rows.
+- Batch smoke loaded two filtered employees, saved and reloaded both records, and confirmed an unchanged repeat save remained idempotent.
+- Production route and API manifests, enterprise typecheck, and build passed.
+
+### 038. Leave Management Foundation
+
+Status: Done
+
+Implemented:
+
+- Added Annual, Sick, Maternity, and Paternity leave types, annual entitlements, opening/allocated/adjusted/pending/used balances, and leave request decisions.
+- Added draft, submission, approval, rejection, and cancellation transitions with overlap, gender, date, and available-balance validation.
+- Added balance reservation and exact-once pending-to-used movement plus the tabbed Leave Management workspace and APIs.
+- Moved Leave Type maintenance to `Settings > Leave Types`, keeping the Leave workspace focused on requests and balances.
+
+Verified:
+
+- Live smoke approved a two-day request and confirmed pending `0` / used `2` before cleanup.
+- Seed confirmed four active leave types and no demo HR transactions; production routes, typecheck, and build passed.
+
+### 039. HR Document Register
+
+Status: Done
+
+Tracker:
+
+- [Flash ERP Basic HR Implementation Tracker](./19-basic-hr-implementation-tracker.md)
+
+Scope:
+
+- Add protected employee-document metadata and existing-upload links for employment letters, contracts, IDs, certificates, warning letters, and appraisals.
+- Add employee and central document views with type, issue/expiry, and status filters while keeping sensitive files behind HR permissions.
+
+Implemented:
+
+- Added protected document metadata, private file upload/storage, permission-checked file streaming, external links, expiry tracking, and soft archive audit fields.
+- Added central employee/type/status/expiry filters plus employee-level document navigation and open/edit/archive actions.
+
+Verified:
+
+- Live smoke created and soft-archived a protected document before cleanup.
+- Prisma validation, SQL Server push, seed, enterprise typecheck, production build, route manifests, and protected route smoke passed.
+
+### 040. Employee Exit Management
+
+Status: Done
+
+Implemented:
+
+- Added resignation/termination exit records with date validation, reason, settlement and asset-return checklist statuses, notes, and confirmation metadata.
+- Added draft, finalize, and authorized reopen flows; finalization updates employee status while reopening restores the prior status without deleting history.
+- Added focused metrics and actions for incomplete and finalized exits.
+
+Verified:
+
+- Live smoke finalized an employee to `RESIGNED`, reopened the exit, restored `ACTIVE`, and cleaned the disposable record.
+- Production routes include `/human-resources/exits` and its save/action APIs.
+
+### 041. Visitor Management
+
+Status: Done
+
+Implemented:
+
+- Added numbered visitor registration with identity/contact data, purpose, expected time, pass number, and active employee/department hosts.
+- Added controlled register/check-in/check-out/cancel transitions with system timestamps and status-history audit rows.
+- Added reception metrics and filters for expected, on-premises, overdue, and historical visits without exposing protected employee data.
+
+Verified:
+
+- Live smoke completed a registered visit through check-in and check-out and confirmed three status-log rows before cleanup.
+- Production routes include `/human-resources/visitors` and its registration/action APIs.
+
+### 042. Basic HR Reporting and Completion Gate
+
+Status: Done
+
+Implemented:
+
+- Added HR overview metrics, department/site/date filters, exportable employee/attendance/leave/document/exit/visitor reports, and permission-filtered audit inquiry.
+- Reconciled HR reporting directly to the shared employee, department, shop, attendance, leave, document, exit, and visitor records.
+
+Scope:
+
+- Add HR overview metrics, exportable operational reports, sensitive audit inquiry, and Payroll GL handoff readiness checks.
+- Reconcile report filters and totals to employee, attendance, leave, document, exit, and visitor source records.
+
+### 043. Payroll Statutory Foundation
+
+Status: Done
+
+Implemented:
+
+- Added source-referenced, effective-dated Ghana PAYE bands, pension rates, 2026 SSNIT insurable limits, filing due days, and protected employee statutory setup.
+
+Scope:
+
+- Add source-referenced, effective-dated Ghana PAYE tax bands, pension contribution rates, SSNIT insurable limits, and filing calendar setup.
+- Extend protected employee payroll profiles with the statutory classifications needed for deterministic calculation.
+
+### 044. Payroll Calculation and Run Control
+
+Status: Done
+
+Implemented:
+
+- Added numbered gross-to-net payroll runs, employee/component snapshots, calculation, recalculation, review, approval, authorized reopen, and posted-state locking.
+
+Scope:
+
+- Add numbered payroll runs, gross-to-net employee snapshots, component detail, calculation, review, approval, reopen, and posting locks.
+
+### 045. Payslips and Statutory Filing
+
+Status: Done
+
+Implemented:
+
+- Added protected printable payslips plus PAYE, SSNIT, and Tier-2 schedules, CSV exports, due dates, and filed/paid tracking.
+
+Scope:
+
+- Add protected printable payslips and PAYE, SSNIT, and Tier-2 filing schedules with exports, due dates, and filed/paid tracking.
+
+### 046. Payroll Finance Integration
+
+Status: Done
+
+Implemented:
+
+- Reused Finance Payroll GL mappings and the shared posting engine for idempotent payroll expense, net-pay, deduction, employer-cost, and liability posting.
+- Corrected protected payslip generation so existing calculated payroll employee results open as an unapproved preview instead of returning 404.
+- Added HR benefit and employee-advance recovery mappings so payroll can post employee benefits, employer benefit costs, and loan recoveries through Finance.
+
+Verified:
+
+- Live disposable payroll smoke calculated GHS `11,000.00` gross, GHS `605.00` employee pension, GHS `2,197.25` PAYE, GHS `7,997.75` net pay, and GHS `1,430.00` employer pension.
+- PAYE, SSNIT, and Tier-2 schedules were generated and Finance journal `GL-000033` balanced at GHS `12,430.00` debit and credit before all disposable smoke rows were cleaned up.
+- Direct live payslip check confirmed payroll result `3cadce61-12bb-4cf8-ad5e-fc41976a0f01` returns payslip data for `EMP-000005`, run `PAY-000002`, status `CALCULATED`.
+- Prisma format/validate/generate, SQL Server database push, seed, domain build, enterprise typecheck, production build, data-reconciliation smoke, and protected route checks passed.
+- Production routes include HR overview/reports, Payroll, protected payslips, and all payroll statutory/run/action/filing APIs.
+
+Scope:
+
+- Generate and post one idempotent balanced Finance payroll batch/journal from each approved run using the existing shared posting engine and Finance-owned GL mappings.
+
+### 047. Benefits Administration
+
+Status: Done
+
+Implemented:
+
+- Added benefit plans and employee enrollments with fixed/percentage employee and employer contributions, provider references, effective windows, taxable/pensionable flags, and active controls.
+- Fed active benefit enrollments into payroll snapshots as employee benefit deductions, employer benefit cost, net-pay impact, and Finance benefit expense/liability posting lines.
+
+Verified:
+
+- Live employee-finance smoke created a benefit plan/enrollment and confirmed payroll captured employee benefit deduction `5` before cleanup.
+- Prisma validation, seed, enterprise typecheck, production build, and route manifest checks passed.
+- Production routes include `/human-resources/benefits`, `/api/human-resources/benefits/plans`, and `/api/human-resources/benefits/enrollments`.
+
+### 048. Employee Loans and Salary Advances
+
+Status: Done
+
+Implemented:
+
+- Added employee loans and salary advances with request, approval/rejection, cashbook-backed disbursement, installment setup, outstanding balance, repayment history, and journal drilldown.
+- Posted disbursement as employee advance receivable debit and selected cashbook credit; payroll posting applies loan recoveries exactly once against the receivable and employee net pay.
+
+Verified:
+
+- Live employee-finance smoke approved/disbursed a salary advance, posted its Finance journal, posted payroll recovery `25`, and confirmed outstanding balance moved from `100` to `75` with one repayment row before cleanup.
+- Prisma validation, seed, enterprise typecheck, production build, and route manifest checks passed.
+- Production routes include `/human-resources/loans`, `/api/human-resources/loans`, and `/api/human-resources/loans/actions`.
+
+### 049. Expense Claims
+
+Status: Done
+
+Implemented:
+
+- Added itemized employee expense claims with GL expense coding, submit/approve/reject/pay states, payment reference, Finance journal links, and duplicate-payment protection.
+- Posted approved claim payments as expense debits and selected cashbook credits through the shared posting engine, with posted cashbook entries.
+
+Verified:
+
+- Live employee-finance smoke submitted, approved, and paid a disposable expense claim and confirmed the balanced Finance journal before cleanup.
+- Prisma validation, seed, enterprise typecheck, production build, and route manifest checks passed.
+- Production routes include `/human-resources/expense-claims`, `/api/human-resources/expense-claims`, and `/api/human-resources/expense-claims/actions`.
+
+### 050. Travel Management
+
+Status: Done
+
+Implemented:
+
+- Added travel requests with destination, purpose, dates, estimated amount, approval/rejection, cashbook-backed advances, actual settlement lines, returned cash, and Finance journal links.
+- Posted travel advances to employee advances and cashbook, then settled actual expenses against the advance with returned cash or payable handling as required.
+
+Verified:
+
+- Live employee-finance smoke approved a travel request, issued an advance, settled actual expenses with returned cash, and confirmed balanced Finance journals before cleanup.
+- Prisma validation, seed, enterprise typecheck, production build, and route manifest checks passed.
+- Production routes include `/human-resources/travel`, `/api/human-resources/travel`, and `/api/human-resources/travel/actions`.
 
 ## Tracker Rules
 

@@ -728,9 +728,11 @@ const statementReportFilter: FilterFn<StatementReportRow> = (row, _columnId, fil
   );
 
 export function EnterpriseReportingDashboard({
+  canViewHrReports = false,
   dashboard,
   initialReportId
 }: {
+  canViewHrReports?: boolean;
   dashboard: EnterpriseReportingDashboardData;
   initialReportId?: string | null;
 }) {
@@ -3472,6 +3474,28 @@ export function EnterpriseReportingDashboard({
 
         <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
           <div className="grid gap-x-8 gap-y-5 lg:grid-cols-2 2xl:grid-cols-3">
+            {canViewHrReports ? (
+              <details className="group/report min-w-0" open>
+                <summary className="flex cursor-pointer list-none items-center gap-2 py-1 text-sm font-semibold text-stone-950">
+                  <ChevronDown className="h-4 w-4 shrink-0 text-stone-500 transition group-open/report:rotate-0" />
+                  <span className="truncate">Human Resources</span>
+                  <span className="ml-auto rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-semibold text-stone-600">
+                    1
+                  </span>
+                </summary>
+                <ul className="mt-2 space-y-1 border-l border-stone-200 pl-5">
+                  <li>
+                    <Link
+                      className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-blue-700 transition hover:bg-blue-50 hover:text-blue-900"
+                      href="/human-resources/reports"
+                    >
+                      <FileText className="h-4 w-4 shrink-0 fill-stone-900 text-stone-900" />
+                      <span className="min-w-0 flex-1 truncate">HR operational reports</span>
+                    </Link>
+                  </li>
+                </ul>
+              </details>
+            ) : null}
             {reportCatalog.map((group) => (
               <details className="group/report min-w-0" key={group.label} open>
                 <summary className="flex cursor-pointer list-none items-center gap-2 py-1 text-sm font-semibold text-stone-950">

@@ -10,6 +10,7 @@ import {
   Fuel,
   Gauge,
   LoaderCircle,
+  MapPin,
   PackagePlus,
   Pencil,
   Plus,
@@ -1404,6 +1405,7 @@ export function FuelOperationsWorkspace({
     workspace.fuelSettings.defaultDispatchSiteId ?? defaultSaleSourceSiteId;
   const automaticRecordedBy = autoRecordedBy?.trim() || null;
   const [activeView, setActiveView] = useState<ViewKey>(defaultView);
+  const [hqSiteFilterId, setHqSiteFilterId] = useState("");
   const allowedViewSet = useMemo(
     () => (availableViews?.length ? new Set<ViewKey>(availableViews) : null),
     [availableViews]
@@ -1525,6 +1527,67 @@ export function FuelOperationsWorkspace({
     label: site.label,
     value: site.operatingSiteId
   }));
+  const showHqSiteFilter = shellActiveSection === "fuel-operations";
+  const selectedHqSite = showHqSiteFilter
+    ? workspace.siteOptions.find((site) => site.operatingSiteId === hqSiteFilterId) ?? null
+    : null;
+  const filteredTankRows = selectedHqSite
+    ? workspace.tankRows.filter((row) => row.operatingSiteId === selectedHqSite.operatingSiteId)
+    : workspace.tankRows;
+  const filteredPumpRows = selectedHqSite
+    ? workspace.pumpRows.filter((row) => row.operatingSiteId === selectedHqSite.operatingSiteId)
+    : workspace.pumpRows;
+  const filteredNozzleRows = selectedHqSite
+    ? workspace.nozzleRows.filter((row) => row.operatingSiteId === selectedHqSite.operatingSiteId)
+    : workspace.nozzleRows;
+  const filteredDipRows = selectedHqSite
+    ? workspace.dipRows.filter((row) => row.operatingSiteId === selectedHqSite.operatingSiteId)
+    : workspace.dipRows;
+  const filteredMeterReadingRows = selectedHqSite
+    ? workspace.meterReadingRows.filter(
+        (row) => row.operatingSiteId === selectedHqSite.operatingSiteId
+      )
+    : workspace.meterReadingRows;
+  const filteredDeliveryRows = selectedHqSite
+    ? workspace.deliveryRows.filter((row) => row.siteCode === selectedHqSite.code)
+    : workspace.deliveryRows;
+  const filteredStationRows = selectedHqSite
+    ? workspace.stationRows.filter(
+        (row) =>
+          row.operatingSiteId === selectedHqSite.operatingSiteId ||
+          row.inventoryLocationCode === selectedHqSite.code ||
+          (Boolean(selectedHqSite.storeCode) && row.storeCode === selectedHqSite.storeCode)
+      )
+    : workspace.stationRows;
+  const filteredStationDeliveryRows = selectedHqSite
+    ? workspace.stationDeliveryRows.filter((row) => row.sourceSiteCode === selectedHqSite.code)
+    : workspace.stationDeliveryRows;
+  const filteredFuelSaleRows = selectedHqSite
+    ? workspace.fuelSaleRows.filter((row) => row.sourceSiteCode === selectedHqSite.code)
+    : workspace.fuelSaleRows;
+  const filteredReconciliationRows = selectedHqSite
+    ? workspace.reconciliationRows.filter((row) => row.siteCode === selectedHqSite.code)
+    : workspace.reconciliationRows;
+  const filteredReconciliationNos = new Set(
+    filteredReconciliationRows.map((row) => row.reconciliationNo)
+  );
+  const filteredReconciliationLineRows = selectedHqSite
+    ? workspace.reconciliationLineRows.filter((row) =>
+        filteredReconciliationNos.has(row.reconciliationNo)
+      )
+    : workspace.reconciliationLineRows;
+  const latestFilteredReconciliation = filteredReconciliationRows[0] ?? null;
+  const displayedMetrics = selectedHqSite
+    ? {
+        activeTanks: filteredTankRows.filter((row) => row.status === "ACTIVE").length,
+        totalBookQuantity: filteredTankRows.reduce(
+          (total, row) => total + row.currentBookQuantity,
+          0
+        ),
+        latestGainLossQuantity: latestFilteredReconciliation?.totalGainLossQuantity ?? 0,
+        latestMarginAmount: latestFilteredReconciliation?.marginAmount ?? 0
+      }
+    : workspace.metrics;
   const currencyOptions =
     workspace.currencyOptions.length > 0
       ? workspace.currencyOptions.map((currency) => ({
@@ -2338,6 +2401,26 @@ export function FuelOperationsWorkspace({
 
   const dipColumns = useMemo<ColumnDef<DipRow>[]>(
     () => [
+      {
+        accessorKey: "siteCode",
+        header: "Site",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-semibold text-stone-950">{row.original.siteCode ?? "Not linked"}</p>
+            <p className="text-xs text-stone-500">{row.original.siteName ?? "No site name"}</p>
+          </div>
+        )
+      },
+      {
+        accessorKey: "stationCode",
+        header: "Station",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-semibold text-stone-950">{row.original.stationCode ?? "Not linked"}</p>
+            <p className="text-xs text-stone-500">{row.original.stationName ?? "No station"}</p>
+          </div>
+        )
+      },
       { accessorKey: "tankCode", header: "Tank" },
       {
         accessorKey: "dipDate",
@@ -2409,6 +2492,26 @@ export function FuelOperationsWorkspace({
 
   const meterColumns = useMemo<ColumnDef<MeterReadingRow>[]>(
     () => [
+      {
+        accessorKey: "siteCode",
+        header: "Site",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-semibold text-stone-950">{row.original.siteCode ?? "Not linked"}</p>
+            <p className="text-xs text-stone-500">{row.original.siteName ?? "No site name"}</p>
+          </div>
+        )
+      },
+      {
+        accessorKey: "stationCode",
+        header: "Station",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-semibold text-stone-950">{row.original.stationCode ?? "Not linked"}</p>
+            <p className="text-xs text-stone-500">{row.original.stationName ?? "No station"}</p>
+          </div>
+        )
+      },
       { accessorKey: "nozzleCode", header: "Nozzle" },
       { accessorKey: "tankCode", header: "Tank" },
       {
@@ -2874,30 +2977,58 @@ export function FuelOperationsWorkspace({
 
   const content = (
       <div className="space-y-6">
+        {showHqSiteFilter ? (
+          <div className="flex flex-col gap-3 border-b border-stone-200 pb-5 sm:flex-row sm:items-end sm:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                <MapPin className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-stone-950">HQ site scope</p>
+                <p className="text-xs text-stone-500">Applies to every Fuel Management grid on this page.</p>
+              </div>
+            </div>
+            <label className="w-full space-y-1.5 text-sm sm:max-w-sm">
+              <span className="block font-semibold text-stone-800">Site</span>
+              <select
+                className="h-10 w-full border border-stone-300 bg-white px-3 text-sm outline-none transition focus:border-[var(--brand)]"
+                onChange={(event) => setHqSiteFilterId(event.target.value)}
+                value={hqSiteFilterId}
+              >
+                <option value="">All sites</option>
+                {workspace.siteOptions.map((site) => (
+                  <option key={site.operatingSiteId} value={site.operatingSiteId}>
+                    {site.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : null}
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard
             hint="Registered tank count."
             icon={Warehouse}
             label="Active tanks"
-            value={String(workspace.metrics.activeTanks)}
+            value={String(displayedMetrics.activeTanks)}
           />
           <MetricCard
             hint="Current operational book quantity."
             icon={Droplets}
             label="Book quantity"
-            value={numberFormatter.format(workspace.metrics.totalBookQuantity)}
+            value={numberFormatter.format(displayedMetrics.totalBookQuantity)}
           />
           <MetricCard
             hint="Latest reconciled physical gain or loss."
             icon={Scale}
             label="Latest gain/loss"
-            value={numberFormatter.format(workspace.metrics.latestGainLossQuantity)}
+            value={numberFormatter.format(displayedMetrics.latestGainLossQuantity)}
           />
           <MetricCard
             hint={`Latest margin in ${functionalCurrencyCode}.`}
             icon={Gauge}
             label="Latest margin"
-            value={moneyFormatter.format(workspace.metrics.latestMarginAmount)}
+            value={moneyFormatter.format(displayedMetrics.latestMarginAmount)}
           />
         </div>
 
@@ -3024,7 +3155,7 @@ export function FuelOperationsWorkspace({
           >
             <SharedDataGrid
               columns={tankColumns}
-              data={workspace.tankRows}
+              data={filteredTankRows}
               emptyLabel="No fuel tanks are registered."
               exportFileName="flash-erp-fuel-tanks"
               globalFilterFn={tankSearch}
@@ -3123,7 +3254,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={pumpColumns}
-                data={workspace.pumpRows}
+                data={filteredPumpRows}
                 emptyLabel="No fuel pumps are registered."
                 exportFileName="flash-erp-fuel-pumps"
                 globalFilterFn={pumpSearch}
@@ -3809,7 +3940,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={fuelSaleColumns}
-                data={workspace.fuelSaleRows}
+                data={filteredFuelSaleRows}
                 emptyLabel="No fuel sales have been recorded."
                 exportFileName="flash-erp-fuel-sales"
                 globalFilterFn={fuelSaleSearch}
@@ -3909,7 +4040,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={nozzleColumns}
-                data={workspace.nozzleRows}
+                data={filteredNozzleRows}
                 emptyLabel="No fuel nozzles are registered."
                 exportFileName="flash-erp-fuel-nozzles"
                 globalFilterFn={nozzleSearch}
@@ -4156,7 +4287,7 @@ export function FuelOperationsWorkspace({
                 {activeView === "dips" ? (
                 <SharedDataGrid
                   columns={dipColumns}
-                  data={workspace.dipRows}
+                  data={filteredDipRows}
                   emptyLabel="No tank dips have been recorded."
                   exportFileName="flash-erp-fuel-dips"
                   globalFilterFn={dipSearch}
@@ -4166,7 +4297,7 @@ export function FuelOperationsWorkspace({
                 {activeView === "meter-readings" ? (
                 <SharedDataGrid
                   columns={meterColumns}
-                  data={workspace.meterReadingRows}
+                  data={filteredMeterReadingRows}
                   emptyLabel="No meter readings have been recorded."
                   exportFileName="flash-erp-fuel-meter-readings"
                   globalFilterFn={meterReadingSearch}
@@ -4379,7 +4510,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={stationColumns}
-                data={workspace.stationRows}
+                data={filteredStationRows}
                 emptyLabel="No filling stations have been registered."
                 exportFileName="flash-erp-fuel-stations"
                 globalFilterFn={stationSearch}
@@ -4880,7 +5011,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={stationDeliveryColumns}
-                data={workspace.stationDeliveryRows}
+                data={filteredStationDeliveryRows}
                 emptyLabel="No fuel transfer-outs have been recorded."
                 exportFileName="flash-erp-fuel-station-deliveries"
                 globalFilterFn={stationDeliverySearch}
@@ -5052,7 +5183,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={deliveryColumns}
-                data={workspace.deliveryRows}
+                data={filteredDeliveryRows}
                 emptyLabel="No supplier fuel receipts have been recorded."
                 exportFileName="flash-erp-fuel-supplier-receipts"
                 globalFilterFn={deliverySearch}
@@ -5128,7 +5259,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={reconciliationColumns}
-                data={workspace.reconciliationRows}
+                data={filteredReconciliationRows}
                 emptyLabel="No fuel reconciliations have been posted."
                 exportFileName="flash-erp-fuel-reconciliations"
                 globalFilterFn={reconciliationSearch}
@@ -5141,7 +5272,7 @@ export function FuelOperationsWorkspace({
             >
               <SharedDataGrid
                 columns={reconciliationLineColumns}
-                data={workspace.reconciliationLineRows}
+                data={filteredReconciliationLineRows}
                 emptyLabel="No reconciliation lines are available."
                 exportFileName="flash-erp-fuel-reconciliation-lines"
                 searchPlaceholder="Search reconciliation lines"
