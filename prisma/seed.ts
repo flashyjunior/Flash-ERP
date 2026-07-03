@@ -3467,7 +3467,7 @@ async function main() {
       eventType: "pos.transaction.completed",
       idempotencyKey: "seed:store-accra-central-01:posTransaction:1",
       status: SyncEventStatus.PENDING,
-      payload: { transactionNo: "POS-ACC-0001", totalAmount: 42.5 }
+      payload: { transactionNo: "POS-DEMO001-0001", totalAmount: 42.5 }
     },
     {
       id: "seed-accra-upstream-2",

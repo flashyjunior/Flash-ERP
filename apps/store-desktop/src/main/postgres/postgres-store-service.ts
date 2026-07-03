@@ -19,6 +19,15 @@ import {
   postSyncJsonRaw,
   SyncHttpClientError,
 } from "../sync-http-client.js";
+import {
+  createPosReceiptSeriesToken,
+  formatPosTransactionNumber,
+  isLegacyPosTransactionNumber,
+  isPosReceiptSeriesToken,
+  POS_RECEIPT_MAX_SEQUENCE,
+  POS_RECEIPT_SEQUENCE_METADATA_KEY,
+  POS_RECEIPT_SERIES_TOKEN_METADATA_KEY,
+} from "../pos-transaction-number.js";
 import type {
   EnterpriseBankAccountPublishedPayload,
   EnterpriseBarcodePublishedPayload,
@@ -2739,6 +2748,71 @@ export class PostgresStoreService {
     } finally {
       client.release();
     }
+  }
+
+  private async nextPosTransactionNumber() {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      const transactionNo = await this.allocatePosTransactionNumber(client);
+      await client.query("COMMIT");
+      return transactionNo;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async allocatePosTransactionNumber(client: pg.PoolClient) {
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('flash_erp_pos_receipt_number'))",
+    );
+    const result = await client.query<{ key: string; value: string }>(
+      `SELECT key, value
+       FROM app_metadata
+       WHERE key = ANY($1::text[])
+       FOR UPDATE`,
+      [
+        [
+          POS_RECEIPT_SEQUENCE_METADATA_KEY,
+          POS_RECEIPT_SERIES_TOKEN_METADATA_KEY,
+        ],
+      ],
+    );
+    const metadata = Object.fromEntries(
+      result.rows.map((row) => [row.key, row.value]),
+    );
+    let seriesToken = metadata[POS_RECEIPT_SERIES_TOKEN_METADATA_KEY];
+    let currentSequence = Math.trunc(
+      asNumber(metadata[POS_RECEIPT_SEQUENCE_METADATA_KEY]),
+    );
+
+    if (
+      !isPosReceiptSeriesToken(seriesToken) ||
+      currentSequence >= POS_RECEIPT_MAX_SEQUENCE
+    ) {
+      seriesToken = createPosReceiptSeriesToken();
+      currentSequence = 0;
+    }
+
+    const nextSequence = currentSequence + 1;
+
+    for (const [key, value] of [
+      [POS_RECEIPT_SERIES_TOKEN_METADATA_KEY, seriesToken],
+      [POS_RECEIPT_SEQUENCE_METADATA_KEY, String(nextSequence)],
+    ] as const) {
+      await client.query(
+        `INSERT INTO app_metadata (key, value)
+           VALUES ($1, $2)
+           ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        [key, value],
+      );
+    }
+
+    return formatPosTransactionNumber(seriesToken, nextSequence);
   }
 
   private async ensureStoreUserCanAccessThisStore(input: {
@@ -8914,9 +8988,8 @@ export class PostgresStoreService {
       throw new Error("Open a cashier shift before starting a sale basket.");
     }
 
-    const transactionSequence = await this.nextSequence("transaction_sequence");
     const transactionId = randomUUID();
-    const transactionNo = `POS-ACC-${String(transactionSequence).padStart(4, "0")}`;
+    const transactionNo = await this.nextPosTransactionNumber();
 
     await this.pool.query(
       `INSERT INTO pos_transaction (
@@ -20772,6 +20845,7 @@ export class PostgresStoreService {
     const startedAt = isoNow();
     const finishedAt = isoNow();
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    await this.repairLegacyPosTransactionConflicts(finishedAt);
     const [upstreamResult, downstreamResult] = await Promise.all([
       this.pool.query(
         `UPDATE sync_outbox
@@ -20817,6 +20891,97 @@ export class PostgresStoreService {
           : "There were no dead-letter items to requeue.",
       snapshot: await this.getSyncSnapshot(),
     };
+  }
+
+  private async repairLegacyPosTransactionConflicts(repairedAt: string) {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        id: string;
+        aggregate_id: string;
+        idempotency_key: string;
+        payload_json: string;
+      }>(
+        `SELECT id, aggregate_id, idempotency_key, payload_json
+         FROM sync_outbox
+         WHERE aggregate_type = 'posTransaction'
+           AND event_type = 'pos.transaction.completed'
+           AND status IN ('FAILED', 'DEAD_LETTER')
+           AND failure_kind = 'STALE_VERSION'
+           AND error_message LIKE '%from another store event%'
+         FOR UPDATE`,
+      );
+
+      for (const row of result.rows) {
+        let payload: StorePosTransactionCompletedPayload;
+
+        try {
+          payload = JSON.parse(
+            row.payload_json,
+          ) as StorePosTransactionCompletedPayload;
+        } catch {
+          continue;
+        }
+
+        if (!isLegacyPosTransactionNumber(payload.transactionNo)) {
+          continue;
+        }
+
+        const oldTransactionNo = payload.transactionNo;
+        const newTransactionNo = await this.allocatePosTransactionNumber(client);
+        const transactionUpdate = await client.query(
+          `UPDATE pos_transaction
+           SET transaction_no = $1, updated_at = $2
+           WHERE id = $3 AND transaction_no = $4`,
+          [newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo],
+        );
+
+        if (transactionUpdate.rowCount !== 1) {
+          continue;
+        }
+
+        payload.transactionNo = newTransactionNo;
+        await client.query(
+          `UPDATE pos_transaction
+           SET source_transaction_no = $1, updated_at = $2
+           WHERE source_transaction_id = $3 AND source_transaction_no = $4`,
+          [newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo],
+        );
+        await client.query(
+          `UPDATE serial_registry
+           SET source_transaction_no = $1, updated_at = $2
+           WHERE source_transaction_id = $3 AND source_transaction_no = $4`,
+          [newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo],
+        );
+        await client.query(
+          `UPDATE sales_order
+           SET fulfilled_transaction_no = $1, updated_at = $2
+           WHERE fulfilled_transaction_id = $3 AND fulfilled_transaction_no = $4`,
+          [newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo],
+        );
+        await client.query(
+          `UPDATE sync_outbox
+           SET id = $1, idempotency_key = $2, payload_json = $3, updated_at = $4
+           WHERE id = $5`,
+          [
+            randomUUID(),
+            row.idempotency_key.replace(oldTransactionNo, newTransactionNo),
+            JSON.stringify(payload),
+            repairedAt,
+            row.id,
+          ],
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async completeRecoveryTask(taskId: string): Promise<StoreSyncActionResult> {

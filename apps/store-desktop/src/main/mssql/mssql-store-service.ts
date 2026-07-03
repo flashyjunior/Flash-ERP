@@ -66,6 +66,15 @@ import {
   postSyncJsonRaw,
   SyncHttpClientError,
 } from "../sync-http-client.js";
+import {
+  createPosReceiptSeriesToken,
+  formatPosTransactionNumber,
+  isLegacyPosTransactionNumber,
+  isPosReceiptSeriesToken,
+  POS_RECEIPT_MAX_SEQUENCE,
+  POS_RECEIPT_SEQUENCE_METADATA_KEY,
+  POS_RECEIPT_SERIES_TOKEN_METADATA_KEY,
+} from "../pos-transaction-number.js";
 import type {
   StoreBankAccountSummary,
   StoreBasketCheckoutRequest,
@@ -2690,6 +2699,53 @@ export class MssqlStoreService {
     });
   }
 
+  private async nextPosTransactionNumber() {
+    return this.withTransaction((transaction) =>
+      this.allocatePosTransactionNumber(transaction),
+    );
+  }
+
+  private async allocatePosTransactionNumber(transaction: sql.Transaction) {
+    const result = await this.query<{ key: string; value: string }>(
+      `SELECT [key], [value]
+       FROM [dbo].[app_metadata] WITH (UPDLOCK, HOLDLOCK)
+       WHERE [key] IN (@sequenceKey, @seriesTokenKey)`,
+      {
+        sequenceKey: POS_RECEIPT_SEQUENCE_METADATA_KEY,
+        seriesTokenKey: POS_RECEIPT_SERIES_TOKEN_METADATA_KEY,
+      },
+      transaction,
+    );
+    const metadata = Object.fromEntries(
+      result.recordset.map((row) => [row.key, row.value]),
+    );
+    let seriesToken = metadata[POS_RECEIPT_SERIES_TOKEN_METADATA_KEY];
+    let currentSequence = Math.trunc(
+      asNumber(metadata[POS_RECEIPT_SEQUENCE_METADATA_KEY]),
+    );
+
+    if (
+      !isPosReceiptSeriesToken(seriesToken) ||
+      currentSequence >= POS_RECEIPT_MAX_SEQUENCE
+    ) {
+      seriesToken = createPosReceiptSeriesToken();
+      currentSequence = 0;
+    }
+
+    const nextSequence = currentSequence + 1;
+    await this.setMetadata(
+      POS_RECEIPT_SERIES_TOKEN_METADATA_KEY,
+      seriesToken,
+      transaction,
+    );
+    await this.setMetadata(
+      POS_RECEIPT_SEQUENCE_METADATA_KEY,
+      String(nextSequence),
+      transaction,
+    );
+    return formatPosTransactionNumber(seriesToken, nextSequence);
+  }
+
   private async listStoreUsers() {
     const result = await this.query<RetailUserRow>(
       `SELECT TOP (200)
@@ -3910,9 +3966,8 @@ export class MssqlStoreService {
       throw new Error("Open a cashier shift before starting a POS basket.");
     }
 
-    const transactionSequence = await this.nextSequence("transaction_sequence");
     const transactionId = randomUUID();
-    const transactionNo = `POS-ACC-${String(transactionSequence).padStart(4, "0")}`;
+    const transactionNo = await this.nextPosTransactionNumber();
 
     await this.query(
       `INSERT INTO [dbo].[pos_transaction] (
@@ -17956,6 +18011,7 @@ export class MssqlStoreService {
     const startedAt = isoNow();
     const finishedAt = isoNow();
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
+    await this.repairLegacyPosTransactionConflicts(finishedAt);
     const [upstreamResult, downstreamResult] = await Promise.all([
       this.query<{ affected_count: number }>(
         `UPDATE [dbo].[sync_outbox]
@@ -18007,6 +18063,114 @@ export class MssqlStoreService {
           : "There were no dead-letter items to requeue.",
       snapshot: await this.getSyncSnapshot(),
     };
+  }
+
+  private async repairLegacyPosTransactionConflicts(repairedAt: string) {
+    await this.withTransaction(async (transaction) => {
+      const result = await this.query<{
+        id: string;
+        aggregate_id: string;
+        idempotency_key: string;
+        payload_json: string;
+      }>(
+        `SELECT [id], [aggregate_id], [idempotency_key], [payload_json]
+         FROM [dbo].[sync_outbox] WITH (UPDLOCK, HOLDLOCK)
+         WHERE [aggregate_type] = N'posTransaction'
+           AND [event_type] = N'pos.transaction.completed'
+           AND [status] IN (N'FAILED', N'DEAD_LETTER')
+           AND [failure_kind] = N'STALE_VERSION'
+           AND [error_message] LIKE N'%from another store event%'`,
+        {},
+        transaction,
+      );
+
+      for (const row of result.recordset) {
+        let payload: StorePosTransactionCompletedPayload;
+
+        try {
+          payload = JSON.parse(
+            row.payload_json,
+          ) as StorePosTransactionCompletedPayload;
+        } catch {
+          continue;
+        }
+
+        if (!isLegacyPosTransactionNumber(payload.transactionNo)) {
+          continue;
+        }
+
+        const oldTransactionNo = payload.transactionNo;
+        const newTransactionNo =
+          await this.allocatePosTransactionNumber(transaction);
+        const transactionUpdate = await this.query(
+          `UPDATE [dbo].[pos_transaction]
+           SET [transaction_no] = @newTransactionNo, [updated_at] = @repairedAt
+           WHERE [id] = @transactionId AND [transaction_no] = @oldTransactionNo`,
+          {
+            newTransactionNo,
+            repairedAt,
+            transactionId: row.aggregate_id,
+            oldTransactionNo,
+          },
+          transaction,
+        );
+
+        if ((transactionUpdate.rowsAffected[0] ?? 0) !== 1) {
+          continue;
+        }
+
+        payload.transactionNo = newTransactionNo;
+        const referenceParams = {
+          newTransactionNo,
+          repairedAt,
+          transactionId: row.aggregate_id,
+          oldTransactionNo,
+        };
+        await this.query(
+          `UPDATE [dbo].[pos_transaction]
+           SET [source_transaction_no] = @newTransactionNo, [updated_at] = @repairedAt
+           WHERE [source_transaction_id] = @transactionId
+             AND [source_transaction_no] = @oldTransactionNo`,
+          referenceParams,
+          transaction,
+        );
+        await this.query(
+          `UPDATE [dbo].[serial_registry]
+           SET [source_transaction_no] = @newTransactionNo, [updated_at] = @repairedAt
+           WHERE [source_transaction_id] = @transactionId
+             AND [source_transaction_no] = @oldTransactionNo`,
+          referenceParams,
+          transaction,
+        );
+        await this.query(
+          `UPDATE [dbo].[sales_order]
+           SET [fulfilled_transaction_no] = @newTransactionNo, [updated_at] = @repairedAt
+           WHERE [fulfilled_transaction_id] = @transactionId
+             AND [fulfilled_transaction_no] = @oldTransactionNo`,
+          referenceParams,
+          transaction,
+        );
+        await this.query(
+          `UPDATE [dbo].[sync_outbox]
+           SET [id] = @newEventId,
+               [idempotency_key] = @idempotencyKey,
+               [payload_json] = @payloadJson,
+               [updated_at] = @repairedAt
+           WHERE [id] = @eventId`,
+          {
+            newEventId: randomUUID(),
+            idempotencyKey: row.idempotency_key.replace(
+              oldTransactionNo,
+              newTransactionNo,
+            ),
+            payloadJson: JSON.stringify(payload),
+            repairedAt,
+            eventId: row.id,
+          },
+          transaction,
+        );
+      }
+    });
   }
 
   private async insertRunLog(input: {

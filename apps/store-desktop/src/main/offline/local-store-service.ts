@@ -198,6 +198,15 @@ import type {
   StoreBankingReportRow,
 } from "../../shared/desktop-runtime.js";
 import { localStoreSchemaSql } from "./local-store-schema.js";
+import {
+  createPosReceiptSeriesToken,
+  formatPosTransactionNumber,
+  isLegacyPosTransactionNumber,
+  isPosReceiptSeriesToken,
+  POS_RECEIPT_MAX_SEQUENCE,
+  POS_RECEIPT_SEQUENCE_METADATA_KEY,
+  POS_RECEIPT_SERIES_TOKEN_METADATA_KEY,
+} from "../pos-transaction-number.js";
 
 const ENTERPRISE_NODE_CODE = "enterprise-primary";
 const remoteSyncCleanupVersion = "flash-erp-store-remote-sync-v1";
@@ -14356,9 +14365,8 @@ export class LocalStoreService {
     }
 
     const shift = this.getOpenShiftContext();
-    const transactionSequence = this.nextSequence("transaction_sequence");
     const transactionId = randomUUID();
-    const transactionNo = `POS-ACC-${String(transactionSequence).padStart(4, "0")}`;
+    const transactionNo = this.nextPosTransactionNumber();
 
     this.db
       .prepare(
@@ -15240,7 +15248,8 @@ export class LocalStoreService {
     let transactionNo = "";
 
     this.withTransaction(() => {
-      const transactionSequence = this.nextSequence("transaction_sequence");
+      const transactionSequence =
+        asNumber(this.metadata(POS_RECEIPT_SEQUENCE_METADATA_KEY)) + 1;
       const shift = this.getOpenShiftContext();
       const saleCashierCode = input.cashierCode.trim() || shift.cashier_code;
       const quantity = Number(input.quantity.toFixed(3));
@@ -15298,7 +15307,7 @@ export class LocalStoreService {
           (method) => method.paymentMethod === "CASH",
         ) ?? null;
       const transactionId = randomUUID();
-      transactionNo = `POS-ACC-${String(transactionSequence).padStart(4, "0")}`;
+      transactionNo = this.nextPosTransactionNumber();
       const paymentId = randomUUID();
       const saleEventId = randomUUID();
       const ledgerEntryId = randomUUID();
@@ -18023,6 +18032,7 @@ export class LocalStoreService {
 
     this.withTransaction(() => {
       const finishedAt = isoNow();
+      this.repairLegacyPosTransactionConflicts(finishedAt);
       upstreamRequeued = Number(
         this.db
           .prepare(
@@ -22030,7 +22040,7 @@ export class LocalStoreService {
         const transactions = [
           [
             "txn-001",
-            "POS-ACC-0001",
+            "POS-DEMO001-0001",
             null,
             "COMPLETED",
             7.5,
@@ -22040,7 +22050,7 @@ export class LocalStoreService {
           ],
           [
             "txn-002",
-            "POS-ACC-0002",
+            "POS-DEMO001-0002",
             "customer-001",
             "COMPLETED",
             14.9,
@@ -22050,7 +22060,7 @@ export class LocalStoreService {
           ],
           [
             "txn-003",
-            "POS-ACC-0003",
+            "POS-DEMO001-0003",
             null,
             "PARKED",
             3.2,
@@ -22086,7 +22096,7 @@ export class LocalStoreService {
 
       if (
         this.scalar(
-          "SELECT count(*) AS value FROM pos_transaction WHERE transaction_no = 'POS-ACC-0004'",
+          "SELECT count(*) AS value FROM pos_transaction WHERE transaction_no = 'POS-DEMO001-0004'",
         ) === 0
       ) {
         const completedAt = minutesAgo(17);
@@ -22098,7 +22108,7 @@ export class LocalStoreService {
 
         this.db
           .prepare(
-            "INSERT INTO pos_transaction (id, transaction_no, shift_id, customer_id, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, completed_at, record_version, deleted_at, updated_at) VALUES ('txn-004', 'POS-ACC-0004', ?, 'customer-001', 'SALE', 'COMPLETED', 299.99, 0, 45, 344.99, 344.99, 0, ?, ?, 1, NULL, ?)",
+            "INSERT INTO pos_transaction (id, transaction_no, shift_id, customer_id, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, completed_at, record_version, deleted_at, updated_at) VALUES ('txn-004', 'POS-DEMO001-0004', ?, 'customer-001', 'SALE', 'COMPLETED', 299.99, 0, 45, 344.99, 344.99, 0, ?, ?, 1, NULL, ?)",
           )
           .run(
             seededShiftId,
@@ -22118,7 +22128,7 @@ export class LocalStoreService {
           );
         this.db
           .prepare(
-            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES ('payment-004', 'txn-004', 'CASH', 'Cash', 'CASH', 344.99, 'CASH-POS-ACC-0004', ?)",
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES ('payment-004', 'txn-004', 'CASH', 'Cash', 'CASH', 344.99, 'CASH-POS-DEMO001-0004', ?)",
           )
           .run(completedAt);
       }
@@ -22135,7 +22145,7 @@ export class LocalStoreService {
             "txn-002",
             "pos.transaction.completed",
             "PENDING",
-            "POS-ACC-0002",
+            "POS-DEMO001-0002",
           ],
           [
             "outbox-002",
@@ -22143,7 +22153,7 @@ export class LocalStoreService {
             "txn-002",
             "inventory.ledger.recorded",
             "IN_FLIGHT",
-            "POS-ACC-0002",
+            "POS-DEMO001-0002",
           ],
           [
             "outbox-003",
@@ -22151,7 +22161,7 @@ export class LocalStoreService {
             "txn-001",
             "pos.transaction.completed",
             "FAILED",
-            "POS-ACC-0001",
+            "POS-DEMO001-0001",
           ],
         ] as const;
 
@@ -22411,7 +22421,7 @@ export class LocalStoreService {
           inventoryLocationCode: salesLocationCode,
           status: "SOLD",
           sourceTransactionId: "txn-004",
-          sourceTransactionNo: "POS-ACC-0004",
+          sourceTransactionNo: "POS-DEMO001-0004",
           updatedAt: seededAt,
         });
 
@@ -25150,6 +25160,106 @@ export class LocalStoreService {
     const nextValue = asNumber(this.metadata(key)) + 1;
     this.setMetadata(key, String(nextValue));
     return nextValue;
+  }
+
+  private nextPosTransactionNumber() {
+    let seriesToken = this.metadata(POS_RECEIPT_SERIES_TOKEN_METADATA_KEY);
+    let currentSequence = Math.trunc(
+      asNumber(this.metadata(POS_RECEIPT_SEQUENCE_METADATA_KEY)),
+    );
+
+    if (
+      !isPosReceiptSeriesToken(seriesToken) ||
+      currentSequence >= POS_RECEIPT_MAX_SEQUENCE
+    ) {
+      seriesToken = createPosReceiptSeriesToken();
+      currentSequence = 0;
+      this.setMetadata(POS_RECEIPT_SERIES_TOKEN_METADATA_KEY, seriesToken);
+    }
+
+    const nextSequence = currentSequence + 1;
+    this.setMetadata(POS_RECEIPT_SEQUENCE_METADATA_KEY, String(nextSequence));
+    return formatPosTransactionNumber(seriesToken, nextSequence);
+  }
+
+  private repairLegacyPosTransactionConflicts(repairedAt: string) {
+    const rows = this.db
+      .prepare(
+        `SELECT id, aggregate_id, idempotency_key, payload_json
+         FROM sync_outbox
+         WHERE aggregate_type = 'posTransaction'
+           AND event_type = 'pos.transaction.completed'
+           AND status IN ('FAILED', 'DEAD_LETTER')
+           AND failure_kind = 'STALE_VERSION'
+           AND error_message LIKE '%from another store event%'`,
+      )
+      .all() as Array<{
+      id: string;
+      aggregate_id: string;
+      idempotency_key: string;
+      payload_json: string;
+    }>;
+
+    for (const row of rows) {
+      let payload: StorePosTransactionCompletedPayload;
+
+      try {
+        payload = JSON.parse(
+          row.payload_json,
+        ) as StorePosTransactionCompletedPayload;
+      } catch {
+        continue;
+      }
+
+      if (!isLegacyPosTransactionNumber(payload.transactionNo)) {
+        continue;
+      }
+
+      const oldTransactionNo = payload.transactionNo;
+      const newTransactionNo = this.nextPosTransactionNumber();
+      const transactionUpdate = this.db
+        .prepare(
+          "UPDATE pos_transaction SET transaction_no = ?, updated_at = ? WHERE id = ? AND transaction_no = ?",
+        )
+        .run(
+          newTransactionNo,
+          repairedAt,
+          row.aggregate_id,
+          oldTransactionNo,
+        );
+
+      if (transactionUpdate.changes !== 1) {
+        continue;
+      }
+
+      payload.transactionNo = newTransactionNo;
+      this.db
+        .prepare(
+          "UPDATE pos_transaction SET source_transaction_no = ?, updated_at = ? WHERE source_transaction_id = ? AND source_transaction_no = ?",
+        )
+        .run(newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo);
+      this.db
+        .prepare(
+          "UPDATE serial_registry SET source_transaction_no = ?, updated_at = ? WHERE source_transaction_id = ? AND source_transaction_no = ?",
+        )
+        .run(newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo);
+      this.db
+        .prepare(
+          "UPDATE sales_order SET fulfilled_transaction_no = ?, updated_at = ? WHERE fulfilled_transaction_id = ? AND fulfilled_transaction_no = ?",
+        )
+        .run(newTransactionNo, repairedAt, row.aggregate_id, oldTransactionNo);
+      this.db
+        .prepare(
+          "UPDATE sync_outbox SET id = ?, idempotency_key = ?, payload_json = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(
+          randomUUID(),
+          row.idempotency_key.replace(oldTransactionNo, newTransactionNo),
+          JSON.stringify(payload),
+          repairedAt,
+          row.id,
+        );
+    }
   }
 
   private insertRunLog(input: {
