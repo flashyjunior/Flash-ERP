@@ -8,6 +8,7 @@ import {
   FuelOperationsWorkspace,
   type ViewKey as FuelOperationsViewKey
 } from "@/components/enterprise/erp-fuel-operations-workspace";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import {
   defaultAccountPaymentReceiptTemplateHtml,
   defaultThermalReceiptTemplateHtml,
@@ -119,6 +120,9 @@ type StockCountUploadRow = {
   countedQuantity: number | null;
   varianceQuantity: number | null;
 };
+type StockCountConfirmation =
+  | { action: "COMMIT"; sessionId: string; sessionNo: string }
+  | { action: "SAVE_CALCULATED"; rowCount: number };
 type InventorySerialDraft = {
   title: string;
   productName: string;
@@ -1842,6 +1846,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [countNote, setCountNote] = useState("");
   const [activeCountEntryTab, setActiveCountEntryTab] = useState<CountEntryTab>("header");
   const [stockCountUploadRows, setStockCountUploadRows] = useState<StockCountUploadRow[]>([]);
+  const [pendingStockCountConfirmation, setPendingStockCountConfirmation] =
+    useState<StockCountConfirmation | null>(null);
   const [remoteInventoryRows, setRemoteInventoryRows] = useState<RemoteInventoryRow[]>([]);
   const [remoteInventoryQuery, setRemoteInventoryQuery] = useState("");
   const [remoteInventoryStoreFilter, setRemoteInventoryStoreFilter] = useState("");
@@ -5561,10 +5567,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   }
 
   async function commitStockCount(sessionId: string, sessionNo: string) {
-    if (!window.confirm(`Commit ${sessionNo} and post the variance to stock?`)) {
-      return;
-    }
-
     setIsPostingInventory(true);
     setInventoryMessage(`Committing ${sessionNo}...`);
 
@@ -5587,6 +5589,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     } finally {
       setIsPostingInventory(false);
     }
+  }
+
+  function requestStockCountCommit(sessionId: string, sessionNo: string) {
+    setPendingStockCountConfirmation({ action: "COMMIT", sessionId, sessionNo });
   }
 
   function exportCountSheet() {
@@ -5655,10 +5661,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       return;
     }
 
-    if (!window.confirm(`Save ${rows.length} calculated count row(s) for supervisor commit?`)) {
-      return;
-    }
-
     setIsPostingInventory(true);
     setInventoryMessage("Saving uploaded count rows...");
 
@@ -5692,6 +5694,36 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     } finally {
       setIsPostingInventory(false);
     }
+  }
+
+  function requestSaveCalculatedCountRows() {
+    const rowCount = stockCountUploadRows.filter(
+      (row) => row.productId && row.countedQuantity !== null
+    ).length;
+
+    if (!rowCount) {
+      setInventoryMessage("Upload count rows with counted quantities before saving.");
+      return;
+    }
+
+    setPendingStockCountConfirmation({ action: "SAVE_CALCULATED", rowCount });
+  }
+
+  function confirmPendingStockCountAction() {
+    const pendingAction = pendingStockCountConfirmation;
+
+    if (!pendingAction) {
+      return;
+    }
+
+    setPendingStockCountConfirmation(null);
+
+    if (pendingAction.action === "COMMIT") {
+      void commitStockCount(pendingAction.sessionId, pendingAction.sessionNo);
+      return;
+    }
+
+    void saveCalculatedCountRows();
   }
 
   function renderPurchaseOrderDialog() {
@@ -7697,7 +7729,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                         <div className="rms-inline-actions">
                           <StatusPill>{`${stockCountUploadRows.length} uploaded row(s)`}</StatusPill>
                           <button className="rms-button" disabled={!stockCountUploadRows.length} onClick={() => setStockCountUploadRows([])} type="button">Clear upload</button>
-                          <button className="rms-button is-primary" disabled={isPostingInventory || !stockCountUploadRows.length} onClick={() => void saveCalculatedCountRows()} type="button">{isPostingInventory ? "Saving..." : "Save calculated rows"}</button>
+                          <button className="rms-button is-primary" disabled={isPostingInventory || !stockCountUploadRows.length} onClick={requestSaveCalculatedCountRows} type="button">{isPostingInventory ? "Saving..." : "Save calculated rows"}</button>
                         </div>
                         <div className="rms-table rms-count-variance-table">
                           <div className="rms-table-head"><span>Item</span><span>System</span><span>Counted</span><span>Variance</span><span>Remove</span></div>
@@ -7739,7 +7771,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                         <b className={session.varianceQuantity === 0 ? "" : session.varianceQuantity < 0 ? "is-short-stock" : "is-over-stock"}>{formatNumber.format(session.varianceQuantity)}</b>
                         <span>{new Date(session.submittedAt).toLocaleString()}</span>
                         {session.status === "SUBMITTED" ? (
-                          <button className="rms-row-button is-add" disabled={isPostingInventory} onClick={() => void commitStockCount(session.sessionId, session.sessionNo)} type="button">Commit</button>
+                          <button className="rms-row-button is-add" disabled={isPostingInventory} onClick={() => requestStockCountCommit(session.sessionId, session.sessionNo)} type="button">Commit</button>
                         ) : (
                           <StatusPill tone="good">Done</StatusPill>
                         )}
@@ -7762,9 +7794,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         {renderInventorySerialDialog()}
 
         {activeWorkspace === "fuel" ? (
-          <div className="rms-workspace">
+          <div className="rms-workspace rms-fuel-workspace">
             {onlineStoreFuelViews.length > 0 ? (
               <FuelOperationsWorkspace
+                autoRecordedBy={workspace.operator.displayName || workspace.operator.loginId}
                 availableViews={onlineStoreFuelViews}
                 defaultView={onlineStoreFuelViews[0] ?? "tanks"}
                 embedInShell
@@ -8086,6 +8119,40 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           </div>
         ) : null}
       </section>
+      <ConfirmationDialog
+        confirmLabel={
+          pendingStockCountConfirmation?.action === "COMMIT" ? "Commit stock count" : "Save rows"
+        }
+        description={
+          pendingStockCountConfirmation?.action === "COMMIT" ? (
+            <p>
+              This will commit{" "}
+              <strong>{pendingStockCountConfirmation.sessionNo}</strong> and post the variance to
+              stock.
+            </p>
+          ) : (
+            <p>
+              This will save{" "}
+              <strong>{pendingStockCountConfirmation?.rowCount ?? 0}</strong> calculated count
+              row(s) for supervisor commit.
+            </p>
+          )
+        }
+        isSubmitting={isPostingInventory}
+        onCancel={() => {
+          if (!isPostingInventory) {
+            setPendingStockCountConfirmation(null);
+          }
+        }}
+        onConfirm={confirmPendingStockCountAction}
+        open={Boolean(pendingStockCountConfirmation)}
+        title={
+          pendingStockCountConfirmation?.action === "COMMIT"
+            ? "Commit stock count"
+            : "Save calculated rows"
+        }
+        tone={pendingStockCountConfirmation?.action === "COMMIT" ? "warning" : "default"}
+      />
       {isScreenLocked ? (
         <div className="rms-lock-overlay" role="dialog" aria-modal="true">
           <section className="rms-login-card rms-lock-card">

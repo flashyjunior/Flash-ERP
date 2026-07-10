@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import {
   HrDialogFooter,
@@ -26,10 +27,46 @@ import type {
 
 type VisitorRow = ErpVisitorWorkspaceData["visitorRows"][number];
 
+const visitorDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false
+});
+
 function datetimeLocal(value: string | null) {
   if (!value) return "";
   const date = new Date(value);
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
+function formatVisitorDateTime(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return visitorDateTimeFormatter.format(date);
+}
+
+function formatVisitDuration(checkInAt: string | null, checkOutAt: string | null) {
+  if (!checkInAt || !checkOutAt) return "";
+  const checkIn = new Date(checkInAt).getTime();
+  const checkOut = new Date(checkOutAt).getTime();
+  if (!Number.isFinite(checkIn) || !Number.isFinite(checkOut) || checkOut < checkIn) return "";
+
+  const totalMinutes = Math.round((checkOut - checkIn) / 60_000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+
+  return [
+    days ? `${days}d` : "",
+    hours ? `${hours}h` : "",
+    minutes || (!days && !hours) ? `${minutes}m` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function ErpHrVisitorsWorkspace({
@@ -42,6 +79,10 @@ export function ErpHrVisitorsWorkspace({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<UpsertErpVisitorVisitRequest>({});
+  const [pendingAction, setPendingAction] = useState<{
+    actionType: "CHECK_IN" | "CHECK_OUT" | "CANCEL";
+    row: VisitorRow;
+  } | null>(null);
   const [filters, setFilters] = useState({ status: "", departmentId: "" });
   const [mutationState, setMutationState] = useState<HrMutationState>({
     status: "idle",
@@ -80,6 +121,9 @@ export function ErpHrVisitorsWorkspace({
       }),
     [filters, workspace.visitorRows]
   );
+  const draftStatus = (draft as Partial<Pick<VisitorRow, "status">>).status;
+  const isCheckedOutDraft = draftStatus === "CHECKED_OUT";
+  const isReadOnlyDraft = !canManage || isCheckedOutDraft;
 
   function startNew() {
     setMutationState({ status: "idle", message: "" });
@@ -95,6 +139,12 @@ export function ErpHrVisitorsWorkspace({
       expectedAt: datetimeLocal(new Date().toISOString()),
       passNo: ""
     });
+  }
+
+  function openVisitor(row: VisitorRow) {
+    setMutationState({ status: "idle", message: "" });
+    setDraft({ ...row, expectedAt: datetimeLocal(row.expectedAt) });
+    setOpen(true);
   }
 
   async function post(endpoint: string, payload: object) {
@@ -120,21 +170,20 @@ export function ErpHrVisitorsWorkspace({
     }
   }
 
-  async function action(row: VisitorRow, actionType: "CHECK_IN" | "CHECK_OUT" | "CANCEL") {
-    let note = "";
-    if (actionType === "CANCEL") {
-      const response = window.prompt(`Enter the cancellation reason for ${row.visitorNo}:`);
-      if (response === null) return;
-      note = response;
-    }
-    if (!window.confirm(`${actionType === "CHECK_IN" ? "Check in" : actionType === "CHECK_OUT" ? "Check out" : "Cancel"} visitor ${row.visitorNo}?`)) {
-      return;
-    }
+  function action(row: VisitorRow, actionType: "CHECK_IN" | "CHECK_OUT" | "CANCEL") {
+    setMutationState({ status: "idle", message: "" });
+    setPendingAction({ actionType, row });
+  }
+
+  async function confirmPendingAction(note: string) {
+    if (!pendingAction) return;
+
     await post("/api/human-resources/visitors/actions", {
-      visitorVisitId: row.visitorVisitId,
-      action: actionType,
+      visitorVisitId: pendingAction.row.visitorVisitId,
+      action: pendingAction.actionType,
       note
     });
+    setPendingAction(null);
   }
 
   const columns = useMemo<ColumnDef<VisitorRow>[]>(
@@ -143,7 +192,6 @@ export function ErpHrVisitorsWorkspace({
       { accessorKey: "visitorName", header: "Visitor" },
       { accessorKey: "phone", header: "Phone" },
       { accessorKey: "organization", header: "Organization" },
-      { accessorKey: "purpose", header: "Purpose" },
       {
         id: "host",
         header: "Host",
@@ -153,20 +201,22 @@ export function ErpHrVisitorsWorkspace({
       {
         accessorKey: "expectedAt",
         header: "Expected",
-        cell: ({ row }) =>
-          row.original.expectedAt ? new Date(row.original.expectedAt).toLocaleString() : "-"
+        cell: ({ row }) => formatVisitorDateTime(row.original.expectedAt)
       },
       {
         accessorKey: "checkInAt",
         header: "Check In",
-        cell: ({ row }) =>
-          row.original.checkInAt ? new Date(row.original.checkInAt).toLocaleString() : "-"
+        cell: ({ row }) => formatVisitorDateTime(row.original.checkInAt)
       },
       {
         accessorKey: "checkOutAt",
         header: "Check Out",
-        cell: ({ row }) =>
-          row.original.checkOutAt ? new Date(row.original.checkOutAt).toLocaleString() : "-"
+        cell: ({ row }) => formatVisitorDateTime(row.original.checkOutAt)
+      },
+      {
+        id: "duration",
+        header: "Duration",
+        cell: ({ row }) => formatVisitDuration(row.original.checkInAt, row.original.checkOutAt)
       },
       { accessorKey: "passNo", header: "Pass" },
       {
@@ -187,11 +237,7 @@ export function ErpHrVisitorsWorkspace({
           if (row.original.status === "REGISTERED") {
             actions.push({
               label: "Edit registration",
-              onSelect: () => {
-                setMutationState({ status: "idle", message: "" });
-                setDraft({ ...row.original, expectedAt: datetimeLocal(row.original.expectedAt) });
-                setOpen(true);
-              }
+              onSelect: () => openVisitor(row.original)
             });
             actions.push({
               label: "Check in",
@@ -211,6 +257,12 @@ export function ErpHrVisitorsWorkspace({
               onSelect: () => void action(row.original, "CHECK_OUT")
             });
           }
+          if (row.original.status === "CHECKED_OUT") {
+            actions.push({
+              label: "View registration",
+              onSelect: () => openVisitor(row.original)
+            });
+          }
           return actions.length ? <GridRowActions actions={actions} /> : null;
         }
       }
@@ -227,7 +279,13 @@ export function ErpHrVisitorsWorkspace({
         setOpen(next);
       }}
       open={open}
-      title={draft.visitorVisitId ? "Visitor Registration" : "New Visitor"}
+      title={
+        draft.visitorVisitId
+          ? isCheckedOutDraft
+            ? "Visitor Registration (Read-only)"
+            : "Visitor Registration"
+          : "New Visitor"
+      }
       triggerClassName="rounded-xl"
       triggerIcon={Plus}
       triggerLabel="Register Visitor"
@@ -237,21 +295,25 @@ export function ErpHrVisitorsWorkspace({
         <HrMutationNotice state={mutationState} />
         <div className="grid gap-4 md:grid-cols-2">
           <HrFieldInput
+            disabled={isReadOnlyDraft}
             label="Visitor name"
             onChange={(value) => setDraft((current) => ({ ...current, visitorName: value }))}
             value={draft.visitorName}
           />
           <HrFieldInput
+            disabled={isReadOnlyDraft}
             label="Phone number"
             onChange={(value) => setDraft((current) => ({ ...current, phone: value }))}
             value={draft.phone}
           />
           <HrFieldInput
+            disabled={isReadOnlyDraft}
             label="Company / organization"
             onChange={(value) => setDraft((current) => ({ ...current, organization: value }))}
             value={draft.organization}
           />
           <HrFieldSelect
+            disabled={isReadOnlyDraft}
             label="ID type"
             onChange={(value) => setDraft((current) => ({ ...current, idType: value }))}
             options={[
@@ -263,11 +325,13 @@ export function ErpHrVisitorsWorkspace({
             value={draft.idType}
           />
           <HrFieldInput
+            disabled={isReadOnlyDraft}
             label="ID number"
             onChange={(value) => setDraft((current) => ({ ...current, idNumber: value }))}
             value={draft.idNumber}
           />
           <HrFieldSelect
+            disabled={isReadOnlyDraft}
             label="Host department"
             onChange={(value) =>
               setDraft((current) => ({ ...current, hostDepartmentId: value, hostEmployeeId: "" }))
@@ -276,33 +340,49 @@ export function ErpHrVisitorsWorkspace({
             value={draft.hostDepartmentId}
           />
           <HrFieldSelect
+            disabled={isReadOnlyDraft}
             label="Person visiting"
             onChange={(value) => setDraft((current) => ({ ...current, hostEmployeeId: value }))}
             options={employeeOptions}
             value={draft.hostEmployeeId}
           />
           <HrFieldInput
+            disabled={isReadOnlyDraft}
             label="Expected date and time"
             onChange={(value) => setDraft((current) => ({ ...current, expectedAt: value }))}
             type="datetime-local"
             value={draft.expectedAt as string | null}
           />
           <HrFieldInput
+            disabled={isReadOnlyDraft}
             label="Visitor pass number"
             onChange={(value) => setDraft((current) => ({ ...current, passNo: value }))}
             value={draft.passNo}
           />
         </div>
         <HrFieldTextArea
+          disabled={isReadOnlyDraft}
           label="Purpose of visit"
           onChange={(value) => setDraft((current) => ({ ...current, purpose: value }))}
           value={draft.purpose}
         />
-        <HrDialogFooter
-          isSubmitting={mutationState.status === "submitting"}
-          onCancel={() => setOpen(false)}
-          onSave={() => void post("/api/human-resources/visitors", draft)}
-        />
+        {isReadOnlyDraft ? (
+          <div className="flex justify-end gap-2 border-t border-stone-200 pt-4">
+            <button
+              className="rounded-xl border border-stone-300 bg-white px-4 py-2 text-sm font-semibold text-stone-700 hover:bg-stone-50"
+              onClick={() => setOpen(false)}
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+        ) : (
+          <HrDialogFooter
+            isSubmitting={mutationState.status === "submitting"}
+            onCancel={() => setOpen(false)}
+            onSave={() => void post("/api/human-resources/visitors", draft)}
+          />
+        )}
       </div>
     </ActionDialog>
   );
@@ -348,8 +428,42 @@ export function ErpHrVisitorsWorkspace({
           emptyLabel="No visitor visits match the selected filters."
           exportFileName="flash-erp-visitor-register"
           initialPageSize={20}
+          onRowSelect={openVisitor}
           searchPlaceholder="Search visitor register"
           toolbarActions={dialog}
+        />
+        <ConfirmationDialog
+          confirmLabel={
+            pendingAction?.actionType === "CHECK_IN"
+              ? "Check in"
+              : pendingAction?.actionType === "CHECK_OUT"
+                ? "Check out"
+                : "Cancel visit"
+          }
+          description={
+            pendingAction ? (
+              <span>
+                {pendingAction.actionType === "CHECK_IN"
+                  ? "Confirm that this visitor has arrived and should be marked on premises."
+                  : pendingAction.actionType === "CHECK_OUT"
+                    ? "Confirm that this visitor has left the premises."
+                    : "Cancel this visitor registration and keep the cancellation reason for audit."}
+              </span>
+            ) : null
+          }
+          isSubmitting={mutationState.status === "submitting"}
+          noteLabel={pendingAction?.actionType === "CANCEL" ? "Cancellation reason" : undefined}
+          notePlaceholder="Reason for cancelling this visit"
+          noteRequired={pendingAction?.actionType === "CANCEL"}
+          onCancel={() => setPendingAction(null)}
+          onConfirm={(note) => void confirmPendingAction(note)}
+          open={Boolean(pendingAction)}
+          title={
+            pendingAction
+              ? `${pendingAction.actionType === "CHECK_IN" ? "Check in" : pendingAction.actionType === "CHECK_OUT" ? "Check out" : "Cancel"} ${pendingAction.row.visitorNo}`
+              : "Confirm visitor action"
+          }
+          tone={pendingAction?.actionType === "CANCEL" ? "danger" : "success"}
         />
       </div>
     </EnterpriseShell>

@@ -23,6 +23,7 @@ import {
   SharedDataGrid,
 } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import {
   HrDialogFooter,
   HrFieldInput,
@@ -149,6 +150,10 @@ export function ErpPayrollWorkspace({
   const [filingDraft, setFilingDraft] = useState<UpdatePayrollFilingRequest>({
     action: "FILE",
   });
+  const [pendingRunAction, setPendingRunAction] = useState<{
+    action: "APPROVE" | "REOPEN" | "POST";
+    row: RunRow;
+  } | null>(null);
   const [selectedRunId, setSelectedRunId] = useState(
     workspace.runRows[0]?.payrollRunId ?? "",
   );
@@ -222,18 +227,19 @@ export function ErpPayrollWorkspace({
     }));
   }
 
-  async function runAction(row: RunRow, action: "APPROVE" | "REOPEN" | "POST") {
-    const message =
-      action === "POST"
-        ? `Post payroll ${row.runNo} to Finance? This creates an immutable GL journal.`
-        : action === "APPROVE"
-          ? `Approve payroll ${row.runNo}? Calculation values will be locked.`
-          : `Reopen payroll ${row.runNo} for recalculation?`;
-    if (!window.confirm(message)) return;
+  function runAction(row: RunRow, action: "APPROVE" | "REOPEN" | "POST") {
+    setMutation({ status: "idle", message: "" });
+    setPendingRunAction({ action, row });
+  }
+
+  async function confirmRunAction() {
+    if (!pendingRunAction) return;
+
     await post(
-      `/api/human-resources/payroll/runs/${row.payrollRunId}/actions`,
-      { action },
+      `/api/human-resources/payroll/runs/${pendingRunAction.row.payrollRunId}/actions`,
+      { action: pendingRunAction.action },
     );
+    setPendingRunAction(null);
   }
 
   const runColumns = useMemo<ColumnDef<RunRow>[]>(
@@ -1201,6 +1207,32 @@ export function ErpPayrollWorkspace({
             />
           </div>
         </ActionDialog>
+        <ConfirmationDialog
+          confirmLabel={
+            pendingRunAction?.action === "POST"
+              ? "Post to Finance"
+              : pendingRunAction?.action === "APPROVE"
+                ? "Approve payroll"
+                : "Reopen payroll"
+          }
+          description={
+            pendingRunAction ? (
+              <span>
+                {pendingRunAction.action === "POST"
+                  ? `Post payroll ${pendingRunAction.row.runNo} to Finance. This creates an immutable GL journal.`
+                  : pendingRunAction.action === "APPROVE"
+                    ? `Approve payroll ${pendingRunAction.row.runNo}. Calculation values will be locked.`
+                    : `Reopen payroll ${pendingRunAction.row.runNo} for recalculation.`}
+              </span>
+            ) : null
+          }
+          isSubmitting={mutation.status === "submitting"}
+          onCancel={() => setPendingRunAction(null)}
+          onConfirm={() => void confirmRunAction()}
+          open={Boolean(pendingRunAction)}
+          title="Confirm payroll action"
+          tone={pendingRunAction?.action === "POST" ? "danger" : "warning"}
+        />
       </div>
     </EnterpriseShell>
   );

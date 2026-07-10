@@ -212,12 +212,6 @@ const navigation: NavigationItem[] = [
     children: enterpriseHumanResourcesMenuItems.map((item) => menuItemChild(item))
   },
   {
-    key: "reports",
-    label: "Reports",
-    icon: BarChart3,
-    href: "/reports"
-  },
-  {
     key: "finance",
     label: "Finance",
     icon: Landmark,
@@ -237,6 +231,12 @@ const navigation: NavigationItem[] = [
     icon: ShieldCheck,
     href: "/security/users",
     children: enterpriseSecurityMenuItems.map((item) => menuItemChild(item))
+  },
+  {
+    key: "reports",
+    label: "Reports",
+    icon: BarChart3,
+    href: "/reports"
   }
 ];
 const sidebarExpandedSectionStorageKey = "flash-erp:enterprise-shell-expanded-section";

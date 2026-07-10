@@ -18,6 +18,7 @@ import { useRouter } from "next/navigation";
 import { startTransition, useEffect, useMemo, useState } from "react";
 
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import { WorkspaceTabs, WorkspaceTabsContent } from "@/components/layouts/workspace-tabs";
@@ -541,6 +542,7 @@ export function ErpFinanceFoundationWorkspace({
   const [isCurrencyDialogOpen, setIsCurrencyDialogOpen] = useState(false);
   const [isAccountDialogOpen, setIsAccountDialogOpen] = useState(false);
   const [isJournalDialogOpen, setIsJournalDialogOpen] = useState(false);
+  const [reversalTarget, setReversalTarget] = useState<JournalRow | null>(null);
   const [settingsState, setSettingsState] = useState<MutationState>({
     status: "idle",
     message: ""
@@ -566,6 +568,10 @@ export function ErpFinanceFoundationWorkspace({
     message: ""
   });
   const [journalState, setJournalState] = useState<MutationState>({
+    status: "idle",
+    message: ""
+  });
+  const [reversalState, setReversalState] = useState<MutationState>({
     status: "idle",
     message: ""
   });
@@ -914,16 +920,12 @@ export function ErpFinanceFoundationWorkspace({
     }
   }
 
-  async function reverseJournal(journalEntryId: string) {
-    const reason = window.prompt("Reversal reason");
-
-    if (reason === null) {
-      return;
-    }
+  async function reverseJournal(journal: JournalRow, reason: string) {
+    setReversalState({ status: "submitting", message: "" });
 
     try {
       const response = await fetch(
-        `/api/finance/foundation/journals/${encodeURIComponent(journalEntryId)}/reverse`,
+        `/api/finance/foundation/journals/${encodeURIComponent(journal.journalEntryId)}/reverse`,
         {
           method: "POST",
           headers: {
@@ -940,9 +942,17 @@ export function ErpFinanceFoundationWorkspace({
         throw new Error(payload.message ?? "Flash ERP could not reverse that journal.");
       }
 
+      setReversalState({
+        status: "success",
+        message: payload.message ?? `Flash ERP reversed ${journal.journalNo}.`
+      });
+      setReversalTarget(null);
       router.refresh();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Flash ERP could not reverse that journal.");
+      setReversalState({
+        status: "error",
+        message: error instanceof Error ? error.message : "Flash ERP could not reverse that journal."
+      });
     }
   }
 
@@ -1571,7 +1581,10 @@ export function ErpFinanceFoundationWorkspace({
                 label: "Reverse journal",
                 disabled:
                   row.original.hasReversal || row.original.sourceType === "JOURNAL_REVERSAL",
-                onSelect: () => void reverseJournal(row.original.journalEntryId),
+                onSelect: () => {
+                  setReversalState({ status: "idle", message: "" });
+                  setReversalTarget(row.original);
+                },
                 tone: "danger"
               }
             ]}
@@ -2795,6 +2808,43 @@ export function ErpFinanceFoundationWorkspace({
           <MutationMessage state={journalState} />
         </div>
       </ActionDialog>
+
+      <ConfirmationDialog
+        confirmLabel="Reverse journal"
+        description={
+          <div className="space-y-2">
+            <p>
+              This creates a reversing journal for{" "}
+              <strong>{reversalTarget?.journalNo ?? "the selected journal"}</strong>. Posted GL
+              history is preserved.
+            </p>
+            {reversalState.status === "error" ? (
+              <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                {reversalState.message}
+              </p>
+            ) : null}
+          </div>
+        }
+        isSubmitting={reversalState.status === "submitting"}
+        noteLabel="Reversal reason"
+        notePlaceholder="Explain why this journal is being reversed."
+        noteRequired
+        onCancel={() => {
+          if (reversalState.status === "submitting") {
+            return;
+          }
+          setReversalTarget(null);
+          setReversalState({ status: "idle", message: "" });
+        }}
+        onConfirm={(reason) => {
+          if (reversalTarget) {
+            void reverseJournal(reversalTarget, reason);
+          }
+        }}
+        open={Boolean(reversalTarget)}
+        title="Reverse journal"
+        tone="danger"
+      />
     </EnterpriseShell>
   );
 }

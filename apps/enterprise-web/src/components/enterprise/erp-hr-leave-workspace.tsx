@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import {
   HrDialogFooter,
@@ -37,6 +38,10 @@ export function ErpHrLeaveWorkspace({ workspace, canManage }: { workspace: ErpLe
   const [entitlementOpen, setEntitlementOpen] = useState(false);
   const [requestDraft, setRequestDraft] = useState<CreateErpLeaveRequestRequest>({});
   const [entitlementDraft, setEntitlementDraft] = useState<UpsertErpLeaveEntitlementRequest>({});
+  const [pendingDecision, setPendingDecision] = useState<{
+    action: "SUBMIT" | "APPROVE" | "REJECT" | "CANCEL";
+    row: RequestRow;
+  } | null>(null);
   const [mutationState, setMutationState] = useState<HrMutationState>({ status: "idle", message: "" });
 
   const employeeOptions = useMemo(() => [{ label: "Select employee", value: "" }, ...workspace.employeeOptions.map((row) => ({ label: `${row.employeeNo} - ${row.displayName} / ${row.departmentName}`, value: row.employeeId }))], [workspace.employeeOptions]);
@@ -57,11 +62,20 @@ export function ErpHrLeaveWorkspace({ workspace, canManage }: { workspace: ErpLe
     }
   }
 
-  async function decide(row: RequestRow, action: "SUBMIT" | "APPROVE" | "REJECT" | "CANCEL") {
-    const note = window.prompt(`${formatHrEnum(action)} ${row.requestNo}. Enter an optional note:`) ?? null;
-    if (note === null) return;
-    if (!window.confirm(`Confirm ${action.toLowerCase()} for leave request ${row.requestNo}?`)) return;
-    await post("/api/human-resources/leave/requests/decision", { leaveRequestId: row.leaveRequestId, action, note });
+  function decide(row: RequestRow, action: "SUBMIT" | "APPROVE" | "REJECT" | "CANCEL") {
+    setMutationState({ status: "idle", message: "" });
+    setPendingDecision({ action, row });
+  }
+
+  async function confirmPendingDecision(note: string) {
+    if (!pendingDecision) return;
+
+    await post("/api/human-resources/leave/requests/decision", {
+      leaveRequestId: pendingDecision.row.leaveRequestId,
+      action: pendingDecision.action,
+      note
+    });
+    setPendingDecision(null);
   }
 
   function newRequest() {
@@ -161,6 +175,25 @@ export function ErpHrLeaveWorkspace({ workspace, canManage }: { workspace: ErpLe
         </div>
         {tab === "requests" ? <SharedDataGrid columns={requestColumns} data={workspace.requestRows} emptyLabel="No leave requests found." exportFileName="flash-erp-leave-requests" initialPageSize={15} searchPlaceholder="Search leave requests" toolbarActions={requestDialog} /> : null}
         {tab === "balances" ? <SharedDataGrid columns={entitlementColumns} data={workspace.entitlementRows} emptyLabel="No leave balances found." exportFileName="flash-erp-leave-balances" initialPageSize={15} searchPlaceholder="Search leave balances" toolbarActions={entitlementDialog} /> : null}
+        <ConfirmationDialog
+          confirmLabel={pendingDecision ? formatHrEnum(pendingDecision.action) : "Confirm"}
+          description={
+            pendingDecision ? (
+              <span>
+                Confirm {formatHrEnum(pendingDecision.action).toLowerCase()} for leave request{" "}
+                <strong>{pendingDecision.row.requestNo}</strong>.
+              </span>
+            ) : null
+          }
+          isSubmitting={mutationState.status === "submitting"}
+          noteLabel="Decision note"
+          notePlaceholder="Optional note for approval history"
+          onCancel={() => setPendingDecision(null)}
+          onConfirm={(note) => void confirmPendingDecision(note)}
+          open={Boolean(pendingDecision)}
+          title={pendingDecision ? `${formatHrEnum(pendingDecision.action)} leave request` : "Confirm leave decision"}
+          tone={pendingDecision?.action === "REJECT" || pendingDecision?.action === "CANCEL" ? "danger" : "success"}
+        />
       </div>
     </EnterpriseShell>
   );

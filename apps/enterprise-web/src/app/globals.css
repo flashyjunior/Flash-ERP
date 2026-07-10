@@ -511,6 +511,11 @@ option {
   margin-top: 10px;
 }
 
+.rms-fuel-workspace {
+  overflow: auto;
+  padding-right: 2px;
+}
+
 .rms-panel {
   border: 1px solid var(--rms-line);
   border-radius: 8px;
@@ -2794,7 +2799,7 @@ option {
 }
 
 .rms-online-desktop .rms-report-detail {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
   overflow: auto;
 }

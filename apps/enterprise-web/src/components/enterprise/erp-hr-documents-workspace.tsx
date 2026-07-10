@@ -7,6 +7,7 @@ import { useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import {
   HrDialogFooter,
@@ -38,6 +39,7 @@ export function ErpHrDocumentsWorkspace({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<UpsertErpHrDocumentRequest>({});
+  const [archivingDocument, setArchivingDocument] = useState<DocumentRow | null>(null);
   const [filters, setFilters] = useState({
     employeeId: initialEmployeeId,
     documentType: "",
@@ -169,9 +171,6 @@ export function ErpHrDocumentsWorkspace({
   }
 
   async function archive(row: DocumentRow) {
-    if (!window.confirm(`Archive HR document ${row.documentNo}? The audit metadata will be retained.`)) {
-      return;
-    }
     setMutationState({ status: "submitting", message: `Archiving ${row.documentNo}...` });
     try {
       const response = await fetch(`/api/human-resources/documents/${row.documentId}`, {
@@ -180,6 +179,7 @@ export function ErpHrDocumentsWorkspace({
       const body = (await response.json()) as { message?: string };
       if (!response.ok) throw new Error(body.message ?? "Flash ERP could not archive the document.");
       setMutationState({ status: "success", message: body.message ?? "Document archived." });
+      setArchivingDocument(null);
       router.refresh();
     } catch (error) {
       setMutationState({
@@ -235,7 +235,7 @@ export function ErpHrDocumentsWorkspace({
                 setOpen(true);
               }
             });
-            actions.push({ label: "Archive", tone: "danger", onSelect: () => void archive(row.original) });
+            actions.push({ label: "Archive", tone: "danger", onSelect: () => setArchivingDocument(row.original) });
           }
           return actions.length ? <GridRowActions actions={actions} /> : null;
         }
@@ -394,6 +394,22 @@ export function ErpHrDocumentsWorkspace({
           initialPageSize={20}
           searchPlaceholder="Search HR documents"
           toolbarActions={dialog}
+        />
+        <ConfirmationDialog
+          confirmLabel="Archive document"
+          description={
+            archivingDocument ? (
+              <span>
+                Archive HR document <strong>{archivingDocument.documentNo}</strong>. The file link and audit metadata are retained.
+              </span>
+            ) : null
+          }
+          isSubmitting={mutationState.status === "submitting"}
+          onCancel={() => setArchivingDocument(null)}
+          onConfirm={() => archivingDocument && void archive(archivingDocument)}
+          open={Boolean(archivingDocument)}
+          title="Archive HR document"
+          tone="danger"
         />
       </div>
     </EnterpriseShell>

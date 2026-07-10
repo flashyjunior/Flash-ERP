@@ -61,6 +61,7 @@ type SharedDataGridProps<TData> = {
   toolbarActions?: ReactNode;
   exportFileName?: string;
   getRowHref?: (row: TData) => string | null;
+  onRowSelect?: (row: TData) => void;
 };
 
 type GridRowAction = {
@@ -237,7 +238,8 @@ export function SharedDataGrid<TData>({
   toolbarFilters,
   toolbarActions,
   exportFileName = "grid-export",
-  getRowHref
+  getRowHref,
+  onRowSelect
 }: SharedDataGridProps<TData>) {
   const router = useRouter();
   const columnPanelRef = useRef<HTMLDivElement | null>(null);
@@ -368,13 +370,20 @@ export function SharedDataGrid<TData>({
   }
 
   function handleRowClick(event: MouseEvent<HTMLTableRowElement>, row: TData) {
-    const href = getRowHref?.(row);
-
-    if (!href || isInteractiveTarget(event.target)) {
+    if (isInteractiveTarget(event.target)) {
       return;
     }
 
-    router.push(href);
+    if (onRowSelect) {
+      onRowSelect(row);
+      return;
+    }
+
+    const href = getRowHref?.(row);
+
+    if (href) {
+      router.push(href);
+    }
   }
 
   return (
@@ -515,12 +524,13 @@ export function SharedDataGrid<TData>({
               {table.getRowModel().rows.length > 0 ? (
                 table.getRowModel().rows.map((row) => {
                   const href = getRowHref?.(row.original);
+                  const isInteractiveRow = Boolean(href || onRowSelect);
 
                   return (
                     <tr
                       className={cn(
                         "border-t border-stone-200/80 transition",
-                        href
+                        isInteractiveRow
                           ? "cursor-pointer hover:bg-[rgba(241,245,249,0.78)]"
                           : "hover:bg-[rgba(248,250,252,0.72)]"
                       )}

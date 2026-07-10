@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { NextResponse } from "next/server";
 
 import { assertEnterpriseOrOnlineStorePermission } from "@/server/auth/enterprise-session";
+import { resolveFuelEvidenceUploadDir } from "@/server/files/fuel-evidence-storage";
 
 export const runtime = "nodejs";
 
@@ -18,15 +19,6 @@ const supportedMimeTypes = new Map<string, string>([
   ["image/avif", ".avif"]
 ]);
 const supportedExtensions = new Set<string>([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]);
-
-function resolveEnterpriseWebRoot() {
-  const candidates = [process.cwd(), path.join(process.cwd(), "apps", "enterprise-web")];
-
-  return (
-    candidates.find((candidate) => existsSync(path.join(candidate, "next.config.ts"))) ??
-    candidates[0]
-  );
-}
 
 function resolveExtension(file: File) {
   const supportedExtension = supportedMimeTypes.get(file.type);
@@ -74,8 +66,7 @@ export async function POST(request: Request) {
       throw new Error("Flash ERP supports PNG, JPG, WEBP, GIF, and AVIF fuel evidence photos only.");
     }
 
-    const enterpriseWebRoot = resolveEnterpriseWebRoot();
-    const uploadDir = path.join(enterpriseWebRoot, "public", "uploads", "fuel-evidence");
+    const uploadDir = resolveFuelEvidenceUploadDir();
     const fileName = `${Date.now()}-${evidenceKind}-${randomUUID()}${extension}`;
     const outputPath = path.join(uploadDir, fileName);
     const fileBuffer = Buffer.from(await file.arrayBuffer());
@@ -85,7 +76,7 @@ export async function POST(request: Request) {
     await writeFile(outputPath, fileBuffer);
 
     return NextResponse.json({
-      url: `/uploads/fuel-evidence/${fileName}`,
+      url: `/api/fuel-operations/evidence/${encodeURIComponent(fileName)}`,
       fileName,
       capturedAt,
       uploadedAt: new Date().toISOString(),

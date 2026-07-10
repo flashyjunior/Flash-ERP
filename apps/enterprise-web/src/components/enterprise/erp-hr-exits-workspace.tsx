@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
+import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import {
   HrDialogFooter,
@@ -44,6 +45,10 @@ export function ErpHrExitsWorkspace({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<UpsertErpEmployeeExitRequest>({});
+  const [pendingAction, setPendingAction] = useState<{
+    actionType: "FINALIZE" | "REOPEN";
+    row: ExitRow;
+  } | null>(null);
   const [mutationState, setMutationState] = useState<HrMutationState>({
     status: "idle",
     message: ""
@@ -103,16 +108,19 @@ export function ErpHrExitsWorkspace({
     }
   }
 
-  async function action(row: ExitRow, actionType: "FINALIZE" | "REOPEN") {
-    const warning =
-      actionType === "FINALIZE"
-        ? `Finalize exit ${row.exitNo}? This will change ${row.employeeName}'s employee status.`
-        : `Reopen exit ${row.exitNo} for correction? The employee status will be restored.`;
-    if (!window.confirm(warning)) return;
+  function action(row: ExitRow, actionType: "FINALIZE" | "REOPEN") {
+    setMutationState({ status: "idle", message: "" });
+    setPendingAction({ actionType, row });
+  }
+
+  async function confirmPendingAction() {
+    if (!pendingAction) return;
+
     await post("/api/human-resources/exits/actions", {
-      exitId: row.exitId,
-      action: actionType
+      exitId: pendingAction.row.exitId,
+      action: pendingAction.actionType
     });
+    setPendingAction(null);
   }
 
   const columns = useMemo<ColumnDef<ExitRow>[]>(
@@ -308,6 +316,28 @@ export function ErpHrExitsWorkspace({
           initialPageSize={20}
           searchPlaceholder="Search employee exits"
           toolbarActions={dialog}
+        />
+        <ConfirmationDialog
+          confirmLabel={pendingAction?.actionType === "FINALIZE" ? "Finalize exit" : "Reopen exit"}
+          description={
+            pendingAction ? (
+              <span>
+                {pendingAction.actionType === "FINALIZE"
+                  ? `This will change ${pendingAction.row.employeeName}'s employee status and lock the exit record.`
+                  : `This will restore ${pendingAction.row.employeeName}'s previous employee status for correction.`}
+              </span>
+            ) : null
+          }
+          isSubmitting={mutationState.status === "submitting"}
+          onCancel={() => setPendingAction(null)}
+          onConfirm={() => void confirmPendingAction()}
+          open={Boolean(pendingAction)}
+          title={
+            pendingAction
+              ? `${pendingAction.actionType === "FINALIZE" ? "Finalize" : "Reopen"} ${pendingAction.row.exitNo}`
+              : "Confirm exit action"
+          }
+          tone={pendingAction?.actionType === "FINALIZE" ? "danger" : "warning"}
         />
       </div>
     </EnterpriseShell>
