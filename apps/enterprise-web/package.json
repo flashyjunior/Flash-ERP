@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "prisma generate --schema ../../prisma/schema.prisma && next dev",
     "build": "prisma generate --schema ../../prisma/schema.prisma && next build",
+    "build:deploy": "node ../../scripts/build-enterprise-web-deploy.mjs",
     "start": "node ../../scripts/start-enterprise-web.mjs",
     "typecheck": "tsc --noEmit"
   },

@@ -5,7 +5,7 @@ services:
     repo: https://github.com/flashyjunior/FLASH-ERP.git
     branch: master
     plan: free
-    buildCommand: npm ci --include=dev && npx prisma migrate deploy --schema prisma/schema.prisma && npm --workspace @flash-erp/enterprise-web run build
+    buildCommand: npm ci --include=dev && npx prisma migrate deploy --schema prisma/schema.prisma && npm run build:deploy
     preDeployCommand: npx prisma migrate deploy --schema prisma/schema.prisma
     startCommand: npm --workspace @flash-erp/enterprise-web run start -- -H 0.0.0.0 -p $PORT
     autoDeployTrigger: commit
