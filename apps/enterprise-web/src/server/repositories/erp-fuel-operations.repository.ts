@@ -77,6 +77,7 @@ export type UpsertFuelPumpRequest = {
   name?: string | null;
   pumpType?: string | null;
   operatingSiteId?: string | null;
+  tankId?: string | null;
   manufacturer?: string | null;
   serialNo?: string | null;
   status?: string | null;
@@ -410,7 +411,16 @@ export type FuelOperationsWorkspaceData = {
     productProfileId: string | null;
     uomCode: string;
   }>;
-  pumpOptions: Array<{ pumpId: string; code: string; name: string; label: string }>;
+  pumpOptions: Array<{
+    pumpId: string;
+    code: string;
+    name: string;
+    label: string;
+    tankId: string | null;
+    productProfileId: string | null;
+    operatingSiteId: string | null;
+    uomCode: string | null;
+  }>;
   nozzleOptions: Array<{ nozzleId: string; code: string; name: string; label: string; tankId: string }>;
   stationOptions: Array<{
     stationId: string;
@@ -452,10 +462,14 @@ export type FuelOperationsWorkspaceData = {
   pumpRows: Array<{
     pumpId: string;
     operatingSiteId: string | null;
+    tankId: string | null;
+    productProfileId: string | null;
     code: string;
     name: string;
     pumpType: string;
     siteCode: string | null;
+    tankCode: string | null;
+    productCode: string | null;
     nozzleCount: number;
     manufacturer: string | null;
     serialNo: string | null;
@@ -3330,6 +3344,11 @@ export async function getFuelOperationsWorkspace(
         },
         include: {
           operatingSite: true,
+          tank: {
+            include: {
+              productProfile: true
+            }
+          },
           nozzles: true
         },
         orderBy: [{ code: "asc" }]
@@ -3766,7 +3785,11 @@ export async function getFuelOperationsWorkspace(
         pumpId: pump.id,
         code: pump.code,
         name: pump.name,
-        label: `${pump.code} - ${pump.name}`
+        label: `${pump.code} - ${pump.name}${pump.tank?.code ? ` (${pump.tank.code})` : ""}`,
+        tankId: pump.tankId,
+        productProfileId: pump.tank?.productProfileId ?? null,
+        operatingSiteId: pump.operatingSiteId ?? pump.tank?.operatingSiteId ?? null,
+        uomCode: pump.tank?.uomCode ?? null
       })),
       nozzleOptions: scopedNozzles.map((nozzle) => ({
         nozzleId: nozzle.id,
@@ -3827,11 +3850,15 @@ export async function getFuelOperationsWorkspace(
       }),
       pumpRows: scopedPumps.map((pump) => ({
         pumpId: pump.id,
-        operatingSiteId: pump.operatingSiteId,
+        operatingSiteId: pump.operatingSiteId ?? pump.tank?.operatingSiteId ?? null,
+        tankId: pump.tankId,
+        productProfileId: pump.tank?.productProfileId ?? null,
         code: pump.code,
         name: pump.name,
         pumpType: pump.pumpType,
-        siteCode: pump.operatingSite?.code ?? null,
+        siteCode: pump.operatingSite?.code ?? siteById.get(pump.tank?.operatingSiteId ?? "")?.code ?? null,
+        tankCode: pump.tank?.code ?? null,
+        productCode: pump.tank?.productProfile?.code ?? null,
         nozzleCount: pump.nozzles.length,
         manufacturer: pump.manufacturer,
         serialNo: pump.serialNo,
@@ -5648,8 +5675,33 @@ export async function upsertFuelPump(
   return prisma.$transaction(async (tx) => {
     const { context, company } = await ensureFuelFoundation(tx);
     const code = normalizeCode(input.code, "pump code");
-    const operatingSiteId = normalizeOptionalText(input.operatingSiteId);
+    const tankId = normalizeOptionalText(input.tankId);
+    const requestedOperatingSiteId = normalizeOptionalText(input.operatingSiteId);
 
+    if (!tankId) {
+      throw new Error("Flash ERP needs a tank before saving a pump.");
+    }
+
+    const tank = await tx.erpFuelTank.findFirst({
+      where: {
+        id: tankId,
+        companyId: company.id
+      }
+    });
+
+    if (!tank) {
+      throw new Error("Flash ERP could not find that tank.");
+    }
+
+    if (
+      requestedOperatingSiteId &&
+      tank.operatingSiteId &&
+      requestedOperatingSiteId !== tank.operatingSiteId
+    ) {
+      throw new Error("Flash ERP cannot link a pump to a tank from a different site.");
+    }
+
+    const operatingSiteId = requestedOperatingSiteId ?? tank.operatingSiteId;
     await validateSite(tx, company.id, operatingSiteId);
 
     const existing = input.pumpId
@@ -5665,6 +5717,7 @@ export async function upsertFuelPump(
 
     const data = {
       operatingSiteId,
+      tankId: tank.id,
       code,
       name: normalizeOptionalText(input.name) ?? code,
       pumpType: normalizeCode(input.pumpType ?? "DISPENSER", "pump type"),
@@ -5701,26 +5754,51 @@ export async function upsertFuelNozzle(
   return prisma.$transaction(async (tx) => {
     const { context, company } = await ensureFuelFoundation(tx);
     const pumpId = normalizeOptionalText(input.pumpId);
-    const tankId = normalizeOptionalText(input.tankId);
+    const requestedTankId = normalizeOptionalText(input.tankId);
 
-    if (!pumpId || !tankId) {
-      throw new Error("Flash ERP needs a pump and tank before saving a nozzle.");
+    if (!pumpId) {
+      throw new Error("Flash ERP needs a pump before saving a nozzle.");
     }
 
-    const [pump, tank] = await Promise.all([
-      tx.erpFuelPump.findFirst({ where: { id: pumpId, companyId: company.id } }),
-      tx.erpFuelTank.findFirst({ where: { id: tankId, companyId: company.id } })
-    ]);
+    const pump = await tx.erpFuelPump.findFirst({
+      where: { id: pumpId, companyId: company.id },
+      include: { tank: true }
+    });
 
     if (!pump) {
       throw new Error("Flash ERP could not find that pump.");
     }
 
+    if (pump.tankId && requestedTankId && requestedTankId !== pump.tankId) {
+      throw new Error("Flash ERP cannot save a nozzle against a tank that differs from the pump tank.");
+    }
+
+    const tankId = pump.tankId ?? requestedTankId;
+
+    if (!tankId) {
+      throw new Error("Flash ERP needs the selected pump to be linked to a tank before saving a nozzle.");
+    }
+
+    const tank =
+      pump.tankId && pump.tank
+        ? pump.tank
+        : await tx.erpFuelTank.findFirst({ where: { id: tankId, companyId: company.id } });
+
     if (!tank) {
       throw new Error("Flash ERP could not find that tank.");
     }
 
-    const productProfileId = normalizeOptionalText(input.productProfileId) ?? tank.productProfileId;
+    const requestedProductProfileId = normalizeOptionalText(input.productProfileId);
+
+    if (
+      tank.productProfileId &&
+      requestedProductProfileId &&
+      requestedProductProfileId !== tank.productProfileId
+    ) {
+      throw new Error("Flash ERP cannot save a nozzle against a product that differs from the pump tank product.");
+    }
+
+    const productProfileId = tank.productProfileId ?? requestedProductProfileId;
     await validateFuelProduct(tx, context.retailOrgId, productProfileId);
 
     const code = normalizeCode(input.code, "nozzle code");

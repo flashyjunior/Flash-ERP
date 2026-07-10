@@ -1629,10 +1629,39 @@ export function FuelOperationsWorkspace({
     uomCode: tank.uomCode,
     value: tank.tankId
   }));
+  const tankById = new Map(tankOptions.map((tank) => [tank.value, tank] as const));
+  const pumpTankOptions = selectedHqSite
+    ? tankOptions.filter((tank) => tank.operatingSiteId === selectedHqSite.operatingSiteId)
+    : tankOptions;
   const pumpOptions = workspace.pumpOptions.map((pump) => ({
     label: pump.label,
+    operatingSiteId: pump.operatingSiteId,
+    productProfileId: pump.productProfileId,
+    tankId: pump.tankId,
+    uomCode: pump.uomCode,
     value: pump.pumpId
   }));
+  const pumpById = new Map(pumpOptions.map((pump) => [pump.value, pump] as const));
+  const nozzlePumpOptions = selectedHqSite
+    ? pumpOptions.filter((pump) => pump.operatingSiteId === selectedHqSite.operatingSiteId)
+    : pumpOptions;
+  const selectedPumpTank = pumpDraft.tankId ? tankById.get(pumpDraft.tankId) ?? null : null;
+  const selectedPumpTankProduct = selectedPumpTank?.productProfileId
+    ? fuelProductByProfileId.get(selectedPumpTank.productProfileId) ?? null
+    : null;
+  const selectedNozzlePump = nozzleDraft.pumpId ? pumpById.get(nozzleDraft.pumpId) ?? null : null;
+  const selectedNozzleTank = selectedNozzlePump?.tankId
+    ? tankById.get(selectedNozzlePump.tankId) ?? null
+    : null;
+  const selectedNozzleProduct = selectedNozzlePump?.productProfileId
+    ? fuelProductByProfileId.get(selectedNozzlePump.productProfileId) ?? null
+    : null;
+  const pumpSubmitBlockReason = !pumpDraft.tankId ? "Select the tank that supplies this pump." : "";
+  const nozzleSubmitBlockReason = !nozzleDraft.pumpId
+    ? "Select the pump for this nozzle."
+    : !selectedNozzlePump?.tankId
+      ? "Link the selected pump to a tank before adding nozzles."
+      : "";
   const nozzleOptions = workspace.nozzleOptions.map((nozzle) => ({
     label: nozzle.label,
     value: nozzle.nozzleId
@@ -1917,6 +1946,7 @@ export function FuelOperationsWorkspace({
       name: row.name,
       pumpType: row.pumpType,
       operatingSiteId: row.operatingSiteId,
+      tankId: row.tankId,
       manufacturer: row.manufacturer,
       serialNo: row.serialNo,
       status: row.status
@@ -2335,6 +2365,8 @@ export function FuelOperationsWorkspace({
       { accessorKey: "code", header: "Pump" },
       { accessorKey: "name", header: "Name" },
       { accessorKey: "siteCode", header: "Site" },
+      { accessorKey: "tankCode", header: "Tank" },
+      { accessorKey: "productCode", header: "Product" },
       { accessorKey: "nozzleCount", header: "Nozzles" },
       { accessorKey: "manufacturer", header: "Manufacturer" },
       {
@@ -3173,7 +3205,11 @@ export function FuelOperationsWorkspace({
                   onOpenChange={(open) => {
                     setPumpDialogOpen(open);
                     if (!open) {
-                      setPumpDraft({ pumpType: "DISPENSER", status: "ACTIVE" });
+                      setPumpDraft({
+                        pumpType: "DISPENSER",
+                        status: "ACTIVE",
+                        operatingSiteId: selectedHqSite?.operatingSiteId
+                      });
                       setMutation(mutationIdle());
                     }
                   }}
@@ -3198,20 +3234,39 @@ export function FuelOperationsWorkspace({
                       value={pumpDraft.name ?? ""}
                     />
                     <DialogSelect
-                      label="Operating site"
-                      onChange={(value) =>
-                        setPumpDraft((current) => ({ ...current, operatingSiteId: value }))
-                      }
-                      options={siteOptions}
-                      value={pumpDraft.operatingSiteId ?? ""}
-                    />
-                    <DialogSelect
                       label="Pump type"
                       onChange={(value) =>
                         setPumpDraft((current) => ({ ...current, pumpType: value }))
                       }
                       options={pumpTypeOptions}
                       value={pumpDraft.pumpType ?? "DISPENSER"}
+                    />
+                    <DialogSelect
+                      label="Tank"
+                      onChange={(value) => {
+                        const tank = tankById.get(value);
+                        setPumpDraft((current) => ({
+                          ...current,
+                          tankId: value,
+                          operatingSiteId: tank?.operatingSiteId ?? current.operatingSiteId
+                        }));
+                      }}
+                      options={pumpTankOptions}
+                      value={pumpDraft.tankId ?? ""}
+                    />
+                    <DialogReadOnlyValue
+                      label="Site"
+                      value={
+                        selectedPumpTank?.label
+                          ? siteOptions.find(
+                              (site) => site.value === selectedPumpTank.operatingSiteId
+                            )?.label ?? "Not set"
+                          : "Select tank"
+                      }
+                    />
+                    <DialogReadOnlyValue
+                      label="Product"
+                      value={selectedPumpTankProduct?.label ?? "Select tank"}
                     />
                     <DialogSelect
                       label="Pump status"
@@ -3237,6 +3292,8 @@ export function FuelOperationsWorkspace({
                     />
                   </div>
                   <DialogFooter
+                    disabled={Boolean(pumpSubmitBlockReason)}
+                    disabledReason={pumpSubmitBlockReason}
                     mutation={mutation}
                     onCancel={() => setPumpDialogOpen(false)}
                     onSubmit={() =>
@@ -3968,19 +4025,22 @@ export function FuelOperationsWorkspace({
                   <div className="grid gap-4 md:grid-cols-2">
                     <DialogSelect
                       label="Pump"
-                      onChange={(value) =>
-                        setNozzleDraft((current) => ({ ...current, pumpId: value }))
-                      }
-                      options={pumpOptions}
+                      onChange={(value) => {
+                        const pump = pumpById.get(value);
+                        setNozzleDraft((current) => ({
+                          ...current,
+                          pumpId: value,
+                          tankId: pump?.tankId ?? "",
+                          productProfileId: pump?.productProfileId ?? current.productProfileId,
+                          meterUomCode: pump?.uomCode ?? current.meterUomCode ?? "LTR"
+                        }));
+                      }}
+                      options={nozzlePumpOptions}
                       value={nozzleDraft.pumpId ?? ""}
                     />
-                    <DialogSelect
+                    <DialogReadOnlyValue
                       label="Tank"
-                      onChange={(value) =>
-                        setNozzleDraft((current) => ({ ...current, tankId: value }))
-                      }
-                      options={tankOptions}
-                      value={nozzleDraft.tankId ?? ""}
+                      value={selectedNozzleTank?.label ?? "Select pump"}
                     />
                     <DialogTextInput
                       label="Nozzle code"
@@ -3996,13 +4056,9 @@ export function FuelOperationsWorkspace({
                       }
                       value={nozzleDraft.name ?? ""}
                     />
-                    <DialogSelect
-                      label="Fuel product (Products)"
-                      onChange={(value) =>
-                        setNozzleDraft((current) => ({ ...current, productProfileId: value }))
-                      }
-                      options={productOptions}
-                      value={nozzleDraft.productProfileId ?? ""}
+                    <DialogReadOnlyValue
+                      label="Fuel product"
+                      value={selectedNozzleProduct?.label ?? "Select pump"}
                     />
                     <DialogSelect
                       label="Nozzle status"
@@ -4024,6 +4080,8 @@ export function FuelOperationsWorkspace({
                     />
                   </div>
                   <DialogFooter
+                    disabled={Boolean(nozzleSubmitBlockReason)}
+                    disabledReason={nozzleSubmitBlockReason}
                     mutation={mutation}
                     onCancel={() => setNozzleDialogOpen(false)}
                     onSubmit={() =>

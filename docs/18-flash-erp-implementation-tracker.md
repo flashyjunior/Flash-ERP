@@ -1,6 +1,6 @@
 # Flash ERP Implementation Tracker
 
-Updated: 2026-06-27
+Updated: 2026-07-10
 
 This is the live progress ledger for the Flash ERP workspace. Keep it aligned with code as slices land. The tracker is intentionally industry-neutral: product, site, storage, customer, supplier, and document-posting foundations can later support oil, retail, services, distribution, manufacturing, or other operating models.
 
@@ -22,6 +22,7 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - HR Reports now live under the central Reports workspace in a Human Resources category, protected payslip generation no longer returns 404 for existing calculated payroll results, and HR/payroll controls have been rounded to match the rest of the application.
 - Benefits, employee loans/salary advances, expense claims, and travel workflows now carry Finance/GL implications through benefit liability mappings, cashbook-backed advance/claim/travel posting, employee receivable tracking, payroll loan recovery, and journal/cashbook drilldowns.
 - HQ Fuel Management now has a cross-page site filter; Tank Dips and Meter Readings expose both site and filling-station context in their grids and can be filtered by site.
+- Fuel pump setup now requires the supplying tank at pump creation/edit time; nozzle setup derives tank, product, and UOM from the selected pump instead of asking users to repeat tank/product choices on each nozzle.
 - Sync now appears under Settings, while POS and Operations appear inside Finance navigation without changing their route ownership.
 - Core Finance completion gate is complete. Retail Operations is intentionally deferred for a later module pass. Finance Multi Currency setup, base/functional currency selection from configured `ErpCurrency` rows, Fuel Operations foundation, outbound filling-station transfer tracking, store-sourced fuel sales/payment capture, HQ-direct GRN receiving into PO locations, dedicated Fuel Operations workflow pages, RMS source-location alignment, fuel sales-order fulfillment, site-filtered fuel tank selection, filling-station edit/GPS capture, POS-style Fuel Sale payment capture, functional-currency Fuel Sale defaults, tender-method payment account mappings, tank UOM derivation from selected fuel products, seeded filling-station/tank defaults, customer-credit tender AR posting, shop-linked filling-station transfer destinations, store/shop `COST_CENTER` P&L tracking, transfer-out waybill/feedback handling, actual inventory valuation/GL posting for fuel transfer-outs, online-store POS service type capture, online-store fuel station-side capture routes, online-store supervisor fuel permissions/menu gating, HQ fuel-sales menu removal, and default fuel source/dispatch site settings in Settings are complete as the first industry-specific post-Finance module work.
 - Fuel tank dips and nozzle meter readings now require uploaded photo evidence before saving, with backend validation to prevent bypassing the UI guard.
@@ -66,6 +67,28 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - The inherited RMS-era model names remain where they still own existing data/workflows. Rename them gradually as ERP ownership and migrations are designed.
 
 ## Maintenance Notes
+
+### 2026-07-10 Fuel Pump Tank Linkage Correction
+
+Status: Done
+
+Implemented:
+
+- Added `ErpFuelPump.tankId` and a guarded SQL Server migration that backfills existing pumps from their existing nozzle tank links where possible.
+- Changed Fuel Operations pump saves to require a supplying tank, derive/validate the pump site from the selected tank, and block cross-site pump/tank combinations.
+- Changed nozzle saves to require only a pump from the user flow, derive tank/product/UOM from that pump, and reject mismatched legacy payloads.
+- Updated HQ Fuel Pump and Nozzle grids/forms so pumps show site/tank/product context and nozzles no longer ask users to choose a separate tank/product.
+
+Verified:
+
+- `npm run prisma:format`
+- `npm run prisma:validate`
+- `npm run prisma:generate`
+- `npx prisma db push --schema prisma/schema.prisma`
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- Live smoke created disposable pump `SMOKE-PUMP-*` linked to tank `TANK-01`, created a nozzle by selecting only that pump, confirmed inherited tank/UOM, and cleaned up the smoke rows.
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/fuel-operations/pumps`, `/api/fuel-operations/pumps`, and `/api/fuel-operations/nozzles`.
 
 ### 2026-06-26 Standard POS Sales Accounting
 

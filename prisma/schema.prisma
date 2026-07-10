@@ -2709,6 +2709,7 @@ model ErpFuelTank {
   company              ErpCompany                   @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   operatingSite        ErpOperatingSite?            @relation(fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
   productProfile       ErpProductProfile?           @relation(fields: [productProfileId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  pumps                ErpFuelPump[]
   nozzles              ErpFuelNozzle[]
   dips                 ErpFuelTankDip[]
   meterReadings        ErpFuelMeterReading[]
@@ -2727,6 +2728,7 @@ model ErpFuelPump {
   retailOrgId     String
   companyId       String
   operatingSiteId String?
+  tankId          String?
   code            String
   name            String
   pumpType        String            @default("DISPENSER")
@@ -2739,11 +2741,13 @@ model ErpFuelPump {
   retailOrg       RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
   company         ErpCompany        @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   operatingSite   ErpOperatingSite? @relation(fields: [operatingSiteId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  tank            ErpFuelTank?      @relation(fields: [tankId], references: [id], onDelete: SetNull, onUpdate: NoAction)
   nozzles         ErpFuelNozzle[]
 
   @@unique([companyId, code])
   @@index([retailOrgId, status])
   @@index([operatingSiteId, status])
+  @@index([tankId, status])
 }
 
 model ErpFuelNozzle {
