@@ -234,7 +234,10 @@ const allocationFilter: FilterFn<AllocationRow> = (row, _columnId, filterValue) 
       row.original.documentNo,
       row.original.partyNo,
       row.original.partyName,
+      row.original.cashbookAccountCode ?? "",
+      row.original.cashbookAccountName ?? "",
       row.original.paymentAccountCode,
+      row.original.cashbookEntryNo ?? "",
       row.original.status,
       row.original.journalNo ?? ""
     ]
@@ -257,7 +260,7 @@ export function ErpArApSettlementWorkspace({
     operationalDocumentId: "",
     allocationDate: workspace.defaultAllocationDate,
     postingDate: workspace.defaultPostingDate,
-    paymentAccountCode: "1000",
+    cashbookAccountId: workspace.cashbookAccountOptions[0]?.cashbookAccountId ?? "",
     amount: "",
     discountAmount: "",
     writeOffAmount: "",
@@ -275,17 +278,15 @@ export function ErpArApSettlementWorkspace({
       }),
     [workspace.currencyCode]
   );
-  const accountOptions = useMemo(
+  const cashbookAccountOptions = useMemo(
     () => [
-      { value: "1000", label: "1000 - Cash" },
-      ...workspace.accountOptions
-        .filter((option) => option.accountCode !== "1000")
-        .map((option) => ({
-          value: option.accountCode,
-          label: option.label
-        }))
+      { value: "", label: "Select cashbook account" },
+      ...workspace.cashbookAccountOptions.map((option) => ({
+        value: option.cashbookAccountId,
+        label: `${option.label} / ${option.glAccountCode}`
+      }))
     ],
-    [workspace.accountOptions]
+    [workspace.cashbookAccountOptions]
   );
   const openItemColumns = useMemo<ColumnDef<OpenItemRow>[]>(
     () => [
@@ -432,8 +433,17 @@ export function ErpArApSettlementWorkspace({
         cell: ({ row }) => currencyFormatter.format(row.original.reductionAmount)
       },
       {
-        accessorKey: "paymentAccountCode",
-        header: "Pay account"
+        accessorKey: "cashbookAccountCode",
+        header: "Cashbook",
+        cell: ({ row }) =>
+          row.original.cashbookAccountCode
+            ? `${row.original.cashbookAccountCode} - ${row.original.cashbookAccountName}`
+            : row.original.paymentAccountCode
+      },
+      {
+        accessorKey: "cashbookEntryNo",
+        header: "Cashbook Entry",
+        cell: ({ row }) => row.original.cashbookEntryNo ?? "-"
       },
       {
         accessorKey: "journalNo",
@@ -489,7 +499,7 @@ export function ErpArApSettlementWorkspace({
       operationalDocumentId: row.documentId,
       allocationDate: workspace.defaultAllocationDate,
       postingDate: workspace.defaultPostingDate,
-      paymentAccountCode: "1000",
+      cashbookAccountId: workspace.cashbookAccountOptions[0]?.cashbookAccountId ?? "",
       amount: row.availableAmount,
       discountAmount: "",
       writeOffAmount: "",
@@ -690,10 +700,10 @@ export function ErpArApSettlementWorkspace({
                   value={draft.postingDate}
                 />
                 <DialogSelect
-                  label="Payment account"
-                  onChange={(value) => updateDraft({ paymentAccountCode: value })}
-                  options={accountOptions}
-                  value={draft.paymentAccountCode}
+                  label="Cashbook account"
+                  onChange={(value) => updateDraft({ cashbookAccountId: value })}
+                  options={cashbookAccountOptions}
+                  value={draft.cashbookAccountId}
                 />
                 <DialogTextInput
                   label="Cash amount"
@@ -804,9 +814,13 @@ export function ErpArApSettlementWorkspace({
                 />
                 <DialogTextInput
                   disabled
-                  label="Payment account"
+                  label="Cashbook account"
                   onChange={() => undefined}
-                  value={pendingPostAllocation.paymentAccountCode}
+                  value={
+                    pendingPostAllocation.cashbookAccountCode
+                      ? `${pendingPostAllocation.cashbookAccountCode} - ${pendingPostAllocation.cashbookAccountName}`
+                      : pendingPostAllocation.paymentAccountCode
+                  }
                 />
                 <DialogTextInput
                   disabled

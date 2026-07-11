@@ -1,6 +1,6 @@
 # Flash ERP Implementation Tracker
 
-Updated: 2026-07-10
+Updated: 2026-07-11
 
 This is the live progress ledger for the Flash ERP workspace. Keep it aligned with code as slices land. The tracker is intentionally industry-neutral: product, site, storage, customer, supplier, and document-posting foundations can later support oil, retail, services, distribution, manufacturing, or other operating models.
 
@@ -32,7 +32,7 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - Inventory inter-store transfer requests now expose logistics fields in the generic transfer dialog, persist them on create/edit, publish them with the store transfer payload, and show actionable save-block reasons instead of silently disabling save/commit.
 - Goods receipt history now exposes AP supplier-invoice status and can generate a posted supplier invoice from a GRN through a confirmation prompt, using the shared operational-document posting engine so the receipt creates AP/open-item and GL ledger impact before supplier payment; supplier details now include an AP invoices tab showing GRN-generated supplier invoices, journal links, and wide GRN reference hyperlinks back to the original receipt.
 - Finance AR/AP Documents now separates customer AR and supplier AP into focused tabs for statements, activity, and aging instead of mixing both sides into one clumsy view.
-- AR/AP settlement posting now requires a confirmation prompt before posting customer receipt vouchers or supplier payment vouchers through Finance.
+- AR/AP settlement posting now requires a confirmation prompt before posting customer receipt vouchers or supplier payment vouchers through Finance; settlement vouchers now select Finance cashbook accounts, derive the GL payment account from the selected cashbook account, and create the linked posted cashbook entry automatically when the voucher is posted.
 - Supplier AP invoice rows now show posted voucher reductions, paid/open amounts, and voucher context so posted PVs visibly reduce the supplier's owed balance.
 - AR/AP statement running balances now apply source documents before settlements on the same posting timestamp, so supplier invoices establish the payable before a same-date payment voucher reduces it.
 - HQ Reports now includes exportable Customer Statement and Supplier Statement reports backed by the same Finance AR/AP statement data.
@@ -67,6 +67,28 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - The inherited RMS-era model names remain where they still own existing data/workflows. Rename them gradually as ERP ownership and migrations are designed.
 
 ## Maintenance Notes
+
+### 2026-07-11 AR/AP Settlement Cashbook Posting
+
+Status: Done
+
+Implemented:
+
+- Added nullable cashbook-account linkage to AR/AP settlement allocations, with a guarded direct SQL Server migration for hosted databases.
+- Changed customer receipt voucher and supplier payment voucher creation to select Finance cashbook accounts instead of raw GL payment accounts.
+- Derived voucher GL payment lines from the selected cashbook account so the settlement dialog and cashbook movement no longer ask for competing payment accounts.
+- Created posted cashbook entries automatically when AR/AP settlement vouchers are posted, linked to the same settlement allocation and GL journal.
+- Kept legacy posted vouchers without cashbook entries available in the manual Cashbook settlement-link dropdown while hiding vouchers that already have their auto-created cashbook movement.
+
+Verified:
+
+- `npm run prisma:format`
+- `npm run prisma:validate`
+- `npm run prisma:generate`
+- `npx prisma db push --schema prisma/schema.prisma`
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/finance/ar-ap-settlements`, `/api/finance/ar-ap-settlements`, `/api/finance/ar-ap-settlements/[allocationId]/post`, `/finance/cashbook`, and `/api/finance/cashbook/entries`.
 
 ### 2026-07-10 Fuel Pump Tank Linkage Correction
 

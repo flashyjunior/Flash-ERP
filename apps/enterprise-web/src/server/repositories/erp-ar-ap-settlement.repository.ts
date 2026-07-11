@@ -42,6 +42,16 @@ type SettlementDocument = Prisma.ErpOperationalDocumentGetPayload<{
             journalNo: true;
           };
         };
+        cashbookAccount: true;
+        cashbookEntries: {
+          include: {
+            postingJournalEntry: {
+              select: {
+                journalNo: true;
+              };
+            };
+          };
+        };
       };
     };
   };
@@ -69,6 +79,7 @@ export type CreateErpSettlementAllocationRequest = {
   operationalDocumentId?: string | null;
   allocationDate?: string | null;
   postingDate?: string | null;
+  cashbookAccountId?: string | null;
   paymentAccountCode?: string | null;
   amount?: number | string | null;
   discountAmount?: number | string | null;
@@ -82,6 +93,8 @@ export type ErpSettlementAllocationMutationResponse = {
   allocationNo?: string;
   journalEntryId?: string;
   journalNo?: string;
+  cashbookEntryId?: string;
+  cashbookEntryNo?: string;
   serverProcessedAt: string;
 };
 
@@ -92,10 +105,13 @@ export type ErpArApSettlementWorkspaceData = {
   refreshedAt: string;
   defaultAllocationDate: string;
   defaultPostingDate: string;
-  accountOptions: Array<{
-    accountCode: string;
-    accountName: string;
+  cashbookAccountOptions: Array<{
+    cashbookAccountId: string;
+    code: string;
+    name: string;
     accountType: string;
+    currencyCode: string;
+    glAccountCode: string;
     label: string;
   }>;
   metrics: {
@@ -143,7 +159,12 @@ export type ErpArApSettlementWorkspaceData = {
     allocationDate: string;
     postingDate: string;
     currencyCode: string;
+    cashbookAccountId: string | null;
+    cashbookAccountCode: string | null;
+    cashbookAccountName: string | null;
     paymentAccountCode: string;
+    cashbookEntryId: string | null;
+    cashbookEntryNo: string | null;
     amount: number;
     discountAmount: number;
     writeOffAmount: number;
@@ -311,7 +332,7 @@ function buildUnavailableErpArApSettlementWorkspace(
     refreshedAt: new Date().toISOString(),
     defaultAllocationDate: today,
     defaultPostingDate: today,
-    accountOptions: [],
+    cashbookAccountOptions: [],
     metrics: {
       openItems: 0,
       arOpenAmount: 0,
@@ -373,6 +394,167 @@ async function getPrimaryCompany(tx: Prisma.TransactionClient, context: Settleme
   });
 }
 
+async function ensureSettlementCashbookSequence(
+  tx: Prisma.TransactionClient,
+  context: SettlementContext,
+  company: NonNullable<Awaited<ReturnType<typeof getPrimaryCompany>>>
+) {
+  const today = new Date();
+  const fiscalYear =
+    (await tx.erpFiscalYear.findFirst({
+      where: {
+        companyId: company.id,
+        startsOn: {
+          lte: today
+        },
+        endsOn: {
+          gte: today
+        },
+        status: {
+          not: "CLOSED"
+        }
+      },
+      orderBy: {
+        startsOn: "desc"
+      },
+      select: {
+        id: true
+      }
+    })) ??
+    (await tx.erpFiscalYear.findFirst({
+      where: {
+        companyId: company.id,
+        status: {
+          not: "CLOSED"
+        }
+      },
+      orderBy: {
+        startsOn: "desc"
+      },
+      select: {
+        id: true
+      }
+    }));
+
+  if (!fiscalYear) {
+    throw new Error("Flash ERP needs an open fiscal year before settlement cashbook numbering can be used.");
+  }
+
+  await tx.erpDocumentSequence.upsert({
+    where: {
+      companyId_documentType_fiscalYearId: {
+        companyId: company.id,
+        documentType: "CASHBOOK_ENTRY",
+        fiscalYearId: fiscalYear.id
+      }
+    },
+    update: {
+      prefix: "CB",
+      paddingLength: 6,
+      resetPolicy: "FISCAL_YEAR",
+      status: activeStatus
+    },
+    create: {
+      retailOrgId: context.retailOrgId,
+      companyId: company.id,
+      fiscalYearId: fiscalYear.id,
+      documentType: "CASHBOOK_ENTRY",
+      prefix: "CB",
+      paddingLength: 6,
+      resetPolicy: "FISCAL_YEAR",
+      status: activeStatus
+    }
+  });
+}
+
+async function ensureDefaultSettlementCashbookAccount(
+  tx: Prisma.TransactionClient,
+  context: SettlementContext,
+  company: NonNullable<Awaited<ReturnType<typeof getPrimaryCompany>>>
+) {
+  const defaultAccount = await tx.erpCashbookAccount.findFirst({
+    where: {
+      companyId: company.id,
+      status: activeStatus,
+      isDefault: true
+    },
+    select: {
+      id: true
+    }
+  });
+
+  if (defaultAccount) {
+    return;
+  }
+
+  const existing = await tx.erpCashbookAccount.findFirst({
+    where: {
+      companyId: company.id,
+      status: activeStatus
+    },
+    orderBy: [{ code: "asc" }],
+    select: {
+      id: true
+    }
+  });
+
+  if (existing) {
+    await tx.erpCashbookAccount.update({
+      where: {
+        id: existing.id
+      },
+      data: {
+        isDefault: true
+      },
+      select: {
+        id: true
+      }
+    });
+    return;
+  }
+
+  const glAccount =
+    (await tx.glAccount.findFirst({
+      where: {
+        retailOrgId: context.retailOrgId,
+        code: "1000",
+        status: activeStatus
+      }
+    })) ??
+    (await tx.glAccount.findFirst({
+      where: {
+        retailOrgId: context.retailOrgId,
+        accountType: "ASSET",
+        status: activeStatus
+      },
+      orderBy: [{ sortOrder: "asc" }, { code: "asc" }]
+    }));
+
+  if (!glAccount) {
+    throw new Error("Flash ERP needs a cash/bank GL account before settlement cashbook posting can be used.");
+  }
+
+  await tx.erpCashbookAccount.create({
+    data: {
+      retailOrgId: context.retailOrgId,
+      companyId: company.id,
+      glAccountId: glAccount.id,
+      code: "MAIN-CASH",
+      name: "Main cash account",
+      accountType: "CASH",
+      currencyCode: company.baseCurrencyCode || context.retailOrg.baseCurrencyCode,
+      glAccountCode: glAccount.code,
+      openingBalance: 0,
+      reconciliationEnabled: true,
+      isDefault: true,
+      status: activeStatus
+    },
+    select: {
+      id: true
+    }
+  });
+}
+
 function addPostingLine(
   lines: PostAccountingDocumentLine[],
   accountCode: string,
@@ -429,6 +611,22 @@ async function loadSettlementDocuments(companyId: string) {
           postingJournalEntry: {
             select: {
               journalNo: true
+            }
+          },
+          cashbookAccount: true,
+          cashbookEntries: {
+            where: {
+              status: {
+                not: RecordStatus.DELETED
+              }
+            },
+            orderBy: [{ createdAt: "desc" }],
+            include: {
+              postingJournalEntry: {
+                select: {
+                  journalNo: true
+                }
+              }
             }
           }
         }
@@ -598,6 +796,7 @@ function buildAllocationRows(documents: SettlementDocument[]) {
       const amount = Number(allocation.amount);
       const discountAmount = Number(allocation.discountAmount);
       const writeOffAmount = Number(allocation.writeOffAmount);
+      const cashbookEntry = allocation.cashbookEntries[0] ?? null;
 
       return {
         allocationId: allocation.id,
@@ -611,7 +810,12 @@ function buildAllocationRows(documents: SettlementDocument[]) {
         allocationDate: allocation.allocationDate.toISOString(),
         postingDate: allocation.postingDate.toISOString(),
         currencyCode: allocation.currencyCode,
+        cashbookAccountId: allocation.cashbookAccountId,
+        cashbookAccountCode: allocation.cashbookAccount?.code ?? null,
+        cashbookAccountName: allocation.cashbookAccount?.name ?? null,
         paymentAccountCode: allocation.paymentAccountCode,
+        cashbookEntryId: cashbookEntry?.id ?? null,
+        cashbookEntryNo: cashbookEntry?.entryNo ?? null,
         amount,
         discountAmount,
         writeOffAmount,
@@ -643,15 +847,20 @@ export async function getErpArApSettlementWorkspace(): Promise<ErpArApSettlement
     );
   }
 
-  const [documents, customerAccountEntries, accounts] = await Promise.all([
+  await prisma.$transaction(async (tx) => {
+    await ensureDefaultSettlementCashbookAccount(tx, context, company);
+    await ensureSettlementCashbookSequence(tx, context, company);
+  });
+
+  const [documents, customerAccountEntries, cashbookAccounts] = await Promise.all([
     loadSettlementDocuments(company.id),
     loadCustomerAccountEntries(context.retailOrgId),
-    prisma.glAccount.findMany({
+    prisma.erpCashbookAccount.findMany({
       where: {
-        retailOrgId: context.retailOrgId,
+        companyId: company.id,
         status: activeStatus
       },
-      orderBy: [{ sortOrder: "asc" }, { code: "asc" }]
+      orderBy: [{ isDefault: "desc" }, { code: "asc" }]
     })
   ]);
   const today = new Date();
@@ -710,10 +919,13 @@ export async function getErpArApSettlementWorkspace(): Promise<ErpArApSettlement
     refreshedAt: new Date().toISOString(),
     defaultAllocationDate: dateOnly(new Date()),
     defaultPostingDate: dateOnly(new Date()),
-    accountOptions: accounts.map((account) => ({
-      accountCode: account.code,
-      accountName: account.name,
+    cashbookAccountOptions: cashbookAccounts.map((account) => ({
+      cashbookAccountId: account.id,
+      code: account.code,
+      name: account.name,
       accountType: account.accountType,
+      currencyCode: account.currencyCode,
+      glAccountCode: account.glAccountCode,
       label: `${account.code} - ${account.name}`
     })),
     metrics: {
@@ -788,6 +1000,16 @@ export async function createErpSettlementAllocation(
               select: {
                 journalNo: true
               }
+            },
+            cashbookAccount: true,
+            cashbookEntries: {
+              include: {
+                postingJournalEntry: {
+                  select: {
+                    journalNo: true
+                  }
+                }
+              }
             }
           }
         }
@@ -797,6 +1019,9 @@ export async function createErpSettlementAllocation(
     if (!document) {
       throw new Error("Flash ERP cannot find a posted operational document for settlement.");
     }
+
+    await ensureDefaultSettlementCashbookAccount(tx, context, document.company);
+    await ensureSettlementCashbookSequence(tx, context, document.company);
 
     const openItem = buildOpenItemRow(document, new Date());
     const allocationDate = parseDate(input.allocationDate ?? dateOnly(new Date()), "allocation date");
@@ -816,7 +1041,39 @@ export async function createErpSettlementAllocation(
       );
     }
 
-    const paymentAccountCode = normalizeCode(input.paymentAccountCode ?? "1000", "payment account");
+    const cashbookAccountId = normalizeOptionalText(input.cashbookAccountId);
+    const cashbookAccount = cashbookAccountId
+      ? await tx.erpCashbookAccount.findFirst({
+          where: {
+            id: cashbookAccountId,
+            companyId: document.companyId,
+            status: activeStatus
+          }
+        })
+      : amount > 0
+        ? await tx.erpCashbookAccount.findFirst({
+            where: {
+              companyId: document.companyId,
+              status: activeStatus,
+              isDefault: true
+            },
+            orderBy: [{ code: "asc" }]
+          })
+        : null;
+
+    if (amount > 0 && !cashbookAccount) {
+      throw new Error("Choose an active Finance cashbook account for the cash settlement amount.");
+    }
+
+    if (cashbookAccount && cashbookAccount.currencyCode !== document.currencyCode) {
+      throw new Error(
+        `${cashbookAccount.code} uses ${cashbookAccount.currencyCode}, but ${document.documentNo} uses ${document.currencyCode}.`
+      );
+    }
+
+    const paymentAccountCode = cashbookAccount
+      ? cashbookAccount.glAccountCode
+      : normalizeCode(input.paymentAccountCode ?? "1000", "payment account");
     const paymentAccount = await tx.glAccount.findFirst({
       where: {
         retailOrgId: context.retailOrgId,
@@ -854,6 +1111,7 @@ export async function createErpSettlementAllocation(
         allocationDate,
         postingDate,
         currencyCode: document.currencyCode,
+        cashbookAccountId: cashbookAccount?.id ?? null,
         paymentAccountCode,
         amount,
         discountAmount,
@@ -894,6 +1152,18 @@ export async function postErpSettlementAllocation(
         }
       },
       include: {
+        cashbookAccount: true,
+        cashbookEntries: {
+          where: {
+            status: {
+              not: RecordStatus.DELETED
+            }
+          },
+          select: {
+            id: true,
+            entryNo: true
+          }
+        },
         operationalDocument: {
           include: {
             postingJournalEntry: {
@@ -920,6 +1190,16 @@ export async function postErpSettlementAllocation(
                   select: {
                     journalNo: true
                   }
+                },
+                cashbookAccount: true,
+                cashbookEntries: {
+                  include: {
+                    postingJournalEntry: {
+                      select: {
+                        journalNo: true
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -942,6 +1222,8 @@ export async function postErpSettlementAllocation(
       throw new Error("Flash ERP can only settle posted operational documents.");
     }
 
+    await ensureDefaultSettlementCashbookAccount(tx, context, document.company);
+
     const openItem = buildOpenItemRow(document, new Date());
     const amount = roundMoney(Number(allocation.amount));
     const discountAmount = roundMoney(Number(allocation.discountAmount));
@@ -961,11 +1243,40 @@ export async function postErpSettlementAllocation(
     const controlAccountCode = controlAccountForSettlement(document);
     const postingProfile = document.partyProfile?.postingProfile ?? null;
     const postingLines: PostAccountingDocumentLine[] = [];
+    let cashbookAccount = allocation.cashbookAccount;
+
+    if (amount > 0 && !cashbookAccount) {
+      const candidates = await tx.erpCashbookAccount.findMany({
+        where: {
+          companyId: allocation.companyId,
+          glAccountCode: allocation.paymentAccountCode,
+          status: activeStatus
+        },
+        orderBy: [{ isDefault: "desc" }, { code: "asc" }],
+        take: 2
+      });
+
+      cashbookAccount = candidates.length === 1 || candidates[0]?.isDefault ? candidates[0] : null;
+    }
+
+    if (amount > 0 && !cashbookAccount) {
+      throw new Error(
+        `${allocation.allocationNo} needs an active cashbook account before it can post cash. Recreate the draft voucher with a cashbook account.`
+      );
+    }
+
+    if (cashbookAccount && cashbookAccount.currencyCode !== allocation.currencyCode) {
+      throw new Error(
+        `${cashbookAccount.code} uses ${cashbookAccount.currencyCode}, but ${allocation.allocationNo} uses ${allocation.currencyCode}.`
+      );
+    }
+
+    const paymentAccountCode = cashbookAccount?.glAccountCode ?? allocation.paymentAccountCode;
 
     if (allocation.allocationType === "CUSTOMER_RECEIPT") {
       addPostingLine(
         postingLines,
-        allocation.paymentAccountCode,
+        paymentAccountCode,
         amount,
         0,
         `${allocation.allocationNo} cash receipt for ${document.documentNo}`
@@ -1001,7 +1312,7 @@ export async function postErpSettlementAllocation(
       );
       addPostingLine(
         postingLines,
-        allocation.paymentAccountCode,
+        paymentAccountCode,
         0,
         amount,
         `${allocation.allocationNo} supplier payment for ${document.documentNo}`
@@ -1036,6 +1347,55 @@ export async function postErpSettlementAllocation(
       postedBy: "Enterprise settlements",
       lines: postingLines
     });
+    let cashbookEntry: { id: string; entryNo: string } | null = null;
+
+    if (cashbookAccount && amount > 0 && allocation.cashbookEntries.length === 0) {
+      await ensureSettlementCashbookSequence(tx, context, document.company);
+
+      const entryNo = (
+        await reserveErpDocumentNumberInTransaction(tx, {
+          retailOrgId: allocation.retailOrgId,
+          companyId: allocation.companyId,
+          documentType: "CASHBOOK_ENTRY"
+        })
+      ).documentNo;
+      const isReceipt = allocation.allocationType === "CUSTOMER_RECEIPT";
+
+      cashbookEntry = await tx.erpCashbookEntry.create({
+        data: {
+          retailOrgId: allocation.retailOrgId,
+          companyId: allocation.companyId,
+          cashbookAccountId: cashbookAccount.id,
+          settlementAllocationId: allocation.id,
+          postingJournalEntryId: result.journalEntryId,
+          entryNo,
+          entryType: isReceipt ? "RECEIPT" : "PAYMENT",
+          direction: isReceipt ? "INFLOW" : "OUTFLOW",
+          entryDate: allocation.allocationDate,
+          postingDate: allocation.postingDate,
+          currencyCode: allocation.currencyCode,
+          amount,
+          offsetAccountCode: controlAccountCode,
+          counterpartyName: allocation.partyName,
+          workflowType: allocation.allocationType,
+          workflowReference: allocation.allocationNo,
+          externalReference: document.documentNo,
+          memo:
+            normalizeOptionalText(allocation.memo) ??
+            `${allocation.allocationNo} ${allocation.allocationType.toLowerCase().replace(/_/g, " ")} for ${document.documentNo}.`,
+          reconciliationStatus: "UNRECONCILED",
+          status: "POSTED",
+          postedAt: new Date(),
+          postedBy: "Enterprise settlements"
+        },
+        select: {
+          id: true,
+          entryNo: true
+        }
+      });
+    } else {
+      cashbookEntry = allocation.cashbookEntries[0] ?? null;
+    }
 
     await tx.erpSettlementAllocation.update({
       where: {
@@ -1045,16 +1405,22 @@ export async function postErpSettlementAllocation(
         status: "POSTED",
         postedAt: new Date(),
         postedBy: "Enterprise settlements",
-        postingJournalEntryId: result.journalEntryId
+        postingJournalEntryId: result.journalEntryId,
+        cashbookAccountId: cashbookAccount?.id ?? allocation.cashbookAccountId,
+        paymentAccountCode
       }
     });
 
     return {
-      message: `Flash ERP posted ${allocation.allocationNo} through journal ${result.journalNo}.`,
+      message: `Flash ERP posted ${allocation.allocationNo} through journal ${result.journalNo}${
+        cashbookEntry ? ` and cashbook entry ${cashbookEntry.entryNo}` : ""
+      }.`,
       allocationId: allocation.id,
       allocationNo: allocation.allocationNo,
       journalEntryId: result.journalEntryId,
       journalNo: result.journalNo,
+      cashbookEntryId: cashbookEntry?.id,
+      cashbookEntryNo: cashbookEntry?.entryNo,
       serverProcessedAt: new Date().toISOString()
     };
   });

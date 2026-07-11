@@ -702,7 +702,19 @@ export async function getErpCashbookWorkspace(): Promise<ErpCashbookWorkspaceDat
         status: "POSTED"
       },
       orderBy: [{ allocationDate: "desc" }, { allocationNo: "desc" }],
-      take: 100
+      take: 100,
+      include: {
+        cashbookEntries: {
+          where: {
+            status: {
+              not: RecordStatus.DELETED
+            }
+          },
+          select: {
+            id: true
+          }
+        }
+      }
     })
   ]);
   const entryRows = accounts
@@ -778,11 +790,13 @@ export async function getErpCashbookWorkspace(): Promise<ErpCashbookWorkspaceDat
       bankName: account.branch.bank.name,
       branchName: account.branch.name
     })),
-    settlementAllocationOptions: settlementAllocations.map((allocation) => ({
-      settlementAllocationId: allocation.id,
-      allocationNo: allocation.allocationNo,
-      label: `${allocation.allocationNo} - ${allocation.partyName}`
-    })),
+    settlementAllocationOptions: settlementAllocations
+      .filter((allocation) => allocation.cashbookEntries.length === 0)
+      .map((allocation) => ({
+        settlementAllocationId: allocation.id,
+        allocationNo: allocation.allocationNo,
+        label: `${allocation.allocationNo} - ${allocation.partyName}`
+      })),
     metrics: {
       cashbookAccounts: accounts.length,
       bookBalance: roundMoney(accounts.reduce((sum, account) => sum + accountBookBalance(account), 0)),

@@ -2386,6 +2386,7 @@ model ErpSettlementAllocation {
   allocationDate        DateTime
   postingDate           DateTime
   currencyCode          String
+  cashbookAccountId     String?
   paymentAccountCode    String                     @default("1000")
   amount                Decimal                    @db.Decimal(18, 2)
   discountAmount        Decimal                    @default(0) @db.Decimal(18, 2)
@@ -2401,6 +2402,7 @@ model ErpSettlementAllocation {
   partyProfile          ErpPartyAccountingProfile? @relation(fields: [partyProfileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   operationalDocument   ErpOperationalDocument     @relation(fields: [operationalDocumentId], references: [id], onDelete: Cascade)
   postingJournalEntry   GlJournalEntry?            @relation(fields: [postingJournalEntryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  cashbookAccount       ErpCashbookAccount?        @relation("SettlementAllocationCashbookAccount", fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   cashbookEntries       ErpCashbookEntry[]
 
   @@unique([retailOrgId, allocationNo])
@@ -2446,6 +2448,7 @@ model ErpCashbookAccount {
   fuelSales             ErpFuelSale[]                @relation("FuelSalePaymentAccount")
   fuelSalePayments      ErpFuelSalePayment[]         @relation("FuelSalePaymentLineAccount")
   tenderMethods         TenderMethod[]               @relation("TenderMethodCashbookAccount")
+  settlementAllocations ErpSettlementAllocation[]    @relation("SettlementAllocationCashbookAccount")
 
   @@unique([companyId, code])
   @@index([retailOrgId, accountType, status])
