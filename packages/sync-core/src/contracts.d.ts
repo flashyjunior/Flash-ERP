@@ -234,8 +234,8 @@ export type StoreCustomerAccountEntryRecordedPayload = {
   occurredAt: string;
 };
 export type StoreBankingDepositRecordedPayload = {
-  depositId: string;
-  depositNo: string;
+    depositId: string;
+    depositNo: string;
   storeCode: string;
   terminalCode: string;
   reconciliationId: string;
@@ -252,12 +252,33 @@ export type StoreBankingDepositRecordedPayload = {
   bankAccountName?: string | null;
   reference: string | null;
   operatorName: string | null;
-  note: string | null;
-  depositedAt: string;
+    note: string | null;
+    depositedAt: string;
+};
+export type StoreExpenseConfirmedPayload = {
+    expenseId: string;
+    expenseNo: string;
+    storeCode: string;
+    terminalCode: string;
+    expenseDate: string;
+    category: string;
+    description: string;
+    supplierName: string | null;
+    paymentMethod: string | null;
+    externalReference: string | null;
+    amount: number;
+    taxAmount: number;
+    attachmentFileName: string | null;
+    attachmentUrl: string | null;
+    attachmentContentType?: string | null;
+    attachmentContentBase64?: string | null;
+    operatorName: string;
+    note: string | null;
+    confirmedAt: string;
 };
 export type StoreInventoryLedgerRecordedPayload = {
-  ledgerEntryId: string;
-  storeCode: string;
+    ledgerEntryId: string;
+    storeCode: string;
   terminalCode: string;
   inventoryLocationCode: string | null;
   productCode: string;

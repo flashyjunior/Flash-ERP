@@ -12,6 +12,7 @@ export const retailEntityKeys = [
   "salesOrder",
   "eodReconciliation",
   "bankingDeposit",
+  "storeExpense",
   "bankAccount",
   "supplier",
   "taxProfile",

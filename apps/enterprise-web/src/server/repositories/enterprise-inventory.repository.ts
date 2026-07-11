@@ -439,6 +439,8 @@ export type EnterpriseInventoryWorkspaceData = {
     feedbackNote: string | null;
     feedbackRecordedAt: string | null;
     feedbackRecordedAtLabel: string;
+    feedbackConfirmedAt: string | null;
+    feedbackPostedAt: string | null;
     feedbackOperatorName: string | null;
     requestedAt: string;
     requestedAtLabel: string;
@@ -888,6 +890,8 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         feedbackVarianceQuantity: true,
         feedbackNote: true,
         feedbackRecordedAt: true,
+        feedbackConfirmedAt: true,
+        feedbackPostedAt: true,
         feedbackOperatorName: true,
         requestedAt: true,
         requiredAt: true,
@@ -1480,6 +1484,8 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
       feedbackNote: transfer.feedbackNote,
       feedbackRecordedAt: toIsoString(transfer.feedbackRecordedAt),
       feedbackRecordedAtLabel: formatRelativeTime(transfer.feedbackRecordedAt),
+      feedbackConfirmedAt: toIsoString(transfer.feedbackConfirmedAt),
+      feedbackPostedAt: toIsoString(transfer.feedbackPostedAt),
       feedbackOperatorName: transfer.feedbackOperatorName,
       requestedAt: transfer.requestedAt.toISOString(),
       requestedAtLabel: formatRelativeTime(transfer.requestedAt),

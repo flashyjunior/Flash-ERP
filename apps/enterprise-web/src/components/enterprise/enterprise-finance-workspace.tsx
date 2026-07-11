@@ -11,7 +11,8 @@ import {
   type LucideIcon
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useRouter } from "next/navigation";
+import { useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
@@ -162,6 +163,12 @@ export function EnterpriseFinanceWorkspace({
 }: {
   workspace: EnterpriseFinanceWorkspaceData;
 }) {
+  const router = useRouter();
+  const [expenseAccountDrafts, setExpenseAccountDrafts] = useState<Record<string, string>>({});
+  const [paymentAccountDrafts, setPaymentAccountDrafts] = useState<Record<string, string>>({});
+  const [postingExpenseId, setPostingExpenseId] = useState<string | null>(null);
+  const [expensePostingMessage, setExpensePostingMessage] = useState<string | null>(null);
+  const [expensePostingError, setExpensePostingError] = useState<string | null>(null);
   const currencyFormatter = useMemo(
     () =>
       new Intl.NumberFormat("en-US", {
@@ -170,6 +177,58 @@ export function EnterpriseFinanceWorkspace({
       }),
     [workspace.currencyCode]
   );
+  const expenseAccountOptions = useMemo(
+    () =>
+      workspace.accountRows.filter((account) =>
+        ["EXPENSE", "COST_OF_SALES", "ASSET"].includes(account.accountType)
+      ),
+    [workspace.accountRows]
+  );
+  const paymentAccountOptions = useMemo(
+    () =>
+      workspace.accountRows.filter((account) =>
+        ["ASSET", "LIABILITY"].includes(account.accountType)
+      ),
+    [workspace.accountRows]
+  );
+  async function assignAndPostExpense(row: ExpenseRow) {
+    const expenseAccountCode = expenseAccountDrafts[row.expenseId] ?? row.financeExpenseAccountCode ?? "";
+    const paymentAccountCode = paymentAccountDrafts[row.expenseId] ?? row.financePaymentAccountCode ?? "";
+
+    setPostingExpenseId(row.expenseId);
+    setExpensePostingError(null);
+    setExpensePostingMessage(null);
+
+    try {
+      const response = await fetch(
+        `/api/finance/operating-expenses/${encodeURIComponent(row.expenseId)}/assignment`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            expenseAccountCode,
+            paymentAccountCode
+          })
+        }
+      );
+      const payload = (await response.json()) as { message?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not post that operating expense.");
+      }
+
+      setExpensePostingMessage(payload.message ?? `${row.expenseNo} posted to GL.`);
+      router.refresh();
+    } catch (error) {
+      setExpensePostingError(
+        error instanceof Error ? error.message : "Flash ERP could not post that operating expense."
+      );
+    } finally {
+      setPostingExpenseId(null);
+    }
+  }
   const accountColumns = useMemo<ColumnDef<AccountRow>[]>(
     () => [
       {
@@ -432,9 +491,107 @@ export function EnterpriseFinanceWorkspace({
         accessorKey: "status",
         header: "Status",
         cell: ({ row }) => formatEnumLabel(row.original.status)
+      },
+      {
+        id: "assignment",
+        header: "GL assignment",
+        cell: ({ row }) => {
+          const isPosted = row.original.status === "POSTED" || Boolean(row.original.postedAt);
+          const disabled = isPosted || postingExpenseId === row.original.expenseId;
+
+          return (
+            <div className="grid min-w-[18rem] gap-2">
+              <select
+                className="rounded-xl border border-stone-200 bg-white px-2 py-1.5 text-xs font-semibold text-stone-700 outline-none"
+                disabled={disabled}
+                onChange={(event) =>
+                  setExpenseAccountDrafts((current) => ({
+                    ...current,
+                    [row.original.expenseId]: event.target.value
+                  }))
+                }
+                value={
+                  expenseAccountDrafts[row.original.expenseId] ??
+                  row.original.financeExpenseAccountCode ??
+                  ""
+                }
+              >
+                <option value="">Expense account</option>
+                {expenseAccountOptions.map((account) => (
+                  <option key={account.accountCode} value={account.accountCode}>
+                    {account.accountCode} · {account.accountName}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="rounded-xl border border-stone-200 bg-white px-2 py-1.5 text-xs font-semibold text-stone-700 outline-none"
+                disabled={disabled}
+                onChange={(event) =>
+                  setPaymentAccountDrafts((current) => ({
+                    ...current,
+                    [row.original.expenseId]: event.target.value
+                  }))
+                }
+                value={
+                  paymentAccountDrafts[row.original.expenseId] ??
+                  row.original.financePaymentAccountCode ??
+                  ""
+                }
+              >
+                <option value="">Payment / clearing</option>
+                {paymentAccountOptions.map((account) => (
+                  <option key={account.accountCode} value={account.accountCode}>
+                    {account.accountCode} · {account.accountName}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="inline-flex h-8 items-center justify-center rounded-xl bg-[var(--brand)] px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-stone-300"
+                disabled={disabled}
+                onClick={() => void assignAndPostExpense(row.original)}
+                type="button"
+              >
+                {isPosted
+                  ? "Posted"
+                  : postingExpenseId === row.original.expenseId
+                    ? "Posting..."
+                    : "Assign & post"}
+              </button>
+              {row.original.financeAssignedBy ? (
+                <p className="text-[0.68rem] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                  Assigned by {row.original.financeAssignedBy}
+                </p>
+              ) : null}
+            </div>
+          );
+        },
+        meta: { disableTruncate: true }
+      },
+      {
+        id: "attachment",
+        header: "Attachment",
+        cell: ({ row }) =>
+          row.original.attachmentUrl ? (
+            <Link
+              className="text-sm font-semibold text-[var(--brand)]"
+              href={row.original.attachmentUrl}
+              target="_blank"
+            >
+              Open
+            </Link>
+          ) : (
+            "None"
+          )
       }
     ],
-    [currencyFormatter]
+    [
+      currencyFormatter,
+      expenseAccountDrafts,
+      expenseAccountOptions,
+      paymentAccountDrafts,
+      paymentAccountOptions,
+      postingExpenseId
+    ]
   );
 
   return (
@@ -617,6 +774,16 @@ export function EnterpriseFinanceWorkspace({
         </WorkspaceTabsContent>
 
         <WorkspaceTabsContent value="expenses">
+          {expensePostingMessage ? (
+            <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">
+              {expensePostingMessage}
+            </div>
+          ) : null}
+          {expensePostingError ? (
+            <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-800">
+              {expensePostingError}
+            </div>
+          ) : null}
           <SharedDataGrid
             columns={expenseColumns}
             data={workspace.expenseRows}

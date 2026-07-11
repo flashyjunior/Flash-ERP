@@ -1072,6 +1072,44 @@ BEGIN
   );
 END;
 
+IF OBJECT_ID(N'[dbo].[local_store_expense]', N'U') IS NULL
+BEGIN
+  CREATE TABLE [dbo].[local_store_expense] (
+    [id] nvarchar(100) NOT NULL CONSTRAINT [PK_local_store_expense] PRIMARY KEY,
+    [expense_no] nvarchar(120) NOT NULL,
+    [status] nvarchar(30) NOT NULL CONSTRAINT [DF_local_store_expense_status] DEFAULT N'DRAFT',
+    [expense_date] nvarchar(40) NOT NULL,
+    [category] nvarchar(80) NOT NULL,
+    [description] nvarchar(500) NOT NULL,
+    [supplier_name] nvarchar(200) NULL,
+    [payment_method] nvarchar(80) NULL,
+    [external_reference] nvarchar(200) NULL,
+    [amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_local_store_expense_amount] DEFAULT 0,
+    [tax_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_local_store_expense_tax] DEFAULT 0,
+    [attachment_file_name] nvarchar(260) NULL,
+    [attachment_url] nvarchar(500) NULL,
+    [attachment_content_type] nvarchar(120) NULL,
+    [attachment_content_base64] nvarchar(max) NULL,
+    [operator_name] nvarchar(160) NOT NULL,
+    [note] nvarchar(1000) NULL,
+    [confirmed_by] nvarchar(160) NULL,
+    [confirmed_at] nvarchar(40) NULL,
+    [synced_at] nvarchar(40) NULL,
+    [updated_at] nvarchar(40) NOT NULL,
+    CONSTRAINT [UQ_local_store_expense_no] UNIQUE ([expense_no])
+  );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'IX_local_store_expense_status' AND [object_id] = OBJECT_ID(N'[dbo].[local_store_expense]'))
+BEGIN
+  CREATE INDEX [IX_local_store_expense_status] ON [dbo].[local_store_expense] ([status], [expense_date] DESC);
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'IX_local_store_expense_synced' AND [object_id] = OBJECT_ID(N'[dbo].[local_store_expense]'))
+BEGIN
+  CREATE INDEX [IX_local_store_expense_synced] ON [dbo].[local_store_expense] ([synced_at], [confirmed_at] DESC);
+END;
+
 IF OBJECT_ID(N'[dbo].[sync_outbox]', N'U') IS NULL
 BEGIN
   CREATE TABLE [dbo].[sync_outbox] (

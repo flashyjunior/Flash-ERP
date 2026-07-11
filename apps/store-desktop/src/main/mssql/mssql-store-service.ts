@@ -37,6 +37,7 @@ import type {
   StoreBankingDepositRecordedPayload,
   StoreCustomerAccountEntryRecordedPayload,
   StoreEodReconciliationRecordedPayload,
+  StoreExpenseConfirmedPayload,
   StoreGoodsReceiptRecordedPayload,
   StoreInventoryLedgerRecordedPayload,
   StoreInterStoreTransferIssuedPayload,
@@ -126,6 +127,7 @@ import type {
   StorePrintableAccountPaymentReceiptDocument,
   StoreRecordBankingDepositRequest,
   StoreRecordEodReconciliationRequest,
+  StoreStoreExpenseInput,
   StoreReceiptLineReturnRequest,
   StoreReceiptLookupLine,
   StoreReceiptLookupResult,
@@ -1884,8 +1886,50 @@ export class MssqlStoreService {
            [first_seen_at] nvarchar(40) NOT NULL,
            [last_seen_at] nvarchar(40) NOT NULL,
            [updated_at] nvarchar(40) NOT NULL,
-           CONSTRAINT [UQ_transaction_reference_capture_key_runtime] UNIQUE ([normalized_reference])
+         CONSTRAINT [UQ_transaction_reference_capture_key_runtime] UNIQUE ([normalized_reference])
+       );
+       END`,
+    );
+
+    await this.query(
+      `IF OBJECT_ID(N'[dbo].[local_store_expense]', N'U') IS NULL
+       BEGIN
+         CREATE TABLE [dbo].[local_store_expense] (
+           [id] nvarchar(100) NOT NULL CONSTRAINT [PK_local_store_expense] PRIMARY KEY,
+           [expense_no] nvarchar(120) NOT NULL,
+           [status] nvarchar(30) NOT NULL CONSTRAINT [DF_local_store_expense_status_runtime] DEFAULT N'DRAFT',
+           [expense_date] nvarchar(40) NOT NULL,
+           [category] nvarchar(80) NOT NULL,
+           [description] nvarchar(500) NOT NULL,
+           [supplier_name] nvarchar(200) NULL,
+           [payment_method] nvarchar(80) NULL,
+           [external_reference] nvarchar(200) NULL,
+           [amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_local_store_expense_amount_runtime] DEFAULT 0,
+           [tax_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_local_store_expense_tax_runtime] DEFAULT 0,
+           [attachment_file_name] nvarchar(260) NULL,
+           [attachment_url] nvarchar(500) NULL,
+           [attachment_content_type] nvarchar(120) NULL,
+           [attachment_content_base64] nvarchar(max) NULL,
+           [operator_name] nvarchar(160) NOT NULL,
+           [note] nvarchar(1000) NULL,
+           [confirmed_by] nvarchar(160) NULL,
+           [confirmed_at] nvarchar(40) NULL,
+           [synced_at] nvarchar(40) NULL,
+           [updated_at] nvarchar(40) NOT NULL,
+           CONSTRAINT [UQ_local_store_expense_no_runtime] UNIQUE ([expense_no])
          );
+       END`,
+    );
+    await this.query(
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'IX_local_store_expense_status_runtime' AND [object_id] = OBJECT_ID(N'[dbo].[local_store_expense]'))
+       BEGIN
+         CREATE INDEX [IX_local_store_expense_status_runtime] ON [dbo].[local_store_expense] ([status], [expense_date] DESC);
+       END`,
+    );
+    await this.query(
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'IX_local_store_expense_synced_runtime' AND [object_id] = OBJECT_ID(N'[dbo].[local_store_expense]'))
+       BEGIN
+         CREATE INDEX [IX_local_store_expense_synced_runtime] ON [dbo].[local_store_expense] ([synced_at], [confirmed_at] DESC);
        END`,
     );
 
@@ -11209,6 +11253,321 @@ export class MssqlStoreService {
     };
   }
 
+  async saveStoreExpenseDraft(
+    input: StoreStoreExpenseInput,
+  ): Promise<StoreSyncActionResult> {
+    const session = await this.requireActiveOperatorSession({
+      purpose: "capturing a store expense",
+    });
+
+    if (!session.capabilities.supervisorEligible) {
+      throw new Error(
+        "Only a synced supervisor can capture store expenses from the desktop.",
+      );
+    }
+
+    const category = input.category?.trim();
+    const description = input.description?.trim();
+    const amount = Number(Number(input.amount).toFixed(2));
+    const taxAmount = Number(Number(input.taxAmount ?? 0).toFixed(2));
+
+    if (!category) {
+      throw new Error("Select or enter the expense category.");
+    }
+
+    if (!description) {
+      throw new Error("Enter the expense details before saving.");
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("Enter an expense amount greater than zero.");
+    }
+
+    if (!Number.isFinite(taxAmount) || taxAmount < 0) {
+      throw new Error("Enter a tax amount of zero or greater.");
+    }
+
+    const expenseDateInput = input.expenseDate?.trim();
+    const expenseDate = expenseDateInput
+      ? new Date(`${expenseDateInput.slice(0, 10)}T00:00:00.000Z`).toISOString()
+      : new Date().toISOString();
+
+    if (Number.isNaN(new Date(expenseDate).getTime())) {
+      throw new Error("Choose a valid expense date.");
+    }
+
+    const timestamp = isoNow();
+    const metadata = await this.metadata();
+    const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
+    const expenseId = input.expenseId?.trim() || randomUUID();
+    const existingResult = await this.query<{
+      id: string;
+      expense_no: string;
+      status: string;
+    }>(
+      `SELECT TOP 1 [id], [expense_no], [status]
+       FROM [dbo].[local_store_expense]
+       WHERE [id] = @expenseId`,
+      { expenseId },
+    );
+    const existing = existingResult.recordset[0] ?? null;
+
+    if (existing && existing.status !== "DRAFT") {
+      throw new Error(
+        `${existing.expense_no} has already been confirmed and cannot be edited locally.`,
+      );
+    }
+
+    const expenseNo =
+      existing?.expense_no ??
+      buildLocalDocumentNo(
+        "EXP",
+        storeCode,
+        await this.nextSequence("store_expense_sequence"),
+        timestamp,
+      );
+    const operatorName =
+      input.operatorName?.trim() || session.displayName || session.loginId;
+
+    await this.query(
+      `MERGE [dbo].[local_store_expense] AS target
+       USING (SELECT @expenseId AS [id]) AS source
+       ON target.[id] = source.[id]
+       WHEN MATCHED THEN
+         UPDATE SET
+           [expense_date] = @expenseDate,
+           [category] = @category,
+           [description] = @description,
+           [supplier_name] = @supplierName,
+           [payment_method] = @paymentMethod,
+           [external_reference] = @externalReference,
+           [amount] = @amount,
+           [tax_amount] = @taxAmount,
+           [attachment_file_name] = @attachmentFileName,
+           [attachment_url] = @attachmentUrl,
+           [attachment_content_type] = @attachmentContentType,
+           [attachment_content_base64] = @attachmentContentBase64,
+           [operator_name] = @operatorName,
+           [note] = @note,
+           [updated_at] = @timestamp
+       WHEN NOT MATCHED THEN
+         INSERT (
+           [id], [expense_no], [status], [expense_date], [category],
+           [description], [supplier_name], [payment_method],
+           [external_reference], [amount], [tax_amount],
+           [attachment_file_name], [attachment_url],
+           [attachment_content_type], [attachment_content_base64],
+           [operator_name], [note], [confirmed_by], [confirmed_at],
+           [synced_at], [updated_at]
+         )
+         VALUES (
+           @expenseId, @expenseNo, N'DRAFT', @expenseDate, @category,
+           @description, @supplierName, @paymentMethod,
+           @externalReference, @amount, @taxAmount,
+           @attachmentFileName, @attachmentUrl,
+           @attachmentContentType, @attachmentContentBase64,
+           @operatorName, @note, NULL, NULL, NULL, @timestamp
+         );`,
+      {
+        expenseId,
+        expenseNo,
+        expenseDate,
+        category,
+        description,
+        supplierName: input.supplierName?.trim() || null,
+        paymentMethod: input.paymentMethod?.trim() || null,
+        externalReference: input.externalReference?.trim() || null,
+        amount,
+        taxAmount,
+        attachmentFileName: input.attachmentFileName?.trim() || null,
+        attachmentUrl: input.attachmentUrl?.trim() || null,
+        attachmentContentType: input.attachmentContentType?.trim() || null,
+        attachmentContentBase64: input.attachmentContentBase64?.trim() || null,
+        operatorName,
+        note: input.note?.trim() || null,
+        timestamp,
+      },
+    );
+
+    await this.setMetadata("last_local_write_at", timestamp);
+    await this.insertRunLog({
+      runKind: "LOCAL_WRITE",
+      result: "SUCCESS",
+      summary: `${expenseNo} store expense draft saved.`,
+      upstreamProcessed: 0,
+      downstreamApplied: 0,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+    });
+
+    return {
+      message: `${expenseNo} was saved as a store expense draft.`,
+      snapshot: await this.getSyncSnapshot(),
+      expenseId,
+      expenseNo,
+      expenseStatus: "DRAFT",
+    };
+  }
+
+  async confirmStoreExpense(expenseId: string): Promise<StoreSyncActionResult> {
+    const session = await this.requireActiveOperatorSession({
+      purpose: "confirming a store expense",
+    });
+
+    if (!session.capabilities.supervisorEligible) {
+      throw new Error(
+        "Only a synced supervisor can confirm store expenses from the desktop.",
+      );
+    }
+
+    const normalizedExpenseId = expenseId.trim();
+
+    if (!normalizedExpenseId) {
+      throw new Error("Choose the expense draft before confirming it.");
+    }
+
+    const rowResult = await this.query<{
+      id: string;
+      expense_no: string;
+      status: string;
+      expense_date: string;
+      category: string;
+      description: string;
+      supplier_name: string | null;
+      payment_method: string | null;
+      external_reference: string | null;
+      amount: number;
+      tax_amount: number | null;
+      attachment_file_name: string | null;
+      attachment_url: string | null;
+      attachment_content_type: string | null;
+      attachment_content_base64: string | null;
+      operator_name: string | null;
+      note: string | null;
+      confirmed_at: string | null;
+    }>(
+      `SELECT TOP 1
+         [id], [expense_no], [status], [expense_date], [category],
+         [description], [supplier_name], [payment_method],
+         [external_reference], [amount], [tax_amount],
+         [attachment_file_name], [attachment_url],
+         [attachment_content_type], [attachment_content_base64],
+         [operator_name], [note], [confirmed_at]
+       FROM [dbo].[local_store_expense]
+       WHERE [id] = @expenseId`,
+      { expenseId: normalizedExpenseId },
+    );
+    const row = rowResult.recordset[0] ?? null;
+
+    if (!row) {
+      throw new Error("Flash ERP could not find that local store expense draft.");
+    }
+
+    if (row.status === "POSTED") {
+      return {
+        message: `${row.expense_no} has already been posted by HQ Finance.`,
+        snapshot: await this.getSyncSnapshot(),
+        expenseId: normalizedExpenseId,
+        expenseNo: row.expense_no,
+        expenseStatus: "POSTED",
+      };
+    }
+
+    if (row.status !== "DRAFT" && row.status !== "APPROVED") {
+      throw new Error(`${row.expense_no} cannot be confirmed from status ${row.status}.`);
+    }
+
+    const timestamp = isoNow();
+    const metadata = await this.metadata();
+    const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const confirmedBy = session.displayName || session.loginId;
+    const confirmedAt = row.confirmed_at ?? timestamp;
+    const shouldQueueEnterprise = !this.isStandaloneDeployment();
+
+    await this.query(
+      `UPDATE [dbo].[local_store_expense]
+       SET [status] = N'APPROVED',
+           [confirmed_by] = @confirmedBy,
+           [confirmed_at] = @confirmedAt,
+           [updated_at] = @timestamp
+       WHERE [id] = @expenseId`,
+      {
+        confirmedBy,
+        confirmedAt,
+        timestamp,
+        expenseId: normalizedExpenseId,
+      },
+    );
+
+    const outboxResult = await this.query<{ id: string }>(
+      `SELECT TOP 1 [id]
+       FROM [dbo].[sync_outbox]
+       WHERE [aggregate_type] = N'storeExpense'
+         AND [aggregate_id] = @expenseId
+         AND [event_type] = N'store-expense.confirmed'`,
+      { expenseId: normalizedExpenseId },
+    );
+
+    if (shouldQueueEnterprise && !outboxResult.recordset[0]) {
+      const payload: StoreExpenseConfirmedPayload = {
+        expenseId: row.id,
+        expenseNo: row.expense_no,
+        storeCode,
+        terminalCode,
+        expenseDate: row.expense_date,
+        category: row.category,
+        description: row.description,
+        supplierName: row.supplier_name,
+        paymentMethod: row.payment_method,
+        externalReference: row.external_reference,
+        amount: Number(row.amount),
+        taxAmount: Number(row.tax_amount ?? 0),
+        attachmentFileName: row.attachment_file_name,
+        attachmentUrl: row.attachment_url,
+        attachmentContentType: row.attachment_content_type,
+        attachmentContentBase64: row.attachment_content_base64,
+        operatorName: row.operator_name ?? confirmedBy,
+        note: row.note,
+        confirmedAt,
+      };
+
+      await this.insertOutboxEvent({
+        eventId: normalizedExpenseId,
+        nodeCode,
+        timestamp,
+        aggregateType: "storeExpense",
+        aggregateId: normalizedExpenseId,
+        eventType: "store-expense.confirmed",
+        idempotencyKey: `${nodeCode}:storeExpense:${row.expense_no}`,
+        payload,
+        recordVersion: 1,
+      });
+    }
+
+    await this.setMetadata("last_local_write_at", timestamp);
+    await this.insertRunLog({
+      runKind: "LOCAL_WRITE",
+      result: "SUCCESS",
+      summary: `${row.expense_no} store expense confirmed.`,
+      upstreamProcessed: shouldQueueEnterprise ? 1 : 0,
+      downstreamApplied: 0,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+    });
+
+    return {
+      message: shouldQueueEnterprise
+        ? `${row.expense_no} was confirmed locally and queued for HQ Finance.`
+        : `${row.expense_no} was confirmed locally for standalone expense review.`,
+      snapshot: await this.getSyncSnapshot(),
+      expenseId: normalizedExpenseId,
+      expenseNo: row.expense_no,
+      expenseStatus: "APPROVED",
+    };
+  }
+
   async authorizeReceiptPrint(input: { autoPrint?: boolean }) {
     if (input.autoPrint) {
       return;
@@ -16279,6 +16638,18 @@ export class MssqlStoreService {
            FROM [dbo].[sync_outbox]
            WHERE [id] = @eventId
              AND [aggregate_type] = N'salesOrder'
+         ), @eventId)`,
+        { acknowledgedAt, eventId },
+      );
+      await this.query(
+        `UPDATE [dbo].[local_store_expense]
+         SET [synced_at] = @acknowledgedAt,
+             [updated_at] = @acknowledgedAt
+         WHERE [id] = COALESCE((
+           SELECT TOP (1) [aggregate_id]
+           FROM [dbo].[sync_outbox]
+           WHERE [id] = @eventId
+             AND [aggregate_type] = N'storeExpense'
          ), @eventId)`,
         { acknowledgedAt, eventId },
       );

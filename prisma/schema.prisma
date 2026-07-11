@@ -474,27 +474,35 @@ model GlJournalLine {
 }
 
 model OperatingExpense {
-  id                String    @id @default(uuid())
-  retailOrgId       String
-  storeId           String?
-  expenseNo         String
-  expenseDate       DateTime
-  category          String
-  description       String
-  supplierName      String?
-  paymentMethod     String?
-  externalReference String?
-  amount            Decimal   @db.Decimal(18, 2)
-  taxAmount         Decimal   @default(0) @db.Decimal(18, 2)
-  status            String    @default("APPROVED")
-  approvedBy        String?
-  approvedAt        DateTime?
-  postedAt          DateTime?
-  note              String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  retailOrg         RetailOrg @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  store             Store?    @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  id                        String    @id @default(uuid())
+  retailOrgId               String
+  storeId                   String?
+  expenseNo                 String
+  expenseDate               DateTime
+  category                  String
+  description               String
+  supplierName              String?
+  paymentMethod             String?
+  externalReference         String?
+  attachmentFileName        String?
+  attachmentUrl             String?
+  amount                    Decimal   @db.Decimal(18, 2)
+  taxAmount                 Decimal   @default(0) @db.Decimal(18, 2)
+  status                    String    @default("APPROVED")
+  confirmedBy               String?
+  confirmedAt               DateTime?
+  financeExpenseAccountCode String?
+  financePaymentAccountCode String?
+  financeAssignedBy         String?
+  financeAssignedAt         DateTime?
+  approvedBy                String?
+  approvedAt                DateTime?
+  postedAt                  DateTime?
+  note                      String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  retailOrg                 RetailOrg @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store                     Store?    @relation(fields: [storeId], references: [id], onDelete: SetNull)
 
   @@unique([retailOrgId, expenseNo])
   @@index([retailOrgId, expenseDate, status])
@@ -4305,6 +4313,9 @@ model InterStoreTransfer {
   quantityAfterDelivery          Decimal?          @db.Decimal(18, 3)
   actualQuantityReceived         Decimal?          @db.Decimal(18, 3)
   feedbackVarianceQuantity       Decimal?          @db.Decimal(18, 3)
+  feedbackDipReading             Decimal?          @db.Decimal(18, 3)
+  beforeDischargeEvidenceJson    String?           @db.NVarChar(Max)
+  afterDischargeEvidenceJson     String?           @db.NVarChar(Max)
   feedbackNote                   String?           @db.NVarChar(Max)
   feedbackRecordedAt             DateTime?
   feedbackConfirmedAt            DateTime?

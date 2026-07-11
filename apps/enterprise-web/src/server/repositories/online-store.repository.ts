@@ -7,6 +7,7 @@ import {
   InterStoreTransferStatus,
   InventoryMovementType,
   LocationType,
+  OperatingExpenseStatus,
   PaymentMethod,
   PosShiftStatus,
   PosTransactionLineIntent,
@@ -35,7 +36,7 @@ import {
   type SyncPromotionDiscountType,
   type SyncPromotionTargetScope
 } from "@flash-erp/sync-core";
-import { readJsonObject as parseJsonObject, readJsonStringArray, serializeJsonField } from "./json-field";
+import { parseJsonField, readJsonObject as parseJsonObject, readJsonStringArray, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
 import { defaultAccountPaymentReceiptTemplateHtml } from "@/lib/templates/thermal-receipt-templates";
@@ -43,6 +44,7 @@ import { getEnterpriseSession, requireEnterpriseSession } from "@/server/auth/en
 import { resolveStoreReceiptTemplateSelection } from "@/server/repositories/receipt-template-support";
 import {
   ensureInventoryLocationSalesOrderSchemaCompatibility,
+  ensureOperatingExpenseSchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility
 } from "@/server/repositories/schema-compatibility.repository";
 import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
@@ -997,6 +999,43 @@ function readStringArrayJson(value: unknown) {
   return readJsonStringArray(value);
 }
 
+function readTransferFeedbackEvidence(value: unknown) {
+  const parsed = parseJsonField(value);
+
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+
+      const record = item as Record<string, unknown>;
+      const url = optionalText(record.url);
+
+      if (!url) {
+        return null;
+      }
+
+      return {
+        url,
+        fileName: optionalText(record.fileName),
+        capturedAt: optionalText(record.capturedAt),
+        uploadedAt: optionalText(record.uploadedAt),
+      };
+    })
+    .filter(
+      (item): item is {
+        url: string;
+        fileName: string | null;
+        capturedAt: string | null;
+        uploadedAt: string | null;
+      } => Boolean(item),
+    );
+}
+
 function resolveOnlineStoreCatalogPolicy(store: {
   catalogPolicyJson: Prisma.JsonValue | null;
   inventoryCatalogLinks: Array<{
@@ -1942,6 +1981,19 @@ export type OnlineStoreWorkspaceData = {
     quantityAfterDelivery: number | null;
     actualQuantityReceived: number | null;
     feedbackVarianceQuantity: number | null;
+    feedbackDipReading: number | null;
+    beforeDischargeEvidence: Array<{
+      url: string;
+      fileName: string | null;
+      capturedAt: string | null;
+      uploadedAt: string | null;
+    }>;
+    afterDischargeEvidence: Array<{
+      url: string;
+      fileName: string | null;
+      capturedAt: string | null;
+      uploadedAt: string | null;
+    }>;
     feedbackNote: string | null;
     feedbackRecordedAt: string | null;
     feedbackConfirmedAt: string | null;
@@ -1961,6 +2013,25 @@ export type OnlineStoreWorkspaceData = {
     receivedAt: string | null;
     closedAt: string | null;
     updatedAt: string;
+  }>;
+  storeExpenses: Array<{
+    expenseId: string;
+    expenseNo: string;
+    expenseDate: string;
+    category: string;
+    description: string;
+    supplierName: string | null;
+    paymentMethod: string | null;
+    externalReference: string | null;
+    attachmentFileName: string | null;
+    attachmentUrl: string | null;
+    amount: number;
+    taxAmount: number;
+    status: string;
+    confirmedBy: string | null;
+    confirmedAt: string | null;
+    postedAt: string | null;
+    note: string | null;
   }>;
   stockCountSessions: Array<{
     sessionId: string;
@@ -2218,6 +2289,7 @@ const emptyOnlineStoreCollections = {
   recentGoodsReceipts: [],
   supplierReturns: [],
   transferRequests: [],
+  storeExpenses: [],
   stockCountSessions: [],
   heldSales: [],
   salesOrders: [],
@@ -2921,6 +2993,7 @@ async function prepareOnlinePayments(
 export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceData> {
   await Promise.all([
     ensureInventoryLocationSalesOrderSchemaCompatibility(),
+    ensureOperatingExpenseSchemaCompatibility(),
     ensureProductVariantSalesOrderDepositSchemaCompatibility()
   ]);
 
@@ -3064,6 +3137,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     recentGoodsReceipts,
     supplierReturns,
     transferRequests,
+    storeExpenses,
     stockCountSessions,
     accountPayments,
     promotions
@@ -3723,6 +3797,9 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         quantityAfterDelivery: true,
         actualQuantityReceived: true,
         feedbackVarianceQuantity: true,
+        feedbackDipReading: true,
+        beforeDischargeEvidenceJson: true,
+        afterDischargeEvidenceJson: true,
         feedbackNote: true,
         feedbackRecordedAt: true,
         feedbackConfirmedAt: true,
@@ -3778,6 +3855,40 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             isSerialized: true
           }
         }
+      }
+    }),
+    prisma.operatingExpense.findMany({
+      where: {
+        retailOrgId: assignment.session.retailOrgId,
+        storeId: assignment.store.id,
+        status: {
+          in: [
+            OperatingExpenseStatus.DRAFT,
+            OperatingExpenseStatus.APPROVED,
+            OperatingExpenseStatus.POSTED
+          ]
+        }
+      },
+      orderBy: [{ expenseDate: "desc" }, { createdAt: "desc" }],
+      take: 60,
+      select: {
+        id: true,
+        expenseNo: true,
+        expenseDate: true,
+        category: true,
+        description: true,
+        supplierName: true,
+        paymentMethod: true,
+        externalReference: true,
+        attachmentFileName: true,
+        attachmentUrl: true,
+        amount: true,
+        taxAmount: true,
+        status: true,
+        confirmedBy: true,
+        confirmedAt: true,
+        postedAt: true,
+        note: true
       }
     }),
     prisma.stockCountSession.findMany({
@@ -4257,6 +4368,14 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         transfer.actualQuantityReceived === null ? null : toQuantity(transfer.actualQuantityReceived),
       feedbackVarianceQuantity:
         transfer.feedbackVarianceQuantity === null ? null : toQuantity(transfer.feedbackVarianceQuantity),
+      feedbackDipReading:
+        transfer.feedbackDipReading === null ? null : toQuantity(transfer.feedbackDipReading),
+      beforeDischargeEvidence: readTransferFeedbackEvidence(
+        transfer.beforeDischargeEvidenceJson
+      ),
+      afterDischargeEvidence: readTransferFeedbackEvidence(
+        transfer.afterDischargeEvidenceJson
+      ),
       feedbackNote: transfer.feedbackNote,
       feedbackRecordedAt: transfer.feedbackRecordedAt?.toISOString() ?? null,
       feedbackConfirmedAt: transfer.feedbackConfirmedAt?.toISOString() ?? null,
@@ -4278,6 +4397,25 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       updatedAt: transfer.updatedAt.toISOString()
     };
   });
+  const mappedStoreExpenses = storeExpenses.map((expense) => ({
+    expenseId: expense.id,
+    expenseNo: expense.expenseNo,
+    expenseDate: expense.expenseDate.toISOString(),
+    category: expense.category,
+    description: expense.description,
+    supplierName: expense.supplierName,
+    paymentMethod: expense.paymentMethod,
+    externalReference: expense.externalReference,
+    attachmentFileName: expense.attachmentFileName,
+    attachmentUrl: expense.attachmentUrl,
+    amount: Number(expense.amount),
+    taxAmount: Number(expense.taxAmount),
+    status: expense.status,
+    confirmedBy: expense.confirmedBy,
+    confirmedAt: expense.confirmedAt?.toISOString() ?? null,
+    postedAt: expense.postedAt?.toISOString() ?? null,
+    note: expense.note
+  }));
   const mappedStockCountSessions = stockCountSessions.map((session) => ({
     sessionId: session.id,
     sessionNo: session.sessionNo,
@@ -4712,6 +4850,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     recentGoodsReceipts: mappedRecentGoodsReceipts,
     supplierReturns: mappedSupplierReturns,
     transferRequests: mappedTransferRequests,
+    storeExpenses: mappedStoreExpenses,
     stockCountSessions: mappedStockCountSessions,
     heldSales: mappedHeldSales,
     salesOrders: mappedSalesOrders,
@@ -5696,6 +5835,29 @@ export type OnlineStoreRemoteInventoryLookupResponse = {
     unitPrice: number;
     updatedAt: string;
   }>;
+  serverProcessedAt: string;
+};
+
+export type UpsertOnlineStoreExpenseRequest = {
+  expenseId?: string | null;
+  expenseDate?: string | null;
+  category?: string | null;
+  description?: string | null;
+  supplierName?: string | null;
+  paymentMethod?: string | null;
+  externalReference?: string | null;
+  attachmentFileName?: string | null;
+  attachmentUrl?: string | null;
+  amount?: number | string | null;
+  taxAmount?: number | string | null;
+  note?: string | null;
+};
+
+export type OnlineStoreExpenseMutationResponse = {
+  expenseId: string;
+  expenseNo: string;
+  status: string;
+  message: string;
   serverProcessedAt: string;
 };
 
@@ -8642,6 +8804,7 @@ export async function recordOnlineStoreAccountPayment(
 async function requireOnlineStoreForOperation(operationLabel: string) {
   await Promise.all([
     ensureInventoryLocationSalesOrderSchemaCompatibility(),
+    ensureOperatingExpenseSchemaCompatibility(),
     ensureProductVariantSalesOrderDepositSchemaCompatibility()
   ]);
 
@@ -8746,6 +8909,207 @@ export async function unlockOnlineStoreScreen(
     },
     message: "Flash ERP unlocked the online store.",
     serverProcessedAt: new Date().toISOString()
+  };
+}
+
+function assertOnlineStoreSupervisor(session: Awaited<ReturnType<typeof getOnlineStoreAssignment>>["session"]) {
+  if (!sessionHasAllPermissions(session, [], { requireSupervisorEligible: true })) {
+    throw new Error("Flash ERP needs an online-store supervisor before capturing store expenses.");
+  }
+}
+
+export async function upsertOnlineStoreExpense(
+  input: UpsertOnlineStoreExpenseRequest
+): Promise<OnlineStoreExpenseMutationResponse> {
+  const { session, user, store } = await requireOnlineStoreForOperation("capturing a store expense");
+  assertOnlineStoreSupervisor(session);
+
+  const expenseId = optionalText(input.expenseId);
+  const category = optionalText(input.category)?.toUpperCase() ?? "GENERAL";
+  const description = optionalText(input.description);
+  const amount = toMoney(Number(input.amount ?? 0));
+  const taxAmount = toMoney(Number(input.taxAmount ?? 0));
+  const expenseDate = input.expenseDate ? new Date(input.expenseDate) : new Date();
+
+  if (!description) {
+    throw new Error("Enter the expense details before saving.");
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Enter a valid expense amount greater than zero.");
+  }
+
+  if (!Number.isFinite(taxAmount) || taxAmount < 0) {
+    throw new Error("Enter a valid tax amount or leave it at zero.");
+  }
+
+  if (Number.isNaN(expenseDate.getTime())) {
+    throw new Error("Choose a valid expense date.");
+  }
+
+  const now = new Date();
+  const data = {
+    expenseDate,
+    category,
+    description,
+    supplierName: optionalText(input.supplierName),
+    paymentMethod: optionalText(input.paymentMethod),
+    externalReference: optionalText(input.externalReference),
+    attachmentFileName: optionalText(input.attachmentFileName),
+    attachmentUrl: optionalText(input.attachmentUrl),
+    amount,
+    taxAmount,
+    note: optionalText(input.note)
+  };
+
+  const existingExpense = expenseId
+    ? await prisma.operatingExpense.findFirst({
+        where: {
+          id: expenseId,
+          retailOrgId: session.retailOrgId,
+          storeId: store.id
+        },
+        select: {
+          id: true,
+          status: true
+        }
+      })
+    : null;
+
+  if (expenseId && !existingExpense) {
+    throw new Error("Flash ERP could not find that draft store expense for this online store.");
+  }
+
+  if (existingExpense && existingExpense.status !== OperatingExpenseStatus.DRAFT) {
+    throw new Error("Only draft store expenses can be edited from the online store.");
+  }
+
+  const expense = existingExpense
+    ? await prisma.operatingExpense.update({
+        where: {
+          id: existingExpense.id
+        },
+        data,
+        select: {
+          id: true,
+          expenseNo: true,
+          status: true
+        }
+      })
+    : await prisma.operatingExpense.create({
+        data: {
+          retailOrgId: session.retailOrgId,
+          storeId: store.id,
+          expenseNo: `EXP-${store.code.toUpperCase()}-${Date.now()}`,
+          status: OperatingExpenseStatus.DRAFT,
+          ...data
+        },
+        select: {
+          id: true,
+          expenseNo: true,
+          status: true
+        }
+      });
+
+  await prisma.securityLog.create({
+    data: {
+      retailOrgId: session.retailOrgId,
+      kind: SecurityLogKind.AUDIT,
+      severity: SecurityLogSeverity.INFO,
+      category: "ONLINE_STORE_EXPENSE",
+      action: "EXPENSE_SAVED",
+      actorLabel: user.loginId,
+      targetType: "Operating expense",
+      targetRef: expense.expenseNo,
+      sourceNodeCode: "ONLINE_DIRECT",
+      message: `${user.loginId} saved store expense ${expense.expenseNo} for ${store.code}.`,
+      detailsJson: serializeJsonField({
+        storeCode: store.code,
+        amount,
+        taxAmount,
+        category
+      } satisfies Prisma.InputJsonValue)
+    }
+  });
+
+  return {
+    expenseId: expense.id,
+    expenseNo: expense.expenseNo,
+    status: expense.status,
+    message: `${expense.expenseNo} saved as a draft store expense.`,
+    serverProcessedAt: now.toISOString()
+  };
+}
+
+export async function confirmOnlineStoreExpense(
+  expenseId: string
+): Promise<OnlineStoreExpenseMutationResponse> {
+  const { session, user, store } = await requireOnlineStoreForOperation("confirming a store expense");
+  assertOnlineStoreSupervisor(session);
+  const now = new Date();
+  const expense = await prisma.operatingExpense.findFirst({
+    where: {
+      id: expenseId,
+      retailOrgId: session.retailOrgId,
+      storeId: store.id
+    },
+    select: {
+      id: true,
+      expenseNo: true,
+      status: true
+    }
+  });
+
+  if (!expense) {
+    throw new Error("Flash ERP could not find that store expense.");
+  }
+
+  if (expense.status !== OperatingExpenseStatus.DRAFT) {
+    throw new Error("Only draft store expenses can be confirmed from the online store.");
+  }
+
+  const confirmed = await prisma.operatingExpense.update({
+    where: {
+      id: expense.id
+    },
+    data: {
+      status: OperatingExpenseStatus.APPROVED,
+      confirmedBy: user.displayName,
+      confirmedAt: now,
+      approvedBy: user.displayName,
+      approvedAt: now
+    },
+    select: {
+      id: true,
+      expenseNo: true,
+      status: true
+    }
+  });
+
+  await prisma.securityLog.create({
+    data: {
+      retailOrgId: session.retailOrgId,
+      kind: SecurityLogKind.AUDIT,
+      severity: SecurityLogSeverity.INFO,
+      category: "ONLINE_STORE_EXPENSE",
+      action: "EXPENSE_CONFIRMED",
+      actorLabel: user.loginId,
+      targetType: "Operating expense",
+      targetRef: confirmed.expenseNo,
+      sourceNodeCode: "ONLINE_DIRECT",
+      message: `${user.loginId} confirmed store expense ${confirmed.expenseNo} for HQ finance review.`,
+      detailsJson: serializeJsonField({
+        storeCode: store.code
+      } satisfies Prisma.InputJsonValue)
+    }
+  });
+
+  return {
+    expenseId: confirmed.id,
+    expenseNo: confirmed.expenseNo,
+    status: confirmed.status,
+    message: `${confirmed.expenseNo} confirmed for HQ finance review.`,
+    serverProcessedAt: now.toISOString()
   };
 }
 

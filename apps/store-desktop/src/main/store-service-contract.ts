@@ -40,6 +40,8 @@ export const storeServiceMethods = [
   "cancelSalesOrder",
   "recordEodReconciliation",
   "recordBankingDeposit",
+  "saveStoreExpenseDraft",
+  "confirmStoreExpense",
   "attachCustomerToActiveBasket",
   "setActiveBasketLoyaltyRedemption",
   "saveInterStoreTransferRequestDraft",

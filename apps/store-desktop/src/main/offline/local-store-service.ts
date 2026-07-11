@@ -44,6 +44,7 @@ import type {
   StoreCustomerAccountEntryRecordedPayload,
   StoreSalesOrderRecordedPayload,
   StoreEodReconciliationRecordedPayload,
+  StoreExpenseConfirmedPayload,
   StoreBankingDepositRecordedPayload,
   StoreNodePullResponse,
   StoreNodePushRequest,
@@ -139,6 +140,7 @@ import type {
   StorePurchaseOrderReceiptRequest,
   StoreRecordBankingDepositRequest,
   StoreRecordEodReconciliationRequest,
+  StoreStoreExpenseInput,
   StoreStockCountSessionDraftInput,
   StoreStockCountSessionSummary,
   StorePurchaseOrderSummary,
@@ -1771,6 +1773,21 @@ function buildLocalBankingDepositNo(
   const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
 
   return `BNK-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
+}
+
+function buildLocalStoreExpenseNo(
+  storeCode: string,
+  sequence: number,
+  timestamp: string,
+) {
+  const storeToken =
+    storeCode
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 10) || "STORE";
+  const stamp = timestamp.replace(/[-:TZ.]/g, "").slice(0, 14);
+
+  return `EXP-${storeToken}-${String(sequence).padStart(4, "0")}-${stamp}`;
 }
 
 function deriveLocalInterStoreTransferStatus(input: {
@@ -11775,6 +11792,296 @@ export class LocalStoreService {
     };
   }
 
+  saveStoreExpenseDraft(input: StoreStoreExpenseInput): StoreSyncActionResult {
+    const session = this.requireActiveOperatorSession({
+      purpose: "capturing a store expense",
+    });
+
+    if (!session.capabilities.supervisorEligible) {
+      throw new Error(
+        "Only a synced supervisor can capture store expenses from the desktop.",
+      );
+    }
+
+    const category = input.category?.trim();
+    const description = input.description?.trim();
+    const amount = Number(Number(input.amount).toFixed(2));
+    const taxAmount = Number(Number(input.taxAmount ?? 0).toFixed(2));
+
+    if (!category) {
+      throw new Error("Select or enter the expense category.");
+    }
+
+    if (!description) {
+      throw new Error("Enter the expense details before saving.");
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("Enter an expense amount greater than zero.");
+    }
+
+    if (!Number.isFinite(taxAmount) || taxAmount < 0) {
+      throw new Error("Enter a tax amount of zero or greater.");
+    }
+
+    const expenseDateInput = input.expenseDate?.trim();
+    const expenseDate = expenseDateInput
+      ? new Date(`${expenseDateInput.slice(0, 10)}T00:00:00.000Z`).toISOString()
+      : new Date().toISOString();
+
+    if (Number.isNaN(new Date(expenseDate).getTime())) {
+      throw new Error("Choose a valid expense date.");
+    }
+
+    const timestamp = isoNow();
+    const storeCode = this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const expenseId = input.expenseId?.trim() || randomUUID();
+    let expenseNo = "";
+    let status = "DRAFT";
+
+    this.withTransaction(() => {
+      const existing = this.db
+        .prepare(
+          "SELECT id, expense_no, status FROM local_store_expense WHERE id = ? LIMIT 1",
+        )
+        .get(expenseId) as
+        | { id: string; expense_no: string; status: string }
+        | undefined;
+
+      if (existing && existing.status !== "DRAFT") {
+        throw new Error(
+          `${existing.expense_no} has already been confirmed and cannot be edited locally.`,
+        );
+      }
+
+      expenseNo =
+        existing?.expense_no ??
+        buildLocalStoreExpenseNo(
+          storeCode,
+          this.nextSequence("store_expense_sequence"),
+          timestamp,
+        );
+      const operatorName =
+        input.operatorName?.trim() || session.displayName || session.loginId;
+
+      this.db
+        .prepare(
+          `INSERT INTO local_store_expense (
+            id, expense_no, status, expense_date, category, description,
+            supplier_name, payment_method, external_reference, amount, tax_amount,
+            attachment_file_name, attachment_url, attachment_content_type,
+            attachment_content_base64, operator_name, note, confirmed_by,
+            confirmed_at, synced_at, updated_at
+          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            expense_date = excluded.expense_date,
+            category = excluded.category,
+            description = excluded.description,
+            supplier_name = excluded.supplier_name,
+            payment_method = excluded.payment_method,
+            external_reference = excluded.external_reference,
+            amount = excluded.amount,
+            tax_amount = excluded.tax_amount,
+            attachment_file_name = excluded.attachment_file_name,
+            attachment_url = excluded.attachment_url,
+            attachment_content_type = excluded.attachment_content_type,
+            attachment_content_base64 = excluded.attachment_content_base64,
+            operator_name = excluded.operator_name,
+            note = excluded.note,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          expenseId,
+          expenseNo,
+          expenseDate,
+          category,
+          description,
+          input.supplierName?.trim() || null,
+          input.paymentMethod?.trim() || null,
+          input.externalReference?.trim() || null,
+          amount,
+          taxAmount,
+          input.attachmentFileName?.trim() || null,
+          input.attachmentUrl?.trim() || null,
+          input.attachmentContentType?.trim() || null,
+          input.attachmentContentBase64?.trim() || null,
+          operatorName,
+          input.note?.trim() || null,
+          timestamp,
+        );
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${expenseNo} store expense draft saved.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: `${expenseNo} was saved as a store expense draft.`,
+      snapshot: this.getSyncSnapshot(),
+      expenseId,
+      expenseNo,
+      expenseStatus: status,
+    };
+  }
+
+  confirmStoreExpense(expenseId: string): StoreSyncActionResult {
+    const session = this.requireActiveOperatorSession({
+      purpose: "confirming a store expense",
+    });
+
+    if (!session.capabilities.supervisorEligible) {
+      throw new Error(
+        "Only a synced supervisor can confirm store expenses from the desktop.",
+      );
+    }
+
+    const normalizedExpenseId = expenseId.trim();
+
+    if (!normalizedExpenseId) {
+      throw new Error("Choose the expense draft before confirming it.");
+    }
+
+    const timestamp = isoNow();
+    const storeCode = this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    const nodeCode = this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
+    let expenseNo = "";
+    let status = "APPROVED";
+
+    this.withTransaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT id, expense_no, status, expense_date, category, description,
+                  supplier_name, payment_method, external_reference, amount,
+                  tax_amount, attachment_file_name, attachment_url,
+                  attachment_content_type, attachment_content_base64,
+                  operator_name, note, confirmed_at
+           FROM local_store_expense
+           WHERE id = ?
+           LIMIT 1`,
+        )
+        .get(normalizedExpenseId) as
+        | {
+            id: string;
+            expense_no: string;
+            status: string;
+            expense_date: string;
+            category: string;
+            description: string;
+            supplier_name: string | null;
+            payment_method: string | null;
+            external_reference: string | null;
+            amount: number;
+            tax_amount: number | null;
+            attachment_file_name: string | null;
+            attachment_url: string | null;
+            attachment_content_type: string | null;
+            attachment_content_base64: string | null;
+            operator_name: string | null;
+            note: string | null;
+            confirmed_at: string | null;
+          }
+        | undefined;
+
+      if (!row) {
+        throw new Error("Flash ERP could not find that local store expense draft.");
+      }
+
+      expenseNo = row.expense_no;
+
+      if (row.status === "POSTED") {
+        status = "POSTED";
+        return;
+      }
+
+      if (row.status !== "DRAFT" && row.status !== "APPROVED") {
+        throw new Error(`${expenseNo} cannot be confirmed from status ${row.status}.`);
+      }
+
+      const confirmedBy = session.displayName || session.loginId;
+      const confirmedAt = row.confirmed_at ?? timestamp;
+
+      this.db
+        .prepare(
+          "UPDATE local_store_expense SET status = 'APPROVED', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(confirmedBy, confirmedAt, timestamp, normalizedExpenseId);
+
+      const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const existingOutbox = this.db
+        .prepare(
+          "SELECT id FROM sync_outbox WHERE aggregate_type = 'storeExpense' AND aggregate_id = ? AND event_type = 'store-expense.confirmed' LIMIT 1",
+        )
+        .get(normalizedExpenseId);
+
+      if (shouldQueueEnterprise && !existingOutbox) {
+        const payload: StoreExpenseConfirmedPayload = {
+          expenseId: row.id,
+          expenseNo: row.expense_no,
+          storeCode,
+          terminalCode,
+          expenseDate: row.expense_date,
+          category: row.category,
+          description: row.description,
+          supplierName: row.supplier_name,
+          paymentMethod: row.payment_method,
+          externalReference: row.external_reference,
+          amount: Number(row.amount),
+          taxAmount: Number(row.tax_amount ?? 0),
+          attachmentFileName: row.attachment_file_name,
+          attachmentUrl: row.attachment_url,
+          attachmentContentType: row.attachment_content_type,
+          attachmentContentBase64: row.attachment_content_base64,
+          operatorName: row.operator_name ?? confirmedBy,
+          note: row.note,
+          confirmedAt,
+        };
+
+        this.db
+          .prepare(
+            "INSERT INTO sync_outbox (id, target_node_code, aggregate_type, aggregate_id, event_type, idempotency_key, payload_json, status, attempt_count, record_version, created_at, updated_at) VALUES (?, ?, 'storeExpense', ?, 'store-expense.confirmed', ?, ?, 'PENDING', 0, 1, ?, ?)",
+          )
+          .run(
+            normalizedExpenseId,
+            ENTERPRISE_NODE_CODE,
+            normalizedExpenseId,
+            `${nodeCode}:storeExpense:${row.expense_no}`,
+            JSON.stringify(payload),
+            timestamp,
+            timestamp,
+          );
+      }
+
+      this.setMetadata("last_local_write_at", timestamp);
+      this.insertRunLog({
+        runKind: "LOCAL_WRITE",
+        result: "SUCCESS",
+        summary: `${expenseNo} store expense confirmed.`,
+        upstreamProcessed: 0,
+        downstreamApplied: 0,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+      });
+    });
+
+    return {
+      message: this.isStandaloneDeployment()
+        ? `${expenseNo} was confirmed locally for standalone expense review.`
+        : `${expenseNo} was confirmed locally and queued for HQ Finance.`,
+      snapshot: this.getSyncSnapshot(),
+      expenseId: normalizedExpenseId,
+      expenseNo,
+      expenseStatus: status,
+    };
+  }
+
   captureScannedSale(input: StoreSellCaptureRequest): StoreSyncActionResult {
     const { session } = this.requireActiveCashierLaneSession({
       permissionCodes: ["pos.sale.process"],
@@ -18922,6 +19229,22 @@ export class LocalStoreService {
         .run(acknowledgedAt, acknowledgedAt, eventId, eventId);
       this.db
         .prepare(
+          `UPDATE local_store_expense
+          SET synced_at = ?, updated_at = ?
+          WHERE id = COALESCE(
+            (
+              SELECT aggregate_id
+              FROM sync_outbox
+              WHERE id = ?
+                AND aggregate_type = 'storeExpense'
+              LIMIT 1
+            ),
+            ?
+          )`,
+        )
+        .run(acknowledgedAt, acknowledgedAt, eventId, eventId);
+      this.db
+        .prepare(
           `UPDATE local_supplier_return
           SET cancellation_ack_synced_at = ?, updated_at = ?
           WHERE id = (
@@ -22684,6 +23007,9 @@ export class LocalStoreService {
       "CREATE TABLE IF NOT EXISTS banking_deposit (id TEXT PRIMARY KEY, deposit_no TEXT NOT NULL UNIQUE, reconciliation_id TEXT NOT NULL, reconciliation_no TEXT NOT NULL, shift_id TEXT NOT NULL, shift_no TEXT NOT NULL, amount NUMERIC NOT NULL, bank_name TEXT, reference TEXT, operator_name TEXT, note TEXT, synced_at TEXT, deposited_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     );
     this.db.exec(
+      "CREATE TABLE IF NOT EXISTS local_store_expense (id TEXT PRIMARY KEY, expense_no TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'DRAFT', expense_date TEXT NOT NULL, category TEXT NOT NULL, description TEXT NOT NULL, supplier_name TEXT, payment_method TEXT, external_reference TEXT, amount NUMERIC NOT NULL, tax_amount NUMERIC NOT NULL DEFAULT 0, attachment_file_name TEXT, attachment_url TEXT, attachment_content_type TEXT, attachment_content_base64 TEXT, operator_name TEXT NOT NULL, note TEXT, confirmed_by TEXT, confirmed_at TEXT, synced_at TEXT, updated_at TEXT NOT NULL)",
+    );
+    this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_purchase_order_snapshot_status ON purchase_order_snapshot(status, updated_at DESC)",
     );
     this.db.exec(
@@ -22736,6 +23062,12 @@ export class LocalStoreService {
     );
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_banking_deposit_synced ON banking_deposit(synced_at, deposited_at DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_local_store_expense_status ON local_store_expense(status, expense_date DESC)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_local_store_expense_synced ON local_store_expense(synced_at, confirmed_at DESC)",
     );
     this.ensureColumn("sync_outbox", "last_attempt_at", "TEXT");
     this.ensureColumn("sync_outbox", "next_retry_at", "TEXT");
@@ -23040,6 +23372,31 @@ export class LocalStoreService {
     this.ensureColumn("banking_deposit", "bank_branch_name", "TEXT");
     this.ensureColumn("banking_deposit", "bank_account_number", "TEXT");
     this.ensureColumn("banking_deposit", "bank_account_name", "TEXT");
+    this.ensureColumn(
+      "local_store_expense",
+      "status",
+      "TEXT NOT NULL DEFAULT 'DRAFT'",
+    );
+    this.ensureColumn("local_store_expense", "expense_date", "TEXT");
+    this.ensureColumn("local_store_expense", "category", "TEXT");
+    this.ensureColumn("local_store_expense", "description", "TEXT");
+    this.ensureColumn("local_store_expense", "supplier_name", "TEXT");
+    this.ensureColumn("local_store_expense", "payment_method", "TEXT");
+    this.ensureColumn("local_store_expense", "external_reference", "TEXT");
+    this.ensureColumn(
+      "local_store_expense",
+      "tax_amount",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("local_store_expense", "attachment_file_name", "TEXT");
+    this.ensureColumn("local_store_expense", "attachment_url", "TEXT");
+    this.ensureColumn("local_store_expense", "attachment_content_type", "TEXT");
+    this.ensureColumn("local_store_expense", "attachment_content_base64", "TEXT");
+    this.ensureColumn("local_store_expense", "operator_name", "TEXT");
+    this.ensureColumn("local_store_expense", "note", "TEXT");
+    this.ensureColumn("local_store_expense", "confirmed_by", "TEXT");
+    this.ensureColumn("local_store_expense", "confirmed_at", "TEXT");
+    this.ensureColumn("local_store_expense", "synced_at", "TEXT");
     this.ensureColumn(
       "sync_recovery_task",
       "replacement_aggregate_type",

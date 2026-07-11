@@ -40,6 +40,7 @@ import type {
   StoreStandalonePasswordPolicyInput,
   StoreStandaloneProductInput,
   StoreStandalonePurchaseOrderInput,
+  StoreStoreExpenseInput,
   StoreTransactionReferenceSummary,
   StoreSyncActionResult,
   StoreSyncRunOptions,
@@ -2683,6 +2684,7 @@ type TransferDocumentGroup = {
   outstandingReceiptQuantity: number;
   lines: StoreInterStoreTransferSummary[];
 };
+type TransferDirectionFilter = "ALL" | "IN" | "OUT";
 
 function getTransferDocumentKey(transfer: StoreInterStoreTransferSummary) {
   return transfer.transferBatchNo ?? transfer.transferNo;
@@ -2753,6 +2755,85 @@ function buildTransferDocumentGroups(
         new Date(right.updatedAt).getTime() -
         new Date(left.updatedAt).getTime(),
     );
+}
+
+function getTransferDocumentRole(
+  transfer: Pick<
+    TransferDocumentGroup,
+    "lines" | "issuedQuantity" | "receivedQuantity" | "outstandingIssueQuantity" | "outstandingReceiptQuantity"
+  >,
+  direction: TransferDirectionFilter,
+) {
+  if (direction === "OUT") {
+    return "SOURCE" as const;
+  }
+
+  if (direction === "IN") {
+    return "DESTINATION" as const;
+  }
+
+  const hasSource = transfer.lines.some((line) => line.role === "SOURCE");
+  const hasDestination = transfer.lines.some(
+    (line) => line.role === "DESTINATION",
+  );
+
+  if (hasSource && !hasDestination) {
+    return "SOURCE" as const;
+  }
+
+  if (hasDestination && !hasSource) {
+    return "DESTINATION" as const;
+  }
+
+  return null;
+}
+
+function getTransferRoleStatusLabel(
+  transfer: TransferDocumentGroup,
+  direction: TransferDirectionFilter,
+) {
+  const role = getTransferDocumentRole(transfer, direction);
+
+  if (role === "SOURCE") {
+    if (transfer.issuedQuantity <= 0) {
+      return "Requested";
+    }
+
+    return transfer.outstandingIssueQuantity > 0 ? "Part issued" : "Issued";
+  }
+
+  if (role === "DESTINATION") {
+    if (transfer.receivedQuantity > 0) {
+      return transfer.outstandingReceiptQuantity > 0
+        ? "Part received"
+        : "Received";
+    }
+
+    return transfer.issuedQuantity > 0 ? "Ready to receive" : "Awaiting issue";
+  }
+
+  return transfer.statusLabel
+    .toLowerCase()
+    .split("_")
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function getTransferRoleOutstandingQuantity(
+  transfer: TransferDocumentGroup,
+  direction: TransferDirectionFilter,
+) {
+  const role = getTransferDocumentRole(transfer, direction);
+
+  if (role === "SOURCE") {
+    return transfer.outstandingIssueQuantity;
+  }
+
+  if (role === "DESTINATION") {
+    return transfer.outstandingReceiptQuantity;
+  }
+
+  return transfer.outstandingIssueQuantity + transfer.outstandingReceiptQuantity;
 }
 
 function ProductTileImage({
@@ -17461,6 +17542,8 @@ function InventoryWorkspace(props: {
   const [transferHistoryFrom, setTransferHistoryFrom] = useState("");
   const [transferHistoryTo, setTransferHistoryTo] = useState("");
   const [transferHistoryShop, setTransferHistoryShop] = useState("");
+  const [transferDirectionFilter, setTransferDirectionFilter] =
+    useState<TransferDirectionFilter>("ALL");
   const [transferRequestReference, setTransferRequestReference] = useState("");
   const [transferRequestNote, setTransferRequestNote] = useState("");
   const [transferRequiredDate, setTransferRequiredDate] = useState(
@@ -17670,7 +17753,7 @@ function InventoryWorkspace(props: {
     ...transferDocumentGroups.map((group) => ({
       id: group.key,
       documentNo: group.documentNo,
-      status: group.statusLabel,
+      status: getTransferRoleStatusLabel(group, transferDirectionFilter),
       sourceShop: group.sourceStoreName,
       sourceShopCode: group.sourceStoreCode,
       destinationShop: group.destinationStoreName,
@@ -17678,6 +17761,10 @@ function InventoryWorkspace(props: {
       productName: `${formatNumber(group.lines.length)} line(s)`,
       productCode: group.lines.map((line) => line.productCode).join(", "),
       quantity: group.requestedQuantity,
+      outstandingQuantity: getTransferRoleOutstandingQuantity(
+        group,
+        transferDirectionFilter,
+      ),
       reference: group.externalReference,
       note: null,
       updatedAt: group.updatedAt,
@@ -17698,6 +17785,8 @@ function InventoryWorkspace(props: {
   const filteredTransferHistoryRows = transferHistoryRows
     .filter((row) => {
       const updatedDate = new Date(row.updatedAt);
+      const transferGroup =
+        row.kind === "Transfer" && "group" in row ? row.group : null;
       const fromMatch = transferHistoryFrom
         ? updatedDate >= new Date(`${transferHistoryFrom}T00:00:00`)
         : true;
@@ -17708,8 +17797,15 @@ function InventoryWorkspace(props: {
         ? row.sourceShopCode === transferHistoryShop ||
           row.destinationShopCode === transferHistoryShop
         : true;
+      const directionMatch =
+        transferGroup === null ||
+        transferDirectionFilter === "ALL" ||
+        (transferDirectionFilter === "OUT" &&
+          transferGroup.lines.some((line) => line.role === "SOURCE")) ||
+        (transferDirectionFilter === "IN" &&
+          transferGroup.lines.some((line) => line.role === "DESTINATION"));
 
-      return fromMatch && toMatch && shopMatch;
+      return fromMatch && toMatch && shopMatch && directionMatch;
     })
     .sort(
       (left, right) =>
@@ -19427,6 +19523,13 @@ function InventoryWorkspace(props: {
   }
 
   function renderTransfersPanel() {
+    const transferActionHeader =
+      transferDirectionFilter === "OUT"
+        ? "Issue"
+        : transferDirectionFilter === "IN"
+          ? "Receive"
+          : "Issue / Receive";
+
     return (
       <section className="rms-panel rms-tab-panel rms-stock-request-panel">
         <div className="rms-panel-title">
@@ -19481,6 +19584,18 @@ function InventoryWorkspace(props: {
             value={transferHistoryTo}
           />
           <select
+            onChange={(event) =>
+              setTransferDirectionFilter(
+                event.target.value as TransferDirectionFilter,
+              )
+            }
+            value={transferDirectionFilter}
+          >
+            <option value="ALL">Transfer in / out</option>
+            <option value="IN">Transfer in</option>
+            <option value="OUT">Transfer out</option>
+          </select>
+          <select
             onChange={(event) => setTransferHistoryShop(event.target.value)}
             value={transferHistoryShop}
           >
@@ -19499,20 +19614,35 @@ function InventoryWorkspace(props: {
             <span>From</span>
             <span>To</span>
             <span>Lines</span>
-            <span>Qty</span>
+            <span>Outstanding</span>
             <span>Status</span>
             <span>View</span>
-            <span>Receive</span>
+            <span>{transferActionHeader}</span>
             <span>Print</span>
           </div>
           {filteredTransferHistoryRows.length ? (
             filteredTransferHistoryRows.map((row) => {
               const transferGroup =
                 row.kind === "Transfer" && "group" in row ? row.group : null;
-              const canProcessTransfer =
+              const canIssueTransfer =
                 transferGroup !== null &&
-                (transferGroup.outstandingReceiptQuantity > 0 ||
-                  transferGroup.outstandingIssueQuantity > 0);
+                transferGroup.lines.some((line) => line.role === "SOURCE") &&
+                transferGroup.outstandingIssueQuantity > 0;
+              const canReceiveTransfer =
+                transferGroup !== null &&
+                transferGroup.lines.some((line) => line.role === "DESTINATION") &&
+                transferGroup.outstandingReceiptQuantity > 0;
+              const canProcessTransfer =
+                canIssueTransfer || canReceiveTransfer;
+              const processLabel =
+                canIssueTransfer ||
+                (transferDirectionFilter === "OUT" && transferGroup !== null)
+                  ? "Issue"
+                  : "Receive";
+              const displayQuantity =
+                transferGroup && "outstandingQuantity" in row
+                  ? row.outstandingQuantity
+                  : row.quantity;
 
               return (
                 <div className="rms-table-row" key={`${row.kind}-${row.id}`}>
@@ -19535,7 +19665,7 @@ function InventoryWorkspace(props: {
                     <strong>{row.productName}</strong>
                     <small>{row.productCode}</small>
                   </div>
-                  <strong>{formatNumber(row.quantity)}</strong>
+                  <strong>{formatNumber(displayQuantity)}</strong>
                   <StatusPill>{row.status}</StatusPill>
                   {transferGroup ? (
                     <ActionIconButton
@@ -19552,7 +19682,7 @@ function InventoryWorkspace(props: {
                   {transferGroup ? (
                     <ActionIconButton
                       disabled={props.isBusy || !canProcessTransfer}
-                      label={`Receive ${transferGroup.documentNo}`}
+                      label={`${processLabel} ${transferGroup.documentNo}`}
                       onClick={() =>
                         setSelectedTransferDocumentKey(transferGroup.key)
                       }
@@ -20489,8 +20619,47 @@ function ManagerWorkspace(props: {
     shiftOptions[0] ??
     null;
   const [activeManagerTab, setActiveManagerTab] = useState<
-    "shift" | "eod" | "banking" | "summary"
+    "shift" | "eod" | "banking" | "expenses" | "summary"
   >("shift");
+  const [expenseDraftId, setExpenseDraftId] = useState("");
+  const [expenseDate, setExpenseDate] = useState(todayInputValue());
+  const [expenseCategory, setExpenseCategory] = useState("UTILITIES");
+  const [expenseDescription, setExpenseDescription] = useState("");
+  const [expenseSupplierName, setExpenseSupplierName] = useState("");
+  const [expensePaymentMethod, setExpensePaymentMethod] = useState("CASH");
+  const [expenseReference, setExpenseReference] = useState("");
+  const [expenseAmount, setExpenseAmount] = useState("");
+  const [expenseTaxAmount, setExpenseTaxAmount] = useState("");
+  const [expenseNote, setExpenseNote] = useState("");
+  const [expenseAttachment, setExpenseAttachment] = useState<{
+    fileName: string;
+    contentType: string;
+    contentBase64: string;
+  } | null>(null);
+  const [expenseMessage, setExpenseMessage] = useState("");
+
+  function createLocalExpenseDraftId() {
+    const randomId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    return `local-expense-${randomId}`;
+  }
+
+  function resetExpenseDraft() {
+    setExpenseDraftId("");
+    setExpenseDate(todayInputValue());
+    setExpenseCategory("UTILITIES");
+    setExpenseDescription("");
+    setExpenseSupplierName("");
+    setExpensePaymentMethod("CASH");
+    setExpenseReference("");
+    setExpenseAmount("");
+    setExpenseTaxAmount("");
+    setExpenseNote("");
+    setExpenseAttachment(null);
+  }
 
   function saveReceiptLogo(companyLogoUrl: string | null) {
     void props.runAction((runtime) =>
@@ -20519,6 +20688,76 @@ function ManagerWorkspace(props: {
     reader.readAsDataURL(file);
   }
 
+  function selectExpenseAttachment(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const base64 = result.includes(",") ? result.split(",").pop() ?? "" : result;
+
+      if (base64) {
+        setExpenseAttachment({
+          fileName: file.name,
+          contentType: file.type || "application/octet-stream",
+          contentBase64: base64,
+        });
+      }
+    });
+    reader.readAsDataURL(file);
+  }
+
+  async function saveStoreExpense(confirmAfterSave = false) {
+    const nextExpenseId = expenseDraftId || createLocalExpenseDraftId();
+    const payload: StoreStoreExpenseInput = {
+      expenseId: nextExpenseId,
+      expenseDate,
+      category: expenseCategory,
+      description: expenseDescription,
+      supplierName: expenseSupplierName,
+      paymentMethod: expensePaymentMethod,
+      externalReference: expenseReference,
+      amount: Number(expenseAmount),
+      taxAmount: Number(expenseTaxAmount || 0),
+      attachmentFileName: expenseAttachment?.fileName ?? null,
+      attachmentContentType: expenseAttachment?.contentType ?? null,
+      attachmentContentBase64: expenseAttachment?.contentBase64 ?? null,
+      operatorName:
+        props.snapshot?.activeOperatorSession?.displayName ??
+        props.snapshot?.activeOperatorSession?.loginId ??
+        null,
+      note: expenseNote,
+    };
+
+    const saved = await props.runAction((runtime) =>
+      runtime.saveStoreExpenseDraft(payload),
+    );
+
+    if (!saved) {
+      return;
+    }
+
+    const savedExpenseId = saved.expenseId ?? nextExpenseId;
+    setExpenseDraftId(savedExpenseId);
+    setExpenseMessage(saved.message);
+
+    if (confirmAfterSave) {
+      const confirmed = await props.runAction((runtime) =>
+        runtime.confirmStoreExpense(savedExpenseId),
+      );
+
+      if (confirmed) {
+        setExpenseMessage(confirmed.message);
+        resetExpenseDraft();
+      }
+    }
+  }
+
   return (
     <div className="rms-workspace rms-tabbed-workspace">
       <div
@@ -20531,6 +20770,7 @@ function ManagerWorkspace(props: {
             ["shift", "Shift"],
             ["eod", "EOD"],
             ["banking", "Banking"],
+            ["expenses", "Expenses"],
             ["summary", "Summary"],
           ] as const
         ).map(([id, label]) => (
@@ -20770,6 +21010,139 @@ function ManagerWorkspace(props: {
                 Bank deposit
               </button>
             </div>
+          </section>
+        ) : null}
+
+        {activeManagerTab === "expenses" ? (
+          <section className="rms-panel rms-tab-panel">
+            <div className="rms-panel-title">
+              <div>
+                <span>Supervisor expense</span>
+                <h2>Store expense capture</h2>
+              </div>
+              <StatusPill tone={expenseDraftId ? "warn" : undefined}>
+                {expenseDraftId ? "Draft active" : "New"}
+              </StatusPill>
+            </div>
+            <div className="rms-form-grid">
+              <input
+                onChange={(event) => setExpenseDate(event.target.value)}
+                type="date"
+                value={expenseDate}
+              />
+              <select
+                onChange={(event) => setExpenseCategory(event.target.value)}
+                value={expenseCategory}
+              >
+                <option value="UTILITIES">Utilities</option>
+                <option value="CLEANING">Cleaning / toiletries</option>
+                <option value="REPAIRS">Repairs</option>
+                <option value="TRANSPORT">Transport</option>
+                <option value="STAFF_WELFARE">Staff welfare</option>
+                <option value="OTHER">Other</option>
+              </select>
+              <input
+                onChange={(event) => setExpenseSupplierName(event.target.value)}
+                placeholder="Supplier or payee"
+                value={expenseSupplierName}
+              />
+              <select
+                onChange={(event) => setExpensePaymentMethod(event.target.value)}
+                value={expensePaymentMethod}
+              >
+                <option value="CASH">Cash</option>
+                <option value="MOBILE_MONEY">Mobile money</option>
+                <option value="CARD">Card</option>
+                <option value="BANK_TRANSFER">Bank transfer</option>
+                <option value="PETTY_CASH">Petty cash</option>
+              </select>
+              <input
+                onChange={(event) => setExpenseReference(event.target.value)}
+                placeholder="Reference"
+                value={expenseReference}
+              />
+              <input
+                min="0"
+                onChange={(event) => setExpenseAmount(event.target.value)}
+                placeholder="Amount"
+                step="0.01"
+                type="number"
+                value={expenseAmount}
+              />
+              <input
+                min="0"
+                onChange={(event) => setExpenseTaxAmount(event.target.value)}
+                placeholder="Tax"
+                step="0.01"
+                type="number"
+                value={expenseTaxAmount}
+              />
+            </div>
+            <div className="rms-form-grid">
+              <textarea
+                onChange={(event) => setExpenseDescription(event.target.value)}
+                placeholder="Expense details"
+                rows={3}
+                value={expenseDescription}
+              />
+              <textarea
+                onChange={(event) => setExpenseNote(event.target.value)}
+                placeholder="Internal note"
+                rows={3}
+                value={expenseNote}
+              />
+              <label className="rms-button">
+                {expenseAttachment ? "Change attachment" : "Attach receipt"}
+                <input
+                  accept="image/*,application/pdf"
+                  hidden
+                  onChange={selectExpenseAttachment}
+                  type="file"
+                />
+              </label>
+              {expenseAttachment ? (
+                <button
+                  className="rms-button"
+                  disabled={props.isBusy}
+                  onClick={() => setExpenseAttachment(null)}
+                  type="button"
+                >
+                  Remove attachment
+                </button>
+              ) : null}
+            </div>
+            <div className="rms-manager-action-strip">
+              <button
+                className="rms-button"
+                disabled={props.isBusy}
+                onClick={() => void saveStoreExpense(false)}
+                type="button"
+              >
+                Save draft
+              </button>
+              <button
+                className="rms-button is-primary"
+                disabled={props.isBusy}
+                onClick={() => void saveStoreExpense(true)}
+                type="button"
+              >
+                Save & confirm for HQ
+              </button>
+              <button
+                className="rms-button"
+                disabled={props.isBusy}
+                onClick={resetExpenseDraft}
+                type="button"
+              >
+                Clear
+              </button>
+              {expenseAttachment ? (
+                <StatusPill>{expenseAttachment.fileName}</StatusPill>
+              ) : null}
+            </div>
+            {expenseMessage ? (
+              <p className="rms-muted-text">{expenseMessage}</p>
+            ) : null}
           </section>
         ) : null}
 

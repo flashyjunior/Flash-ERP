@@ -4,6 +4,7 @@ let interStoreTransferSchemaReady: Promise<void> | null = null;
 let permissionCatalogSchemaReady: Promise<void> | null = null;
 let inventoryLocationSalesOrderSchemaReady: Promise<void> | null = null;
 let productVariantSalesOrderDepositSchemaReady: Promise<void> | null = null;
+let operatingExpenseSchemaReady: Promise<void> | null = null;
 
 function isSqlServerDatabase() {
   return (process.env.DATABASE_URL ?? "").trim().toLowerCase().startsWith("sqlserver://");
@@ -66,6 +67,24 @@ export function ensureInterStoreTransferSchemaCompatibility() {
         END
       `);
       await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'feedbackDipReading') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [feedbackDipReading] DECIMAL(18, 3) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'beforeDischargeEvidenceJson') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [beforeDischargeEvidenceJson] NVARCHAR(MAX) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'afterDischargeEvidenceJson') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer] ADD [afterDischargeEvidenceJson] NVARCHAR(MAX) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
         IF NOT EXISTS (
           SELECT 1
           FROM sys.indexes
@@ -112,6 +131,15 @@ export function ensureInterStoreTransferSchemaCompatibility() {
         'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "deliveryNoteNo" TEXT'
       );
       await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "feedbackDipReading" DECIMAL(18,3)'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "beforeDischargeEvidenceJson" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "afterDischargeEvidenceJson" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
         'CREATE INDEX IF NOT EXISTS "InterStoreTransfer_retailOrgId_transferBatchNo_idx" ON "InterStoreTransfer"("retailOrgId", "transferBatchNo")'
       );
     }
@@ -121,6 +149,62 @@ export function ensureInterStoreTransferSchemaCompatibility() {
   });
 
   return interStoreTransferSchemaReady;
+}
+
+export function ensureOperatingExpenseSchemaCompatibility() {
+  operatingExpenseSchemaReady ??= (async () => {
+    if (isSqlServerDatabase()) {
+      const columns = [
+        ["attachmentFileName", "NVARCHAR(1000) NULL"],
+        ["attachmentUrl", "NVARCHAR(1000) NULL"],
+        ["confirmedBy", "NVARCHAR(1000) NULL"],
+        ["confirmedAt", "DATETIME2(3) NULL"],
+        ["financeExpenseAccountCode", "NVARCHAR(1000) NULL"],
+        ["financePaymentAccountCode", "NVARCHAR(1000) NULL"],
+        ["financeAssignedBy", "NVARCHAR(1000) NULL"],
+        ["financeAssignedAt", "DATETIME2(3) NULL"],
+      ] as const;
+
+      for (const [columnName, columnType] of columns) {
+        await prisma.$executeRawUnsafe(`
+          IF COL_LENGTH(N'dbo.OperatingExpense', N'${columnName}') IS NULL
+          BEGIN
+            ALTER TABLE [dbo].[OperatingExpense] ADD [${columnName}] ${columnType};
+          END
+        `);
+      }
+    } else {
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "attachmentFileName" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "attachmentUrl" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "confirmedBy" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "confirmedAt" TIMESTAMP(3)'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "financeExpenseAccountCode" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "financePaymentAccountCode" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "financeAssignedBy" TEXT'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "OperatingExpense" ADD COLUMN IF NOT EXISTS "financeAssignedAt" TIMESTAMP(3)'
+      );
+    }
+  })().catch((error) => {
+    operatingExpenseSchemaReady = null;
+    throw error;
+  });
+
+  return operatingExpenseSchemaReady;
 }
 
 export function ensurePermissionCatalogSchemaCompatibility() {

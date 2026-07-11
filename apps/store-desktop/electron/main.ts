@@ -4395,6 +4395,8 @@ if (!desktopSingleInstanceLock) {
   registerStoreIpcHandler("flash-erp:cancel-sales-order", "cancelSalesOrder");
   registerStoreIpcHandler("flash-erp:record-eod-reconciliation", "recordEodReconciliation");
   registerStoreIpcHandler("flash-erp:record-banking-deposit", "recordBankingDeposit");
+  registerStoreIpcHandler("flash-erp:save-store-expense-draft", "saveStoreExpenseDraft");
+  registerStoreIpcHandler("flash-erp:confirm-store-expense", "confirmStoreExpense");
   registerStoreIpcHandler("flash-erp:attach-customer-to-active-basket", "attachCustomerToActiveBasket");
   registerStoreIpcHandler("flash-erp:set-active-basket-loyalty-redemption", "setActiveBasketLoyaltyRedemption");
   registerStoreIpcHandler("flash-erp:save-inter-store-transfer-request-draft", "saveInterStoreTransferRequestDraft");

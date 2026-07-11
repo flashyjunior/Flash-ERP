@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { type Prisma } from "@prisma/client";
 
 import { deriveCustomerAccountPostingEffect } from "@flash-erp/sync-core";
-import { serializeRequiredJsonField } from "./json-field";
+import { parseJsonField, serializeRequiredJsonField } from "./json-field";
 import { prisma } from "@/lib/db/prisma";
 import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
 import {
@@ -206,6 +206,9 @@ export type RecordFuelTransferFeedbackRequest = {
   expectedStockQuantity?: number | string | null;
   quantityAfterDelivery?: number | string | null;
   actualQuantityReceived?: number | string | null;
+  feedbackDipReading?: number | string | null;
+  beforeDischargeEvidence?: unknown;
+  afterDischargeEvidence?: unknown;
   feedbackNote?: string | null;
   feedbackOperatorName?: string | null;
   action?: "SAVE" | "CONFIRM" | "POST" | string | null;
@@ -649,6 +652,19 @@ export type FuelOperationsWorkspaceData = {
     quantityAfterDelivery: number | null;
     actualQuantityReceived: number | null;
     feedbackVarianceQuantity: number | null;
+    feedbackDipReading: number | null;
+    beforeDischargeEvidence: Array<{
+      url: string;
+      fileName: string | null;
+      capturedAt: string | null;
+      uploadedAt: string | null;
+    }>;
+    afterDischargeEvidence: Array<{
+      url: string;
+      fileName: string | null;
+      capturedAt: string | null;
+      uploadedAt: string | null;
+    }>;
     feedbackNote: string | null;
     feedbackRecordedAt: string | null;
     feedbackConfirmedAt: string | null;
@@ -4086,6 +4102,14 @@ export async function getFuelOperationsWorkspace(
               transfer.actualQuantityReceived === null ? null : toNumber(transfer.actualQuantityReceived),
             feedbackVarianceQuantity:
               transfer.feedbackVarianceQuantity === null ? null : toNumber(transfer.feedbackVarianceQuantity),
+            feedbackDipReading:
+              transfer.feedbackDipReading === null ? null : toNumber(transfer.feedbackDipReading),
+            beforeDischargeEvidence: normalizeTransferFeedbackEvidence(
+              transfer.beforeDischargeEvidenceJson
+            ),
+            afterDischargeEvidence: normalizeTransferFeedbackEvidence(
+              transfer.afterDischargeEvidenceJson
+            ),
             feedbackNote: transfer.feedbackNote,
             feedbackRecordedAt: transfer.feedbackRecordedAt?.toISOString() ?? null,
             feedbackConfirmedAt: transfer.feedbackConfirmedAt?.toISOString() ?? null,
@@ -4166,6 +4190,9 @@ export async function getFuelOperationsWorkspace(
             quantityAfterDelivery: null,
             actualQuantityReceived: null,
             feedbackVarianceQuantity: null,
+            feedbackDipReading: null,
+            beforeDischargeEvidence: [],
+            afterDischargeEvidence: [],
             feedbackNote: null,
             feedbackRecordedAt: null,
             feedbackConfirmedAt: null,
@@ -7252,6 +7279,9 @@ export async function createFuelStationDelivery(
         quantityAfterDelivery: null,
         actualQuantityReceived: null,
         feedbackVarianceQuantity: null,
+        feedbackDipReading: null,
+        beforeDischargeEvidence: [],
+        afterDischargeEvidence: [],
         feedbackNote: null,
         feedbackRecordedAt: null,
         feedbackConfirmedAt: null,
@@ -7271,6 +7301,52 @@ function normalizeWaterTestResult(value: string | null | undefined) {
   }
 
   return ["POSITIVE", "NEGATIVE"].includes(normalized) ? normalized : null;
+}
+
+function normalizeTransferFeedbackEvidence(value: unknown) {
+  const parsed = parseJsonField(value);
+
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+
+      const record = item as Record<string, unknown>;
+      const url = normalizeOptionalText(
+        typeof record.url === "string" ? record.url : null,
+      );
+
+      if (!url) {
+        return null;
+      }
+
+      return {
+        url,
+        fileName: normalizeOptionalText(
+          typeof record.fileName === "string" ? record.fileName : null,
+        ),
+        capturedAt: normalizeOptionalText(
+          typeof record.capturedAt === "string" ? record.capturedAt : null,
+        ),
+        uploadedAt: normalizeOptionalText(
+          typeof record.uploadedAt === "string" ? record.uploadedAt : null,
+        ),
+      };
+    })
+    .filter(
+      (item): item is {
+        url: string;
+        fileName: string | null;
+        capturedAt: string | null;
+        uploadedAt: string | null;
+      } => Boolean(item),
+    )
+    .slice(0, 30);
 }
 
 export async function recordFuelTransferFeedback(
@@ -7364,11 +7440,15 @@ export async function recordFuelTransferFeedback(
         }
       }
     });
+    const issuedFromTransfer = roundQuantity(
+      transferLines.reduce((sum, line) => sum + toNumber(line.issuedQuantity), 0)
+    );
+    const receivedFromTransfer = roundQuantity(
+      transferLines.reduce((sum, line) => sum + toNumber(line.receivedQuantity), 0)
+    );
     const expectedQuantityReceived =
       optionalNumber(input.expectedQuantityReceived, "expected quantity received") ??
-      roundQuantity(
-        transferLines.reduce((sum, line) => sum + toNumber(line.issuedQuantity), 0)
-      );
+      (receivedFromTransfer > 0 ? receivedFromTransfer : issuedFromTransfer);
     const quantityBeforeDelivery = optionalNumber(
       input.quantityBeforeDelivery,
       "quantity before delivery"
@@ -7381,16 +7461,22 @@ export async function recordFuelTransferFeedback(
     const quantityAfterDelivery = optionalNumber(input.quantityAfterDelivery, "quantity after delivery");
     let actualQuantityReceived =
       optionalNumber(input.actualQuantityReceived, "actual quantity received") ??
+      (receivedFromTransfer > 0
+        ? receivedFromTransfer
+        : null) ??
       (quantityBeforeDelivery === null || quantityAfterDelivery === null
         ? null
         : roundQuantity(quantityAfterDelivery - quantityBeforeDelivery));
     const action = normalizeOptionalText(input.action)?.toUpperCase() ?? "SAVE";
+    const feedbackDipReading = optionalNumber(input.feedbackDipReading, "dip reading");
+    const beforeDischargeEvidence = normalizeTransferFeedbackEvidence(
+      input.beforeDischargeEvidence
+    );
+    const afterDischargeEvidence = normalizeTransferFeedbackEvidence(
+      input.afterDischargeEvidence
+    );
 
     if (action === "POST" && actualQuantityReceived === null) {
-      const receivedFromTransfer = roundQuantity(
-        transferLines.reduce((sum, line) => sum + toNumber(line.receivedQuantity), 0)
-      );
-
       actualQuantityReceived = receivedFromTransfer > 0 ? receivedFromTransfer : null;
     }
 
@@ -7402,6 +7488,28 @@ export async function recordFuelTransferFeedback(
 
     if (actualQuantityReceived !== null && actualQuantityReceived < 0) {
       throw new Error("Flash ERP actual quantity received cannot be negative.");
+    }
+
+    if (feedbackDipReading !== null && feedbackDipReading < 0) {
+      throw new Error("Flash ERP dip reading cannot be negative.");
+    }
+
+    if ((action === "CONFIRM" || action === "POST") && feedbackDipReading === null) {
+      throw new Error("Capture the transfer feedback dip reading before confirming feedback.");
+    }
+
+    if (
+      (action === "CONFIRM" || action === "POST") &&
+      beforeDischargeEvidence.length === 0
+    ) {
+      throw new Error("Upload at least one before-discharge photo before confirming feedback.");
+    }
+
+    if (
+      (action === "CONFIRM" || action === "POST") &&
+      afterDischargeEvidence.length === 0
+    ) {
+      throw new Error("Upload at least one after-discharge photo before confirming feedback.");
     }
 
     const feedbackVarianceQuantity =
@@ -7522,6 +7630,9 @@ export async function recordFuelTransferFeedback(
         quantityAfterDelivery,
         actualQuantityReceived,
         feedbackVarianceQuantity,
+        feedbackDipReading,
+        beforeDischargeEvidenceJson: serializeRequiredJsonField(beforeDischargeEvidence),
+        afterDischargeEvidenceJson: serializeRequiredJsonField(afterDischargeEvidence),
         feedbackNote: normalizeOptionalText(input.feedbackNote),
         feedbackRecordedAt: now,
         feedbackConfirmedAt: action === "CONFIRM" || action === "POST" ? now : undefined,

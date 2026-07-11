@@ -62,12 +62,40 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - POS sales no longer fail solely because a stock item has zero or missing cost; revenue, tax, tender/cashbook, and AR still post, while COGS/Inventory relief is skipped until a valid cost exists.
 - Journal Inquiry detail now surfaces related POS sale/COGS accounting lines for the same sale reference so revenue/tax/tender/AR and inventory-cost impact can be reviewed together when COGS posts in a separate inventory journal.
 - HQ transfer draft dialogs now reopen with current detail lines after save/refresh, and online-store Fuel pages are scoped to the logged-in shop so tanks, pumps, nozzles, dips, meter readings, supplier receipts, reconciliation, shop prices, stock labels, and default site selections do not bleed across shops.
+- HQ committed transfer requests can be rerouted to a new destination until destination feedback is confirmed/posted; source-side transfer quantities remain locked after commit. Online-store and desktop transfer windows now distinguish Transfer In from Transfer Out, use role-aware issue/receive labels, and show role-relevant outstanding quantities.
+- Destination fuel transfer feedback now locks expected/actual received quantities to the receipt quantity, captures a separate dip reading, and requires before-discharge plus after-discharge photo evidence with protected timestamped uploads. Mobile capture uses the device camera path while desktop keeps file selection.
+- Online-store and desktop supervisors can capture store expenses as drafts with optional receipts, confirm them for HQ, and sync them to Finance. HQ Finance assigns expense and payment/clearing GL accounts before posting through the shared accounting engine.
 - Local product and transaction data was reset on 2026-06-22 after Fuel Sale defaults were implemented: transactional POS, inventory, purchasing, fuel, finance posting, cashbook, bank reconciliation, tax, payroll-posting, fixed-asset transaction, sync-event, and product-dependent rows were cleared; the clean RMS fuel catalog now contains `AGO`, `KERO`, `LPG`, and `PMS` with matching ERP product-profile mirrors, seeded filling stations, and seeded zero-quantity tanks.
 - Repair/service maintenance tracking is intentionally deferred to a later dedicated Maintenance module instead of being mixed into fixed assets.
 - Chart of accounts reset on 2026-06-20 to the requested 61-account general business COA. Local GL journal artifacts were cleared so the new accounts have clean ledger history.
 - The inherited RMS-era model names remain where they still own existing data/workflows. Rename them gradually as ERP ownership and migrations are designed.
 
 ## Maintenance Notes
+
+### 2026-07-11 Transfer Reroute, Feedback Evidence, and Store Expense Handoff
+
+Status: Done
+
+Implemented:
+
+- Allowed HQ transfer rerouting after commit while blocking source/line edits and locking everything once destination feedback is confirmed or posted.
+- Added Transfer In / Transfer Out filters, role-aware status labels, and role-relevant outstanding quantities to online-store and desktop transfer grids.
+- Locked destination feedback expected/actual received quantities to the transfer receipt quantity and added separate dip reading capture.
+- Added before-discharge and after-discharge feedback evidence arrays with protected timestamped uploads and mobile camera capture hints.
+- Added supervisor store-expense capture to online-store and desktop, with draft save, confirm-for-HQ, optional attachment, sync projection, and HQ Finance GL assignment/posting.
+- Added SQL Server, Postgres, and SQLite desktop store-expense storage paths plus shared sync ownership for `storeExpense` upstream events.
+
+Verified:
+
+- `npm run prisma:format`
+- `npm run prisma:validate`
+- `npm run prisma:generate`
+- `npm --workspace @flash-erp/domain run typecheck`
+- `npm --workspace @flash-erp/sync-core run typecheck`
+- `npm --workspace @flash-erp/store-desktop run typecheck`
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm --workspace @flash-erp/store-desktop run build`
+- `npm --workspace @flash-erp/enterprise-web run build`
 
 ### 2026-07-11 HQ Management Report Pack
 

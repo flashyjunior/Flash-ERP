@@ -48,7 +48,7 @@ type TenderMethod = OnlineStoreWorkspaceData["tenderMethods"][number];
 type Receipt = CreateOnlineStoreSaleResponse["receipt"];
 type AccountPaymentReceipt = RecordOnlineStoreAccountPaymentResponse["receipt"];
 type OnlineShift = NonNullable<OnlineStoreWorkspaceData["shift"]>;
-type WorkspaceId = "dashboard" | "pos" | "inventory" | "manager" | "reversals" | "reports" | "fuel";
+type WorkspaceId = "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "fuel";
 type ManagerTab = "shift" | "eod" | "banking" | "summary";
 type ReportId = "sales" | "products" | "orders" | "tenders" | "inventory" | "banking" | "shifts";
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
@@ -71,11 +71,21 @@ const clockFormatter = new Intl.DateTimeFormat("en-GB", {
   hour12: false
 });
 
+function formatEnumLabel(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
 type PurchaseOrderSummary = OnlineStoreWorkspaceData["purchaseOrders"][number];
 type PurchaseOrderLine = PurchaseOrderSummary["lines"][number];
 type GoodsReceiptSummary = OnlineStoreWorkspaceData["recentGoodsReceipts"][number];
 type TransferRequest = OnlineStoreWorkspaceData["transferRequests"][number];
 type RemoteInventoryRow = OnlineStoreRemoteInventoryLookupResponse["rows"][number];
+type TransferFeedbackEvidence = TransferRequest["beforeDischargeEvidence"][number];
+type TransferDirectionFilter = "ALL" | "IN" | "OUT";
 type TransferDocumentGroup = {
   key: string;
   documentNo: string;
@@ -104,6 +114,9 @@ type TransferDocumentGroup = {
   quantityAfterDelivery: number | null;
   actualQuantityReceived: number | null;
   feedbackVarianceQuantity: number | null;
+  feedbackDipReading: number | null;
+  beforeDischargeEvidence: TransferFeedbackEvidence[];
+  afterDischargeEvidence: TransferFeedbackEvidence[];
   feedbackNote: string | null;
   feedbackRecordedAt: string | null;
   feedbackConfirmedAt: string | null;
@@ -189,12 +202,13 @@ const workspaceNav: Array<{
   id: WorkspaceId;
   label: string;
   detail: string;
-  icon: "dashboard" | "pos" | "inventory" | "manager" | "reversals" | "reports" | "fuel";
+  icon: "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "fuel";
   requiresFuelOperationsVisibility?: boolean;
 }> = [
   { id: "dashboard", label: "Dashboard", detail: "Shop pulse, sales, stock", icon: "dashboard" },
   { id: "pos", label: "POS", detail: "Sales, orders, shifts", icon: "pos" },
   { id: "inventory", label: "Inventory", detail: "Request, receive, count", icon: "inventory" },
+  { id: "expenses", label: "Expenses", detail: "Store expense capture", icon: "expenses" },
   {
     id: "fuel",
     label: "Fuel",
@@ -503,6 +517,9 @@ function buildTransferDocumentGroups(transfers: TransferRequest[]): TransferDocu
         quantityAfterDelivery: firstLine?.quantityAfterDelivery ?? null,
         actualQuantityReceived: firstLine?.actualQuantityReceived ?? null,
         feedbackVarianceQuantity: firstLine?.feedbackVarianceQuantity ?? null,
+        feedbackDipReading: firstLine?.feedbackDipReading ?? null,
+        beforeDischargeEvidence: firstLine?.beforeDischargeEvidence ?? [],
+        afterDischargeEvidence: firstLine?.afterDischargeEvidence ?? [],
         feedbackNote: firstLine?.feedbackNote ?? null,
         feedbackRecordedAt: firstLine?.feedbackRecordedAt ?? null,
         feedbackConfirmedAt: firstLine?.feedbackConfirmedAt ?? null,
@@ -513,6 +530,71 @@ function buildTransferDocumentGroups(transfers: TransferRequest[]): TransferDocu
       };
     })
     .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+}
+
+function getTransferDocumentRole(
+  transfer: Pick<
+    TransferDocumentGroup,
+    "lines" | "issuedQuantity" | "receivedQuantity" | "outstandingIssueQuantity" | "outstandingReceiptQuantity"
+  >,
+  direction: TransferDirectionFilter
+) {
+  if (direction === "OUT") {
+    return "SOURCE" as const;
+  }
+
+  if (direction === "IN") {
+    return "DESTINATION" as const;
+  }
+
+  const hasSource = transfer.lines.some((line) => line.role === "SOURCE");
+  const hasDestination = transfer.lines.some((line) => line.role === "DESTINATION");
+
+  if (hasSource && !hasDestination) {
+    return "SOURCE" as const;
+  }
+
+  if (hasDestination && !hasSource) {
+    return "DESTINATION" as const;
+  }
+
+  return null;
+}
+
+function getTransferRoleStatusLabel(transfer: TransferDocumentGroup, direction: TransferDirectionFilter) {
+  const role = getTransferDocumentRole(transfer, direction);
+
+  if (role === "SOURCE") {
+    if (transfer.issuedQuantity <= 0) {
+      return "Requested";
+    }
+
+    return transfer.outstandingIssueQuantity > 0 ? "Part issued" : "Issued";
+  }
+
+  if (role === "DESTINATION") {
+    if (transfer.receivedQuantity > 0) {
+      return transfer.outstandingReceiptQuantity > 0 ? "Part received" : "Received";
+    }
+
+    return transfer.issuedQuantity > 0 ? "Ready to receive" : "Awaiting issue";
+  }
+
+  return formatEnumLabel(transfer.statusLabel);
+}
+
+function getTransferRoleOutstandingQuantity(transfer: TransferDocumentGroup, direction: TransferDirectionFilter) {
+  const role = getTransferDocumentRole(transfer, direction);
+
+  if (role === "SOURCE") {
+    return transfer.outstandingIssueQuantity;
+  }
+
+  if (role === "DESTINATION") {
+    return transfer.outstandingReceiptQuantity;
+  }
+
+  return transfer.outstandingIssueQuantity + transfer.outstandingReceiptQuantity;
 }
 
 function formatSupplierReturnReason(value: SupplierReturnReason | string) {
@@ -545,6 +627,14 @@ function SidebarIcon({ name }: { name: (typeof workspaceNav)[number]["icon"] }) 
         <path d="M21 16V8l-9-5-9 5v8l9 5z" />
         <path d="M3.3 7.5 12 12l8.7-4.5" />
         <path d="M12 22V12" />
+      </>
+    ),
+    expenses: (
+      <>
+        <path d="M7 3h10v18l-2-1-2 1-2-1-2 1-2-1z" />
+        <path d="M9 8h6" />
+        <path d="M9 12h6" />
+        <path d="M9 16h4" />
       </>
     ),
     manager: (
@@ -1772,6 +1862,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [isOpeningShift, setIsOpeningShift] = useState(false);
   const [inventoryQuery, setInventoryQuery] = useState("");
   const [inventoryDocumentQuery, setInventoryDocumentQuery] = useState("");
+  const [transferDirectionFilter, setTransferDirectionFilter] = useState<TransferDirectionFilter>("ALL");
   const [transferStatusFilter, setTransferStatusFilter] = useState("");
   const [countVarianceFilter, setCountVarianceFilter] = useState<"all" | "variance" | "short" | "over">("all");
   const [inventoryProductId, setInventoryProductId] = useState(workspace.inventoryProducts[0]?.productId ?? "");
@@ -1841,7 +1932,23 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [transferFeedbackExpectedStock, setTransferFeedbackExpectedStock] = useState("");
   const [transferFeedbackQuantityAfter, setTransferFeedbackQuantityAfter] = useState("");
   const [transferFeedbackActualReceived, setTransferFeedbackActualReceived] = useState("");
+  const [transferFeedbackDipReading, setTransferFeedbackDipReading] = useState("");
+  const [transferFeedbackBeforeEvidence, setTransferFeedbackBeforeEvidence] = useState<TransferFeedbackEvidence[]>([]);
+  const [transferFeedbackAfterEvidence, setTransferFeedbackAfterEvidence] = useState<TransferFeedbackEvidence[]>([]);
   const [transferFeedbackNote, setTransferFeedbackNote] = useState("");
+  const [expenseDraftId, setExpenseDraftId] = useState("");
+  const [expenseDate, setExpenseDate] = useState(activeDate);
+  const [expenseCategory, setExpenseCategory] = useState("GENERAL");
+  const [expenseDescription, setExpenseDescription] = useState("");
+  const [expenseSupplierName, setExpenseSupplierName] = useState("");
+  const [expensePaymentMethod, setExpensePaymentMethod] = useState("CASH");
+  const [expenseReference, setExpenseReference] = useState("");
+  const [expenseAmount, setExpenseAmount] = useState("");
+  const [expenseTaxAmount, setExpenseTaxAmount] = useState("0");
+  const [expenseNote, setExpenseNote] = useState("");
+  const [expenseAttachmentFileName, setExpenseAttachmentFileName] = useState("");
+  const [expenseAttachmentUrl, setExpenseAttachmentUrl] = useState("");
+  const [expenseMessage, setExpenseMessage] = useState("");
   const [countedQuantity, setCountedQuantity] = useState("0");
   const [countNote, setCountNote] = useState("");
   const [activeCountEntryTab, setActiveCountEntryTab] = useState<CountEntryTab>("header");
@@ -2338,25 +2445,29 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   });
   const transferRequestRows = workspace.transferRequests.filter((transfer) => {
     const statusMatch = !transferStatusFilter || transfer.status === transferStatusFilter;
+    const directionMatch =
+      transferDirectionFilter === "ALL" ||
+      (transferDirectionFilter === "OUT" && transfer.role === "SOURCE") ||
+      (transferDirectionFilter === "IN" && transfer.role === "DESTINATION");
     const queryMatch =
       !inventoryDocumentSearch ||
       `${transfer.transferNo} ${transfer.transferBatchNo ?? ""} ${transfer.sourceStoreName} ${transfer.sourceLocationName} ${transfer.destinationStoreName} ${transfer.destinationLocationName} ${transfer.productCode} ${transfer.productName} ${transfer.status} ${transfer.externalReference ?? ""}`
         .toLowerCase()
         .includes(inventoryDocumentSearch);
 
-    return statusMatch && queryMatch;
+    return statusMatch && directionMatch && queryMatch;
   });
   const transferDocumentGroups = buildTransferDocumentGroups(transferRequestRows);
   const transferListHasIssueAction = transferDocumentGroups.some((transfer) =>
-    transfer.lines.some((line) => line.role === "SOURCE") || transfer.outstandingIssueQuantity > 0
+    transfer.lines.some((line) => line.role === "SOURCE" && line.outstandingIssueQuantity > 0)
   );
   const transferListHasReceiveAction = transferDocumentGroups.some((transfer) =>
-    transfer.lines.some((line) => line.role === "DESTINATION") || transfer.outstandingReceiptQuantity > 0
+    transfer.lines.some((line) => line.role === "DESTINATION" && line.outstandingReceiptQuantity > 0)
   );
   const transferProcessHeader =
-    transferListHasIssueAction && !transferListHasReceiveAction
+    transferDirectionFilter === "OUT" || (transferListHasIssueAction && !transferListHasReceiveAction)
       ? "Issue"
-      : transferListHasReceiveAction && !transferListHasIssueAction
+      : transferDirectionFilter === "IN" || (transferListHasReceiveAction && !transferListHasIssueAction)
         ? "Receive"
         : "Issue / Receive";
   const selectedTransferDocument =
@@ -5420,7 +5531,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   }
 
   function openTransferFeedbackDialog(transferDocument: TransferDocumentGroup) {
-    const expectedReceived = transferDocument.expectedQuantityReceived ?? transferDocument.issuedQuantity;
+    const expectedReceived =
+      transferDocument.receivedQuantity > 0
+        ? transferDocument.receivedQuantity
+        : transferDocument.expectedQuantityReceived ?? transferDocument.issuedQuantity;
     const quantityBefore = transferDocument.quantityBeforeDelivery;
     const quantityAfter = transferDocument.quantityAfterDelivery;
     const expectedStock =
@@ -5428,6 +5542,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       (quantityBefore === null ? null : roundQuantity(quantityBefore + expectedReceived));
     const actualReceived =
       transferDocument.actualQuantityReceived ??
+      (transferDocument.receivedQuantity > 0 ? transferDocument.receivedQuantity : null) ??
       (quantityBefore === null || quantityAfter === null
         ? null
         : roundQuantity(quantityAfter - quantityBefore));
@@ -5439,7 +5554,71 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setTransferFeedbackExpectedStock(expectedStock === null ? "" : String(expectedStock));
     setTransferFeedbackQuantityAfter(quantityAfter === null ? "" : String(quantityAfter));
     setTransferFeedbackActualReceived(actualReceived === null ? "" : String(actualReceived));
+    setTransferFeedbackDipReading(transferDocument.feedbackDipReading === null ? "" : String(transferDocument.feedbackDipReading));
+    setTransferFeedbackBeforeEvidence(transferDocument.beforeDischargeEvidence);
+    setTransferFeedbackAfterEvidence(transferDocument.afterDischargeEvidence);
     setTransferFeedbackNote(transferDocument.feedbackNote ?? "");
+  }
+
+  async function uploadTransferFeedbackEvidence(
+    event: ChangeEvent<HTMLInputElement>,
+    section: "before" | "after"
+  ) {
+    const files = Array.from(event.target.files ?? []);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    setInventoryMessage(`Uploading ${files.length} transfer feedback photo${files.length === 1 ? "" : "s"}...`);
+
+    try {
+      const uploadedEvidence: TransferFeedbackEvidence[] = [];
+
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append(
+          "evidenceKind",
+          section === "before" ? "transfer-before-discharge" : "transfer-after-discharge"
+        );
+
+        const response = await fetch("/api/fuel-operations/evidence", {
+          method: "POST",
+          body: formData
+        });
+        const payload = (await response.json()) as {
+          url?: string;
+          fileName?: string;
+          capturedAt?: string;
+          uploadedAt?: string;
+          message?: string;
+        };
+
+        if (!response.ok || !payload.url) {
+          throw new Error(payload.message ?? "Flash ERP could not upload that transfer feedback photo.");
+        }
+
+        uploadedEvidence.push({
+          url: payload.url,
+          fileName: payload.fileName ?? file.name,
+          capturedAt: payload.capturedAt ?? new Date().toISOString(),
+          uploadedAt: payload.uploadedAt ?? new Date().toISOString()
+        });
+      }
+
+      if (section === "before") {
+        setTransferFeedbackBeforeEvidence((current) => [...current, ...uploadedEvidence]);
+      } else {
+        setTransferFeedbackAfterEvidence((current) => [...current, ...uploadedEvidence]);
+      }
+
+      setInventoryMessage("Transfer feedback photo evidence uploaded.");
+    } catch (error) {
+      setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not upload transfer feedback evidence.");
+    } finally {
+      event.target.value = "";
+    }
   }
 
   async function postTransferFeedback(action: "SAVE" | "CONFIRM") {
@@ -5455,6 +5634,16 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setInventoryMessage(`${action === "CONFIRM" ? "Confirming" : "Saving"} transfer feedback...`);
 
     try {
+      const receivedQuantity =
+        transferDocument.receivedQuantity > 0
+          ? transferDocument.receivedQuantity
+          : transferDocument.expectedQuantityReceived ?? transferDocument.issuedQuantity;
+      const beforeQuantity = Number(transferFeedbackQuantityBefore);
+      const expectedStock =
+        transferFeedbackExpectedStock ||
+        (Number.isFinite(beforeQuantity)
+          ? String(roundQuantity(beforeQuantity + receivedQuantity))
+          : null);
       const response = await fetch(
         `/api/fuel-operations/station-deliveries/${encodeURIComponent(transferId)}/feedback`,
         {
@@ -5466,10 +5655,13 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             action,
             waterTestResult: transferFeedbackWaterTest || null,
             quantityBeforeDelivery: transferFeedbackQuantityBefore || null,
-            expectedQuantityReceived: transferFeedbackExpectedReceived || null,
-            expectedStockQuantity: transferFeedbackExpectedStock || null,
+            expectedQuantityReceived: String(receivedQuantity),
+            expectedStockQuantity: expectedStock,
             quantityAfterDelivery: transferFeedbackQuantityAfter || null,
-            actualQuantityReceived: transferFeedbackActualReceived || null,
+            actualQuantityReceived: String(receivedQuantity),
+            feedbackDipReading: transferFeedbackDipReading || null,
+            beforeDischargeEvidence: transferFeedbackBeforeEvidence,
+            afterDischargeEvidence: transferFeedbackAfterEvidence,
             feedbackNote: transferFeedbackNote || null,
             feedbackOperatorName: workspace.operator.displayName
           })
@@ -5486,6 +5678,142 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       router.refresh();
     } catch (error) {
       setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not save transfer feedback.");
+    } finally {
+      setIsPostingInventory(false);
+    }
+  }
+
+  function resetExpenseDraft() {
+    setExpenseDraftId("");
+    setExpenseDate(activeDate);
+    setExpenseCategory("GENERAL");
+    setExpenseDescription("");
+    setExpenseSupplierName("");
+    setExpensePaymentMethod("CASH");
+    setExpenseReference("");
+    setExpenseAmount("");
+    setExpenseTaxAmount("0");
+    setExpenseNote("");
+    setExpenseAttachmentFileName("");
+    setExpenseAttachmentUrl("");
+  }
+
+  async function uploadExpenseAttachment(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+
+    if (!file) {
+      return;
+    }
+
+    setExpenseMessage("Uploading expense attachment...");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch("/api/online-store/expenses/attachments", {
+        method: "POST",
+        body: formData
+      });
+      const payload = (await response.json()) as {
+        url?: string;
+        fileName?: string;
+        message?: string;
+      };
+
+      if (!response.ok || !payload.url) {
+        throw new Error(payload.message ?? "Flash ERP could not upload the expense attachment.");
+      }
+
+      setExpenseAttachmentUrl(payload.url);
+      setExpenseAttachmentFileName(payload.fileName ?? file.name);
+      setExpenseMessage(payload.message ?? "Expense attachment uploaded.");
+    } catch (error) {
+      setExpenseMessage(error instanceof Error ? error.message : "Flash ERP could not upload the expense attachment.");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  async function saveStoreExpense(confirmAfterSave = false) {
+    setIsPostingInventory(true);
+    setExpenseMessage(confirmAfterSave ? "Saving and confirming expense..." : "Saving expense...");
+
+    try {
+      const response = await fetch("/api/online-store/expenses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          expenseId: expenseDraftId || null,
+          expenseDate,
+          category: expenseCategory,
+          description: expenseDescription,
+          supplierName: expenseSupplierName || null,
+          paymentMethod: expensePaymentMethod || null,
+          externalReference: expenseReference || null,
+          attachmentFileName: expenseAttachmentFileName || null,
+          attachmentUrl: expenseAttachmentUrl || null,
+          amount: expenseAmount,
+          taxAmount: expenseTaxAmount || "0",
+          note: expenseNote || null
+        })
+      });
+      const payload = (await response.json()) as {
+        expenseId?: string;
+        expenseNo?: string;
+        message?: string;
+      };
+
+      if (!response.ok || !payload.expenseId) {
+        throw new Error(payload.message ?? "Flash ERP could not save the store expense.");
+      }
+
+      if (confirmAfterSave) {
+        const confirmResponse = await fetch(
+          `/api/online-store/expenses/${encodeURIComponent(payload.expenseId)}/confirm`,
+          { method: "POST" }
+        );
+        const confirmPayload = (await confirmResponse.json()) as { message?: string };
+
+        if (!confirmResponse.ok) {
+          throw new Error(confirmPayload.message ?? "Flash ERP saved the expense but could not confirm it.");
+        }
+
+        setExpenseMessage(confirmPayload.message ?? `${payload.expenseNo ?? "Expense"} confirmed.`);
+        resetExpenseDraft();
+      } else {
+        setExpenseDraftId(payload.expenseId);
+        setExpenseMessage(payload.message ?? `${payload.expenseNo ?? "Expense"} saved.`);
+      }
+
+      router.refresh();
+    } catch (error) {
+      setExpenseMessage(error instanceof Error ? error.message : "Flash ERP could not save the store expense.");
+    } finally {
+      setIsPostingInventory(false);
+    }
+  }
+
+  async function confirmStoreExpense(expenseId: string) {
+    setIsPostingInventory(true);
+    setExpenseMessage("Confirming store expense...");
+
+    try {
+      const response = await fetch(
+        `/api/online-store/expenses/${encodeURIComponent(expenseId)}/confirm`,
+        { method: "POST" }
+      );
+      const payload = (await response.json()) as { message?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not confirm the store expense.");
+      }
+
+      setExpenseMessage(payload.message ?? "Store expense confirmed for HQ Finance.");
+      router.refresh();
+    } catch (error) {
+      setExpenseMessage(error instanceof Error ? error.message : "Flash ERP could not confirm the store expense.");
     } finally {
       setIsPostingInventory(false);
     }
@@ -5864,8 +6192,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     ).length;
     const canCaptureFeedback =
       isFuelTransferDocument(selectedTransferDocument) &&
-      selectedTransferDocument.issuedQuantity > 0 &&
-      selectedTransferDocument.lines.some((transfer) => transfer.role === "SOURCE");
+      selectedTransferDocument.receivedQuantity > 0 &&
+      selectedTransferDocument.lines.some((transfer) => transfer.role === "DESTINATION");
+    const selectedTransferOutstandingQuantity = getTransferRoleOutstandingQuantity(
+      selectedTransferDocument,
+      transferDirectionFilter
+    );
 
     return (
       <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
@@ -5908,8 +6240,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             <DocumentStat label="Requested" value={formatNumber.format(selectedTransferDocument.requestedQuantity)} />
             <DocumentStat
               label="Outstanding"
-              tone={selectedTransferDocument.outstandingIssueQuantity + selectedTransferDocument.outstandingReceiptQuantity > 0 ? "warning" : "good"}
-              value={formatNumber.format(selectedTransferDocument.outstandingIssueQuantity + selectedTransferDocument.outstandingReceiptQuantity)}
+              tone={selectedTransferOutstandingQuantity > 0 ? "warning" : "good"}
+              value={formatNumber.format(selectedTransferOutstandingQuantity)}
             />
             <DocumentStat label="Vehicle" value={selectedTransferDocument.vehicleRegistrationNo ?? "Not captured"} />
             <DocumentStat label="Driver" value={selectedTransferDocument.driverName ?? "Not captured"} />
@@ -5931,7 +6263,24 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               const action = canIssue ? "issue" : canReceive ? "receive" : null;
               const outstandingQuantity = action === "issue" ? transfer.outstandingIssueQuantity : transfer.outstandingReceiptQuantity;
               const quantityValue = transferReceiptQuantities[transfer.transferId] ?? String(outstandingQuantity);
-              const completed = ["RECEIVED", "CLOSED"].includes(transfer.status);
+              const roleCompleted =
+                transfer.role === "SOURCE"
+                  ? transfer.outstandingIssueQuantity <= 0 && transfer.issuedQuantity > 0
+                  : transfer.outstandingReceiptQuantity <= 0 && transfer.receivedQuantity > 0;
+              const roleStatusLabel =
+                transfer.role === "SOURCE"
+                  ? transfer.issuedQuantity <= 0
+                    ? "Requested"
+                    : transfer.outstandingIssueQuantity > 0
+                      ? "Part issued"
+                      : "Issued"
+                  : transfer.receivedQuantity > 0
+                    ? transfer.outstandingReceiptQuantity > 0
+                      ? "Part received"
+                      : "Received"
+                    : transfer.issuedQuantity > 0
+                      ? "Ready to receive"
+                      : "Awaiting issue";
 
               return (
                 <div className="rms-table-row" key={transfer.transferId}>
@@ -5940,7 +6289,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <strong>{formatNumber.format(transfer.requestedQuantity)}</strong>
                   <span>{formatNumber.format(transfer.issuedQuantity)}</span>
                   <span>{formatNumber.format(transfer.receivedQuantity)}</span>
-                  <StatusPill tone={completed ? "good" : transfer.status === "REQUESTED" ? "warning" : "neutral"}>{transfer.status}</StatusPill>
+                  <StatusPill tone={roleCompleted ? "good" : "warning"}>{roleStatusLabel}</StatusPill>
                   {action ? (
                     <div className="rms-transfer-action-cell">
                       <input
@@ -5969,7 +6318,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                       </button>
                     </div>
                   ) : (
-                    <StatusPill tone={completed ? "good" : "neutral"}>{completed ? "Done" : transfer.role.toLowerCase()}</StatusPill>
+                    <StatusPill tone={roleCompleted ? "good" : "neutral"}>{roleCompleted ? "Done" : transfer.role.toLowerCase()}</StatusPill>
                   )}
                 </div>
               );
@@ -5987,15 +6336,29 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
     const beforeQuantity = Number(transferFeedbackQuantityBefore);
     const afterQuantity = Number(transferFeedbackQuantityAfter);
-    const expectedReceived = Number(transferFeedbackExpectedReceived);
+    const receivedQuantity =
+      selectedTransferFeedbackDocument.receivedQuantity > 0
+        ? selectedTransferFeedbackDocument.receivedQuantity
+        : Number(transferFeedbackExpectedReceived);
+    const expectedReceived = Number.isFinite(receivedQuantity)
+      ? receivedQuantity
+      : selectedTransferFeedbackDocument.issuedQuantity;
+    const expectedStock =
+      Number.isFinite(beforeQuantity)
+        ? roundQuantity(beforeQuantity + expectedReceived)
+        : transferFeedbackExpectedStock.trim()
+          ? Number(transferFeedbackExpectedStock)
+          : null;
     const actualReceivedFromStock =
       Number.isFinite(beforeQuantity) && Number.isFinite(afterQuantity)
         ? roundQuantity(afterQuantity - beforeQuantity)
         : null;
     const actualReceived =
-      transferFeedbackActualReceived.trim() && Number.isFinite(Number(transferFeedbackActualReceived))
-        ? Number(transferFeedbackActualReceived)
-        : actualReceivedFromStock;
+      Number.isFinite(expectedReceived)
+        ? expectedReceived
+        : transferFeedbackActualReceived.trim() && Number.isFinite(Number(transferFeedbackActualReceived))
+          ? Number(transferFeedbackActualReceived)
+          : null;
     const variance =
       actualReceived !== null && Number.isFinite(expectedReceived)
         ? roundQuantity(actualReceived - expectedReceived)
@@ -6012,6 +6375,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             <DocumentStat label="Source" value={selectedTransferFeedbackDocument.sourceStoreName} />
             <DocumentStat label="Destination" value={selectedTransferFeedbackDocument.destinationStoreName} />
             <DocumentStat label="Issued" value={formatNumber.format(selectedTransferFeedbackDocument.issuedQuantity)} />
+            <DocumentStat label="Received" value={formatNumber.format(expectedReceived)} />
             <DocumentStat
               label="Variance"
               tone={variance === null || variance === 0 ? "good" : "warning"}
@@ -6036,29 +6400,67 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 setTransferFeedbackExpectedStock(String(roundQuantity(before + expected)));
               }
             }} step="0.001" type="number" value={transferFeedbackQuantityBefore} /></label>
-            <label><span>Expected qty received</span><input min="0" onChange={(event) => {
-              const nextExpected = event.target.value;
-              setTransferFeedbackExpectedReceived(nextExpected);
-              const before = Number(transferFeedbackQuantityBefore);
-              const expected = Number(nextExpected);
-              if (Number.isFinite(before) && Number.isFinite(expected)) {
-                setTransferFeedbackExpectedStock(String(roundQuantity(before + expected)));
-              }
-            }} step="0.001" type="number" value={transferFeedbackExpectedReceived} /></label>
-            <label><span>Expected stock</span><input min="0" onChange={(event) => setTransferFeedbackExpectedStock(event.target.value)} step="0.001" type="number" value={transferFeedbackExpectedStock} /></label>
+            <label><span>Expected qty received</span><input disabled readOnly step="0.001" type="number" value={String(expectedReceived)} /></label>
+            <label><span>Expected stock</span><input disabled readOnly step="0.001" type="number" value={expectedStock === null || Number.isNaN(expectedStock) ? "" : String(expectedStock)} /></label>
             <label><span>Qty after delivery</span><input min="0" onChange={(event) => {
               const nextAfter = event.target.value;
               setTransferFeedbackQuantityAfter(nextAfter);
-              const before = Number(transferFeedbackQuantityBefore);
-              const after = Number(nextAfter);
-              if (Number.isFinite(before) && Number.isFinite(after)) {
-                setTransferFeedbackActualReceived(String(roundQuantity(after - before)));
-              }
             }} step="0.001" type="number" value={transferFeedbackQuantityAfter} /></label>
-            <label><span>Actual qty received</span><input min="0" onChange={(event) => setTransferFeedbackActualReceived(event.target.value)} step="0.001" type="number" value={transferFeedbackActualReceived} /></label>
+            <label><span>Actual qty received</span><input disabled readOnly step="0.001" type="number" value={actualReceived === null ? "" : String(actualReceived)} /></label>
+            <label><span>Dip reading</span><input min="0" onChange={(event) => setTransferFeedbackDipReading(event.target.value)} step="0.001" type="number" value={transferFeedbackDipReading} /></label>
             <label><span>Variance</span><input readOnly value={variance === null ? "" : String(variance)} /></label>
             <label className="rms-note-field rms-transfer-feedback-note"><span>Feedback note</span><textarea onChange={(event) => setTransferFeedbackNote(event.target.value)} rows={3} value={transferFeedbackNote} /></label>
           </div>
+          <div className="rms-transfer-feedback-evidence-grid">
+            {([
+              {
+                key: "before" as const,
+                title: "Before discharge",
+                evidence: transferFeedbackBeforeEvidence,
+                onRemove: (url: string) =>
+                  setTransferFeedbackBeforeEvidence((items) => items.filter((item) => item.url !== url))
+              },
+              {
+                key: "after" as const,
+                title: "After discharge",
+                evidence: transferFeedbackAfterEvidence,
+                onRemove: (url: string) =>
+                  setTransferFeedbackAfterEvidence((items) => items.filter((item) => item.url !== url))
+              }
+            ]).map((section) => (
+              <div className="rms-transfer-feedback-evidence-card" key={section.key}>
+                <div>
+                  <strong>{section.title}</strong>
+                  <small>{section.evidence.length} photo{section.evidence.length === 1 ? "" : "s"}</small>
+                </div>
+                <label className="rms-evidence-capture-button">
+                  <span>{section.key === "before" ? "Capture before photos" : "Capture after photos"}</span>
+                  <input
+                    accept="image/*"
+                    capture="environment"
+                    multiple
+                    onChange={(event) => void uploadTransferFeedbackEvidence(event, section.key)}
+                    type="file"
+                  />
+                </label>
+                <div className="rms-transfer-feedback-evidence-list">
+                  {section.evidence.map((item) => (
+                    <div className="rms-transfer-feedback-evidence-item" key={item.url}>
+                      <a href={item.url} rel="noreferrer" target="_blank">{item.fileName ?? "Evidence photo"}</a>
+                      <small>{formatDateTime(item.capturedAt ?? item.uploadedAt ?? new Date().toISOString(), workspace.store?.timezone ?? null)}</small>
+                      <button className="rms-row-button" onClick={() => section.onRemove(item.url)} type="button">Remove</button>
+                    </div>
+                  ))}
+                  {section.evidence.length === 0 ? <small>No photos captured yet.</small> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+          {actualReceivedFromStock !== null && Math.abs(actualReceivedFromStock - expectedReceived) > 0.0001 ? (
+            <p className="rms-inline-warning">
+              Stock before/after implies {formatNumber.format(actualReceivedFromStock)} received, while the transfer receipt is locked at {formatNumber.format(expectedReceived)}.
+            </p>
+          ) : null}
           <div className="rms-dialog-actions">
             <button className="rms-button" onClick={() => setSelectedTransferFeedbackKey(null)} type="button">Cancel</button>
             <button className="rms-button" disabled={isPostingInventory} onClick={() => void postTransferFeedback("SAVE")} type="button">
@@ -7544,6 +7946,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <div className="rms-stock-toolbar">
                     <div className="rms-filter-row rms-document-filter">
                       <input onChange={(event) => setInventoryDocumentQuery(event.target.value)} placeholder="Transfer, source, item, destination" value={inventoryDocumentQuery} />
+                      <select onChange={(event) => setTransferDirectionFilter(event.target.value as TransferDirectionFilter)} value={transferDirectionFilter}>
+                        <option value="ALL">Transfer in / out</option>
+                        <option value="IN">Transfer in</option>
+                        <option value="OUT">Transfer out</option>
+                      </select>
                       <select onChange={(event) => setTransferStatusFilter(event.target.value)} value={transferStatusFilter}>
                         <option value="">All statuses</option>
                         {transferStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
@@ -7632,17 +8039,23 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                             : "Receive";
                       const canCaptureFeedback =
                         isFuelTransferDocument(transfer) &&
-                        transfer.issuedQuantity > 0 &&
-                        transfer.lines.some((line) => line.role === "SOURCE");
+                        transfer.receivedQuantity > 0 &&
+                        transfer.lines.some((line) => line.role === "DESTINATION");
+                      const roleStatusLabel = getTransferRoleStatusLabel(transfer, transferDirectionFilter);
+                      const roleOutstandingQuantity = getTransferRoleOutstandingQuantity(transfer, transferDirectionFilter);
+                      const statusTone =
+                        roleOutstandingQuantity <= 0 && (roleStatusLabel === "Issued" || roleStatusLabel === "Received")
+                          ? "good"
+                          : "warning";
 
                       return (
                         <div className="rms-table-row" key={transfer.key}>
                           <div><strong>{transfer.documentNo}</strong><small>{transfer.lines.length} line(s) · {formatRelative(transfer.updatedAt)}</small></div>
                           <div><strong>{transfer.sourceStoreName}</strong><small>{transfer.sourceStoreCode}</small></div>
                           <div><strong>{transfer.destinationStoreName}</strong><small>{transfer.destinationStoreCode}</small></div>
-                          <StatusPill tone={transfer.statusLabel === "RECEIVED" || transfer.statusLabel === "CLOSED" ? "good" : "warning"}>{transfer.statusLabel}</StatusPill>
+                          <StatusPill tone={statusTone}>{roleStatusLabel}</StatusPill>
                           <strong>{formatNumber.format(transfer.requestedQuantity)}</strong>
-                          <span>{formatNumber.format(transfer.outstandingIssueQuantity + transfer.outstandingReceiptQuantity)}</span>
+                          <span>{formatNumber.format(roleOutstandingQuantity)}</span>
                           <ActionIconButton label={`Open ${transfer.documentNo}`} onClick={() => setSelectedTransferDocumentKey(transfer.key)}>
                             <ViewIcon />
                           </ActionIconButton>
@@ -7792,6 +8205,85 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         {renderTransferFeedbackDialog()}
         {renderRemoteInventoryDialog()}
         {renderInventorySerialDialog()}
+
+        {activeWorkspace === "expenses" ? (
+          <div className="rms-workspace rms-tabbed-workspace rms-expense-workspace">
+            <section className="rms-panel">
+              <div className="rms-panel-title">
+                <div><span>Store expenses</span><h2>Capture and confirm</h2></div>
+                <StatusPill>{workspace.storeExpenses.length} row(s)</StatusPill>
+              </div>
+              <div className="rms-form-grid rms-expense-form">
+                <label><span>Date</span><input onChange={(event) => setExpenseDate(event.target.value)} type="date" value={expenseDate} /></label>
+                <label><span>Category</span><select onChange={(event) => setExpenseCategory(event.target.value)} value={expenseCategory}>
+                  <option value="GENERAL">General</option>
+                  <option value="UTILITIES">Utilities</option>
+                  <option value="TOILETRIES">Toiletries</option>
+                  <option value="REPAIRS">Repairs</option>
+                  <option value="TRANSPORT">Transport</option>
+                  <option value="SECURITY">Security</option>
+                  <option value="OTHER">Other</option>
+                </select></label>
+                <label><span>Payment</span><select onChange={(event) => setExpensePaymentMethod(event.target.value)} value={expensePaymentMethod}>
+                  <option value="CASH">Cash</option>
+                  <option value="MOBILE_MONEY">Mobile money</option>
+                  <option value="BANK_TRANSFER">Bank transfer</option>
+                  <option value="CARD">Card</option>
+                  <option value="PAYABLE">Payable</option>
+                </select></label>
+                <label><span>Amount</span><input min="0.01" onChange={(event) => setExpenseAmount(event.target.value)} step="0.01" type="number" value={expenseAmount} /></label>
+                <label><span>Tax</span><input min="0" onChange={(event) => setExpenseTaxAmount(event.target.value)} step="0.01" type="number" value={expenseTaxAmount} /></label>
+                <label><span>Supplier / payee</span><input onChange={(event) => setExpenseSupplierName(event.target.value)} value={expenseSupplierName} /></label>
+                <label><span>Reference</span><input onChange={(event) => setExpenseReference(event.target.value)} value={expenseReference} /></label>
+                <label className="rms-note-field"><span>Details</span><textarea onChange={(event) => setExpenseDescription(event.target.value)} rows={3} value={expenseDescription} /></label>
+                <label className="rms-note-field"><span>Note</span><textarea onChange={(event) => setExpenseNote(event.target.value)} rows={2} value={expenseNote} /></label>
+              </div>
+              <div className="rms-expense-attachment-row">
+                <label className="rms-evidence-capture-button">
+                  <span>{expenseAttachmentFileName ? "Replace attachment" : "Upload attachment"}</span>
+                  <input accept="image/*,.pdf" onChange={(event) => void uploadExpenseAttachment(event)} type="file" />
+                </label>
+                {expenseAttachmentUrl ? (
+                  <a className="rms-row-button" href={expenseAttachmentUrl} rel="noreferrer" target="_blank">
+                    {expenseAttachmentFileName || "Open attachment"}
+                  </a>
+                ) : (
+                  <StatusPill>Optional</StatusPill>
+                )}
+              </div>
+              <div className="rms-dialog-actions">
+                <button className="rms-button" onClick={resetExpenseDraft} type="button">Clear</button>
+                <button className="rms-button" disabled={isPostingInventory} onClick={() => void saveStoreExpense(false)} type="button">Save draft</button>
+                <button className="rms-button is-primary" disabled={isPostingInventory} onClick={() => void saveStoreExpense(true)} type="button">Save & confirm</button>
+              </div>
+              {expenseMessage ? <p className="rms-inline-message">{expenseMessage}</p> : null}
+            </section>
+            <section className="rms-panel">
+              <div className="rms-panel-title">
+                <div><span>Recent expenses</span><h2>Store submissions</h2></div>
+              </div>
+              <div className="rms-table rms-expense-table">
+                <div className="rms-table-head"><span>Expense</span><span>Date</span><span>Category</span><span>Amount</span><span>Status</span><span>Attachment</span><span>Action</span></div>
+                {workspace.storeExpenses.map((expense) => (
+                  <div className="rms-table-row" key={expense.expenseId}>
+                    <div><strong>{expense.expenseNo}</strong><small>{expense.description}</small></div>
+                    <span>{formatDateTime(expense.expenseDate, workspace.store?.timezone ?? "Africa/Accra")}</span>
+                    <span>{expense.category}</span>
+                    <strong>{formatMoney(expense.amount + expense.taxAmount, currencyCode)}</strong>
+                    <StatusPill tone={expense.status === "POSTED" ? "good" : expense.status === "APPROVED" ? "warning" : "neutral"}>{expense.status}</StatusPill>
+                    {expense.attachmentUrl ? <a href={expense.attachmentUrl} rel="noreferrer" target="_blank">Open</a> : <span>-</span>}
+                    {expense.status === "DRAFT" ? (
+                      <button className="rms-row-button is-add" disabled={isPostingInventory} onClick={() => void confirmStoreExpense(expense.expenseId)} type="button">Confirm</button>
+                    ) : (
+                      <StatusPill>{expense.status === "POSTED" ? "Posted" : "HQ review"}</StatusPill>
+                    )}
+                  </div>
+                ))}
+                {!workspace.storeExpenses.length ? <EmptyState title="No store expenses" detail="Supervisor-captured store expenses will appear here." /> : null}
+              </div>
+            </section>
+          </div>
+        ) : null}
 
         {activeWorkspace === "fuel" ? (
           <div className="rms-workspace rms-fuel-workspace">

@@ -661,17 +661,29 @@ export function EnterpriseInventoryWorkspace({
       .filter((transfer) => (transfer.transferBatchNo ?? transfer.transferNo) === editingTransferBatchNo)
       .sort((left, right) => left.lineNo - right.lineNo);
   }, [editingTransferBatchNo, workspace.interStoreTransferRows]);
-  const isTransferDialogReadOnly = Boolean(
+  const isTransferFeedbackFinal = Boolean(
+    editingTransferBatchNo &&
+      editingTransferRows.some(
+        (transfer) =>
+          transfer.feedbackStatus === "CONFIRMED" ||
+          transfer.feedbackStatus === "POSTED" ||
+          transfer.feedbackConfirmedAt ||
+          transfer.feedbackPostedAt
+      )
+  );
+  const isTransferCommitted = Boolean(
     editingTransferBatchNo &&
       editingTransferRows.length > 0 &&
       !editingTransferRows.every((transfer) => transfer.status === "DRAFT")
   );
+  const isTransferHeaderLocked = isTransferFeedbackFinal;
+  const isTransferLineLocked = isTransferFeedbackFinal || isTransferCommitted;
   const interStoreRequestBlockReason = transferSubmitting
     ? "Transfer request is already saving."
-    : isTransferDialogReadOnly
-      ? "This transfer has already been committed, so it is read-only."
-      : !transferSourceLocation
-        ? "Choose the source shop/location."
+    : isTransferFeedbackFinal
+      ? "This transfer already has confirmed filling-station feedback, so it is read-only."
+    : !transferSourceLocation
+      ? "Choose the source shop/location."
         : !transferDestinationLocation
           ? "Choose the destination shop/location."
           : !selectedSourceLocation
@@ -1736,8 +1748,10 @@ export function EnterpriseInventoryWorkspace({
           }}
           open={transferDialogOpen}
           title={
-            isTransferDialogReadOnly
+            isTransferFeedbackFinal
               ? "View transfer request"
+              : isTransferCommitted
+                ? "Reroute transfer request"
               : editingTransferBatchNo
                 ? "Edit transfer request"
                 : "Create transfer request"
@@ -1771,7 +1785,7 @@ export function EnterpriseInventoryWorkspace({
                   Ship from
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked || isTransferCommitted}
                     onChange={(event) => setTransferSourceLocation(event.target.value)}
                     value={transferSourceLocation}
                   >
@@ -1787,7 +1801,7 @@ export function EnterpriseInventoryWorkspace({
                   Ship to
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferDestinationLocation(event.target.value)}
                     value={transferDestinationLocation}
                   >
@@ -1803,7 +1817,7 @@ export function EnterpriseInventoryWorkspace({
                   Reference
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferReference(event.target.value)}
                     placeholder="Optional reference"
                     value={transferReference}
@@ -1813,7 +1827,7 @@ export function EnterpriseInventoryWorkspace({
                   Required date
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferRequiredAt(event.target.value)}
                     type="date"
                     value={transferRequiredAt}
@@ -1823,7 +1837,7 @@ export function EnterpriseInventoryWorkspace({
                   Delivery note / waybill
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferDeliveryNoteNo(event.target.value)}
                     placeholder="Waybill or delivery note"
                     value={transferDeliveryNoteNo}
@@ -1833,7 +1847,7 @@ export function EnterpriseInventoryWorkspace({
                   Transporter
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferTransporterName(event.target.value)}
                     placeholder="Transport company"
                     value={transferTransporterName}
@@ -1843,7 +1857,7 @@ export function EnterpriseInventoryWorkspace({
                   Vehicle number
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferVehicleRegistrationNo(event.target.value)}
                     placeholder="Vehicle registration"
                     value={transferVehicleRegistrationNo}
@@ -1853,7 +1867,7 @@ export function EnterpriseInventoryWorkspace({
                   Driver name
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferHeaderLocked}
                     onChange={(event) => setTransferDriverName(event.target.value)}
                     placeholder="Driver name"
                     value={transferDriverName}
@@ -1863,7 +1877,7 @@ export function EnterpriseInventoryWorkspace({
                   Driver contact
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferLineLocked}
                     onChange={(event) => setTransferDriverContact(event.target.value)}
                     placeholder="Phone number"
                     value={transferDriverContact}
@@ -1873,7 +1887,7 @@ export function EnterpriseInventoryWorkspace({
                   Note
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferLineLocked}
                     onChange={(event) => setTransferNote(event.target.value)}
                     placeholder="Reason, customer demand, or delivery instruction"
                     value={transferNote}
@@ -1927,7 +1941,7 @@ export function EnterpriseInventoryWorkspace({
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_8rem_auto]">
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferLineLocked}
                     onChange={(event) => setTransferProductCode(event.target.value)}
                     value={transferProductCode}
                   >
@@ -1940,7 +1954,7 @@ export function EnterpriseInventoryWorkspace({
                   </select>
                   <input
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                    disabled={isTransferDialogReadOnly}
+                    disabled={isTransferLineLocked}
                     min="0.001"
                     onChange={(event) => setTransferQuantity(event.target.value)}
                     step="0.001"
@@ -1949,7 +1963,7 @@ export function EnterpriseInventoryWorkspace({
                   />
                   <button
                     className="rounded-xl bg-stone-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
-                    disabled={!transferProductCode || transferSubmitting || isTransferDialogReadOnly}
+                    disabled={!transferProductCode || transferSubmitting || isTransferLineLocked}
                     onClick={addTransferLine}
                     type="button"
                   >
@@ -1972,7 +1986,7 @@ export function EnterpriseInventoryWorkspace({
                         </span>
                         <button
                           className="rounded-lg border border-stone-200 px-3 py-1.5 text-xs font-semibold text-stone-700"
-                          disabled={isTransferDialogReadOnly}
+                          disabled={isTransferLineLocked}
                           onClick={() =>
                             setTransferLines((currentLines) =>
                               currentLines.filter((currentLine) => currentLine.id !== line.id)
@@ -2011,17 +2025,19 @@ export function EnterpriseInventoryWorkspace({
                   title={interStoreRequestBlockReason || undefined}
                   type="button"
                 >
-                  {transferSubmitting ? "Saving" : "Save draft"}
+                  {transferSubmitting ? "Saving" : isTransferCommitted ? "Save reroute" : "Save draft"}
                 </button>
-                <button
-                  className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[var(--brand-deep)] disabled:cursor-not-allowed disabled:bg-stone-300"
-                  disabled={!canSaveInterStoreRequest}
-                  onClick={() => void saveInterStoreRequest(false)}
-                  title={interStoreRequestBlockReason || undefined}
-                  type="button"
-                >
-                  {transferSubmitting ? "Committing" : "Commit request"}
-                </button>
+                {!isTransferCommitted ? (
+                  <button
+                    className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[var(--brand-deep)] disabled:cursor-not-allowed disabled:bg-stone-300"
+                    disabled={!canSaveInterStoreRequest}
+                    onClick={() => void saveInterStoreRequest(false)}
+                    title={interStoreRequestBlockReason || undefined}
+                    type="button"
+                  >
+                    {transferSubmitting ? "Committing" : "Commit request"}
+                  </button>
+                ) : null}
               </div>
             </div>
             {interStoreRequestBlockReason && !transferSubmitting ? (

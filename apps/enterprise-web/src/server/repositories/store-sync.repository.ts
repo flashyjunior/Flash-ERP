@@ -9,6 +9,7 @@ import {
   InterStoreTransferOrigin,
   InterStoreTransferStatus,
   InventoryMovementType,
+  OperatingExpenseStatus,
   PaymentMethod,
   PosTransactionStatus,
   PosTransactionType,
@@ -88,6 +89,7 @@ import type {
   StoreBankingDepositRecordedPayload,
   StoreCustomerAccountEntryRecordedPayload,
   StoreEodReconciliationRecordedPayload,
+  StoreExpenseConfirmedPayload,
   StorePosShiftClosedPayload,
   StorePosShiftOpenedPayload,
   StorePosTransactionCompletedPayload,
@@ -147,12 +149,14 @@ import {
 import {
   ensureInterStoreTransferSchemaCompatibility,
   ensureInventoryLocationSalesOrderSchemaCompatibility,
+  ensureOperatingExpenseSchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility,
 } from "@/server/repositories/schema-compatibility.repository";
 import {
   captureTransactionReference,
   sendSaleSmsNotificationSafely
 } from "@/server/repositories/sale-sms.repository";
+import { writeStoreExpenseAttachment } from "@/server/files/store-expense-storage";
 import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 
 const allowedAggregateTypes = new Set([
@@ -169,6 +173,7 @@ const allowedAggregateTypes = new Set([
   "salesOrder",
   "eodReconciliation",
   "bankingDeposit",
+  "storeExpense",
   "bankAccount",
   "supplier",
   "taxProfile",
@@ -209,6 +214,14 @@ const localOwnershipRuleFallbacks: Partial<
     conflictPolicy: "accept-append-only",
     notes:
       "Goods receipts are append-only receiving facts created at enterprise or synced back from store nodes.",
+  },
+  storeExpense: {
+    authority: "shared",
+    upstreamFlow: true,
+    downstreamFlow: false,
+    conflictPolicy: "accept-append-only",
+    notes:
+      "Store expense approvals are append-only operational facts created by online-store or desktop supervisors and posted later by HQ Finance.",
   },
 };
 
@@ -4880,6 +4893,93 @@ function parseStoreBankingDepositRecordedPayload(
   };
 }
 
+function parseStoreExpenseConfirmedPayload(
+  event: SyncEnvelope,
+): StoreExpenseConfirmedPayload {
+  const payload = toJsonObject(
+    event.payload,
+    event.aggregateType,
+    event.eventType,
+  );
+
+  return {
+    expenseId: readRequiredString(
+      payload,
+      "expenseId",
+      event.aggregateType,
+      event.eventType,
+    ),
+    expenseNo: readRequiredString(
+      payload,
+      "expenseNo",
+      event.aggregateType,
+      event.eventType,
+    ),
+    storeCode: readRequiredString(
+      payload,
+      "storeCode",
+      event.aggregateType,
+      event.eventType,
+    ),
+    terminalCode: readRequiredString(
+      payload,
+      "terminalCode",
+      event.aggregateType,
+      event.eventType,
+    ),
+    expenseDate: readRequiredDate(
+      payload,
+      "expenseDate",
+      event.aggregateType,
+      event.eventType,
+    ).toISOString(),
+    category: readRequiredString(
+      payload,
+      "category",
+      event.aggregateType,
+      event.eventType,
+    ),
+    description: readRequiredString(
+      payload,
+      "description",
+      event.aggregateType,
+      event.eventType,
+    ),
+    supplierName: readOptionalString(payload, "supplierName"),
+    paymentMethod: readOptionalString(payload, "paymentMethod"),
+    externalReference: readOptionalString(payload, "externalReference"),
+    amount: readRequiredNumber(
+      payload,
+      "amount",
+      event.aggregateType,
+      event.eventType,
+    ),
+    taxAmount: readRequiredNumber(
+      payload,
+      "taxAmount",
+      event.aggregateType,
+      event.eventType,
+    ),
+    attachmentFileName: readOptionalString(payload, "attachmentFileName"),
+    attachmentUrl: readOptionalString(payload, "attachmentUrl"),
+    attachmentContentType: readOptionalString(payload, "attachmentContentType"),
+    attachmentContentBase64: readOptionalString(payload, "attachmentContentBase64"),
+    operatorName: readRequiredString(
+      payload,
+      "operatorName",
+      event.aggregateType,
+      event.eventType,
+    ),
+    note: readOptionalString(payload, "note"),
+    confirmedAt: readRequiredDate(
+      payload,
+      "confirmedAt",
+      event.aggregateType,
+      event.eventType,
+    ).toISOString(),
+  };
+}
+
 function parseStoreInventoryLedgerRecordedPayload(
   event: SyncEnvelope,
 ): StoreInventoryLedgerRecordedPayload {
@@ -8341,6 +8441,168 @@ async function projectStoreBankingDeposit(
   return true;
 }
 
+function inferStoreExpenseAttachmentFileName(payload: StoreExpenseConfirmedPayload) {
+  const safeSourceName =
+    payload.attachmentFileName?.trim().replace(/[^a-zA-Z0-9._-]/g, "") || "";
+  const lowerName = safeSourceName.toLowerCase();
+  const supportedExtension = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"].find((extension) =>
+    lowerName.endsWith(extension)
+  );
+
+  if (supportedExtension) {
+    return `${Date.now()}-desktop-expense-${payload.expenseId}${supportedExtension}`;
+  }
+
+  const contentType = payload.attachmentContentType?.toLowerCase() ?? "";
+  const inferredExtension =
+    contentType === "application/pdf"
+      ? ".pdf"
+      : contentType === "image/png"
+        ? ".png"
+        : contentType === "image/webp"
+          ? ".webp"
+          : contentType === "image/gif"
+            ? ".gif"
+            : contentType === "image/jpeg" || contentType === "image/jpg"
+              ? ".jpg"
+              : ".jpg";
+
+  return `${Date.now()}-desktop-expense-${payload.expenseId}${inferredExtension}`;
+}
+
+async function projectStoreExpenseConfirmed(
+  tx: Prisma.TransactionClient | PrismaClient,
+  target: StoreSyncTarget,
+  event: SyncEnvelope,
+) {
+  const payload = parseStoreExpenseConfirmedPayload(event);
+
+  assertStoreBinding(
+    payload.storeCode,
+    target,
+    event.aggregateType,
+    event.eventType,
+  );
+  assertTerminalBinding(
+    payload.terminalCode,
+    target,
+    event.aggregateType,
+    event.eventType,
+  );
+
+  if (!target.storeNode.store) {
+    throw new StoreProjectionError(
+      "DEPENDENCY_MISSING",
+      `Flash ERP is missing store binding for node "${target.storeNode.code}".`,
+      true,
+    );
+  }
+
+  if (payload.expenseId !== event.aggregateId) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Store expense packet "${event.eventId}" does not match aggregate id "${event.aggregateId}".`,
+      false,
+    );
+  }
+
+  if (!Number.isFinite(payload.amount) || payload.amount <= 0) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Store expense "${payload.expenseNo}" requires an amount greater than zero.`,
+      false,
+    );
+  }
+
+  if (!Number.isFinite(payload.taxAmount) || payload.taxAmount < 0) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Store expense "${payload.expenseNo}" cannot carry a negative tax amount.`,
+      false,
+    );
+  }
+
+  await ensureOperatingExpenseSchemaCompatibility();
+
+  let attachmentFileName = payload.attachmentFileName;
+  let attachmentUrl = payload.attachmentUrl;
+
+  if (payload.attachmentContentBase64) {
+    const attachment = await writeStoreExpenseAttachment({
+      fileName: inferStoreExpenseAttachmentFileName(payload),
+      content: Buffer.from(payload.attachmentContentBase64, "base64"),
+    });
+    attachmentFileName = attachment.fileName;
+    attachmentUrl = attachment.url;
+  }
+
+  const existingExpense = await tx.operatingExpense.findUnique({
+    where: {
+      id: payload.expenseId,
+    },
+    select: {
+      id: true,
+      storeId: true,
+      status: true,
+      postedAt: true,
+    },
+  });
+  const confirmedAt = new Date(payload.confirmedAt);
+  const data = {
+    retailOrgId: target.storeNode.retailOrgId,
+    storeId: target.storeNode.store.id,
+    expenseNo: payload.expenseNo,
+    expenseDate: new Date(payload.expenseDate),
+    category: payload.category,
+    description: payload.description,
+    supplierName: payload.supplierName,
+    paymentMethod: payload.paymentMethod,
+    externalReference: payload.externalReference,
+    attachmentFileName,
+    attachmentUrl,
+    amount: toMoneyString(payload.amount),
+    taxAmount: toMoneyString(payload.taxAmount),
+    status: OperatingExpenseStatus.APPROVED,
+    confirmedBy: payload.operatorName,
+    confirmedAt,
+    approvedBy: payload.operatorName,
+    approvedAt: confirmedAt,
+    note: payload.note,
+  } satisfies Prisma.OperatingExpenseUncheckedCreateInput;
+
+  if (existingExpense) {
+    if (existingExpense.storeId !== target.storeNode.store.id) {
+      throw new StoreProjectionError(
+        "STALE_VERSION",
+        `Flash ERP already has store expense "${payload.expenseNo}" from another store event.`,
+        false,
+      );
+    }
+
+    if (existingExpense.status === OperatingExpenseStatus.POSTED || existingExpense.postedAt) {
+      return true;
+    }
+
+    await tx.operatingExpense.update({
+      where: {
+        id: payload.expenseId,
+      },
+      data,
+    });
+
+    return true;
+  }
+
+  await tx.operatingExpense.create({
+    data: {
+      id: payload.expenseId,
+      ...data,
+    },
+  });
+
+  return true;
+}
+
 async function resolveStoreShiftCashier(
   tx: Prisma.TransactionClient | PrismaClient,
   target: StoreSyncTarget,
@@ -11772,6 +12034,13 @@ async function applyStoreUpstreamEventProjection(
   }
 
   if (
+    event.aggregateType === "storeExpense" &&
+    event.eventType === "store-expense.confirmed"
+  ) {
+    return projectStoreExpenseConfirmed(tx, target, event);
+  }
+
+  if (
     event.aggregateType === "posShift" &&
     event.eventType === "pos.shift.opened"
   ) {
@@ -14458,6 +14727,11 @@ export async function updateInterStoreTransferBatch(
         transferNo: true,
         transferBatchNo: true,
         status: true,
+        sourceStoreId: true,
+        sourceInventoryLocationId: true,
+        feedbackStatus: true,
+        feedbackConfirmedAt: true,
+        feedbackPostedAt: true,
       },
     });
 
@@ -14467,15 +14741,23 @@ export async function updateInterStoreTransferBatch(
       );
     }
 
-    const lockedTransfer = existingTransfers.find(
-      (transfer) => transfer.status !== InterStoreTransferStatus.DRAFT,
+    const finalizedFeedbackTransfer = existingTransfers.find(
+      (transfer) =>
+        transfer.feedbackStatus === "CONFIRMED" ||
+        transfer.feedbackStatus === "POSTED" ||
+        transfer.feedbackConfirmedAt !== null ||
+        transfer.feedbackPostedAt !== null,
     );
 
-    if (lockedTransfer) {
+    if (finalizedFeedbackTransfer) {
       throw new Error(
-        `Transfer request ${normalizedTransferBatchNo} has already been pushed to the shops and can no longer be edited from HQ.`,
+        `Transfer request ${normalizedTransferBatchNo} already has confirmed station feedback and can no longer be changed from HQ.`,
       );
     }
+
+    const isDraftBatch = existingTransfers.every(
+      (transfer) => transfer.status === InterStoreTransferStatus.DRAFT,
+    );
 
     const sourceLocationCode = input.sourceLocationCode?.trim();
     const destinationLocationCode = input.destinationLocationCode?.trim();
@@ -14638,6 +14920,74 @@ export async function updateInterStoreTransferBatch(
     const existingBatchNo =
       existingTransfers[0]!.transferBatchNo ?? existingTransfers[0]!.transferNo;
     const transfers: CreateInterStoreTransferResponse[] = [];
+
+    if (!isDraftBatch) {
+      const sourceChanged = existingTransfers.some(
+        (transfer) =>
+          transfer.sourceStoreId !== sourceLocation.storeId ||
+          transfer.sourceInventoryLocationId !== sourceLocation.id,
+      );
+
+      if (sourceChanged) {
+        throw new Error(
+          "The source location cannot be changed after a transfer has been committed. Open a new transfer request if stock must move from another shop.",
+        );
+      }
+
+      for (const transfer of existingTransfers) {
+        const updatedTransfer = await tx.interStoreTransfer.update({
+          where: {
+            id: transfer.id,
+          },
+          data: {
+            destinationStoreId: destinationLocation.storeId,
+            destinationInventoryLocationId: destinationLocation.id,
+            externalReference: input.externalReference?.trim() || null,
+            transporterName,
+            vehicleRegistrationNo,
+            driverName,
+            driverContact,
+            deliveryNoteNo,
+            requiredAt,
+            requestNote:
+              input.note?.trim() ||
+              `HQ rerouted ${transfer.transferNo} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+          },
+          select: {
+            id: true,
+            transferNo: true,
+            status: true,
+          },
+        });
+
+        const publication = await queueInterStoreTransferPublication(tx, {
+          transferId: updatedTransfer.id,
+          publishedAt: now,
+        });
+
+        transfers.push({
+          transferId: updatedTransfer.id,
+          transferNo: updatedTransfer.transferNo,
+          sourceLocationCode: sourceLocation.code,
+          destinationLocationCode: destinationLocation.code,
+          sourceNodeCode: publication?.sourceNodeCode ?? null,
+          destinationNodeCode: publication?.destinationNodeCode ?? null,
+          status: toInterStoreTransferLifecycleStatus(updatedTransfer.status),
+          message: `Flash ERP rerouted ${updatedTransfer.transferNo} to ${destinationLocation.name}.`,
+          serverProcessedAt: now.toISOString(),
+        });
+      }
+
+      return {
+        sourceLocationCode: sourceLocation.code,
+        destinationLocationCode: destinationLocation.code,
+        transferBatchNo: existingBatchNo,
+        transferCount: transfers.length,
+        transfers,
+        message: `Flash ERP rerouted transfer request ${existingBatchNo} to ${destinationLocation.name} and queued the updated instruction for the shops.`,
+        serverProcessedAt: now.toISOString(),
+      };
+    }
 
     for (const line of lines) {
       if (!line.productCode) {

@@ -14,7 +14,7 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const session = await assertEnterpriseOrOnlineStorePermission(
       ["settings.company.manage"],
-      ["inventory.transfer.issue"]
+      ["inventory.transfer.receive"]
     );
     const { stationDeliveryId } = await context.params;
     const transferId = decodeURIComponent(stationDeliveryId);
@@ -30,14 +30,19 @@ export async function POST(request: Request, context: RouteContext) {
             select: {
               code: true
             }
+          },
+          destinationStore: {
+            select: {
+              code: true
+            }
           }
         }
       });
 
-      if (!transfer || transfer.sourceStore.code !== session.homeStoreCode) {
+      if (!transfer || transfer.destinationStore.code !== session.homeStoreCode) {
         return NextResponse.json(
           {
-            message: "Flash ERP source-shop feedback can only be captured from the issuing shop."
+            message: "Flash ERP transfer feedback can only be captured by the receiving shop."
           },
           { status: 403 }
         );

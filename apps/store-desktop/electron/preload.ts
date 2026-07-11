@@ -163,6 +163,10 @@ const desktopRuntime: DesktopRuntimeApi = {
     ipcRenderer.invoke("flash-erp:record-eod-reconciliation", input),
   recordBankingDeposit: (input: StoreRecordBankingDepositRequest) =>
     ipcRenderer.invoke("flash-erp:record-banking-deposit", input),
+  saveStoreExpenseDraft: (input) =>
+    ipcRenderer.invoke("flash-erp:save-store-expense-draft", input),
+  confirmStoreExpense: (expenseId: string) =>
+    ipcRenderer.invoke("flash-erp:confirm-store-expense", expenseId),
   attachCustomerToActiveBasket: (input) =>
     ipcRenderer.invoke("flash-erp:attach-customer-to-active-basket", input),
   setActiveBasketLoyaltyRedemption: (input) =>

@@ -801,6 +801,30 @@ CREATE TABLE IF NOT EXISTS banking_deposit (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS local_store_expense (
+  id TEXT PRIMARY KEY,
+  expense_no TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  expense_date TEXT NOT NULL,
+  category TEXT NOT NULL,
+  description TEXT NOT NULL,
+  supplier_name TEXT,
+  payment_method TEXT,
+  external_reference TEXT,
+  amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+  tax_amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+  attachment_file_name TEXT,
+  attachment_url TEXT,
+  attachment_content_type TEXT,
+  attachment_content_base64 TEXT,
+  operator_name TEXT NOT NULL,
+  note TEXT,
+  confirmed_by TEXT,
+  confirmed_at TEXT,
+  synced_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_outbox (
   id TEXT PRIMARY KEY,
   target_node_code TEXT,
@@ -919,6 +943,8 @@ CREATE INDEX IF NOT EXISTS idx_pos_shift_status ON pos_shift(status, opened_at D
 CREATE INDEX IF NOT EXISTS idx_sales_order_status ON sales_order(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_banking_deposit_reconciliation ON banking_deposit(reconciliation_id, deposited_at DESC);
+CREATE INDEX IF NOT EXISTS idx_local_store_expense_status ON local_store_expense(status, expense_date DESC);
+CREATE INDEX IF NOT EXISTS idx_local_store_expense_synced ON local_store_expense(synced_at, confirmed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_status ON sync_outbox(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_retry ON sync_outbox(status, next_retry_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_inbox_status ON sync_inbox(status, received_at);

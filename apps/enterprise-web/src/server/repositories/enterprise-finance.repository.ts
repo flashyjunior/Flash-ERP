@@ -9,6 +9,7 @@ import {
   assertEnterpriseDatabaseReady,
   isEnterpriseDatabaseSchemaNotReadyError
 } from "@/server/readiness/enterprise-database-readiness";
+import { ensureOperatingExpenseSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 import {
   GlAccountType,
@@ -205,6 +206,14 @@ export type EnterpriseFinanceWorkspaceData = {
     status: string;
     approvedBy: string | null;
     approvedAt: string | null;
+    attachmentFileName: string | null;
+    attachmentUrl: string | null;
+    confirmedBy: string | null;
+    confirmedAt: string | null;
+    financeExpenseAccountCode: string | null;
+    financePaymentAccountCode: string | null;
+    financeAssignedBy: string | null;
+    financeAssignedAt: string | null;
     postedAt: string | null;
   }>;
   postureMessages: string[];
@@ -229,6 +238,16 @@ function formatEnumLabel(value: string) {
     .split("_")
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(" ");
+}
+
+function normalizeRequiredCode(value: unknown, label: string) {
+  const normalized = String(value ?? "").trim().toUpperCase();
+
+  if (!normalized) {
+    throw new Error(`Choose ${label}.`);
+  }
+
+  return normalized;
 }
 
 function defaultFinanceFilters(input?: {
@@ -440,7 +459,7 @@ async function getEnterpriseContext(): Promise<EnterpriseContext | null> {
 }
 
 async function ensureStandardChartOfAccounts(retailOrgId: string) {
-  const accounts = await Promise.all(
+  await Promise.all(
     standardChartOfAccounts.map((definition) =>
       prisma.glAccount.upsert({
         where: {
@@ -468,6 +487,12 @@ async function ensureStandardChartOfAccounts(retailOrgId: string) {
       })
     )
   );
+  const accounts = await prisma.glAccount.findMany({
+    where: {
+      retailOrgId,
+      status: RecordStatus.ACTIVE
+    }
+  });
 
   return new Map(accounts.map((account) => [account.code, account]));
 }
@@ -734,6 +759,12 @@ async function materializeOperatingExpenseJournals(input: {
       status: {
         in: [OperatingExpenseStatus.APPROVED, OperatingExpenseStatus.POSTED]
       },
+      financeExpenseAccountCode: {
+        not: null
+      },
+      financePaymentAccountCode: {
+        not: null
+      },
       ...(expenseDateFilter ? { expenseDate: expenseDateFilter } : {}),
       ...buildStoreRelationFilter(input.filters.storeCode)
     },
@@ -751,7 +782,10 @@ async function materializeOperatingExpenseJournals(input: {
       supplierName: true,
       paymentMethod: true,
       amount: true,
-      taxAmount: true
+      taxAmount: true,
+      status: true,
+      financeExpenseAccountCode: true,
+      financePaymentAccountCode: true
     }
   });
 
@@ -762,12 +796,13 @@ async function materializeOperatingExpenseJournals(input: {
     const taxAmount = roundMoney(Number(expense.taxAmount));
     const totalAmount = roundMoney(amount + taxAmount);
     const memo = `${expense.category} ${expense.expenseNo}`;
-    const clearingAccount = expense.paymentMethod ? "1000" : "2000";
+    const expenseAccount = expense.financeExpenseAccountCode ?? "8000";
+    const clearingAccount = expense.financePaymentAccountCode ?? (expense.paymentMethod ? "1000" : "2000");
     const lines: JournalDraftLine[] = [];
 
     addLine({
       lines,
-      accountCode: "8000",
+      accountCode: expenseAccount,
       storeId: expense.storeId,
       debitAmount: amount,
       memo
@@ -797,6 +832,35 @@ async function materializeOperatingExpenseJournals(input: {
       description: expense.description,
       lines
     });
+
+    const postedJournal = wasCreated
+      ? true
+      : Boolean(
+          await prisma.glJournalEntry.findUnique({
+            where: {
+              retailOrgId_sourceType_sourceId: {
+                retailOrgId: input.retailOrgId,
+                sourceType: "OPERATING_EXPENSE",
+                sourceId: expense.id
+              }
+            },
+            select: {
+              id: true
+            }
+          })
+        );
+
+    if (postedJournal && expense.status !== OperatingExpenseStatus.POSTED) {
+      await prisma.operatingExpense.update({
+        where: {
+          id: expense.id
+        },
+        data: {
+          status: OperatingExpenseStatus.POSTED,
+          postedAt: new Date()
+        }
+      });
+    }
 
     if (wasCreated) {
       created += 1;
@@ -831,6 +895,167 @@ async function materializeGlPostings(input: {
     salesCreated,
     inventoryCreated,
     expenseCreated
+  };
+}
+
+export async function assignAndPostOperatingExpenseAccounts(
+  input: {
+    expenseId?: string | null;
+    expenseAccountCode?: string | null;
+    paymentAccountCode?: string | null;
+  },
+  operatorName = "Enterprise finance"
+) {
+  await assertEnterpriseDatabaseReady();
+  await ensureOperatingExpenseSchemaCompatibility();
+
+  const context = await getEnterpriseContext();
+
+  if (!context) {
+    throw new Error("Flash ERP needs an active enterprise node before posting operating expenses.");
+  }
+
+  const expenseId = String(input.expenseId ?? "").trim();
+  const expenseAccountCode = normalizeRequiredCode(input.expenseAccountCode, "an expense GL account");
+  const paymentAccountCode = normalizeRequiredCode(input.paymentAccountCode, "a payment or clearing GL account");
+
+  if (!expenseId) {
+    throw new Error("Choose an operating expense before assigning GL accounts.");
+  }
+
+  const expense = await prisma.operatingExpense.findFirst({
+    where: {
+      id: expenseId,
+      retailOrgId: context.retailOrgId
+    },
+    select: {
+      id: true,
+      expenseNo: true,
+      expenseDate: true,
+      status: true,
+      postedAt: true,
+      store: {
+        select: {
+          code: true
+        }
+      }
+    }
+  });
+
+  if (!expense) {
+    throw new Error("Flash ERP could not find that operating expense.");
+  }
+
+  const existingJournal = await prisma.glJournalEntry.findUnique({
+    where: {
+      retailOrgId_sourceType_sourceId: {
+        retailOrgId: context.retailOrgId,
+        sourceType: "OPERATING_EXPENSE",
+        sourceId: expense.id
+      }
+    },
+    select: {
+      journalNo: true
+    }
+  });
+
+  if (existingJournal || expense.status === OperatingExpenseStatus.POSTED || expense.postedAt) {
+    throw new Error(
+      `${expense.expenseNo} is already posted${existingJournal ? ` in ${existingJournal.journalNo}` : ""}.`
+    );
+  }
+
+  if (expense.status !== OperatingExpenseStatus.APPROVED) {
+    throw new Error(`${expense.expenseNo} must be confirmed by the store before HQ Finance can post it.`);
+  }
+
+  const accounts = await prisma.glAccount.findMany({
+    where: {
+      retailOrgId: context.retailOrgId,
+      code: {
+        in: [expenseAccountCode, paymentAccountCode]
+      },
+      status: RecordStatus.ACTIVE
+    },
+    select: {
+      code: true,
+      name: true,
+      accountType: true
+    }
+  });
+  const accountByCode = new Map(accounts.map((account) => [account.code, account]));
+  const expenseAccount = accountByCode.get(expenseAccountCode);
+  const paymentAccount = accountByCode.get(paymentAccountCode);
+
+  if (!expenseAccount) {
+    throw new Error(`Expense account ${expenseAccountCode} is not an active GL account.`);
+  }
+
+  if (!paymentAccount) {
+    throw new Error(`Payment account ${paymentAccountCode} is not an active GL account.`);
+  }
+
+  if (
+    ![GlAccountType.EXPENSE, GlAccountType.COST_OF_SALES, GlAccountType.ASSET].includes(
+      expenseAccount.accountType
+    )
+  ) {
+    throw new Error(
+      `Expense account ${expenseAccount.code} (${expenseAccount.name}) must be an expense, cost, or prepaid asset account.`
+    );
+  }
+
+  if (![GlAccountType.ASSET, GlAccountType.LIABILITY].includes(paymentAccount.accountType)) {
+    throw new Error(
+      `Payment account ${paymentAccount.code} (${paymentAccount.name}) must be an asset cash/bank account or liability clearing account.`
+    );
+  }
+
+  await prisma.operatingExpense.update({
+    where: {
+      id: expense.id
+    },
+    data: {
+      financeExpenseAccountCode: expenseAccountCode,
+      financePaymentAccountCode: paymentAccountCode,
+      financeAssignedBy: operatorName,
+      financeAssignedAt: new Date()
+    }
+  });
+
+  const dateKey = expense.expenseDate.toISOString().slice(0, 10);
+  const materialized = await materializeOperatingExpenseJournals({
+    retailOrgId: context.retailOrgId,
+    accountsByCode: await ensureStandardChartOfAccounts(context.retailOrgId),
+    filters: {
+      dateFrom: dateKey,
+      dateTo: dateKey,
+      storeCode: expense.store?.code ?? ""
+    }
+  });
+  const journal = await prisma.glJournalEntry.findUnique({
+    where: {
+      retailOrgId_sourceType_sourceId: {
+        retailOrgId: context.retailOrgId,
+        sourceType: "OPERATING_EXPENSE",
+        sourceId: expense.id
+      }
+    },
+    select: {
+      journalNo: true
+    }
+  });
+
+  if (!journal) {
+    throw new Error(`${expense.expenseNo} was assigned but could not be posted to GL.`);
+  }
+
+  return {
+    expenseId: expense.id,
+    expenseNo: expense.expenseNo,
+    journalNo: journal.journalNo,
+    materializedCount: materialized,
+    message: `${expense.expenseNo} posted to GL journal ${journal.journalNo}.`
   };
 }
 
@@ -945,6 +1170,8 @@ export async function getEnterpriseFinanceWorkspace(input?: {
 
     throw error;
   }
+
+  await ensureOperatingExpenseSchemaCompatibility();
 
   const context = await getEnterpriseContext();
 
@@ -1112,6 +1339,14 @@ export async function getEnterpriseFinanceWorkspace(input?: {
         status: true,
         approvedBy: true,
         approvedAt: true,
+        attachmentFileName: true,
+        attachmentUrl: true,
+        confirmedBy: true,
+        confirmedAt: true,
+        financeExpenseAccountCode: true,
+        financePaymentAccountCode: true,
+        financeAssignedBy: true,
+        financeAssignedAt: true,
         postedAt: true,
         store: {
           select: {
@@ -1245,6 +1480,14 @@ export async function getEnterpriseFinanceWorkspace(input?: {
     status: expense.status,
     approvedBy: expense.approvedBy,
     approvedAt: expense.approvedAt?.toISOString() ?? null,
+    attachmentFileName: expense.attachmentFileName,
+    attachmentUrl: expense.attachmentUrl,
+    confirmedBy: expense.confirmedBy,
+    confirmedAt: expense.confirmedAt?.toISOString() ?? null,
+    financeExpenseAccountCode: expense.financeExpenseAccountCode,
+    financePaymentAccountCode: expense.financePaymentAccountCode,
+    financeAssignedBy: expense.financeAssignedBy,
+    financeAssignedAt: expense.financeAssignedAt?.toISOString() ?? null,
     postedAt: expense.postedAt?.toISOString() ?? null
   }));
   const postedDebit = roundMoney(journalRows.reduce((sum, row) => sum + row.debitAmount, 0));

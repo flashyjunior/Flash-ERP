@@ -1954,6 +1954,9 @@ export type StoreSyncActionResult = {
   message: string;
   snapshot: StoreSyncSnapshot;
   accountPaymentEntryNo?: string | null;
+  expenseId?: string | null;
+  expenseNo?: string | null;
+  expenseStatus?: string | null;
   salesOrderNo?: string | null;
   upstreamProcessed?: number;
   downstreamApplied?: number;
@@ -2322,6 +2325,24 @@ export type StoreRecordBankingDepositRequest = {
   note?: string | null;
 };
 
+export type StoreStoreExpenseInput = {
+  expenseId?: string | null;
+  expenseDate?: string | null;
+  category: string;
+  description: string;
+  supplierName?: string | null;
+  paymentMethod?: string | null;
+  externalReference?: string | null;
+  amount: number;
+  taxAmount?: number | null;
+  attachmentFileName?: string | null;
+  attachmentUrl?: string | null;
+  attachmentContentType?: string | null;
+  attachmentContentBase64?: string | null;
+  operatorName?: string | null;
+  note?: string | null;
+};
+
 export type StoreSupervisorOverrideInput = {
   supervisorCode: string;
   supervisorPassword?: string | null;
@@ -2532,6 +2553,10 @@ export type DesktopRuntimeApi = {
   recordBankingDeposit: (
     input: StoreRecordBankingDepositRequest
   ) => Promise<StoreSyncActionResult>;
+  saveStoreExpenseDraft: (
+    input: StoreStoreExpenseInput
+  ) => Promise<StoreSyncActionResult>;
+  confirmStoreExpense: (expenseId: string) => Promise<StoreSyncActionResult>;
   attachCustomerToActiveBasket: (
     input: StoreBasketCustomerAttachmentInput
   ) => Promise<StoreSyncActionResult>;

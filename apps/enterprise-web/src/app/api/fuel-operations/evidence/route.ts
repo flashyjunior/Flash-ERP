@@ -41,7 +41,7 @@ export async function POST(request: Request) {
   try {
     await assertEnterpriseOrOnlineStorePermission(
       ["settings.company.manage"],
-      ["fuel.dip.capture", "fuel.meter-reading.capture"],
+      ["fuel.dip.capture", "fuel.meter-reading.capture", "inventory.transfer.receive"],
       { any: true }
     );
     const formData = await request.formData();

@@ -109,6 +109,13 @@ export const entityOwnershipRules: Record<RetailEntityKey, EntityOwnershipRule> 
     conflictPolicy: "accept-append-only",
     notes: "Banking deposits are local financial handoff facts linked to reconciled shifts."
   },
+  storeExpense: {
+    authority: "store",
+    upstreamFlow: true,
+    downstreamFlow: false,
+    conflictPolicy: "accept-append-only",
+    notes: "Supervisor-confirmed store expenses are local financial facts routed to HQ Finance for GL assignment."
+  },
   bankAccount: {
     authority: "enterprise",
     upstreamFlow: false,
