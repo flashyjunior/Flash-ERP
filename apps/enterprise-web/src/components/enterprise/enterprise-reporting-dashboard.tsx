@@ -97,6 +97,7 @@ type ReportCatalogGroup = {
 type ReportRuntimeFilters = {
   status: string;
   tender: string;
+  customer: string;
   supplier: string;
   location: string;
   role: string;
@@ -105,6 +106,7 @@ type ReportRuntimeFilters = {
   product: string;
   promotion: string;
   category: string;
+  serviceType: string;
 };
 
 type ReportFilterKey = keyof ReportRuntimeFilters;
@@ -142,6 +144,7 @@ const reportIds: ReportId[] = [
 const defaultReportRuntimeFilters: ReportRuntimeFilters = {
   status: "",
   tender: "",
+  customer: "",
   supplier: "",
   location: "",
   role: "",
@@ -149,7 +152,8 @@ const defaultReportRuntimeFilters: ReportRuntimeFilters = {
   cashier: "",
   product: "",
   promotion: "",
-  category: ""
+  category: "",
+  serviceType: ""
 };
 
 const reportsWithStoreScope = new Set<ReportId>([
@@ -404,6 +408,9 @@ const cashierSalesFilter: FilterFn<CashierSalesRow> = (row, _columnId, filterVal
 const itemSalesFilter: FilterFn<ItemSalesRow> = (row, _columnId, filterValue) =>
   matchesReportQuery(
     [
+      row.original.transactionNo,
+      row.original.serviceType,
+      row.original.customerName,
       row.original.productCode,
       row.original.productName,
       row.original.department,
@@ -797,6 +804,84 @@ export function EnterpriseReportingDashboard({
 
   function matchesDate(value: string | null | undefined) {
     return matchesDateScope(value, dashboard.filters.dateFrom, dashboard.filters.dateTo);
+  }
+
+  function filterStatementRows(
+    rows: StatementReportRow[],
+    filters: ReportRuntimeFilters,
+    partyFilter: string
+  ) {
+    return rows.filter(
+      (row) =>
+        matchesDate(row.transactionDate) &&
+        matchesChoice(filters.status, [row.status]) &&
+        matchesChoice(partyFilter, [row.partyNo, row.partyName])
+    );
+  }
+
+  function renderStatementSummary(
+    title: string,
+    rows: StatementReportRow[],
+    partyFilter: string
+  ) {
+    const sortedRows = rows
+      .slice()
+      .sort(
+        (left, right) =>
+          new Date(left.transactionDate).getTime() - new Date(right.transactionDate).getTime()
+      );
+    const firstRow = sortedRows[0] ?? null;
+    const lastRow = sortedRows[sortedRows.length - 1] ?? null;
+    const periodDebit = rows.reduce((sum, row) => sum + row.debitAmount, 0);
+    const periodCredit = rows.reduce((sum, row) => sum + row.creditAmount, 0);
+    const openingBalance = firstRow
+      ? firstRow.runningBalance - firstRow.debitAmount + firstRow.creditAmount
+      : 0;
+    const closingBalance = lastRow?.runningBalance ?? openingBalance;
+    const uniqueParties = new Set(rows.map((row) => row.partyNo)).size;
+    const partyName = firstRow?.partyName ?? null;
+    const partyNo = firstRow?.partyNo ?? null;
+    const heading = partyFilter && partyName ? `${partyName} (${partyNo})` : title;
+    const subtitle = partyFilter
+      ? `${dashboard.filters.dateFrom} to ${dashboard.filters.dateTo}`
+      : "Select a customer or supplier to view a single-party standard statement.";
+
+    return (
+      <section className="mb-4 rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+              Statement
+            </p>
+            <h2 className="text-lg font-semibold text-stone-950">{heading}</h2>
+            <p className="text-sm text-stone-500">{subtitle}</p>
+          </div>
+          <StatusBadge
+            label={
+              partyFilter
+                ? `${numberFormatter.format(rows.length)} row(s)`
+                : `${numberFormatter.format(uniqueParties)} part${uniqueParties === 1 ? "y" : "ies"}`
+            }
+            tone={partyFilter ? "success" : "warning"}
+          />
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {[
+            ["Opening", currencyFormatter.format(openingBalance)],
+            ["Debit", currencyFormatter.format(periodDebit)],
+            ["Credit", currencyFormatter.format(periodCredit)],
+            ["Closing", currencyFormatter.format(closingBalance)]
+          ].map(([label, value]) => (
+            <div className="rounded-lg border border-stone-100 bg-stone-50 px-3 py-2" key={label}>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">
+                {label}
+              </p>
+              <p className="mt-1 text-base font-semibold text-stone-950">{value}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+    );
   }
 
   const storePerformanceColumns = useMemo<ColumnDef<StorePerformanceRow>[]>(
@@ -1409,6 +1494,24 @@ export function EnterpriseReportingDashboard({
   const itemSalesColumns = useMemo<ColumnDef<ItemSalesRow>[]>(
     () => [
       {
+        accessorKey: "transactionNo",
+        header: "Receipt",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.transactionNo}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.customerName ?? "Walk-in"} · {row.original.storeCode}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "serviceType",
+        header: "Service type",
+        cell: ({ row }) => row.original.serviceType
+      },
+      {
         accessorKey: "productName",
         header: "Item",
         cell: ({ row }) => (
@@ -1440,8 +1543,13 @@ export function EnterpriseReportingDashboard({
         cell: ({ row }) => currencyFormatter.format(row.original.discountAmount)
       },
       {
+        accessorKey: "taxAmount",
+        header: "Tax",
+        cell: ({ row }) => currencyFormatter.format(row.original.taxAmount)
+      },
+      {
         accessorKey: "lastSoldAtLabel",
-        header: "Last sold",
+        header: "Sold",
         cell: ({ row }) => renderTimestamp(row.original.lastSoldAt, row.original.lastSoldAtLabel),
         meta: { disableTruncate: true }
       }
@@ -2251,8 +2359,8 @@ export function EnterpriseReportingDashboard({
           },
           {
             id: "itemSales",
-            label: "Item sales",
-            description: "Product movement, discount, and net sales by shop.",
+            label: "Receipt item sales",
+            description: "Line-level items grouped by receipt number with service type context.",
             rowCount: dashboard.itemSalesRows.length,
           },
           {
@@ -2437,8 +2545,25 @@ export function EnterpriseReportingDashboard({
         return buildChoiceOptions(
           dashboard.supplierReportRows.flatMap((row) => [row.supplierNo, row.name])
         );
+      case "supplierStatements":
+        return buildChoiceOptions(
+          dashboard.supplierStatementRows.flatMap((row) => [row.partyNo, row.partyName])
+        );
       case "expenseTracking":
         return buildChoiceOptions(dashboard.expenseTrackingRows.map((row) => row.supplierName));
+      default:
+        return [];
+    }
+  }
+
+  function getCustomerOptions(reportId: ReportId) {
+    switch (reportId) {
+      case "customerStatements":
+        return buildChoiceOptions(
+          dashboard.customerStatementRows.flatMap((row) => [row.partyNo, row.partyName])
+        );
+      case "itemSales":
+        return buildChoiceOptions(dashboard.itemSalesRows.map((row) => row.customerName));
       default:
         return [];
     }
@@ -2607,6 +2732,14 @@ export function EnterpriseReportingDashboard({
     }
   }
 
+  function getServiceTypeOptions(reportId: ReportId) {
+    if (reportId !== "itemSales") {
+      return [];
+    }
+
+    return buildChoiceOptions(dashboard.itemSalesRows.map((row) => row.serviceType));
+  }
+
   function getPromotionOptions(reportId: ReportId) {
     if (reportId !== "promotionPerformance") {
       return [];
@@ -2752,33 +2885,39 @@ export function EnterpriseReportingDashboard({
     const filters = getReportFilterValues(reportId);
     const statusOptions = getStatusOptions(reportId);
     const tenderOptions = getTenderOptions(reportId);
+    const customerOptions = getCustomerOptions(reportId);
     const supplierOptions = getSupplierOptions(reportId);
     const locationOptions = getLocationOptions(reportId);
     const roleOptions = getRoleOptions(reportId);
     const cashierOptions = getCashierOptions(reportId);
     const productOptions = getProductOptions(reportId);
+    const serviceTypeOptions = getServiceTypeOptions(reportId);
     const promotionOptions = getPromotionOptions(reportId);
     const categoryOptions = getCategoryOptions(reportId);
     const hasLocalFilter =
       filters.status ||
       filters.tender ||
+      filters.customer ||
       filters.supplier ||
       filters.location ||
       filters.role ||
       filters.credit ||
       filters.cashier ||
       filters.product ||
+      filters.serviceType ||
       filters.promotion ||
       filters.category;
 
     const hasReportFilters =
       statusOptions.length > 0 ||
       tenderOptions.length > 0 ||
+      customerOptions.length > 0 ||
       supplierOptions.length > 0 ||
       locationOptions.length > 0 ||
       roleOptions.length > 0 ||
       cashierOptions.length > 0 ||
       productOptions.length > 0 ||
+      serviceTypeOptions.length > 0 ||
       promotionOptions.length > 0 ||
       categoryOptions.length > 0 ||
       reportId === "receivables";
@@ -2826,6 +2965,12 @@ export function EnterpriseReportingDashboard({
                   onChange: (value) => updateReportFilter(reportId, "tender", value)
                 })}
                 {renderChoiceFilter({
+                  label: "Customer",
+                  value: filters.customer,
+                  options: customerOptions,
+                  onChange: (value) => updateReportFilter(reportId, "customer", value)
+                })}
+                {renderChoiceFilter({
                   label: "Supplier",
                   value: filters.supplier,
                   options: supplierOptions,
@@ -2854,6 +2999,12 @@ export function EnterpriseReportingDashboard({
                   value: filters.product,
                   options: productOptions,
                   onChange: (value) => updateReportFilter(reportId, "product", value)
+                })}
+                {renderChoiceFilter({
+                  label: "Service type",
+                  value: filters.serviceType,
+                  options: serviceTypeOptions,
+                  onChange: (value) => updateReportFilter(reportId, "serviceType", value)
                 })}
                 {renderChoiceFilter({
                   label: "Promotion",
@@ -3051,14 +3202,16 @@ export function EnterpriseReportingDashboard({
                   row.productName,
                   row.department,
                   row.category
-                ])
+                ]) &&
+                matchesChoice(filters.customer, [row.customerName]) &&
+                matchesChoice(filters.serviceType, [row.serviceType])
             )}
             emptyLabel="No item sales rows are available for this report."
             exportFileName="flash-erp-item-sales"
             globalFilterFn={itemSalesFilter}
             initialPageSize={12}
-            initialSorting={[{ id: "netSales", desc: true }]}
-            searchPlaceholder="Search items, departments, categories, or stores"
+            initialSorting={[{ id: "transactionNo", desc: true }]}
+            searchPlaceholder="Search receipts, service type, customers, items, departments, categories, or stores"
           />
         );
       case "promotionPerformance":
@@ -3365,32 +3518,48 @@ export function EnterpriseReportingDashboard({
           />
         );
       case "customerStatements":
+        const customerStatementRows = filterStatementRows(
+          dashboard.customerStatementRows,
+          filters,
+          filters.customer
+        );
+
         return (
-          <SharedDataGrid
-            columns={statementReportColumns}
-            data={dashboard.customerStatementRows.filter(
-              (row) => matchesDate(row.transactionDate) && matchesChoice(filters.status, [row.status])
-            )}
-            emptyLabel="No customer statement activity is available for this report."
-            exportFileName="flash-erp-customer-statements"
-            globalFilterFn={statementReportFilter}
-            initialPageSize={20}
-            searchPlaceholder="Search customer statements, references, journals, or memo"
-          />
+          <>
+            {renderStatementSummary("Customer statement", customerStatementRows, filters.customer)}
+            <SharedDataGrid
+              columns={statementReportColumns}
+              data={customerStatementRows}
+              emptyLabel="No customer statement activity is available for this report."
+              exportFileName="flash-erp-customer-statements"
+              globalFilterFn={statementReportFilter}
+              initialPageSize={20}
+              initialSorting={[{ id: "transactionDate", desc: false }]}
+              searchPlaceholder="Search customer statements, references, journals, or memo"
+            />
+          </>
         );
       case "supplierStatements":
+        const supplierStatementRows = filterStatementRows(
+          dashboard.supplierStatementRows,
+          filters,
+          filters.supplier
+        );
+
         return (
-          <SharedDataGrid
-            columns={statementReportColumns}
-            data={dashboard.supplierStatementRows.filter(
-              (row) => matchesDate(row.transactionDate) && matchesChoice(filters.status, [row.status])
-            )}
-            emptyLabel="No supplier statement activity is available for this report."
-            exportFileName="flash-erp-supplier-statements"
-            globalFilterFn={statementReportFilter}
-            initialPageSize={20}
-            searchPlaceholder="Search supplier statements, vouchers, journals, or memo"
-          />
+          <>
+            {renderStatementSummary("Supplier statement", supplierStatementRows, filters.supplier)}
+            <SharedDataGrid
+              columns={statementReportColumns}
+              data={supplierStatementRows}
+              emptyLabel="No supplier statement activity is available for this report."
+              exportFileName="flash-erp-supplier-statements"
+              globalFilterFn={statementReportFilter}
+              initialPageSize={20}
+              initialSorting={[{ id: "transactionDate", desc: false }]}
+              searchPlaceholder="Search supplier statements, vouchers, journals, or memo"
+            />
+          </>
         );
       case "users":
         return (

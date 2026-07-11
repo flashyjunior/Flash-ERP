@@ -157,6 +157,13 @@ function formatEnumLabel(value: string) {
     .join(" ");
 }
 
+function parseTransactionServiceType(notes: string | null | undefined) {
+  const match = notes?.match(/(?:^|\|)\s*Service type:\s*([^|]+)/i);
+  const serviceType = match?.[1]?.trim();
+
+  return serviceType ? formatEnumLabel(serviceType.replace(/\s+/g, "_")) : "Not captured";
+}
+
 function daysSince(value: Date | null) {
   if (!value) {
     return null;
@@ -294,6 +301,10 @@ export type EnterpriseReportingDashboardData = {
     lastSaleAtLabel: string;
   }>;
   itemSalesRows: Array<{
+    lineId: string;
+    transactionNo: string;
+    serviceType: string;
+    customerName: string | null;
     productCode: string;
     productName: string;
     department: string | null;
@@ -303,7 +314,7 @@ export type EnterpriseReportingDashboardData = {
     quantitySold: number;
     netSales: number;
     discountAmount: number;
-    transactionCount: number;
+    taxAmount: number;
     lastSoldAt: string | null;
     lastSoldAtLabel: string;
   }>;
@@ -1092,6 +1103,7 @@ async function getReportingFactRows(
       },
       take: 2000,
       select: {
+        id: true,
         posTransactionId: true,
         productCodeSnapshot: true,
         productNameSnapshot: true,
@@ -1099,6 +1111,7 @@ async function getReportingFactRows(
         appliedPromotionNameSnapshot: true,
         quantity: true,
         discountAmount: true,
+        taxAmount: true,
         lineTotal: true,
         product: {
           select: {
@@ -1108,6 +1121,9 @@ async function getReportingFactRows(
         },
         posTransaction: {
           select: {
+            transactionNo: true,
+            customerNameSnapshot: true,
+            notes: true,
             completedAt: true,
             store: {
               select: {
@@ -1519,22 +1535,37 @@ async function getReportingFactRows(
   const grossProfitAmount = netSalesExTax - cogsAmount;
 
   return {
-    itemSalesRows: [...itemAggregates.values()]
-      .sort((left, right) => right.netSales - left.netSales)
-      .slice(0, 100)
-      .map((row) => ({
-        productCode: row.productCode,
-        productName: row.productName,
-        department: row.department,
-        category: row.category,
-        store: row.store,
-        storeCode: row.storeCode,
-        quantitySold: Number(row.quantitySold.toFixed(3)),
-        netSales: Number(row.netSales.toFixed(2)),
-        discountAmount: Number(row.discountAmount.toFixed(2)),
-        transactionCount: row.transactionIds.size,
-        lastSoldAt: row.lastSoldAt?.toISOString() ?? null,
-        lastSoldAtLabel: formatRelativeTime(row.lastSoldAt)
+    itemSalesRows: saleLines
+      .slice()
+      .sort((left, right) => {
+        const receiptCompare = left.posTransaction.transactionNo.localeCompare(
+          right.posTransaction.transactionNo
+        );
+
+        if (receiptCompare !== 0) {
+          return receiptCompare;
+        }
+
+        return left.productNameSnapshot.localeCompare(right.productNameSnapshot);
+      })
+      .slice(0, 300)
+      .map((line) => ({
+        lineId: line.id,
+        transactionNo: line.posTransaction.transactionNo,
+        serviceType: parseTransactionServiceType(line.posTransaction.notes),
+        customerName: line.posTransaction.customerNameSnapshot,
+        productCode: line.productCodeSnapshot,
+        productName: line.productNameSnapshot,
+        department: line.product.department,
+        category: line.product.category,
+        store: line.posTransaction.store.name,
+        storeCode: line.posTransaction.store.code,
+        quantitySold: Number(Number(line.quantity).toFixed(3)),
+        netSales: Number(Number(line.lineTotal).toFixed(2)),
+        discountAmount: Number(Number(line.discountAmount).toFixed(2)),
+        taxAmount: Number(Number(line.taxAmount).toFixed(2)),
+        lastSoldAt: line.posTransaction.completedAt?.toISOString() ?? null,
+        lastSoldAtLabel: formatRelativeTime(line.posTransaction.completedAt)
       })),
     promotionPerformanceRows: [...promotionAggregates.values()]
       .sort((left, right) => right.discountAmount - left.discountAmount)

@@ -35,7 +35,7 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - AR/AP settlement posting now requires a confirmation prompt before posting customer receipt vouchers or supplier payment vouchers through Finance; settlement vouchers now select Finance cashbook accounts, derive the GL payment account from the selected cashbook account, and create the linked posted cashbook entry automatically when the voucher is posted.
 - Supplier AP invoice rows now show posted voucher reductions, paid/open amounts, and voucher context so posted PVs visibly reduce the supplier's owed balance.
 - AR/AP statement running balances now apply source documents before settlements on the same posting timestamp, so supplier invoices establish the payable before a same-date payment voucher reduces it.
-- HQ Reports now includes exportable Customer Statement and Supplier Statement reports backed by the same Finance AR/AP statement data.
+- HQ Reports now includes exportable Customer Statement and Supplier Statement reports backed by the same Finance AR/AP statement data, with party filters and standard statement summaries for single customer/supplier review.
 - Fuel sales remain commercial sales through the sale/POS flow. Online-store POS now shows Service Type beside the customer selector and persists it through immediate sales and saved sales orders. HQ Fuel Delivery has been corrected to behave as a store-to-store fuel transfer-out: issuing the transfer reduces source Item Dynamic stock and source tank book quantity, appears in inter-store/in-transit monitoring, and is received by the destination online-store transfer workflow.
 - Filling stations are now linked to shops/inventory locations for transfer destinations; customer-credit/accounting workflows use the actual customer account selected on the sale/payment instead of treating stations as customer accounts.
 - Customer credit limits now treat `0` as unlimited credit; credit-limit enforcement only runs when the configured customer/Finance party profile limit is greater than zero.
@@ -67,6 +67,23 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - The inherited RMS-era model names remain where they still own existing data/workflows. Rename them gradually as ERP ownership and migrations are designed.
 
 ## Maintenance Notes
+
+### 2026-07-11 HQ Report Statement and Item Detail Polish
+
+Status: Done
+
+Implemented:
+
+- Added customer and supplier dropdown filters to the central Customer Statement and Supplier Statement reports.
+- Added a standard statement summary header for filtered customer/supplier statements, covering opening balance, period debit, period credit, closing balance, and row count.
+- Changed the Items report from product-only aggregation to receipt-line detail grouped around sales receipt number.
+- Added service type, customer, receipt number, line tax, and receipt-first search/filter context to the Items report.
+
+Verified:
+
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/reports`.
 
 ### 2026-07-11 AR/AP Settlement Cashbook Posting
 
