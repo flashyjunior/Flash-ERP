@@ -52,8 +52,20 @@ type TransferReportRow = EnterpriseReportingDashboardData["transferReportRows"][
 type FuelDailyReportRow = EnterpriseReportingDashboardData["fuelDailyReportRows"][number];
 type SupplierReportRow = EnterpriseReportingDashboardData["supplierReportRows"][number];
 type UserReportRow = EnterpriseReportingDashboardData["userReportRows"][number];
+type ManagementSummaryRow = EnterpriseReportingDashboardData["managementSummaryRows"][number];
+type ShopPnlComparisonRow = EnterpriseReportingDashboardData["shopPnlComparisonRows"][number];
+type CashExposureRow = EnterpriseReportingDashboardData["cashExposureRows"][number];
+type CounterpartyExposureRow = EnterpriseReportingDashboardData["counterpartyExposureRows"][number];
+type PayrollCostRow = EnterpriseReportingDashboardData["payrollCostRows"][number];
+type ManagementExceptionRow = EnterpriseReportingDashboardData["managementExceptionRows"][number];
 
 type ReportId =
+  | "managementSummary"
+  | "shopPnlComparison"
+  | "cashExposure"
+  | "counterpartyExposure"
+  | "payrollCost"
+  | "managementExceptions"
   | "tenders"
   | "receipts"
   | "cashierSales"
@@ -112,6 +124,12 @@ type ReportRuntimeFilters = {
 type ReportFilterKey = keyof ReportRuntimeFilters;
 
 const reportIds: ReportId[] = [
+  "managementSummary",
+  "shopPnlComparison",
+  "cashExposure",
+  "counterpartyExposure",
+  "payrollCost",
+  "managementExceptions",
   "tenders",
   "receipts",
   "cashierSales",
@@ -157,6 +175,8 @@ const defaultReportRuntimeFilters: ReportRuntimeFilters = {
 };
 
 const reportsWithStoreScope = new Set<ReportId>([
+  "shopPnlComparison",
+  "managementExceptions",
   "tenders",
   "receipts",
   "cashierSales",
@@ -734,6 +754,63 @@ const statementReportFilter: FilterFn<StatementReportRow> = (row, _columnId, fil
     filterValue
   );
 
+const managementSummaryFilter: FilterFn<ManagementSummaryRow> = (row, _columnId, filterValue) =>
+  matchesReportQuery(
+    [row.original.metricCode, row.original.metricName, row.original.group, row.original.status, row.original.basis],
+    filterValue
+  );
+
+const shopPnlComparisonFilter: FilterFn<ShopPnlComparisonRow> = (row, _columnId, filterValue) =>
+  matchesReportQuery(
+    [row.original.storeCode, row.original.storeName, row.original.status],
+    filterValue
+  );
+
+const cashExposureFilter: FilterFn<CashExposureRow> = (row, _columnId, filterValue) =>
+  matchesReportQuery(
+    [
+      row.original.accountCode,
+      row.original.accountName,
+      row.original.accountType,
+      row.original.currencyCode,
+      row.original.status
+    ],
+    filterValue
+  );
+
+const counterpartyExposureFilter: FilterFn<CounterpartyExposureRow> = (
+  row,
+  _columnId,
+  filterValue
+) =>
+  matchesReportQuery(
+    [row.original.partyType, row.original.partyNo, row.original.partyName, row.original.status, row.original.basis],
+    filterValue
+  );
+
+const payrollCostFilter: FilterFn<PayrollCostRow> = (row, _columnId, filterValue) =>
+  matchesReportQuery(
+    [row.original.runNo, row.original.payPeriodCode, row.original.status],
+    filterValue
+  );
+
+const managementExceptionFilter: FilterFn<ManagementExceptionRow> = (
+  row,
+  _columnId,
+  filterValue
+) =>
+  matchesReportQuery(
+    [
+      row.original.area,
+      row.original.exceptionType,
+      row.original.referenceNo,
+      row.original.storeName ?? "",
+      row.original.status,
+      row.original.actionHint
+    ],
+    filterValue
+  );
+
 export function EnterpriseReportingDashboard({
   canViewHrReports = false,
   dashboard,
@@ -883,6 +960,351 @@ export function EnterpriseReportingDashboard({
       </section>
     );
   }
+
+  function managementTone(status: "Healthy" | "Watch" | "Review") {
+    return status === "Healthy" ? "success" : status === "Watch" ? "warning" : "danger";
+  }
+
+  function formatManagementValue(
+    value: number,
+    displayKind: "currency" | "number" | "percent"
+  ) {
+    if (displayKind === "currency") {
+      return currencyFormatter.format(value);
+    }
+
+    if (displayKind === "percent") {
+      return `${value.toFixed(2)}%`;
+    }
+
+    return numberFormatter.format(value);
+  }
+
+  const managementSummaryColumns = useMemo<ColumnDef<ManagementSummaryRow>[]>(
+    () => [
+      {
+        accessorKey: "metricName",
+        header: "Metric",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.metricName}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.group}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "value",
+        header: "Value",
+        cell: ({ row }) => (
+          <span className="font-semibold text-stone-950">
+            {formatManagementValue(row.original.value, row.original.displayKind)}
+          </span>
+        )
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={managementTone(row.original.status)}
+          />
+        )
+      },
+      {
+        accessorKey: "basis",
+        header: "Basis",
+        meta: { disableTruncate: true }
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const shopPnlComparisonColumns = useMemo<ColumnDef<ShopPnlComparisonRow>[]>(
+    () => [
+      {
+        accessorKey: "storeName",
+        header: "Shop",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.storeName}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.storeCode}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "revenueAmount",
+        header: "Revenue",
+        cell: ({ row }) => currencyFormatter.format(row.original.revenueAmount)
+      },
+      {
+        accessorKey: "cogsAmount",
+        header: "COGS",
+        cell: ({ row }) => currencyFormatter.format(row.original.cogsAmount)
+      },
+      {
+        accessorKey: "grossProfitAmount",
+        header: "Gross profit",
+        cell: ({ row }) => currencyFormatter.format(row.original.grossProfitAmount)
+      },
+      {
+        accessorKey: "trackedExpenseAmount",
+        header: "Tracked expenses",
+        cell: ({ row }) => currencyFormatter.format(row.original.trackedExpenseAmount)
+      },
+      {
+        accessorKey: "operatingProfitAmount",
+        header: "Operating profit",
+        cell: ({ row }) => (
+          <span className="font-semibold text-stone-950">
+            {currencyFormatter.format(row.original.operatingProfitAmount)}
+          </span>
+        )
+      },
+      {
+        accessorKey: "grossMarginPercent",
+        header: "Margin",
+        cell: ({ row }) => `${row.original.grossMarginPercent.toFixed(2)}%`
+      },
+      {
+        accessorKey: "transactionCount",
+        header: "Receipts",
+        cell: ({ row }) => numberFormatter.format(row.original.transactionCount)
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={managementTone(row.original.status)}
+          />
+        )
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const cashExposureColumns = useMemo<ColumnDef<CashExposureRow>[]>(
+    () => [
+      {
+        accessorKey: "accountName",
+        header: "Account",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.accountName}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.accountCode} • {row.original.accountType}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "bookBalanceAmount",
+        header: "Book balance",
+        cell: ({ row }) => currencyFormatter.format(row.original.bookBalanceAmount)
+      },
+      {
+        accessorKey: "unreconciledAmount",
+        header: "Unreconciled",
+        cell: ({ row }) => currencyFormatter.format(row.original.unreconciledAmount)
+      },
+      {
+        accessorKey: "unreconciledEntries",
+        header: "Entries",
+        cell: ({ row }) => numberFormatter.format(row.original.unreconciledEntries)
+      },
+      {
+        accessorKey: "lastActivityAtLabel",
+        header: "Last activity",
+        cell: ({ row }) =>
+          renderTimestamp(row.original.lastActivityAt, row.original.lastActivityAtLabel),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={managementTone(row.original.status)}
+          />
+        )
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const counterpartyExposureColumns = useMemo<ColumnDef<CounterpartyExposureRow>[]>(
+    () => [
+      {
+        accessorKey: "partyName",
+        header: "Party",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.partyName}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.partyType} • {row.original.partyNo}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "exposureAmount",
+        header: "Exposure",
+        cell: ({ row }) => currencyFormatter.format(row.original.exposureAmount)
+      },
+      {
+        accessorKey: "lastActivityAtLabel",
+        header: "Last activity",
+        cell: ({ row }) =>
+          renderTimestamp(row.original.lastActivityAt, row.original.lastActivityAtLabel),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={managementTone(row.original.status)}
+          />
+        )
+      },
+      {
+        accessorKey: "basis",
+        header: "Basis",
+        meta: { disableTruncate: true }
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const payrollCostColumns = useMemo<ColumnDef<PayrollCostRow>[]>(
+    () => [
+      {
+        accessorKey: "runNo",
+        header: "Run",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.runNo}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.payPeriodCode}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "employeeCount",
+        header: "Employees",
+        cell: ({ row }) => numberFormatter.format(row.original.employeeCount)
+      },
+      {
+        accessorKey: "grossPayAmount",
+        header: "Gross pay",
+        cell: ({ row }) => currencyFormatter.format(row.original.grossPayAmount)
+      },
+      {
+        accessorKey: "statutoryLiabilityAmount",
+        header: "Statutory",
+        cell: ({ row }) => currencyFormatter.format(row.original.statutoryLiabilityAmount)
+      },
+      {
+        accessorKey: "netPayAmount",
+        header: "Net pay",
+        cell: ({ row }) => currencyFormatter.format(row.original.netPayAmount)
+      },
+      {
+        accessorKey: "employerCostAmount",
+        header: "Employer cost",
+        cell: ({ row }) => (
+          <span className="font-semibold text-stone-950">
+            {currencyFormatter.format(row.original.employerCostAmount)}
+          </span>
+        )
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={
+              ["POSTED", "PAID", "FILED"].includes(row.original.status)
+                ? "success"
+                : row.original.status === "DRAFT"
+                  ? "warning"
+                  : "default"
+            }
+          />
+        )
+      },
+      {
+        accessorKey: "postedAtLabel",
+        header: "Posted",
+        cell: ({ row }) => renderTimestamp(row.original.postedAt, row.original.postedAtLabel),
+        meta: { disableTruncate: true }
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const managementExceptionColumns = useMemo<ColumnDef<ManagementExceptionRow>[]>(
+    () => [
+      {
+        accessorKey: "area",
+        header: "Area",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.area}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.exceptionType}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "referenceNo",
+        header: "Reference"
+      },
+      {
+        accessorKey: "storeName",
+        header: "Shop",
+        cell: ({ row }) => row.original.storeName ?? "Company-wide"
+      },
+      {
+        accessorKey: "amount",
+        header: "Amount",
+        cell: ({ row }) =>
+          row.original.amount === null ? "Not valued" : currencyFormatter.format(row.original.amount)
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={managementTone(row.original.status)}
+          />
+        )
+      },
+      {
+        accessorKey: "lastActivityAtLabel",
+        header: "Latest",
+        cell: ({ row }) =>
+          renderTimestamp(row.original.lastActivityAt, row.original.lastActivityAtLabel),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "actionHint",
+        header: "Action",
+        meta: { disableTruncate: true }
+      }
+    ],
+    [currencyFormatter]
+  );
 
   const storePerformanceColumns = useMemo<ColumnDef<StorePerformanceRow>[]>(
     () => [
@@ -2296,6 +2718,47 @@ export function EnterpriseReportingDashboard({
   const reportCatalog = useMemo<ReportCatalogGroup[]>(
     () => [
       {
+        label: "Management",
+        reports: [
+          {
+            id: "managementSummary",
+            label: "Executive management summary",
+            description: "Decision-level KPIs for trading, costs, cash, working capital, payroll, inventory, and controls.",
+            rowCount: dashboard.managementSummaryRows.length,
+          },
+          {
+            id: "shopPnlComparison",
+            label: "Shop P&L comparison",
+            description: "Revenue, COGS, gross margin, tracked expenses, and operating result by shop.",
+            rowCount: dashboard.shopPnlComparisonRows.length,
+          },
+          {
+            id: "cashExposure",
+            label: "Cash exposure",
+            description: "Cashbook balances, unreconciled entries, and bank/cash reconciliation posture.",
+            rowCount: dashboard.cashExposureRows.length,
+          },
+          {
+            id: "counterpartyExposure",
+            label: "Customer and supplier exposure",
+            description: "Open customer receivable and supplier payable exposure in one management view.",
+            rowCount: dashboard.counterpartyExposureRows.length,
+          },
+          {
+            id: "payrollCost",
+            label: "Payroll cost",
+            description: "Payroll run gross pay, statutory liabilities, net pay, and employer cost.",
+            rowCount: dashboard.payrollCostRows.length,
+          },
+          {
+            id: "managementExceptions",
+            label: "Management exceptions",
+            description: "High-signal sync, cash, cashbook, payroll, and inventory exceptions requiring attention.",
+            rowCount: dashboard.managementExceptionRows.length,
+          }
+        ]
+      },
+      {
         label: "Finance and KPIs",
         reports: [
           {
@@ -2498,6 +2961,18 @@ export function EnterpriseReportingDashboard({
 
   function getStatusOptions(reportId: ReportId) {
     switch (reportId) {
+      case "managementSummary":
+        return buildChoiceOptions(dashboard.managementSummaryRows.map((row) => row.status));
+      case "shopPnlComparison":
+        return buildChoiceOptions(dashboard.shopPnlComparisonRows.map((row) => row.status));
+      case "cashExposure":
+        return buildChoiceOptions(dashboard.cashExposureRows.map((row) => row.status));
+      case "counterpartyExposure":
+        return buildChoiceOptions(dashboard.counterpartyExposureRows.map((row) => row.status));
+      case "payrollCost":
+        return buildChoiceOptions(dashboard.payrollCostRows.map((row) => row.status));
+      case "managementExceptions":
+        return buildChoiceOptions(dashboard.managementExceptionRows.map((row) => row.status));
       case "kpiScorecard":
         return buildChoiceOptions(dashboard.kpiScorecardRows.map((row) => row.status));
       case "profitAndLoss":
@@ -2571,6 +3046,12 @@ export function EnterpriseReportingDashboard({
 
   function getLocationOptions(reportId: ReportId) {
     switch (reportId) {
+      case "shopPnlComparison":
+        return buildChoiceOptions(
+          dashboard.shopPnlComparisonRows.flatMap((row) => [row.storeCode, row.storeName])
+        );
+      case "managementExceptions":
+        return buildChoiceOptions(dashboard.managementExceptionRows.map((row) => row.storeName));
       case "purchaseOrders":
         return buildChoiceOptions(
           dashboard.purchaseOrderReportRows.flatMap((row) => [
@@ -2755,6 +3236,14 @@ export function EnterpriseReportingDashboard({
 
   function getCategoryOptions(reportId: ReportId) {
     switch (reportId) {
+      case "managementSummary":
+        return buildChoiceOptions(dashboard.managementSummaryRows.map((row) => row.group));
+      case "cashExposure":
+        return buildChoiceOptions(dashboard.cashExposureRows.map((row) => row.accountType));
+      case "counterpartyExposure":
+        return buildChoiceOptions(dashboard.counterpartyExposureRows.map((row) => row.partyType));
+      case "managementExceptions":
+        return buildChoiceOptions(dashboard.managementExceptionRows.map((row) => row.area));
       case "kpiScorecard":
         return buildChoiceOptions(dashboard.kpiScorecardRows.map((row) => row.group));
       case "profitAndLoss":
@@ -3054,6 +3543,110 @@ export function EnterpriseReportingDashboard({
     const filters = getReportFilterValues(reportId);
 
     switch (reportId) {
+      case "managementSummary":
+        return (
+          <SharedDataGrid
+            columns={managementSummaryColumns}
+            data={dashboard.managementSummaryRows.filter(
+              (row) =>
+                matchesChoice(filters.status, [row.status]) &&
+                matchesChoice(filters.category, [row.group])
+            )}
+            emptyLabel="No management summary rows are available for this report."
+            exportFileName="flash-erp-management-summary"
+            globalFilterFn={managementSummaryFilter}
+            initialPageSize={12}
+            searchPlaceholder="Search metrics, groups, status, or basis"
+          />
+        );
+      case "shopPnlComparison":
+        return (
+          <SharedDataGrid
+            columns={shopPnlComparisonColumns}
+            data={dashboard.shopPnlComparisonRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeCode, row.storeName]) &&
+                matchesChoice(filters.status, [row.status]) &&
+                matchesChoice(filters.location, [row.storeCode, row.storeName])
+            )}
+            emptyLabel="No shop P&L rows are available for this report."
+            exportFileName="flash-erp-shop-pnl-comparison"
+            globalFilterFn={shopPnlComparisonFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "operatingProfitAmount", desc: true }]}
+            searchPlaceholder="Search shops, codes, or status"
+          />
+        );
+      case "cashExposure":
+        return (
+          <SharedDataGrid
+            columns={cashExposureColumns}
+            data={dashboard.cashExposureRows.filter(
+              (row) =>
+                matchesChoice(filters.status, [row.status]) &&
+                matchesChoice(filters.category, [row.accountType])
+            )}
+            emptyLabel="No cash exposure rows are available for this report."
+            exportFileName="flash-erp-cash-exposure"
+            globalFilterFn={cashExposureFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "unreconciledAmount", desc: true }]}
+            searchPlaceholder="Search cashbook accounts, type, currency, or status"
+          />
+        );
+      case "counterpartyExposure":
+        return (
+          <SharedDataGrid
+            columns={counterpartyExposureColumns}
+            data={dashboard.counterpartyExposureRows.filter(
+              (row) =>
+                matchesDate(row.lastActivityAt) &&
+                matchesChoice(filters.status, [row.status]) &&
+                matchesChoice(filters.category, [row.partyType]) &&
+                matchesChoice(filters.customer, [row.partyNo, row.partyName])
+            )}
+            emptyLabel="No customer or supplier exposure rows are available for this report."
+            exportFileName="flash-erp-counterparty-exposure"
+            globalFilterFn={counterpartyExposureFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "exposureAmount", desc: true }]}
+            searchPlaceholder="Search party, number, type, or status"
+          />
+        );
+      case "payrollCost":
+        return (
+          <SharedDataGrid
+            columns={payrollCostColumns}
+            data={dashboard.payrollCostRows.filter(
+              (row) => matchesDate(row.paymentDate) && matchesChoice(filters.status, [row.status])
+            )}
+            emptyLabel="No payroll cost rows are available for this report."
+            exportFileName="flash-erp-payroll-cost"
+            globalFilterFn={payrollCostFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "paymentDate", desc: true }]}
+            searchPlaceholder="Search payroll runs, periods, or status"
+          />
+        );
+      case "managementExceptions":
+        return (
+          <SharedDataGrid
+            columns={managementExceptionColumns}
+            data={dashboard.managementExceptionRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeName]) &&
+                matchesDate(row.lastActivityAt) &&
+                matchesChoice(filters.status, [row.status]) &&
+                matchesChoice(filters.location, [row.storeName]) &&
+                matchesChoice(filters.category, [row.area])
+            )}
+            emptyLabel="No management exceptions are available for this report."
+            exportFileName="flash-erp-management-exceptions"
+            globalFilterFn={managementExceptionFilter}
+            initialPageSize={12}
+            searchPlaceholder="Search exception area, reference, shop, action, or status"
+          />
+        );
       case "kpiScorecard":
         return (
           <SharedDataGrid

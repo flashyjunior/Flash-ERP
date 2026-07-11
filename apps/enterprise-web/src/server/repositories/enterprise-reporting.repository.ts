@@ -265,6 +265,77 @@ export type EnterpriseReportingDashboardData = {
     operatingProfitAmount: number;
     slowMovingItems: number;
   };
+  managementSummaryRows: Array<{
+    metricCode: string;
+    metricName: string;
+    group: string;
+    value: number;
+    displayKind: "currency" | "number" | "percent";
+    status: "Healthy" | "Watch" | "Review";
+    basis: string;
+  }>;
+  shopPnlComparisonRows: Array<{
+    storeCode: string;
+    storeName: string;
+    revenueAmount: number;
+    cogsAmount: number;
+    grossProfitAmount: number;
+    trackedExpenseAmount: number;
+    operatingProfitAmount: number;
+    grossMarginPercent: number;
+    transactionCount: number;
+    status: "Healthy" | "Watch" | "Review";
+  }>;
+  cashExposureRows: Array<{
+    cashbookAccountId: string;
+    accountCode: string;
+    accountName: string;
+    accountType: string;
+    currencyCode: string;
+    bookBalanceAmount: number;
+    unreconciledAmount: number;
+    unreconciledEntries: number;
+    lastActivityAt: string | null;
+    lastActivityAtLabel: string;
+    lastReconciledAt: string | null;
+    status: "Healthy" | "Watch" | "Review";
+  }>;
+  counterpartyExposureRows: Array<{
+    partyType: "Customer" | "Supplier";
+    partyNo: string;
+    partyName: string;
+    exposureAmount: number;
+    lastActivityAt: string | null;
+    lastActivityAtLabel: string;
+    status: "Healthy" | "Watch" | "Review";
+    basis: string;
+  }>;
+  payrollCostRows: Array<{
+    payrollRunId: string;
+    runNo: string;
+    payPeriodCode: string;
+    paymentDate: string;
+    status: string;
+    employeeCount: number;
+    grossPayAmount: number;
+    employerCostAmount: number;
+    statutoryLiabilityAmount: number;
+    netPayAmount: number;
+    postedAt: string | null;
+    postedAtLabel: string;
+  }>;
+  managementExceptionRows: Array<{
+    exceptionId: string;
+    area: string;
+    exceptionType: string;
+    referenceNo: string;
+    storeName: string | null;
+    amount: number | null;
+    status: "Healthy" | "Watch" | "Review";
+    lastActivityAt: string | null;
+    lastActivityAtLabel: string;
+    actionHint: string;
+  }>;
   tenderReportRows: Array<{
     tenderKey: string;
     tenderCode: string | null;
@@ -723,6 +794,12 @@ export function buildUnavailableEnterpriseReportingDashboard(
       operatingProfitAmount: 0,
       slowMovingItems: 0
     },
+    managementSummaryRows: [],
+    shopPnlComparisonRows: [],
+    cashExposureRows: [],
+    counterpartyExposureRows: [],
+    payrollCostRows: [],
+    managementExceptionRows: [],
     tenderReportRows: [],
     receiptReportRows: [],
     cashierSalesRows: [],
@@ -1052,6 +1129,528 @@ async function getFuelDailyReportRows(
 
       return left.tankCode.localeCompare(right.tankCode);
     });
+}
+
+async function getCashExposureRows(
+  filters: EnterpriseReportingDashboardData["filters"]
+): Promise<EnterpriseReportingDashboardData["cashExposureRows"]> {
+  const enterpriseContext = await getReportingEnterpriseContext();
+
+  if (!enterpriseContext) {
+    return [];
+  }
+
+  const accounts = await prisma.erpCashbookAccount.findMany({
+    where: {
+      retailOrgId: enterpriseContext.retailOrgId,
+      status: RecordStatus.ACTIVE
+    },
+    include: {
+      entries: {
+        where: {
+          status: "POSTED"
+        },
+        select: {
+          amount: true,
+          direction: true,
+          entryDate: true,
+          reconciliationStatus: true
+        }
+      }
+    },
+    orderBy: [{ isDefault: "desc" }, { code: "asc" }],
+    take: 100
+  });
+
+  const scopedDateFrom = parseDateStart(filters.dateFrom);
+  const scopedDateTo = parseDateEnd(filters.dateTo);
+
+  return accounts
+    .map((account) => {
+      let postedMovementAmount = 0;
+      let unreconciledAmount = 0;
+      let unreconciledEntries = 0;
+      let lastActivityAt: Date | null = null;
+
+      for (const entry of account.entries) {
+        const amount = Number(entry.amount);
+        postedMovementAmount += entry.direction === "OUTFLOW" ? -amount : amount;
+
+        if (!lastActivityAt || entry.entryDate.getTime() > lastActivityAt.getTime()) {
+          lastActivityAt = entry.entryDate;
+        }
+
+        if (entry.reconciliationStatus !== "RECONCILED") {
+          const inDateScope =
+            (!scopedDateFrom || entry.entryDate >= scopedDateFrom) &&
+            (!scopedDateTo || entry.entryDate <= scopedDateTo);
+
+          if (inDateScope) {
+            unreconciledEntries += 1;
+            unreconciledAmount += amount;
+          }
+        }
+      }
+
+      const status = managementStatus(
+        unreconciledEntries >= 10 || unreconciledAmount >= 10_000
+          ? "Review"
+          : unreconciledEntries > 0 || unreconciledAmount > 0
+            ? "Watch"
+            : "Healthy"
+      );
+
+      return {
+        cashbookAccountId: account.id,
+        accountCode: account.code,
+        accountName: account.name,
+        accountType: formatEnumLabel(account.accountType),
+        currencyCode: account.currencyCode,
+        bookBalanceAmount: roundMoney(Number(account.openingBalance) + postedMovementAmount),
+        unreconciledAmount: roundMoney(unreconciledAmount),
+        unreconciledEntries,
+        lastActivityAt: lastActivityAt?.toISOString() ?? null,
+        lastActivityAtLabel: formatRelativeTime(lastActivityAt),
+        lastReconciledAt: account.lastReconciledAt?.toISOString() ?? null,
+        status
+      };
+    })
+    .sort((left, right) => {
+      if (left.status !== right.status) {
+        const rank: Record<typeof left.status, number> = { Review: 0, Watch: 1, Healthy: 2 };
+        return rank[left.status] - rank[right.status];
+      }
+
+      return Math.abs(right.unreconciledAmount) - Math.abs(left.unreconciledAmount);
+    });
+}
+
+async function getPayrollCostRows(
+  filters: EnterpriseReportingDashboardData["filters"]
+): Promise<EnterpriseReportingDashboardData["payrollCostRows"]> {
+  const enterpriseContext = await getReportingEnterpriseContext();
+
+  if (!enterpriseContext) {
+    return [];
+  }
+
+  const dateFrom = parseDateStart(filters.dateFrom);
+  const dateTo = parseDateEnd(filters.dateTo);
+  const payrollRuns = await prisma.erpPayrollRun.findMany({
+    where: {
+      retailOrgId: enterpriseContext.retailOrgId,
+      ...(dateFrom || dateTo
+        ? {
+            paymentDate: {
+              ...(dateFrom ? { gte: dateFrom } : {}),
+              ...(dateTo ? { lte: dateTo } : {})
+            }
+          }
+        : {})
+    },
+    orderBy: [{ paymentDate: "desc" }, { runNo: "desc" }],
+    take: 100
+  });
+
+  return payrollRuns.map((run) => ({
+    payrollRunId: run.id,
+    runNo: run.runNo,
+    payPeriodCode: run.payPeriodCode,
+    paymentDate: run.paymentDate.toISOString(),
+    status: run.status,
+    employeeCount: run.employeeCount,
+    grossPayAmount: roundMoney(Number(run.totalGrossPay)),
+    employerCostAmount: roundMoney(Number(run.totalEmployerCost)),
+    statutoryLiabilityAmount: roundMoney(
+      Number(run.totalPayeTax) +
+        Number(run.totalEmployeePension) +
+        Number(run.totalEmployerPension)
+    ),
+    netPayAmount: roundMoney(Number(run.totalNetPay)),
+    postedAt: run.postedAt?.toISOString() ?? null,
+    postedAtLabel: formatRelativeTime(run.postedAt)
+  }));
+}
+
+function managementStatus(
+  status: EnterpriseReportingDashboardData["managementSummaryRows"][number]["status"]
+) {
+  return status;
+}
+
+function buildShopPnlComparisonRows({
+  cogsReportRows,
+  expenseTrackingRows,
+  storePerformanceRows
+}: {
+  cogsReportRows: EnterpriseReportingDashboardData["cogsReportRows"];
+  expenseTrackingRows: EnterpriseReportingDashboardData["expenseTrackingRows"];
+  storePerformanceRows: EnterpriseReportingDashboardData["storePerformanceRows"];
+}): EnterpriseReportingDashboardData["shopPnlComparisonRows"] {
+  const cogsByStore = new Map<string, number>();
+  const expenseByStore = new Map<string, number>();
+
+  for (const row of cogsReportRows) {
+    cogsByStore.set(row.storeCode, (cogsByStore.get(row.storeCode) ?? 0) + row.cogsAmount);
+  }
+
+  for (const row of expenseTrackingRows) {
+    const storeCode = row.storeCode ?? "UNASSIGNED";
+    cogsByStore.set(storeCode, cogsByStore.get(storeCode) ?? 0);
+    expenseByStore.set(
+      storeCode,
+      (expenseByStore.get(storeCode) ?? 0) + row.recognizedAmount
+    );
+  }
+
+  const storeCodes = uniqueStrings([
+    ...storePerformanceRows.map((row) => row.storeCode),
+    ...Array.from(cogsByStore.keys()),
+    ...Array.from(expenseByStore.keys())
+  ]);
+  const storeByCode = new Map(storePerformanceRows.map((row) => [row.storeCode, row] as const));
+
+  return storeCodes
+    .map((storeCode) => {
+      const storeRow = storeByCode.get(storeCode);
+      const revenueAmount = roundMoney(storeRow?.salesValue ?? 0);
+      const cogsAmount = roundMoney(cogsByStore.get(storeCode) ?? 0);
+      const trackedExpenseAmount = roundMoney(expenseByStore.get(storeCode) ?? 0);
+      const grossProfitAmount = roundMoney(revenueAmount - cogsAmount);
+      const operatingProfitAmount = roundMoney(grossProfitAmount - trackedExpenseAmount);
+      const grossMarginPercent =
+        revenueAmount > 0 ? roundMoney((grossProfitAmount / revenueAmount) * 100) : 0;
+      const status =
+        operatingProfitAmount < 0 || grossMarginPercent < 10
+          ? managementStatus("Review")
+          : grossMarginPercent < 20
+            ? managementStatus("Watch")
+            : managementStatus("Healthy");
+
+      return {
+        storeCode,
+        storeName: storeRow?.store ?? storeCode,
+        revenueAmount,
+        cogsAmount,
+        grossProfitAmount,
+        trackedExpenseAmount,
+        operatingProfitAmount,
+        grossMarginPercent,
+        transactionCount: storeRow?.completedTransactions ?? 0,
+        status
+      };
+    })
+    .sort((left, right) => right.operatingProfitAmount - left.operatingProfitAmount);
+}
+
+function buildCounterpartyExposureRows({
+  receivableRows,
+  supplierStatementRows
+}: {
+  receivableRows: EnterpriseReportingDashboardData["receivableRows"];
+  supplierStatementRows: EnterpriseReportingDashboardData["supplierStatementRows"];
+}): EnterpriseReportingDashboardData["counterpartyExposureRows"] {
+  const customerRows = receivableRows
+    .filter((row) => Math.abs(row.receivableBalanceAmount) > 0.0001)
+    .map((row) => ({
+      partyType: "Customer" as const,
+      partyNo: row.customerNo,
+      partyName: row.fullName,
+      exposureAmount: roundMoney(row.receivableBalanceAmount),
+      lastActivityAt: row.lastTransactionAt,
+      lastActivityAtLabel: row.lastTransactionAtLabel,
+      status: row.receivableBalanceAmount > 10_000 ? managementStatus("Review") : managementStatus("Watch"),
+      basis: "Customer account receivable balance from posted AR/customer-account activity."
+    }));
+
+  const supplierByParty = new Map<
+    string,
+    {
+      partyNo: string;
+      partyName: string;
+      exposureAmount: number;
+      lastActivityAt: string | null;
+      lastActivityAtLabel: string;
+    }
+  >();
+
+  for (const row of supplierStatementRows) {
+    const current = supplierByParty.get(row.partyNo);
+    const currentDate = parseIso(current?.lastActivityAt);
+    const rowDate = parseIso(row.transactionDate);
+
+    if (!current || (rowDate && (!currentDate || rowDate.getTime() >= currentDate.getTime()))) {
+      supplierByParty.set(row.partyNo, {
+        partyNo: row.partyNo,
+        partyName: row.partyName,
+        exposureAmount: Math.abs(row.runningBalance),
+        lastActivityAt: row.transactionDate,
+        lastActivityAtLabel: formatRelativeTime(rowDate)
+      });
+    }
+  }
+
+  const supplierRows = [...supplierByParty.values()]
+    .filter((row) => row.exposureAmount > 0.0001)
+    .map((row) => ({
+      partyType: "Supplier" as const,
+      partyNo: row.partyNo,
+      partyName: row.partyName,
+      exposureAmount: roundMoney(row.exposureAmount),
+      lastActivityAt: row.lastActivityAt,
+      lastActivityAtLabel: row.lastActivityAtLabel,
+      status: row.exposureAmount > 10_000 ? managementStatus("Review") : managementStatus("Watch"),
+      basis: "Supplier payable balance from posted AP statement running balance."
+    }));
+
+  return [...customerRows, ...supplierRows]
+    .sort((left, right) => right.exposureAmount - left.exposureAmount)
+    .slice(0, 150);
+}
+
+function buildManagementExceptionRows({
+  cashExposureRows,
+  closeoutRows,
+  exceptionRows,
+  payrollCostRows,
+  slowMovingItemRows
+}: {
+  cashExposureRows: EnterpriseReportingDashboardData["cashExposureRows"];
+  closeoutRows: EnterpriseReportingDashboardData["closeoutRows"];
+  exceptionRows: EnterpriseReportingDashboardData["exceptionRows"];
+  payrollCostRows: EnterpriseReportingDashboardData["payrollCostRows"];
+  slowMovingItemRows: EnterpriseReportingDashboardData["slowMovingItemRows"];
+}): EnterpriseReportingDashboardData["managementExceptionRows"] {
+  const rows: EnterpriseReportingDashboardData["managementExceptionRows"] = [];
+
+  for (const row of exceptionRows) {
+    rows.push({
+      exceptionId: `sync:${row.eventId}`,
+      area: "Store sync",
+      exceptionType: row.eventType,
+      referenceNo: row.referenceLabel,
+      storeName: row.store,
+      amount: null,
+      status: row.retryable ? "Watch" : "Review",
+      lastActivityAt: row.receivedAt,
+      lastActivityAtLabel: row.receivedAtLabel,
+      actionHint: row.retryable
+        ? "Retry or reprocess the store event from the sync monitor."
+        : "Review the failed source event before new store activity piles up."
+    });
+  }
+
+  for (const row of closeoutRows.filter(
+    (closeout) => closeout.remainingBankingAmount > 0 || Math.abs(closeout.varianceAmount) > 0
+  )) {
+    rows.push({
+      exceptionId: `closeout:${row.reconciliationNo}`,
+      area: "Cash control",
+      exceptionType: row.remainingBankingAmount > 0 ? "Banking pending" : "Cash variance",
+      referenceNo: row.reconciliationNo,
+      storeName: row.store,
+      amount: roundMoney(row.remainingBankingAmount || Math.abs(row.varianceAmount)),
+      status: row.remainingBankingAmount > 0 || Math.abs(row.varianceAmount) >= 100 ? "Review" : "Watch",
+      lastActivityAt: row.reconciledAt,
+      lastActivityAtLabel: row.reconciledAtLabel,
+      actionHint: "Confirm the cashier closeout, banking handoff, or approved variance treatment."
+    });
+  }
+
+  for (const row of cashExposureRows.filter((cashbook) => cashbook.unreconciledEntries > 0)) {
+    rows.push({
+      exceptionId: `cashbook:${row.cashbookAccountId}`,
+      area: "Cashbook",
+      exceptionType: "Unreconciled cashbook",
+      referenceNo: row.accountCode,
+      storeName: null,
+      amount: row.unreconciledAmount,
+      status: row.status,
+      lastActivityAt: row.lastActivityAt,
+      lastActivityAtLabel: row.lastActivityAtLabel,
+      actionHint: "Match posted cashbook entries to bank statement lines or clear old exceptions."
+    });
+  }
+
+  for (const row of payrollCostRows.filter(
+    (payrollRun) => !["POSTED", "PAID", "FILED"].includes(payrollRun.status)
+  )) {
+    rows.push({
+      exceptionId: `payroll:${row.payrollRunId}`,
+      area: "Payroll",
+      exceptionType: "Payroll run not finalized",
+      referenceNo: row.runNo,
+      storeName: null,
+      amount: row.employerCostAmount,
+      status: row.status === "DRAFT" ? "Watch" : "Review",
+      lastActivityAt: row.paymentDate,
+      lastActivityAtLabel: formatRelativeTime(parseIso(row.paymentDate)),
+      actionHint: "Complete payroll calculation, approval, posting, and filing for the period."
+    });
+  }
+
+  for (const row of slowMovingItemRows.slice(0, 25)) {
+    rows.push({
+      exceptionId: `slow-stock:${row.locationCode}:${row.productCode}`,
+      area: "Inventory",
+      exceptionType: row.riskBand,
+      referenceNo: row.productCode,
+      storeName: row.storeName ?? row.warehouseName,
+      amount: row.stockValue,
+      status: row.riskBand === "No sales" ? "Review" : "Watch",
+      lastActivityAt: row.lastMovementAt,
+      lastActivityAtLabel: row.lastMovementAtLabel,
+      actionHint: "Review replenishment, transfer, markdown, or product master setup."
+    });
+  }
+
+  return rows
+    .sort((left, right) => {
+      if (left.status !== right.status) {
+        const rank = { Review: 0, Watch: 1, Healthy: 2 };
+        return rank[left.status] - rank[right.status];
+      }
+
+      return (right.amount ?? 0) - (left.amount ?? 0);
+    })
+    .slice(0, 150);
+}
+
+function buildManagementSummaryRows({
+  cashExposureRows,
+  counterpartyExposureRows,
+  managementExceptionRows,
+  payrollCostRows,
+  reportingFacts,
+  shopPnlComparisonRows,
+  trackedExpenseAmount
+}: {
+  cashExposureRows: EnterpriseReportingDashboardData["cashExposureRows"];
+  counterpartyExposureRows: EnterpriseReportingDashboardData["counterpartyExposureRows"];
+  managementExceptionRows: EnterpriseReportingDashboardData["managementExceptionRows"];
+  payrollCostRows: EnterpriseReportingDashboardData["payrollCostRows"];
+  reportingFacts: ReportingFactRows;
+  shopPnlComparisonRows: EnterpriseReportingDashboardData["shopPnlComparisonRows"];
+  trackedExpenseAmount: number;
+}): EnterpriseReportingDashboardData["managementSummaryRows"] {
+  const cashUnreconciledAmount = roundMoney(
+    cashExposureRows.reduce((sum, row) => sum + row.unreconciledAmount, 0)
+  );
+  const counterpartyExposureAmount = roundMoney(
+    counterpartyExposureRows.reduce((sum, row) => sum + row.exposureAmount, 0)
+  );
+  const payrollEmployerCostAmount = roundMoney(
+    payrollCostRows.reduce((sum, row) => sum + row.employerCostAmount, 0)
+  );
+  const profitableShopCount = shopPnlComparisonRows.filter(
+    (row) => row.operatingProfitAmount >= 0
+  ).length;
+  const slowMovingStockValue = roundMoney(
+    reportingFacts.slowMovingItemRows.reduce((sum, row) => sum + row.stockValue, 0)
+  );
+  const reviewExceptionCount = managementExceptionRows.filter(
+    (row) => row.status === "Review"
+  ).length;
+
+  return [
+    {
+      metricCode: "net-sales-ex-tax",
+      metricName: "Net sales excluding tax",
+      group: "Trading",
+      value: reportingFacts.financialTotals.netSalesExTax,
+      displayKind: "currency",
+      status: reportingFacts.financialTotals.netSalesExTax > 0 ? "Healthy" : "Watch",
+      basis: "Completed sales less transaction discounts and tax in the selected reporting scope."
+    },
+    {
+      metricCode: "gross-margin",
+      metricName: "Gross margin",
+      group: "Trading",
+      value: reportingFacts.financialTotals.grossMarginPercent,
+      displayKind: "percent",
+      status:
+        reportingFacts.financialTotals.grossMarginPercent >= 25
+          ? "Healthy"
+          : reportingFacts.financialTotals.grossMarginPercent >= 12
+            ? "Watch"
+            : "Review",
+      basis: "Gross profit divided by net sales excluding tax."
+    },
+    {
+      metricCode: "tracked-expenses",
+      metricName: "Tracked expenses",
+      group: "Costs",
+      value: trackedExpenseAmount,
+      displayKind: "currency",
+      status:
+        reportingFacts.financialTotals.netSalesExTax > 0 &&
+        trackedExpenseAmount / reportingFacts.financialTotals.netSalesExTax > 0.15
+          ? "Review"
+          : trackedExpenseAmount > 0
+            ? "Watch"
+            : "Healthy",
+      basis: "Recognized PO charges, cash shortages, and supplier recovery exposure."
+    },
+    {
+      metricCode: "profitable-shops",
+      metricName: "Profitable shops",
+      group: "Branches",
+      value: profitableShopCount,
+      displayKind: "number",
+      status:
+        shopPnlComparisonRows.length === 0
+          ? "Watch"
+          : profitableShopCount === shopPnlComparisonRows.length
+            ? "Healthy"
+            : "Review",
+      basis: "Shop P&L rows with operating profit at or above zero."
+    },
+    {
+      metricCode: "cash-unreconciled",
+      metricName: "Unreconciled cashbook",
+      group: "Cash",
+      value: cashUnreconciledAmount,
+      displayKind: "currency",
+      status: cashUnreconciledAmount > 10_000 ? "Review" : cashUnreconciledAmount > 0 ? "Watch" : "Healthy",
+      basis: "Posted cashbook entries not yet matched to bank/cash statement lines."
+    },
+    {
+      metricCode: "counterparty-exposure",
+      metricName: "Customer and supplier exposure",
+      group: "Working capital",
+      value: counterpartyExposureAmount,
+      displayKind: "currency",
+      status: counterpartyExposureAmount > 25_000 ? "Review" : counterpartyExposureAmount > 0 ? "Watch" : "Healthy",
+      basis: "Open customer receivables plus supplier payable exposure from statements."
+    },
+    {
+      metricCode: "payroll-cost",
+      metricName: "Payroll employer cost",
+      group: "People cost",
+      value: payrollEmployerCostAmount,
+      displayKind: "currency",
+      status: payrollCostRows.some((row) => row.status === "DRAFT") ? "Watch" : "Healthy",
+      basis: "Payroll run employer-cost totals in the selected payment-date scope."
+    },
+    {
+      metricCode: "slow-stock",
+      metricName: "Slow-moving stock value",
+      group: "Inventory",
+      value: slowMovingStockValue,
+      displayKind: "currency",
+      status: slowMovingStockValue > 10_000 ? "Review" : slowMovingStockValue > 0 ? "Watch" : "Healthy",
+      basis: "Stocked items with no sales or stale sales movement in the current scope."
+    },
+    {
+      metricCode: "review-exceptions",
+      metricName: "Review-level exceptions",
+      group: "Controls",
+      value: reviewExceptionCount,
+      displayKind: "number",
+      status: reviewExceptionCount > 0 ? "Review" : managementExceptionRows.length > 0 ? "Watch" : "Healthy",
+      basis: "High-priority rows from sync, cash, cashbook, payroll, and inventory controls."
+    }
+  ];
 }
 
 async function getReportingFactRows(
@@ -1627,8 +2226,13 @@ export async function getEnterpriseReportingDashboard(
   ]);
 
   const currencyCode = operationsDashboard.currencyCode || posWorkspace.currencyCode || "USD";
-  const reportingFacts = await getReportingFactRows(operationsDashboard.filters);
-  const fuelDailyReportRows = await getFuelDailyReportRows(operationsDashboard.filters);
+  const [reportingFacts, fuelDailyReportRows, cashExposureRows, payrollCostRows] =
+    await Promise.all([
+      getReportingFactRows(operationsDashboard.filters),
+      getFuelDailyReportRows(operationsDashboard.filters),
+      getCashExposureRows(operationsDashboard.filters),
+      getPayrollCostRows(operationsDashboard.filters)
+    ]);
   const laneAggregateByStore = buildLaneAggregateByStore(posWorkspace.laneRows);
   const storeCodes = uniqueStrings([
     ...operationsDashboard.storeSummaries.map((row) => row.storeCode),
@@ -2326,6 +2930,31 @@ export async function getEnterpriseReportingDashboard(
       basis: `${reportingFacts.slowMovingItemRows.length} stocked item row(s) with no sale or at least 60 days since last sale.`
     }
   ];
+  const shopPnlComparisonRows = buildShopPnlComparisonRows({
+    cogsReportRows: reportingFacts.cogsReportRows,
+    expenseTrackingRows,
+    storePerformanceRows
+  });
+  const counterpartyExposureRows = buildCounterpartyExposureRows({
+    receivableRows,
+    supplierStatementRows
+  });
+  const managementExceptionRows = buildManagementExceptionRows({
+    cashExposureRows,
+    closeoutRows,
+    exceptionRows,
+    payrollCostRows,
+    slowMovingItemRows: reportingFacts.slowMovingItemRows
+  });
+  const managementSummaryRows = buildManagementSummaryRows({
+    cashExposureRows,
+    counterpartyExposureRows,
+    managementExceptionRows,
+    payrollCostRows,
+    reportingFacts,
+    shopPnlComparisonRows,
+    trackedExpenseAmount
+  });
 
   const postureMessages = uniqueStrings([
     `${syncDashboard.metrics.attentionNodes} node(s) currently need sync attention across ${syncDashboard.metrics.activeStores} active store node(s).`,
@@ -2407,6 +3036,12 @@ export async function getEnterpriseReportingDashboard(
       operatingProfitAmount,
       slowMovingItems: reportingFacts.slowMovingItemRows.length
     },
+    managementSummaryRows,
+    shopPnlComparisonRows,
+    cashExposureRows,
+    counterpartyExposureRows,
+    payrollCostRows,
+    managementExceptionRows,
     tenderReportRows,
     receiptReportRows,
     cashierSalesRows: cashierSalesReportRows,
@@ -2436,7 +3071,7 @@ export async function getEnterpriseReportingDashboard(
     closeoutRows,
     postureMessages,
     priorities,
-    statusMessage: `Flash ERP enterprise reporting now consolidates posted sales, tender mix, COGS, margin, tracked expenses, inventory movement, purchasing, fuel station daily controls, suppliers, AR/AP statements, users, customer receivables, promotions, and branch exceptions from ${syncDashboard.metrics.activeStores} active store node(s).`,
+    statusMessage: `Flash ERP enterprise reporting now consolidates management KPIs, shop P&L, cash exposure, counterparty exposure, payroll cost, posted sales, COGS, margin, tracked expenses, inventory movement, purchasing, fuel daily controls, AR/AP statements, users, promotions, and branch exceptions from ${syncDashboard.metrics.activeStores} active store node(s).`,
     refreshedAt
   };
 }
