@@ -34,6 +34,7 @@ export async function POST(
       storeGroupCode?: string | null;
       storeGroupName?: string | null;
       storeGroupType?: string | null;
+      stockUpdateMode?: string | null;
       licenseStatus?: string | null;
       licenseKey?: string | null;
       licensedUntil?: string | null;
@@ -69,6 +70,7 @@ export async function POST(
       storeGroupCode: body.storeGroupCode ?? null,
       storeGroupName: body.storeGroupName ?? null,
       storeGroupType: body.storeGroupType ?? null,
+      stockUpdateMode: body.stockUpdateMode ?? null,
       licenseStatus: "licenseStatus" in body ? body.licenseStatus : undefined,
       licenseKey: "licenseKey" in body ? body.licenseKey : undefined,
       licensedUntil: "licensedUntil" in body ? body.licensedUntil : undefined,

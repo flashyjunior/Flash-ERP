@@ -457,6 +457,16 @@ export type EnterpriseInventoryWorkspaceData = {
     driverContact: string | null;
     deliveryNoteNo: string | null;
     workflowType: string | null;
+    issueStockUpdateStatus: string;
+    issueStockUpdateStatusLabel: string;
+    issueStockConfirmedAt: string | null;
+    issueStockConfirmedAtLabel: string;
+    issueStockConfirmedBy: string | null;
+    receiptStockUpdateStatus: string;
+    receiptStockUpdateStatusLabel: string;
+    receiptStockConfirmedAt: string | null;
+    receiptStockConfirmedAtLabel: string;
+    receiptStockConfirmedBy: string | null;
     feedbackStatus: string;
     waterTestResult: string | null;
     quantityBeforeDelivery: number | null;
@@ -910,6 +920,12 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         lineNo: true,
         origin: true,
         workflowType: true,
+        issueStockUpdateStatus: true,
+        issueStockConfirmedAt: true,
+        issueStockConfirmedBy: true,
+        receiptStockUpdateStatus: true,
+        receiptStockConfirmedAt: true,
+        receiptStockConfirmedBy: true,
         status: true,
         externalReference: true,
         requestedQuantity: true,
@@ -1500,6 +1516,16 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
       driverContact: transfer.driverContact,
       deliveryNoteNo: transfer.deliveryNoteNo,
       workflowType: transfer.workflowType,
+      issueStockUpdateStatus: transfer.issueStockUpdateStatus,
+      issueStockUpdateStatusLabel: formatEnumLabel(transfer.issueStockUpdateStatus),
+      issueStockConfirmedAt: toIsoString(transfer.issueStockConfirmedAt),
+      issueStockConfirmedAtLabel: formatRelativeTime(transfer.issueStockConfirmedAt),
+      issueStockConfirmedBy: transfer.issueStockConfirmedBy,
+      receiptStockUpdateStatus: transfer.receiptStockUpdateStatus,
+      receiptStockUpdateStatusLabel: formatEnumLabel(transfer.receiptStockUpdateStatus),
+      receiptStockConfirmedAt: toIsoString(transfer.receiptStockConfirmedAt),
+      receiptStockConfirmedAtLabel: formatRelativeTime(transfer.receiptStockConfirmedAt),
+      receiptStockConfirmedBy: transfer.receiptStockConfirmedBy,
       feedbackStatus: transfer.feedbackStatus,
       waterTestResult: transfer.waterTestResult,
       quantityBeforeDelivery:

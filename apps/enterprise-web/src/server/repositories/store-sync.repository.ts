@@ -157,6 +157,11 @@ import {
   sendSaleSmsNotificationSafely
 } from "@/server/repositories/sale-sms.repository";
 import { writeStoreExpenseAttachment } from "@/server/files/store-expense-storage";
+import {
+  shouldPostStockImmediately,
+  STOCK_UPDATE_STATUS_PENDING,
+  STOCK_UPDATE_STATUS_POSTED
+} from "@/server/repositories/inventory-stock-policy.repository";
 import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 
 const allowedAggregateTypes = new Set([
@@ -10033,6 +10038,11 @@ async function projectStoreInterStoreTransferIssue(
   }
 
   const occurredAt = new Date(payload.occurredAt);
+  const postStockImmediately = await shouldPostStockImmediately(
+    tx,
+    transfer.retailOrgId,
+    transfer.sourceStoreId,
+  );
   const nextIssuedQuantity = Number(
     (Number(transfer.issuedQuantity) + payload.quantity).toFixed(3),
   );
@@ -10048,29 +10058,31 @@ async function projectStoreInterStoreTransferIssue(
     receivedQuantity: transfer.receivedQuantity,
   });
 
-  await tx.inventoryLedgerEntry.create({
-    data: {
-      id: randomUUID(),
-      retailOrgId: transfer.retailOrgId,
-      storeId: transfer.sourceStoreId,
-      warehouseId: transfer.sourceInventoryLocation.warehouseId,
-      inventoryLocationId: transfer.sourceInventoryLocationId,
-      productId: transfer.productId,
-      movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
-      quantity: toQuantityString(payload.quantity * -1),
-      unitCost:
-        transfer.unitCost === null
-          ? (transfer.product.baseCostPrice?.toString() ?? null)
-          : toMoneyString(Number(transfer.unitCost)),
-      referenceType: "INTERSTORE_TRANSFER",
-      referenceId: transfer.id,
-      externalReference: transfer.transferNo,
-      sourceNodeCode: target.storeNode.code,
-      occurredAt,
-    },
-  });
+  if (postStockImmediately) {
+    await tx.inventoryLedgerEntry.create({
+      data: {
+        id: randomUUID(),
+        retailOrgId: transfer.retailOrgId,
+        storeId: transfer.sourceStoreId,
+        warehouseId: transfer.sourceInventoryLocation.warehouseId,
+        inventoryLocationId: transfer.sourceInventoryLocationId,
+        productId: transfer.productId,
+        movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
+        quantity: toQuantityString(payload.quantity * -1),
+        unitCost:
+          transfer.unitCost === null
+            ? (transfer.product.baseCostPrice?.toString() ?? null)
+            : toMoneyString(Number(transfer.unitCost)),
+        referenceType: "INTERSTORE_TRANSFER",
+        referenceId: transfer.id,
+        externalReference: transfer.transferNo,
+        sourceNodeCode: target.storeNode.code,
+        occurredAt,
+      },
+    });
+  }
 
-  if (transfer.product.isSerialized) {
+  if (postStockImmediately && transfer.product.isSerialized) {
     for (const serialNumber of serialNumbers) {
       await upsertEnterpriseSerialUnit(tx, {
         retailOrgId: transfer.retailOrgId,
@@ -10101,6 +10113,11 @@ async function projectStoreInterStoreTransferIssue(
         : {}),
       issueOperatorName: payload.operatorName,
       issueNote: payload.note,
+      issueStockUpdateStatus: postStockImmediately
+        ? STOCK_UPDATE_STATUS_POSTED
+        : STOCK_UPDATE_STATUS_PENDING,
+      issueStockConfirmedAt: postStockImmediately ? occurredAt : null,
+      issueStockConfirmedBy: postStockImmediately ? payload.operatorName : null,
       sourceNodeCode: target.storeNode.code,
       issuedAt: occurredAt,
     },
@@ -10324,6 +10341,11 @@ async function projectStoreInterStoreTransferReceipt(
   }
 
   const occurredAt = new Date(payload.occurredAt);
+  const postStockImmediately = await shouldPostStockImmediately(
+    tx,
+    transfer.retailOrgId,
+    transfer.destinationStoreId,
+  );
   const nextReceivedQuantity = Number(
     (Number(transfer.receivedQuantity) + payload.quantity).toFixed(3),
   );
@@ -10339,29 +10361,31 @@ async function projectStoreInterStoreTransferReceipt(
     receivedQuantity: nextReceivedQuantity,
   });
 
-  await tx.inventoryLedgerEntry.create({
-    data: {
-      id: randomUUID(),
-      retailOrgId: transfer.retailOrgId,
-      storeId: transfer.destinationStoreId,
-      warehouseId: transfer.destinationInventoryLocation.warehouseId,
-      inventoryLocationId: transfer.destinationInventoryLocationId,
-      productId: transfer.productId,
-      movementType: InventoryMovementType.STOCK_TRANSFER_IN,
-      quantity: toQuantityString(payload.quantity),
-      unitCost:
-        transfer.unitCost === null
-          ? (transfer.product.baseCostPrice?.toString() ?? null)
-          : toMoneyString(Number(transfer.unitCost)),
-      referenceType: "INTERSTORE_TRANSFER",
-      referenceId: transfer.id,
-      externalReference: transfer.transferNo,
-      sourceNodeCode: target.storeNode.code,
-      occurredAt,
-    },
-  });
+  if (postStockImmediately) {
+    await tx.inventoryLedgerEntry.create({
+      data: {
+        id: randomUUID(),
+        retailOrgId: transfer.retailOrgId,
+        storeId: transfer.destinationStoreId,
+        warehouseId: transfer.destinationInventoryLocation.warehouseId,
+        inventoryLocationId: transfer.destinationInventoryLocationId,
+        productId: transfer.productId,
+        movementType: InventoryMovementType.STOCK_TRANSFER_IN,
+        quantity: toQuantityString(payload.quantity),
+        unitCost:
+          transfer.unitCost === null
+            ? (transfer.product.baseCostPrice?.toString() ?? null)
+            : toMoneyString(Number(transfer.unitCost)),
+        referenceType: "INTERSTORE_TRANSFER",
+        referenceId: transfer.id,
+        externalReference: transfer.transferNo,
+        sourceNodeCode: target.storeNode.code,
+        occurredAt,
+      },
+    });
+  }
 
-  if (transfer.product.isSerialized) {
+  if (postStockImmediately && transfer.product.isSerialized) {
     for (const serialNumber of serialNumbers) {
       await upsertEnterpriseSerialUnit(tx, {
         retailOrgId: transfer.retailOrgId,
@@ -10392,6 +10416,11 @@ async function projectStoreInterStoreTransferReceipt(
         : {}),
       receiptOperatorName: payload.operatorName,
       receiptNote: payload.note,
+      receiptStockUpdateStatus: postStockImmediately
+        ? STOCK_UPDATE_STATUS_POSTED
+        : STOCK_UPDATE_STATUS_PENDING,
+      receiptStockConfirmedAt: postStockImmediately ? occurredAt : null,
+      receiptStockConfirmedBy: postStockImmediately ? payload.operatorName : null,
       destinationNodeCode: target.storeNode.code,
       receivedAt: occurredAt,
     },
@@ -10611,6 +10640,11 @@ async function projectStoreGoodsReceipt(
   );
   const occurredAt = new Date(payload.receivedAt);
   const postedAt = new Date();
+  const postStockImmediately = await shouldPostStockImmediately(
+    tx,
+    target.storeNode.retailOrgId,
+    target.storeNode.store.id,
+  );
   const receiptExternalReference =
     payload.externalReference ?? payload.goodsReceiptNo;
 
@@ -10840,6 +10874,11 @@ async function projectStoreGoodsReceipt(
       externalReference: receiptExternalReference,
       note: payload.note,
       operatorName: payload.operatorName,
+      stockUpdateStatus: postStockImmediately
+        ? STOCK_UPDATE_STATUS_POSTED
+        : STOCK_UPDATE_STATUS_PENDING,
+      stockConfirmedAt: postStockImmediately ? postedAt : null,
+      stockConfirmedBy: postStockImmediately ? payload.operatorName : null,
       receivedAt: occurredAt,
       postedAt,
       sourceNodeCode: target.storeNode.code,
@@ -10886,29 +10925,31 @@ async function projectStoreGoodsReceipt(
       },
     });
 
-    await tx.inventoryLedgerEntry.create({
-      data: {
-        id: ledgerEntryId,
-        retailOrgId: target.storeNode.retailOrgId,
-        storeId: target.storeNode.store.id,
-        warehouseId: inventoryLocation.warehouseId,
-        inventoryLocationId: inventoryLocation.id,
-        productId: product.id,
-        movementType: InventoryMovementType.GOODS_RECEIPT,
-        quantity: toQuantityString(line.quantity),
-        unitCost:
-          line.unitCost === null
-            ? (product.baseCostPrice?.toString() ?? null)
-            : toMoneyString(line.unitCost),
-        referenceType: "GOODS_RECEIPT",
-        referenceId: payload.goodsReceiptId,
-        externalReference: receiptExternalReference,
-        sourceNodeCode: target.storeNode.code,
-        occurredAt,
-      },
-    });
+    if (postStockImmediately) {
+      await tx.inventoryLedgerEntry.create({
+        data: {
+          id: ledgerEntryId,
+          retailOrgId: target.storeNode.retailOrgId,
+          storeId: target.storeNode.store.id,
+          warehouseId: inventoryLocation.warehouseId,
+          inventoryLocationId: inventoryLocation.id,
+          productId: product.id,
+          movementType: InventoryMovementType.GOODS_RECEIPT,
+          quantity: toQuantityString(line.quantity),
+          unitCost:
+            line.unitCost === null
+              ? (product.baseCostPrice?.toString() ?? null)
+              : toMoneyString(line.unitCost),
+          referenceType: "GOODS_RECEIPT",
+          referenceId: payload.goodsReceiptId,
+          externalReference: receiptExternalReference,
+          sourceNodeCode: target.storeNode.code,
+          occurredAt,
+        },
+      });
+    }
 
-    if (product.isSerialized) {
+    if (postStockImmediately && product.isSerialized) {
       await applyEnterpriseSerializedLedgerMovement(tx, {
         retailOrgId: target.storeNode.retailOrgId,
         storeId: target.storeNode.store.id,
@@ -16801,6 +16842,11 @@ export async function recordInventoryGoodsReceipt(
     const receiptNo = buildGoodsReceiptNo(location.code, now);
     const goodsReceiptId = randomUUID();
     const ledgerEntryId = randomUUID();
+    const postStockImmediately = await shouldPostStockImmediately(
+      tx,
+      location.retailOrgId,
+      location.storeId,
+    );
     const operatorName = input.operatorName?.trim() || "Flash ERP operator";
     const note =
       input.note?.trim() ||
@@ -16829,6 +16875,11 @@ export async function recordInventoryGoodsReceipt(
         externalReference,
         note,
         operatorName,
+        stockUpdateStatus: postStockImmediately
+          ? STOCK_UPDATE_STATUS_POSTED
+          : STOCK_UPDATE_STATUS_PENDING,
+        stockConfirmedAt: postStockImmediately ? now : null,
+        stockConfirmedBy: postStockImmediately ? operatorName : null,
         receivedAt: now,
         postedAt: now,
         sourceNodeCode: enterpriseNode.code,
@@ -16846,26 +16897,28 @@ export async function recordInventoryGoodsReceipt(
       },
     });
 
-    await tx.inventoryLedgerEntry.create({
-      data: {
-        id: ledgerEntryId,
-        retailOrgId: location.retailOrgId,
-        storeId: location.storeId,
-        warehouseId: location.warehouseId,
-        inventoryLocationId: location.id,
-        productId: product.id,
-        movementType: InventoryMovementType.GOODS_RECEIPT,
-        quantity: toQuantityString(receivedQuantity),
-        unitCost: unitCost === null ? null : toMoneyString(unitCost),
-        referenceType: "GOODS_RECEIPT",
-        referenceId: goodsReceiptId,
-        externalReference,
-        sourceNodeCode: enterpriseNode.code,
-        occurredAt: now,
-      },
-    });
+    if (postStockImmediately) {
+      await tx.inventoryLedgerEntry.create({
+        data: {
+          id: ledgerEntryId,
+          retailOrgId: location.retailOrgId,
+          storeId: location.storeId,
+          warehouseId: location.warehouseId,
+          inventoryLocationId: location.id,
+          productId: product.id,
+          movementType: InventoryMovementType.GOODS_RECEIPT,
+          quantity: toQuantityString(receivedQuantity),
+          unitCost: unitCost === null ? null : toMoneyString(unitCost),
+          referenceType: "GOODS_RECEIPT",
+          referenceId: goodsReceiptId,
+          externalReference,
+          sourceNodeCode: enterpriseNode.code,
+          occurredAt: now,
+        },
+      });
+    }
 
-    if (product.isSerialized) {
+    if (postStockImmediately && product.isSerialized) {
       await applyEnterpriseSerializedLedgerMovement(tx, {
         retailOrgId: location.retailOrgId,
         storeId: location.storeId,
@@ -16904,7 +16957,7 @@ export async function recordInventoryGoodsReceipt(
             },
           });
 
-    if (location.store && targetStoreNode?.terminal?.code) {
+    if (postStockImmediately && location.store && targetStoreNode?.terminal?.code) {
       await tx.syncOutboxEvent.create({
         data: {
           id: randomUUID(),
@@ -16944,7 +16997,9 @@ export async function recordInventoryGoodsReceipt(
       operatorName,
       note,
       message:
-        location.store && targetStoreNode?.terminal?.code
+        !postStockImmediately
+          ? `Flash ERP saved goods receipt ${receiptNo} for ${product.name} into ${location.name}; stock update is pending HQ confirmation.`
+          : location.store && targetStoreNode?.terminal?.code
           ? `Flash ERP posted goods receipt ${receiptNo} for ${product.name} into ${location.name} and queued the downstream receipt packet for ${targetStoreNode.code}.`
           : `Flash ERP posted goods receipt ${receiptNo} for ${product.name} into ${location.name}.`,
       serverProcessedAt: now.toISOString(),

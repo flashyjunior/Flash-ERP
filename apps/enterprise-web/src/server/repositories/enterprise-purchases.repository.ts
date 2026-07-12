@@ -23,6 +23,11 @@ import {
   createErpOperationalDocument,
   postErpOperationalDocument
 } from "@/server/repositories/erp-operational-documents.repository";
+import {
+  shouldPostStockImmediately,
+  STOCK_UPDATE_STATUS_PENDING,
+  STOCK_UPDATE_STATUS_POSTED
+} from "@/server/repositories/inventory-stock-policy.repository";
 import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
 import {
   InventoryMovementType,
@@ -382,6 +387,11 @@ export type EnterprisePurchasesWorkspaceData = {
     note: string | null;
     operatorName: string | null;
     sourceNodeCode: string | null;
+    stockUpdateStatus: string;
+    stockUpdateStatusLabel: string;
+    stockConfirmedAt: string | null;
+    stockConfirmedAtLabel: string;
+    stockConfirmedBy: string | null;
     totalQuantity: number;
     lineCount: number;
     receivedAt: string;
@@ -877,6 +887,11 @@ export async function createHqGoodsReceiptFromPurchaseOrder(
     const receiptNote =
       input.note?.trim() ||
       `HQ goods receipt for ${purchaseOrder.purchaseOrderNo} into ${purchaseOrder.inventoryLocation.name}.`;
+    const postStockImmediately = await shouldPostStockImmediately(
+      tx,
+      purchaseOrder.retailOrgId,
+      purchaseOrder.storeId
+    );
 
     await tx.goodsReceipt.create({
       data: {
@@ -891,6 +906,9 @@ export async function createHqGoodsReceiptFromPurchaseOrder(
         externalReference,
         note: receiptNote,
         operatorName,
+        stockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,
+        stockConfirmedAt: postStockImmediately ? now : null,
+        stockConfirmedBy: postStockImmediately ? operatorName : null,
         receivedAt,
         postedAt: now,
         sourceNodeCode: enterpriseNode.code
@@ -940,26 +958,29 @@ export async function createHqGoodsReceiptFromPurchaseOrder(
         }
       });
 
-      await tx.inventoryLedgerEntry.create({
-        data: {
-          id: ledgerEntryId,
-          retailOrgId: purchaseOrder.retailOrgId,
-          storeId: purchaseOrder.storeId,
-          warehouseId: purchaseOrder.warehouseId,
-          inventoryLocationId: purchaseOrder.inventoryLocationId,
-          productId: receiptLine.line.productId,
-          movementType: InventoryMovementType.GOODS_RECEIPT,
-          quantity: toQuantityString(quantity),
-          unitCost: unitCost === null ? null : toMoneyString(unitCost),
-          referenceType: "GOODS_RECEIPT",
-          referenceId: goodsReceiptId,
-          externalReference,
-          sourceNodeCode: enterpriseNode.code,
-          occurredAt: receivedAt
-        }
-      });
+      if (postStockImmediately) {
+        await tx.inventoryLedgerEntry.create({
+          data: {
+            id: ledgerEntryId,
+            retailOrgId: purchaseOrder.retailOrgId,
+            storeId: purchaseOrder.storeId,
+            warehouseId: purchaseOrder.warehouseId,
+            inventoryLocationId: purchaseOrder.inventoryLocationId,
+            productId: receiptLine.line.productId,
+            movementType: InventoryMovementType.GOODS_RECEIPT,
+            quantity: toQuantityString(quantity),
+            unitCost: unitCost === null ? null : toMoneyString(unitCost),
+            referenceType: "GOODS_RECEIPT",
+            referenceId: goodsReceiptId,
+            externalReference,
+            sourceNodeCode: enterpriseNode.code,
+            occurredAt: receivedAt
+          }
+        });
+      }
 
       if (
+        postStockImmediately &&
         purchaseOrder.inventoryLocation.store &&
         targetStoreNode?.terminal?.code
       ) {
@@ -1028,7 +1049,7 @@ export async function createHqGoodsReceiptFromPurchaseOrder(
     let mirroredFuelDeliveryNo: string | null = null;
     const skippedFuelMirrorProducts: string[] = [];
 
-    if (primaryCompany) {
+    if (primaryCompany && postStockImmediately) {
       const fuelLineCandidates = [];
 
       for (const receiptLine of receiptLines) {
@@ -1245,7 +1266,9 @@ export async function createHqGoodsReceiptFromPurchaseOrder(
       receivedQuantity,
       mirroredFuelDeliveryNo,
       message: [
-        mirroredFuelDeliveryNo
+        !postStockImmediately
+          ? `Flash ERP saved HQ GRN ${receiptNo} into ${purchaseOrder.inventoryLocation.name}; stock update is pending HQ confirmation.`
+          : mirroredFuelDeliveryNo
           ? `Flash ERP posted HQ GRN ${receiptNo} into ${purchaseOrder.inventoryLocation.name} and mirrored fuel receipt ${mirroredFuelDeliveryNo}.`
           : `Flash ERP posted HQ GRN ${receiptNo} into ${purchaseOrder.inventoryLocation.name}.`,
         skippedFuelMirrorProducts.length > 0
@@ -1436,6 +1459,9 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
         note: true,
         operatorName: true,
         sourceNodeCode: true,
+        stockUpdateStatus: true,
+        stockConfirmedAt: true,
+        stockConfirmedBy: true,
         receivedAt: true,
         postedAt: true,
         purchaseOrder: {
@@ -1656,6 +1682,11 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
       note: receipt.note,
       operatorName: receipt.operatorName,
       sourceNodeCode: receipt.sourceNodeCode,
+      stockUpdateStatus: receipt.stockUpdateStatus,
+      stockUpdateStatusLabel: formatEnumLabel(receipt.stockUpdateStatus),
+      stockConfirmedAt: toIsoString(receipt.stockConfirmedAt),
+      stockConfirmedAtLabel: formatRelativeTime(receipt.stockConfirmedAt),
+      stockConfirmedBy: receipt.stockConfirmedBy,
       totalQuantity: Number(lines.reduce((sum, line) => sum + line.quantity, 0).toFixed(3)),
       lineCount: lines.length,
       receivedAt: receipt.receivedAt.toISOString(),

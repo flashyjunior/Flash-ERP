@@ -35,6 +35,14 @@ type InventoryRow = EnterpriseStoreDetailData["recentInventoryRows"][number];
 type LocationRow = EnterpriseStoreDetailData["locationRows"][number];
 type StoreOperatingMode = "HYBRID" | "SALES_ONLY" | "WAREHOUSE_ONLY";
 type StoreExecutionMode = "OFFLINE_FIRST" | "ONLINE_DIRECT";
+type StockUpdateMode = "" | "AUTO" | "HQ_CONFIRM";
+
+const stockUpdateModeOptions: Array<{ value: StockUpdateMode; label: string }> = [
+  { value: "", label: "Use company default" },
+  { value: "AUTO", label: "Auto update stock" },
+  { value: "HQ_CONFIRM", label: "Hold for HQ confirmation" },
+];
+
 const legacyReceiptTemplateSelectionValue = "__LEGACY__";
 const warehouseNameOptions = [
   "Main Warehouse",
@@ -253,6 +261,11 @@ export function EnterpriseStoreDetail({
   );
   const [storeGroupType, setStoreGroupType] = useState(
     detail.store.storeGroupType ?? "REGION",
+  );
+  const [stockUpdateMode, setStockUpdateMode] = useState<StockUpdateMode>(
+    detail.store.stockUpdateMode === "AUTO" || detail.store.stockUpdateMode === "HQ_CONFIRM"
+      ? detail.store.stockUpdateMode
+      : "",
   );
   const [touchModeEnabled, setTouchModeEnabled] = useState(
     detail.store.touchModeEnabled,
@@ -900,6 +913,7 @@ export function EnterpriseStoreDetail({
             storeGroupCode: (storeGroupName || region).trim(),
             storeGroupName,
             storeGroupType,
+            stockUpdateMode: stockUpdateMode || null,
             touchModeEnabled,
             countryCode,
             postalCode,
@@ -1000,6 +1014,12 @@ export function EnterpriseStoreDetail({
                 setRegion(detail.store.region ?? "");
                 setStoreGroupName(detail.store.storeGroupName ?? "");
                 setStoreGroupType(detail.store.storeGroupType ?? "REGION");
+                setStockUpdateMode(
+                  detail.store.stockUpdateMode === "AUTO" ||
+                    detail.store.stockUpdateMode === "HQ_CONFIRM"
+                    ? detail.store.stockUpdateMode
+                    : "",
+                );
                 setTouchModeEnabled(detail.store.touchModeEnabled);
                 setCountryCode(detail.store.countryCode ?? "GH");
                 setPostalCode(detail.store.postalCode ?? "");
@@ -1181,6 +1201,24 @@ export function EnterpriseStoreDetail({
                         <option value="AREA">Area</option>
                         <option value="CITY">City</option>
                         <option value="FRANCHISE">Franchise</option>
+                      </select>
+                    </label>
+                    <label className="space-y-2 text-sm text-stone-700">
+                      <span className="block font-semibold text-stone-900">
+                        Stock update control
+                      </span>
+                      <select
+                        className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
+                        onChange={(event) =>
+                          setStockUpdateMode(event.target.value as StockUpdateMode)
+                        }
+                        value={stockUpdateMode}
+                      >
+                        {stockUpdateModeOptions.map((option) => (
+                          <option key={option.value || "company-default"} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                     </label>
                     <label className="flex items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700 md:col-span-2">

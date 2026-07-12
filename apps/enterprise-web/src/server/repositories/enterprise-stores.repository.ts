@@ -7,6 +7,11 @@ import {
   ensureEnterpriseStarterReceiptTemplate,
   resolveStoreReceiptTemplateSelection,
 } from "@/server/repositories/receipt-template-support";
+import {
+  STOCK_UPDATE_MODE_AUTO,
+  STOCK_UPDATE_MODE_HQ_CONFIRM,
+  formatStockUpdateMode
+} from "@/server/repositories/inventory-stock-policy.repository";
 import { ensureInventoryLocationSalesOrderSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 import {
   LocationType,
@@ -124,6 +129,16 @@ function normalizeStoreMode(value: string | null | undefined) {
   }
 
   throw new Error("Flash ERP only supports OFFLINE_FIRST or ONLINE_DIRECT store modes.");
+}
+
+function normalizeStoreStockUpdateMode(value: string | null | undefined) {
+  const normalized = value?.trim().toUpperCase().replace(/[\s-]+/g, "_") ?? "";
+
+  if (normalized === STOCK_UPDATE_MODE_AUTO || normalized === STOCK_UPDATE_MODE_HQ_CONFIRM) {
+    return normalized;
+  }
+
+  return null;
 }
 
 function formatStoreMode(value: string | null | undefined) {
@@ -791,6 +806,8 @@ export type EnterpriseStoresWorkspaceData = {
     storeGroupName: string | null;
     storeGroupType: string | null;
     storeGroupLabel: string;
+    stockUpdateMode: string | null;
+    stockUpdateModeLabel: string;
     licenseStatus: string;
     licenseKey: string | null;
     licensedUntil: string | null;
@@ -852,6 +869,7 @@ export type ProvisionEnterpriseStoreRequest = {
   storeGroupCode?: string | null;
   storeGroupName?: string | null;
   storeGroupType?: string | null;
+  stockUpdateMode?: string | null;
   licenseStatus?: string | null;
   licenseKey?: string | null;
   licensedUntil?: string | null;
@@ -899,6 +917,7 @@ export type CreateEnterpriseStoreRequest = {
   storeGroupCode?: string | null;
   storeGroupName?: string | null;
   storeGroupType?: string | null;
+  stockUpdateMode?: string | null;
   licenseStatus?: string | null;
   licenseKey?: string | null;
   licensedUntil?: string | null;
@@ -965,6 +984,7 @@ export type UpdateEnterpriseStoreRequest = {
   storeGroupCode?: string | null;
   storeGroupName?: string | null;
   storeGroupType?: string | null;
+  stockUpdateMode?: string | null;
   licenseStatus?: string | null;
   licenseKey?: string | null;
   licensedUntil?: string | null;
@@ -1071,6 +1091,7 @@ export async function getEnterpriseStoresWorkspace(): Promise<EnterpriseStoresWo
         storeGroupCode: true,
         storeGroupName: true,
         storeGroupType: true,
+        stockUpdateMode: true,
         licenseStatus: true,
         licenseKey: true,
         licensedUntil: true,
@@ -1275,6 +1296,10 @@ export async function getEnterpriseStoresWorkspace(): Promise<EnterpriseStoresWo
           store.storeGroupCode ??
           store.region ??
           "Ungrouped",
+        stockUpdateMode: store.stockUpdateMode,
+        stockUpdateModeLabel: store.stockUpdateMode
+          ? formatStockUpdateMode(store.stockUpdateMode)
+          : "Use company default",
         licenseStatus: store.licenseStatus,
         licenseKey: store.licenseKey,
         licensedUntil: toIsoString(store.licensedUntil),
@@ -1437,6 +1462,7 @@ export async function createEnterpriseStore(
   const storeGroupType = normalizeOptionalText(
     input.storeGroupType ?? "REGION",
   );
+  const stockUpdateMode = normalizeStoreStockUpdateMode(input.stockUpdateMode);
   const licenseStatus = normalizeLicenseStatus(
     input.licenseStatus ?? "UNLICENSED",
   );
@@ -1531,6 +1557,7 @@ export async function createEnterpriseStore(
           storeGroupCode,
           storeGroupName,
           storeGroupType,
+          stockUpdateMode,
           licenseStatus,
           licenseKey,
           licensedUntil,
@@ -1609,6 +1636,7 @@ export async function provisionEnterpriseStore(
   const storeGroupType = normalizeOptionalText(
     input.storeGroupType ?? "REGION",
   );
+  const stockUpdateMode = normalizeStoreStockUpdateMode(input.stockUpdateMode);
   const licenseStatus = normalizeLicenseStatus(
     input.licenseStatus ?? "UNLICENSED",
   );
@@ -1742,6 +1770,7 @@ export async function provisionEnterpriseStore(
           storeGroupCode,
           storeGroupName,
           storeGroupType,
+          stockUpdateMode,
           licenseStatus,
           licenseKey,
           licensedUntil,
@@ -2249,6 +2278,7 @@ export async function updateEnterpriseStore(
   const storeGroupType = normalizeOptionalText(
     input.storeGroupType ?? "REGION",
   );
+  const stockUpdateMode = normalizeStoreStockUpdateMode(input.stockUpdateMode);
   const licenseStatus =
     input.licenseStatus === undefined
       ? undefined
@@ -2364,6 +2394,7 @@ export async function updateEnterpriseStore(
           storeGroupCode,
           storeGroupName,
           storeGroupType,
+          stockUpdateMode,
           ...(licenseStatus === undefined ? {} : { licenseStatus }),
           ...(licenseKey === undefined ? {} : { licenseKey }),
           ...(licensedUntil === undefined ? {} : { licensedUntil }),
@@ -2971,6 +3002,8 @@ export type EnterpriseStoreDetailData = {
     storeGroupCode: string | null;
     storeGroupName: string | null;
     storeGroupType: string | null;
+    stockUpdateMode: string | null;
+    stockUpdateModeLabel: string;
     licenseStatus: string;
     licenseKey: string | null;
     licensedUntil: string | null;
@@ -3144,6 +3177,7 @@ export async function getEnterpriseStoreDetail(
       storeGroupCode: true,
       storeGroupName: true,
       storeGroupType: true,
+      stockUpdateMode: true,
       licenseStatus: true,
       licenseKey: true,
       licensedUntil: true,
@@ -3404,6 +3438,10 @@ export async function getEnterpriseStoreDetail(
       storeGroupCode: store.storeGroupCode,
       storeGroupName: store.storeGroupName,
       storeGroupType: store.storeGroupType,
+      stockUpdateMode: store.stockUpdateMode,
+      stockUpdateModeLabel: store.stockUpdateMode
+        ? formatStockUpdateMode(store.stockUpdateMode)
+        : "Use company default",
       licenseStatus: store.licenseStatus,
       licenseKey: store.licenseKey,
       licensedUntil: toIsoString(store.licensedUntil),

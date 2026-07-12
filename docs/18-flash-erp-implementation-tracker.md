@@ -1,6 +1,6 @@
 # Flash ERP Implementation Tracker
 
-Updated: 2026-07-11
+Updated: 2026-07-12
 
 This is the live progress ledger for the Flash ERP workspace. Keep it aligned with code as slices land. The tracker is intentionally industry-neutral: product, site, storage, customer, supplier, and document-posting foundations can later support oil, retail, services, distribution, manufacturing, or other operating models.
 
@@ -65,12 +65,40 @@ This is the live progress ledger for the Flash ERP workspace. Keep it aligned wi
 - HQ committed transfer requests can be rerouted to a new destination until destination feedback is confirmed/posted; source-side transfer quantities remain locked after commit. Online-store and desktop transfer windows now distinguish Transfer In from Transfer Out, use role-aware issue/receive labels, and show role-relevant outstanding quantities.
 - Destination fuel transfer feedback now locks expected/actual received quantities to the receipt quantity, captures a separate dip reading, and requires before-discharge plus after-discharge photo evidence with protected timestamped uploads. Mobile capture uses the device camera path while desktop keeps file selection.
 - Online-store and desktop supervisors can capture store expenses as drafts with optional receipts, confirm them for HQ, and sync them to Finance. HQ Finance assigns expense and payment/clearing GL accounts before posting through the shared accounting engine.
+- Company Settings now controls whether stock-impacting non-POS operations post stock immediately or remain pending HQ confirmation, with store-level overrides. HQ Goods Receipt and Inter-Store Transfer pages expose pending stock status and explicit stock-post actions, while POS sales remain immediate.
+- HQ transfer feedback review now shows the full store-captured feedback payload: water test, before/after quantities, expected received/stock, actual received, variance, dip reading, notes, operator/timestamps, and before/after evidence links.
 - Local product and transaction data was reset on 2026-06-22 after Fuel Sale defaults were implemented: transactional POS, inventory, purchasing, fuel, finance posting, cashbook, bank reconciliation, tax, payroll-posting, fixed-asset transaction, sync-event, and product-dependent rows were cleared; the clean RMS fuel catalog now contains `AGO`, `KERO`, `LPG`, and `PMS` with matching ERP product-profile mirrors, seeded filling stations, and seeded zero-quantity tanks.
 - Repair/service maintenance tracking is intentionally deferred to a later dedicated Maintenance module instead of being mixed into fixed assets.
 - Chart of accounts reset on 2026-06-20 to the requested 61-account general business COA. Local GL journal artifacts were cleared so the new accounts have clean ledger history.
 - The inherited RMS-era model names remain where they still own existing data/workflows. Rename them gradually as ERP ownership and migrations are designed.
 
 ## Maintenance Notes
+
+### 2026-07-12 Stock Update Confirmation Policy
+
+Status: Done
+
+Implemented:
+
+- Added company-level and store-level stock update policy fields for `AUTO` versus `HQ_CONFIRM`.
+- Added Settings > Company stock-control setup and store create/edit overrides, with store override falling back to company default when blank.
+- Changed HQ GRN, online-store GRN, synced store GRN, online-store transfer issue/receipt, and synced store transfer issue/receipt projections so non-POS stock ledger updates can remain pending for HQ confirmation.
+- Added stock confirmation APIs for Goods Receipts and Inter-Store Transfers.
+- Added stock status and `Post stock` actions to HQ Goods Receipt history/detail and issue/receipt stock status plus post actions to HQ Transfer feedback review.
+- Hardened the online-store transfer read model with a defensive store-scope filter before rendering transfer-in/out records.
+- Expanded HQ Transfer feedback review to show all store-captured feedback values, notes, timestamps, and before/after evidence.
+
+Verified:
+
+- `npm run prisma:format`
+- `npm run prisma:validate`
+- `npm run prisma:generate`
+- `npx prisma db push --schema prisma/schema.prisma`
+- `npm --workspace @flash-erp/sync-core run typecheck`
+- `npm --workspace @flash-erp/store-desktop run typecheck`
+- `npm --workspace @flash-erp/enterprise-web run typecheck`
+- `npm --workspace @flash-erp/enterprise-web run build`
+- Production build route list includes `/api/purchases/goods-receipts/[goodsReceiptId]/stock-confirm`, `/api/inventory/inter-store-transfers/[transferBatchNo]/stock-confirm`, `/settings/[view]`, `/stores`, `/stores/[storeCode]`, `/purchases/goods-receipt`, `/inventory/transfers`, `/inventory/in-transit`, and `/online-store`.
 
 ### 2026-07-11 Transfer Reroute, Feedback Evidence, and Store Expense Handoff
 

@@ -32,7 +32,15 @@ type IntegrationValidationResponse = {
   }>;
 };
 
-type CompanySettingsTab = "details" | "numbering" | "sizes" | "discounts" | "sales-orders" | "options" | "sms";
+type CompanySettingsTab =
+  | "details"
+  | "numbering"
+  | "stock"
+  | "sizes"
+  | "discounts"
+  | "sales-orders"
+  | "options"
+  | "sms";
 
 function MetricCard({
   label,
@@ -346,6 +354,7 @@ const documentNumberFormatFields = [
 const companySettingsTabs: Array<{ key: CompanySettingsTab; label: string }> = [
   { key: "details", label: "Company details" },
   { key: "numbering", label: "Document numbering" },
+  { key: "stock", label: "Stock control" },
   { key: "sizes", label: "Product sizes" },
   { key: "discounts", label: "POS discounts" },
   { key: "sales-orders", label: "Sales orders" },
@@ -362,6 +371,16 @@ const saleSmsTemplatePlaceholders = [
 const fuelReceiptPaperOptions = [
   { label: "Thermal slip", value: "THERMAL" },
   { label: "A4 receipt", value: "A4" }
+];
+const stockUpdateModeOptions = [
+  {
+    label: "Auto update stock after receipt/transfer",
+    value: "AUTO"
+  },
+  {
+    label: "Hold receipt/transfer stock for HQ confirmation",
+    value: "HQ_CONFIRM"
+  }
 ];
 
 export function EnterpriseSettingsWorkspace({
@@ -476,8 +495,8 @@ export function EnterpriseSettingsWorkspace({
           },
           {
             icon: ShieldCheck,
-            label: "Timezone",
-            value: workspace.companyProfile.timezone
+            label: "Stock control",
+            value: workspace.companyProfile.stockUpdateMode === "HQ_CONFIRM" ? "HQ confirm" : "Auto"
           }
         ];
       case "ldap":
@@ -828,6 +847,42 @@ export function EnterpriseSettingsWorkspace({
                       value={companyDraft.loginBackgroundImageUrl}
                     />
                   </aside>
+                </div>
+              </SettingsFormCard>
+            ) : null}
+
+            {companyTab === "stock" ? (
+              <SettingsFormCard
+                actionLabel="Save stock control"
+                actionToneClassName="bg-[linear-gradient(135deg,var(--brand),var(--brand-deep))]"
+                mutationState={companyState}
+                onSave={() =>
+                  void saveSection(
+                    "/api/settings/company-profile",
+                    companyDraft,
+                    setCompanyState,
+                    () => router.refresh(),
+                    "Flash ERP could not update the stock-control setting."
+                  )
+                }
+                title="Stock control"
+              >
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                  <SelectField
+                    label="Receipt and transfer stock updates"
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        stockUpdateMode: value
+                      }))
+                    }
+                    options={stockUpdateModeOptions}
+                    value={companyDraft.stockUpdateMode ?? "AUTO"}
+                  />
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">
+                    POS sales keep updating stock immediately. This setting controls purchase
+                    receipts, transfer issues, and transfer receipts unless a store overrides it.
+                  </div>
                 </div>
               </SettingsFormCard>
             ) : null}

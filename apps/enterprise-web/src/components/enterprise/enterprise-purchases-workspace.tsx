@@ -769,6 +769,58 @@ export function EnterprisePurchasesWorkspace({
     }
   }
 
+  async function confirmGoodsReceiptStock(row: GoodsReceiptRow) {
+    setSubmitting(true);
+    setStatus(emptyStatus());
+
+    try {
+      const response = await fetch(
+        `/api/purchases/goods-receipts/${encodeURIComponent(row.goodsReceiptId)}/stock-confirm`,
+        {
+          method: "POST",
+        },
+      );
+      const payload = (await response.json()) as {
+        stockUpdateStatus?: string;
+        stockConfirmedAt?: string | null;
+        stockConfirmedBy?: string | null;
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not post the goods-receipt stock update.");
+      }
+
+      setSelectedGoodsReceipt((current) =>
+        current?.goodsReceiptId === row.goodsReceiptId
+          ? {
+              ...current,
+              stockUpdateStatus: payload.stockUpdateStatus ?? "POSTED",
+              stockUpdateStatusLabel: "Posted",
+              stockConfirmedAt: payload.stockConfirmedAt ?? new Date().toISOString(),
+              stockConfirmedAtLabel: "Just now",
+              stockConfirmedBy: payload.stockConfirmedBy ?? current.stockConfirmedBy,
+            }
+          : current,
+      );
+      setStatus({
+        tone: "success",
+        message: payload.message ?? `${row.goodsReceiptNo} stock is now posted to inventory.`,
+      });
+      router.refresh();
+    } catch (error) {
+      setStatus({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not post the goods-receipt stock update.",
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   function requestGenerateSupplierInvoice(row: GoodsReceiptRow) {
     if (!row.supplierNo) {
       setStatus({
@@ -1150,6 +1202,29 @@ export function EnterprisePurchasesWorkspace({
         cell: ({ row }) => numberFormatter.format(row.original.lineCount)
       },
       {
+        accessorKey: "stockUpdateStatusLabel",
+        header: "Stock",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <span
+              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                row.original.stockUpdateStatus === "PENDING"
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-emerald-100 text-emerald-800"
+              }`}
+            >
+              {row.original.stockUpdateStatusLabel}
+            </span>
+            <p className="mt-1 truncate text-xs text-stone-500">
+              {row.original.stockConfirmedAt
+                ? `${row.original.stockConfirmedAtLabel} by ${row.original.stockConfirmedBy ?? "HQ"}`
+                : "Waiting for HQ"}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
         accessorKey: "postedAtLabel",
         header: "Posted",
         cell: ({ row }) => renderTimestamp(row.original.postedAt, row.original.postedAtLabel),
@@ -1188,6 +1263,20 @@ export function EnterprisePurchasesWorkspace({
             >
               Print
             </button>
+            {row.original.stockUpdateStatus === "PENDING" ? (
+              <button
+                className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 disabled:opacity-60"
+                disabled={submitting}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void confirmGoodsReceiptStock(row.original);
+                }}
+                type="button"
+              >
+                Post stock
+              </button>
+            ) : null}
             <button
               className="rounded-lg bg-[var(--brand)] px-3 py-1.5 text-xs font-semibold text-white disabled:bg-stone-300"
               disabled={submitting || row.original.apInvoiceStatus === "POSTED" || !row.original.supplierNo}
@@ -2213,6 +2302,18 @@ export function EnterprisePurchasesWorkspace({
               />
               <MetricCard
                 hint={
+                  selectedGoodsReceipt.stockConfirmedAt
+                    ? `${selectedGoodsReceipt.stockConfirmedAtLabel} by ${
+                        selectedGoodsReceipt.stockConfirmedBy ?? "HQ"
+                      }`
+                    : "Waiting for HQ inventory confirmation."
+                }
+                icon={PackageCheck}
+                label="Stock"
+                value={selectedGoodsReceipt.stockUpdateStatusLabel}
+              />
+              <MetricCard
+                hint={
                   selectedGoodsReceipt.apInvoiceNo
                     ? `Journal ${selectedGoodsReceipt.apJournalNo ?? "pending"}`
                     : "Generate AP invoice for supplier payment."
@@ -2255,6 +2356,17 @@ export function EnterprisePurchasesWorkspace({
                 <FileText className="h-4 w-4" />
                 {selectedGoodsReceipt.apInvoiceStatus === "POSTED" ? "AP posted" : "Generate AP invoice"}
               </button>
+              {selectedGoodsReceipt.stockUpdateStatus === "PENDING" ? (
+                <button
+                  className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 disabled:opacity-60"
+                  disabled={submitting}
+                  onClick={() => void confirmGoodsReceiptStock(selectedGoodsReceipt)}
+                  type="button"
+                >
+                  <PackageCheck className="h-4 w-4" />
+                  Post stock
+                </button>
+              ) : null}
               <button
                 className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-semibold text-stone-700"
                 onClick={() => printGoodsReceipt(selectedGoodsReceipt)}

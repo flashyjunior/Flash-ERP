@@ -5,6 +5,11 @@ import { readJsonObject, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
 import {
+  STOCK_UPDATE_MODE_AUTO,
+  STOCK_UPDATE_MODE_HQ_CONFIRM,
+  formatStockUpdateMode
+} from "@/server/repositories/inventory-stock-policy.repository";
+import {
   RecordStatus,
   SecurityLogKind,
   SecurityLogSeverity,
@@ -371,6 +376,7 @@ function readCompanyProfileSettings(
     name: string;
     baseCurrencyCode: string;
     timezone: string;
+    stockUpdateMode?: string | null;
   }
 ) {
   const payload = readObject(value);
@@ -396,6 +402,11 @@ function readCompanyProfileSettings(
     countryCode: readString(payload, "countryCode"),
     postalCode: readString(payload, "postalCode"),
     baseCurrencyCode: retailOrg.baseCurrencyCode || readString(payload, "baseCurrencyCode", "USD"),
+    stockUpdateMode:
+      retailOrg.stockUpdateMode === STOCK_UPDATE_MODE_HQ_CONFIRM
+        ? STOCK_UPDATE_MODE_HQ_CONFIRM
+        : STOCK_UPDATE_MODE_AUTO,
+    stockUpdateModeLabel: formatStockUpdateMode(retailOrg.stockUpdateMode),
     timezone: readString(payload, "timezone", retailOrg.timezone)
   };
 }
@@ -748,6 +759,7 @@ async function getEnterpriseSettingsContext(): Promise<
         name: string;
         baseCurrencyCode: string;
         timezone: string;
+        stockUpdateMode: string;
         companySettingsJson: Prisma.JsonValue | null;
         ldapSettingsJson: Prisma.JsonValue | null;
         smtpSettingsJson: Prisma.JsonValue | null;
@@ -775,6 +787,7 @@ async function getEnterpriseSettingsContext(): Promise<
           name: true,
           baseCurrencyCode: true,
           timezone: true,
+          stockUpdateMode: true,
           companySettingsJson: true,
           ldapSettingsJson: true,
           smtpSettingsJson: true,
@@ -817,6 +830,7 @@ async function getWritableRetailOrgSettings(tx: Prisma.TransactionClient, retail
       name: true,
       baseCurrencyCode: true,
       timezone: true,
+      stockUpdateMode: true,
       companySettingsJson: true,
       ldapSettingsJson: true,
       smtpSettingsJson: true,
@@ -922,6 +936,8 @@ export function buildUnavailableEnterpriseSettingsWorkspace(
       countryCode: "",
       postalCode: "",
       baseCurrencyCode: "USD",
+      stockUpdateMode: STOCK_UPDATE_MODE_AUTO,
+      stockUpdateModeLabel: formatStockUpdateMode(STOCK_UPDATE_MODE_AUTO),
       timezone: "UTC"
     },
     ldapSettings: defaultLdapSettings,
@@ -1067,6 +1083,7 @@ export async function getEnterpriseSettingsWorkspace(): Promise<EnterpriseSettin
 
 export type UpdateEnterpriseCompanyProfileRequest = CompanyProfileSettings & {
   baseCurrencyCode: string;
+  stockUpdateMode?: string | null;
   timezone: string;
 };
 
@@ -1134,6 +1151,10 @@ export async function updateEnterpriseCompanyProfile(
         input.timezone ?? previousJson.timezone,
         "timezone"
       );
+      const stockUpdateMode =
+        input.stockUpdateMode === STOCK_UPDATE_MODE_HQ_CONFIRM
+          ? STOCK_UPDATE_MODE_HQ_CONFIRM
+          : STOCK_UPDATE_MODE_AUTO;
       const salesOrderFulfilmentStoreId =
         normalizeOptionalText(
           input.salesOrderFulfilmentStoreId ?? previousJson.salesOrderFulfilmentStoreId
@@ -1183,6 +1204,7 @@ export async function updateEnterpriseCompanyProfile(
         countryCode: normalizeOptionalText(input.countryCode ?? previousJson.countryCode) ?? "",
         postalCode: normalizeOptionalText(input.postalCode ?? previousJson.postalCode) ?? "",
         baseCurrencyCode,
+        stockUpdateMode,
         timezone
       };
 
@@ -1194,6 +1216,7 @@ export async function updateEnterpriseCompanyProfile(
           name: legalName,
           baseCurrencyCode,
           timezone,
+          stockUpdateMode,
           companySettingsJson: serializeJsonField(updatedJson)
         }
       });
@@ -1251,6 +1274,7 @@ export async function updateEnterpriseCompanyProfile(
         details: buildUpdateAuditDetails(previousJson, updatedJson, {
           tradingName,
           baseCurrencyCode,
+          stockUpdateMode,
           timezone
         })
       });

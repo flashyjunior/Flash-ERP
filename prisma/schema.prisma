@@ -13,6 +13,7 @@ model RetailOrg {
   name                              String
   baseCurrencyCode                  String
   timezone                          String
+  stockUpdateMode                   String                             @default("AUTO")
   companySettingsJson               String?                            @db.NVarChar(Max)
   ldapSettingsJson                  String?                            @db.NVarChar(Max)
   smtpSettingsJson                  String?                            @db.NVarChar(Max)
@@ -289,6 +290,7 @@ model Store {
   storeGroupCode                    String?
   storeGroupName                    String?
   storeGroupType                    String?
+  stockUpdateMode                   String?
   countryCode                       String?
   postalCode                        String?
   taxRegistrationNo                 String?
@@ -4299,6 +4301,12 @@ model InterStoreTransfer {
   driverContact                  String?
   deliveryNoteNo                 String?
   feedbackStatus                 String            @default("PENDING")
+  issueStockUpdateStatus         String            @default("POSTED")
+  issueStockConfirmedAt          DateTime?
+  issueStockConfirmedBy          String?
+  receiptStockUpdateStatus       String            @default("POSTED")
+  receiptStockConfirmedAt        DateTime?
+  receiptStockConfirmedBy        String?
   valuationStatus                String            @default("PENDING")
   issueJournalEntryId            String?
   receiptJournalEntryId          String?
@@ -4373,6 +4381,9 @@ model GoodsReceipt {
   externalReference   String?
   note                String?
   operatorName        String?
+  stockUpdateStatus   String             @default("POSTED")
+  stockConfirmedAt    DateTime?
+  stockConfirmedBy    String?
   receivedAt          DateTime
   postedAt            DateTime           @default(now())
   sourceNodeCode      String?

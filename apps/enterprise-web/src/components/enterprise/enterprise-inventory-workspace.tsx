@@ -1,7 +1,7 @@
 "use client";
 
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
-import { Activity, Boxes, Package, Plus, Store } from "lucide-react";
+import { Activity, Boxes, Package, PackageCheck, Plus, Store } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -710,6 +710,8 @@ export function EnterpriseInventoryWorkspace({
       const sortedRows = [...rows].sort((left, right) => left.lineNo - right.lineNo);
       const firstRow = sortedRows[0]!;
       const statuses = new Set(sortedRows.map((row) => row.status));
+      const issuePending = sortedRows.some((row) => row.issueStockUpdateStatus === "PENDING");
+      const receiptPending = sortedRows.some((row) => row.receiptStockUpdateStatus === "PENDING");
       const latestRequestedRow = sortedRows.reduce((latest, row) =>
         new Date(row.requestedAt).getTime() > new Date(latest.requestedAt).getTime() ? row : latest
       );
@@ -732,6 +734,16 @@ export function EnterpriseInventoryWorkspace({
         lineNo: 1,
         status: statuses.size === 1 ? firstRow.status : "MIXED",
         statusLabel: statuses.size === 1 ? firstRow.statusLabel : "Mixed",
+        issueStockUpdateStatus: issuePending ? "PENDING" : firstRow.issueStockUpdateStatus,
+        issueStockUpdateStatusLabel: issuePending ? "Pending" : firstRow.issueStockUpdateStatusLabel,
+        issueStockConfirmedAt: issuePending ? null : firstRow.issueStockConfirmedAt,
+        issueStockConfirmedAtLabel: issuePending ? "Not yet" : firstRow.issueStockConfirmedAtLabel,
+        issueStockConfirmedBy: issuePending ? null : firstRow.issueStockConfirmedBy,
+        receiptStockUpdateStatus: receiptPending ? "PENDING" : firstRow.receiptStockUpdateStatus,
+        receiptStockUpdateStatusLabel: receiptPending ? "Pending" : firstRow.receiptStockUpdateStatusLabel,
+        receiptStockConfirmedAt: receiptPending ? null : firstRow.receiptStockConfirmedAt,
+        receiptStockConfirmedAtLabel: receiptPending ? "Not yet" : firstRow.receiptStockConfirmedAtLabel,
+        receiptStockConfirmedBy: receiptPending ? null : firstRow.receiptStockConfirmedBy,
         productCode: `${sortedRows.length} line${sortedRows.length === 1 ? "" : "s"}`,
         productName: summarizeTransferLines(sortedRows),
         requestedQuantity: Number(
@@ -758,6 +770,8 @@ export function EnterpriseInventoryWorkspace({
   const transferDetailBaseHref =
     dedicatedView && defaultView === "in-transit" ? "/inventory/in-transit" : "/inventory/transfers";
   const editingTransferFeedback = editingTransferRows[0] ?? null;
+  const hasPendingIssueStock = editingTransferRows.some((row) => row.issueStockUpdateStatus === "PENDING");
+  const hasPendingReceiptStock = editingTransferRows.some((row) => row.receiptStockUpdateStatus === "PENDING");
 
   function resetTransferDraft() {
     setEditingTransferBatchNo(null);
@@ -1156,6 +1170,57 @@ export function EnterpriseInventoryWorkspace({
     }
   }
 
+  async function confirmTransferStock(direction: "ISSUE" | "RECEIPT") {
+    const transferBatchNo = editingTransferBatchNo;
+
+    if (!transferBatchNo) {
+      return;
+    }
+
+    setTransferSubmitting(true);
+    setTransferStatus({ tone: "idle", message: "" });
+
+    try {
+      const response = await fetch(
+        `/api/inventory/inter-store-transfers/${encodeURIComponent(transferBatchNo)}/stock-confirm`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ direction }),
+        },
+      );
+      const payload = (await response.json()) as { message?: string; error?: string };
+
+      if (!response.ok) {
+        throw new Error(
+          payload.message ??
+            payload.error ??
+            `Flash ERP could not post the ${direction === "ISSUE" ? "issue" : "receipt"} stock update.`,
+        );
+      }
+
+      setTransferStatus({
+        tone: "success",
+        message:
+          payload.message ??
+          `${transferBatchNo} ${direction === "ISSUE" ? "issue" : "receipt"} stock is now posted.`,
+      });
+      router.refresh();
+    } catch (error) {
+      setTransferStatus({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : `Flash ERP could not post the ${direction === "ISSUE" ? "issue" : "receipt"} stock update.`,
+      });
+    } finally {
+      setTransferSubmitting(false);
+    }
+  }
+
   const purchaseOrderColumns = useMemo<ColumnDef<PurchaseOrderRow>[]>(
     () => [
       {
@@ -1346,6 +1411,34 @@ export function EnterpriseInventoryWorkspace({
             </p>
           </div>
         ),
+        meta: { disableTruncate: true }
+      },
+      {
+        id: "stockStatus",
+        header: "Stock",
+        cell: ({ row }) => {
+          const issuePending = row.original.issueStockUpdateStatus === "PENDING";
+          const receiptPending = row.original.receiptStockUpdateStatus === "PENDING";
+
+          return (
+            <div className="min-w-0 space-y-1">
+              <p
+                className={`truncate text-xs font-semibold ${
+                  issuePending ? "text-amber-700" : "text-emerald-700"
+                }`}
+              >
+                Issue {row.original.issueStockUpdateStatusLabel}
+              </p>
+              <p
+                className={`truncate text-xs font-semibold ${
+                  receiptPending ? "text-amber-700" : "text-emerald-700"
+                }`}
+              >
+                Receipt {row.original.receiptStockUpdateStatusLabel}
+              </p>
+            </div>
+          );
+        },
         meta: { disableTruncate: true }
       },
       {
@@ -2035,8 +2128,64 @@ export function EnterpriseInventoryWorkspace({
                       {[
                         { label: "Status", value: editingTransferFeedback.feedbackStatus },
                         {
+                          label: "Issue stock",
+                          value: (
+                            <span
+                              className={
+                                editingTransferFeedback.issueStockUpdateStatus === "PENDING"
+                                  ? "text-amber-700"
+                                  : "text-emerald-700"
+                              }
+                            >
+                              {editingTransferFeedback.issueStockUpdateStatusLabel}
+                            </span>
+                          )
+                        },
+                        {
+                          label: "Receipt stock",
+                          value: (
+                            <span
+                              className={
+                                editingTransferFeedback.receiptStockUpdateStatus === "PENDING"
+                                  ? "text-amber-700"
+                                  : "text-emerald-700"
+                              }
+                            >
+                              {editingTransferFeedback.receiptStockUpdateStatusLabel}
+                            </span>
+                          )
+                        },
+                        {
                           label: "Water test",
                           value: editingTransferFeedback.waterTestResult ?? "Not captured"
+                        },
+                        {
+                          label: "Before quantity",
+                          value:
+                            editingTransferFeedback.quantityBeforeDelivery === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.quantityBeforeDelivery)
+                        },
+                        {
+                          label: "Expected received",
+                          value:
+                            editingTransferFeedback.expectedQuantityReceived === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.expectedQuantityReceived)
+                        },
+                        {
+                          label: "Expected stock",
+                          value:
+                            editingTransferFeedback.expectedStockQuantity === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.expectedStockQuantity)
+                        },
+                        {
+                          label: "After quantity",
+                          value:
+                            editingTransferFeedback.quantityAfterDelivery === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.quantityAfterDelivery)
                         },
                         {
                           label: "Dip reading",
@@ -2080,6 +2229,30 @@ export function EnterpriseInventoryWorkspace({
                                 "Confirmed"
                               )
                             : "Not confirmed"
+                        },
+                        {
+                          label: "Posted",
+                          value: editingTransferFeedback.feedbackPostedAt
+                            ? renderTimestamp(editingTransferFeedback.feedbackPostedAt, "Posted")
+                            : "Not posted"
+                        },
+                        {
+                          label: "Issue confirmed",
+                          value: editingTransferFeedback.issueStockConfirmedAt
+                            ? renderTimestamp(
+                                editingTransferFeedback.issueStockConfirmedAt,
+                                editingTransferFeedback.issueStockConfirmedAtLabel
+                              )
+                            : "Not posted"
+                        },
+                        {
+                          label: "Receipt confirmed",
+                          value: editingTransferFeedback.receiptStockConfirmedAt
+                            ? renderTimestamp(
+                                editingTransferFeedback.receiptStockConfirmedAt,
+                                editingTransferFeedback.receiptStockConfirmedAtLabel
+                              )
+                            : "Not posted"
                         }
                       ].map((stat) => (
                         <div className="rounded-xl border border-stone-200 bg-stone-50 p-3" key={stat.label}>
@@ -2092,6 +2265,45 @@ export function EnterpriseInventoryWorkspace({
                         </div>
                       ))}
                     </div>
+                    {hasPendingIssueStock || hasPendingReceiptStock ? (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                          <div>
+                            <p className="text-sm font-semibold text-amber-950">
+                              Pending HQ stock update
+                            </p>
+                            <p className="mt-1 text-sm leading-6 text-amber-900">
+                              Post only after the source/destination evidence has been reviewed.
+                              POS sales are not held by this policy.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {hasPendingIssueStock ? (
+                              <button
+                                className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 disabled:opacity-60"
+                                disabled={transferSubmitting}
+                                onClick={() => void confirmTransferStock("ISSUE")}
+                                type="button"
+                              >
+                                <PackageCheck className="h-4 w-4" />
+                                Post issue stock
+                              </button>
+                            ) : null}
+                            {hasPendingReceiptStock ? (
+                              <button
+                                className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 disabled:opacity-60"
+                                disabled={transferSubmitting}
+                                onClick={() => void confirmTransferStock("RECEIPT")}
+                                type="button"
+                              >
+                                <PackageCheck className="h-4 w-4" />
+                                Post receipt stock
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                     {editingTransferFeedback.feedbackNote ? (
                       <div className="rounded-xl border border-stone-200 bg-white p-3">
                         <span className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">

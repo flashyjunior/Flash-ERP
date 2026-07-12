@@ -29,6 +29,13 @@ const numberFormatter = new Intl.NumberFormat("en-US");
 type StoreRow = EnterpriseStoresWorkspaceData["storeRows"][number];
 type StoreOperatingMode = "HYBRID" | "SALES_ONLY" | "WAREHOUSE_ONLY";
 type StoreExecutionMode = "OFFLINE_FIRST" | "ONLINE_DIRECT";
+type StockUpdateMode = "" | "AUTO" | "HQ_CONFIRM";
+
+const stockUpdateModeOptions: Array<{ value: StockUpdateMode; label: string }> = [
+  { value: "", label: "Use company default" },
+  { value: "AUTO", label: "Auto update stock" },
+  { value: "HQ_CONFIRM", label: "Hold for HQ confirmation" },
+];
 
 function getOperatingModeLabel(mode: StoreOperatingMode) {
   if (mode === "HYBRID") {
@@ -162,6 +169,7 @@ export function EnterpriseStoresWorkspace({
   const [region, setRegion] = useState("");
   const [storeGroupName, setStoreGroupName] = useState("");
   const [storeGroupType, setStoreGroupType] = useState("REGION");
+  const [stockUpdateMode, setStockUpdateMode] = useState<StockUpdateMode>("");
   const [touchModeEnabled, setTouchModeEnabled] = useState(true);
   const [countryCode, setCountryCode] = useState("GH");
   const [createState, setCreateState] = useState<{
@@ -219,6 +227,10 @@ export function EnterpriseStoresWorkspace({
       {
         accessorKey: "storeModeLabel",
         header: "Execution",
+      },
+      {
+        accessorKey: "stockUpdateModeLabel",
+        header: "Stock control",
       },
       {
         accessorKey: "nodeCount",
@@ -281,6 +293,7 @@ export function EnterpriseStoresWorkspace({
     setRegion("");
     setStoreGroupName("");
     setStoreGroupType("REGION");
+    setStockUpdateMode("");
     setTouchModeEnabled(true);
     setCountryCode("GH");
     setCreateState({
@@ -314,6 +327,7 @@ export function EnterpriseStoresWorkspace({
       storeGroupCode: (storeGroupName || region).trim(),
       storeGroupName: (storeGroupName || region).trim(),
       storeGroupType: storeGroupType.trim(),
+      stockUpdateMode: stockUpdateMode || null,
       touchModeEnabled,
       countryCode: countryCode.trim(),
     };
@@ -624,6 +638,24 @@ export function EnterpriseStoresWorkspace({
                         <option value="AREA">Area</option>
                         <option value="CITY">City</option>
                         <option value="FRANCHISE">Franchise</option>
+                      </select>
+                    </label>
+                    <label className="space-y-2 text-sm text-stone-700">
+                      <span className="block font-semibold text-stone-900">
+                        Stock update control
+                      </span>
+                      <select
+                        className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
+                        onChange={(event) =>
+                          setStockUpdateMode(event.target.value as StockUpdateMode)
+                        }
+                        value={stockUpdateMode}
+                      >
+                        {stockUpdateModeOptions.map((option) => (
+                          <option key={option.value || "company-default"} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                     </label>
                     <label className="flex items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">

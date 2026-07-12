@@ -59,6 +59,11 @@ import {
   getFuelOperationsWorkspace,
   type FuelOperationsWorkspaceData
 } from "@/server/repositories/erp-fuel-operations.repository";
+import {
+  shouldPostStockImmediately,
+  STOCK_UPDATE_STATUS_PENDING,
+  STOCK_UPDATE_STATUS_POSTED
+} from "@/server/repositories/inventory-stock-policy.repository";
 
 const onlineTerminalCode = "online-web";
 const onlineStoreRoleCodes = new Set([
@@ -4314,7 +4319,12 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     returnedAt: supplierReturn.returnedAt.toISOString()
   }));
   const currentStoreId = assignment.store.id;
-  const mappedTransferRequests = transferRequests.map((transfer) => {
+  const mappedTransferRequests = transferRequests
+    .filter(
+      (transfer) =>
+        transfer.sourceStore.id === currentStoreId || transfer.destinationStore.id === currentStoreId
+    )
+    .map((transfer) => {
     const requestedQuantity = toQuantity(transfer.requestedQuantity);
     const issuedQuantity = toQuantity(transfer.issuedQuantity);
     const receivedQuantity = toQuantity(transfer.receivedQuantity);
@@ -10903,6 +10913,7 @@ export async function createOnlineStoreGoodsReceipt(
   return prisma.$transaction(async (tx) => {
     const now = new Date();
     const serializedReceiptLines = preparedLines.filter((line) => line.serialNumbers.length > 0);
+    const postStockImmediately = await shouldPostStockImmediately(tx, session.retailOrgId, store.id);
 
     if (serializedReceiptLines.length > 0) {
       const existingSerials = await tx.inventorySerialUnit.findMany({
@@ -10947,6 +10958,9 @@ export async function createOnlineStoreGoodsReceipt(
         receiptNo,
         note,
         operatorName: user.displayName,
+        stockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,
+        stockConfirmedAt: postStockImmediately ? now : null,
+        stockConfirmedBy: postStockImmediately ? user.displayName : null,
         receivedAt: now,
         sourceNodeCode: "ONLINE_DIRECT",
         lines: {
@@ -11015,64 +11029,72 @@ export async function createOnlineStoreGoodsReceipt(
       });
     }
 
-    await tx.inventoryLedgerEntry.createMany({
-      data: preparedLines.map((line) => ({
-        retailOrgId: session.retailOrgId,
-        storeId: store.id,
-        warehouseId: location.warehouseId,
-        inventoryLocationId: location.id,
-        productId: line.product.id,
-        movementType: InventoryMovementType.GOODS_RECEIPT,
-        quantity: line.quantity,
-        unitCost: line.unitCost,
-        referenceType: "GOODS_RECEIPT",
-        referenceId: receipt.id,
-        externalReference: receipt.receiptNo,
-        sourceNodeCode: "ONLINE_DIRECT",
-        createdByUserId: user.id,
-        occurredAt: now
-      }))
-    });
-    const fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
-      retailOrgId: session.retailOrgId,
-      storeId: store.id,
-      inventoryLocationId: location.id,
-      inventoryLocationCode: location.code,
-      inventoryLocationName: location.name,
-      referenceNo: receipt.receiptNo,
-      sourceLabel: purchaseOrder?.purchaseOrderNo ?? "Online goods receipt",
-      notes: purchaseOrder
-        ? `Mirrored from online-store GRN ${receipt.receiptNo} for ${purchaseOrder.purchaseOrderNo}.`
-        : `Mirrored from direct online-store GRN ${receipt.receiptNo}.`,
-      occurredAt: now,
-      lines: preparedLines.map((line) => ({
-        product: line.product,
-        quantity: line.quantity,
-        unitCost: line.unitCost
-      }))
-    });
+    let fuelMirror: { deliveryNo: string | null; skippedProducts: string[] } = {
+      deliveryNo: null,
+      skippedProducts: []
+    };
 
-    const serialRows = serializedReceiptLines.flatMap((line) =>
-      line.serialNumbers.map((serialNumber) => ({
-        retailOrgId: session.retailOrgId,
-        storeId: store.id,
-        warehouseId: location.warehouseId,
-        inventoryLocationId: location.id,
-        productId: line.product.id,
-        serialNumber,
-        status: SerialInventoryStatus.AVAILABLE,
-        sourceReferenceType: "GOODS_RECEIPT",
-        sourceReferenceId: receipt.id,
-        sourceReferenceLabel: receipt.receiptNo,
-        sourceNodeCode: "ONLINE_DIRECT",
-        lastOccurredAt: now
-      }))
-    );
-
-    if (serialRows.length > 0) {
-      await tx.inventorySerialUnit.createMany({
-        data: serialRows
+    if (postStockImmediately) {
+      await tx.inventoryLedgerEntry.createMany({
+        data: preparedLines.map((line) => ({
+          retailOrgId: session.retailOrgId,
+          storeId: store.id,
+          warehouseId: location.warehouseId,
+          inventoryLocationId: location.id,
+          productId: line.product.id,
+          movementType: InventoryMovementType.GOODS_RECEIPT,
+          quantity: line.quantity,
+          unitCost: line.unitCost,
+          referenceType: "GOODS_RECEIPT",
+          referenceId: receipt.id,
+          externalReference: receipt.receiptNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          createdByUserId: user.id,
+          occurredAt: now
+        }))
       });
+
+      fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
+        retailOrgId: session.retailOrgId,
+        storeId: store.id,
+        inventoryLocationId: location.id,
+        inventoryLocationCode: location.code,
+        inventoryLocationName: location.name,
+        referenceNo: receipt.receiptNo,
+        sourceLabel: purchaseOrder?.purchaseOrderNo ?? "Online goods receipt",
+        notes: purchaseOrder
+          ? `Mirrored from online-store GRN ${receipt.receiptNo} for ${purchaseOrder.purchaseOrderNo}.`
+          : `Mirrored from direct online-store GRN ${receipt.receiptNo}.`,
+        occurredAt: now,
+        lines: preparedLines.map((line) => ({
+          product: line.product,
+          quantity: line.quantity,
+          unitCost: line.unitCost
+        }))
+      });
+
+      const serialRows = serializedReceiptLines.flatMap((line) =>
+        line.serialNumbers.map((serialNumber) => ({
+          retailOrgId: session.retailOrgId,
+          storeId: store.id,
+          warehouseId: location.warehouseId,
+          inventoryLocationId: location.id,
+          productId: line.product.id,
+          serialNumber,
+          status: SerialInventoryStatus.AVAILABLE,
+          sourceReferenceType: "GOODS_RECEIPT",
+          sourceReferenceId: receipt.id,
+          sourceReferenceLabel: receipt.receiptNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          lastOccurredAt: now
+        }))
+      );
+
+      if (serialRows.length > 0) {
+        await tx.inventorySerialUnit.createMany({
+          data: serialRows
+        });
+      }
     }
 
     await tx.securityLog.create({
@@ -11099,7 +11121,9 @@ export async function createOnlineStoreGoodsReceipt(
     return {
       receiptNo: receipt.receiptNo,
       message: [
-        `Flash ERP posted ${receipt.receiptNo} directly in enterprise for ${store.code}.`,
+        postStockImmediately
+          ? `Flash ERP posted ${receipt.receiptNo} directly in enterprise for ${store.code}.`
+          : `Flash ERP saved ${receipt.receiptNo} for ${store.code}; stock update is pending HQ confirmation.`,
         fuelMirror.deliveryNo ? `Fuel tank receipt ${fuelMirror.deliveryNo} updated the matching tank book quantity.` : "",
         fuelMirror.skippedProducts.length > 0
           ? `Fuel tank mirror skipped for ${fuelMirror.skippedProducts.join(", ")} because no matching active tank exists.`
@@ -11957,6 +11981,8 @@ export async function processOnlineStoreTransfer(
 
   return prisma.$transaction(async (tx) => {
     if (input.action === "ISSUE") {
+      const postStockImmediately = await shouldPostStockImmediately(tx, session.retailOrgId, store.id);
+
       if (transfer.sourceStoreId !== store.id) {
         throw new Error(`${transfer.transferNo} is not waiting for issue from this online store.`);
       }
@@ -12003,6 +12029,25 @@ export async function processOnlineStoreTransfer(
       const nextIssuedSerialNumbers = normalizeSerialNumbers([...issuedSerialNumbers, ...serialNumbers]);
 
       if (transfer.product.isSerialized) {
+        const availableSerialCount = await tx.inventorySerialUnit.count({
+          where: {
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            inventoryLocationId: transfer.sourceInventoryLocationId,
+            productId: transfer.product.id,
+            serialNumber: {
+              in: serialNumbers
+            },
+            status: SerialInventoryStatus.AVAILABLE
+          }
+        });
+
+        if (availableSerialCount !== serialNumbers.length) {
+          throw new Error(`Refresh the transfer and choose serials available at ${transfer.sourceInventoryLocation.code}.`);
+        }
+      }
+
+      if (postStockImmediately && transfer.product.isSerialized) {
         const serialUpdate = await tx.inventorySerialUnit.updateMany({
           where: {
             retailOrgId: session.retailOrgId,
@@ -12031,24 +12076,26 @@ export async function processOnlineStoreTransfer(
         }
       }
 
-      await tx.inventoryLedgerEntry.create({
-        data: {
-          retailOrgId: session.retailOrgId,
-          storeId: store.id,
-          warehouseId: transfer.sourceInventoryLocation.warehouseId,
-          inventoryLocationId: transfer.sourceInventoryLocationId,
-          productId: transfer.product.id,
-          movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
-          quantity: quantity * -1,
-          unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
-          referenceType: "INTER_STORE_TRANSFER",
-          referenceId: transfer.id,
-          externalReference: transfer.transferNo,
-          sourceNodeCode: "ONLINE_DIRECT",
-          createdByUserId: user.id,
-          occurredAt: now
-        }
-      });
+      if (postStockImmediately) {
+        await tx.inventoryLedgerEntry.create({
+          data: {
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            warehouseId: transfer.sourceInventoryLocation.warehouseId,
+            inventoryLocationId: transfer.sourceInventoryLocationId,
+            productId: transfer.product.id,
+            movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
+            quantity: quantity * -1,
+            unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
+            referenceType: "INTER_STORE_TRANSFER",
+            referenceId: transfer.id,
+            externalReference: transfer.transferNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            createdByUserId: user.id,
+            occurredAt: now
+          }
+        });
+      }
 
       await tx.interStoreTransfer.update({
         where: {
@@ -12066,6 +12113,9 @@ export async function processOnlineStoreTransfer(
           workflowType: isFuelTransferProduct(transfer.product) ? "FUEL_TRANSFER" : undefined,
           issueNote: note ?? `Issued ${formatNumberForMessage(quantity)} unit(s) from ${transfer.sourceInventoryLocation.code}.`,
           issueOperatorName: user.displayName,
+          issueStockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,
+          issueStockConfirmedAt: postStockImmediately ? now : null,
+          issueStockConfirmedBy: postStockImmediately ? user.displayName : null,
           sourceNodeCode: "ONLINE_DIRECT",
           issuedAt: now
         }
@@ -12103,7 +12153,9 @@ export async function processOnlineStoreTransfer(
         receivedQuantity,
         outstandingIssueQuantity: toQuantity(Math.max(0, requestedQuantity - nextIssuedQuantity)),
         outstandingReceiptQuantity: toQuantity(Math.max(0, nextIssuedQuantity - receivedQuantity)),
-        message: `${transfer.transferNo} issued ${formatNumberForMessage(quantity)} unit(s).`,
+        message: postStockImmediately
+          ? `${transfer.transferNo} issued ${formatNumberForMessage(quantity)} unit(s).`
+          : `${transfer.transferNo} issued ${formatNumberForMessage(quantity)} unit(s); source stock update is pending HQ confirmation.`,
         serverProcessedAt: now.toISOString()
       };
     }
@@ -12136,6 +12188,8 @@ export async function processOnlineStoreTransfer(
     });
     const nextReceivedSerialNumbers = normalizeSerialNumbers([...receivedSerialNumbers, ...serialNumbers]);
 
+    const postStockImmediately = await shouldPostStockImmediately(tx, session.retailOrgId, store.id);
+
     if (transfer.product.isSerialized) {
       const issuedKeys = new Set(issuedSerialNumbers.map((serial) => serial.toUpperCase()));
       const receivedKeys = new Set(receivedSerialNumbers.map((serial) => serial.toUpperCase()));
@@ -12146,7 +12200,9 @@ export async function processOnlineStoreTransfer(
       if (invalidSerials.length > 0) {
         throw new Error(`Serial number(s) ${invalidSerials.join(", ")} are not outstanding on ${transfer.transferNo}.`);
       }
+    }
 
+    if (postStockImmediately && transfer.product.isSerialized) {
       const serialUpdate = await tx.inventorySerialUnit.updateMany({
         where: {
           retailOrgId: session.retailOrgId,
@@ -12174,42 +12230,49 @@ export async function processOnlineStoreTransfer(
       }
     }
 
-    await tx.inventoryLedgerEntry.create({
-      data: {
+    let fuelMirror: { deliveryNo: string | null; skippedProducts: string[] } = {
+      deliveryNo: null,
+      skippedProducts: []
+    };
+
+    if (postStockImmediately) {
+      await tx.inventoryLedgerEntry.create({
+        data: {
+          retailOrgId: session.retailOrgId,
+          storeId: store.id,
+          warehouseId: transfer.destinationInventoryLocation.warehouseId,
+          inventoryLocationId: transfer.destinationInventoryLocationId,
+          productId: transfer.product.id,
+          movementType: InventoryMovementType.STOCK_TRANSFER_IN,
+          quantity,
+          unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
+          referenceType: "INTER_STORE_TRANSFER",
+          referenceId: transfer.id,
+          externalReference: transfer.transferNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          createdByUserId: user.id,
+          occurredAt: now
+        }
+      });
+      fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
         retailOrgId: session.retailOrgId,
         storeId: store.id,
-        warehouseId: transfer.destinationInventoryLocation.warehouseId,
         inventoryLocationId: transfer.destinationInventoryLocationId,
-        productId: transfer.product.id,
-        movementType: InventoryMovementType.STOCK_TRANSFER_IN,
-        quantity,
-        unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
-        referenceType: "INTER_STORE_TRANSFER",
-        referenceId: transfer.id,
-        externalReference: transfer.transferNo,
-        sourceNodeCode: "ONLINE_DIRECT",
-        createdByUserId: user.id,
-        occurredAt: now
-      }
-    });
-    const fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
-      retailOrgId: session.retailOrgId,
-      storeId: store.id,
-      inventoryLocationId: transfer.destinationInventoryLocationId,
-      inventoryLocationCode: transfer.destinationInventoryLocation.code,
-      inventoryLocationName: transfer.destinationInventoryLocation.name,
-      referenceNo: transfer.transferNo,
-      sourceLabel: "Inter-store transfer",
-      notes: `Mirrored from online-store transfer receipt ${transfer.transferNo}.`,
-      occurredAt: now,
-      lines: [
-        {
-          product: transfer.product,
-          quantity,
-          unitCost: transfer.unitCost === null ? Number(transfer.product.baseCostPrice ?? 0) : Number(transfer.unitCost)
-        }
-      ]
-    });
+        inventoryLocationCode: transfer.destinationInventoryLocation.code,
+        inventoryLocationName: transfer.destinationInventoryLocation.name,
+        referenceNo: transfer.transferNo,
+        sourceLabel: "Inter-store transfer",
+        notes: `Mirrored from online-store transfer receipt ${transfer.transferNo}.`,
+        occurredAt: now,
+        lines: [
+          {
+            product: transfer.product,
+            quantity,
+            unitCost: transfer.unitCost === null ? Number(transfer.product.baseCostPrice ?? 0) : Number(transfer.unitCost)
+          }
+        ]
+      });
+    }
 
     await tx.interStoreTransfer.update({
       where: {
@@ -12221,6 +12284,9 @@ export async function processOnlineStoreTransfer(
         receivedSerialNumbersSnapshot: serializeJsonField(nextReceivedSerialNumbers.length ? nextReceivedSerialNumbers : null),
         receiptNote: note ?? `Received ${formatNumberForMessage(quantity)} unit(s) into ${transfer.destinationInventoryLocation.code}.`,
         receiptOperatorName: user.displayName,
+        receiptStockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,
+        receiptStockConfirmedAt: postStockImmediately ? now : null,
+        receiptStockConfirmedBy: postStockImmediately ? user.displayName : null,
         destinationNodeCode: "ONLINE_DIRECT",
         receivedAt: now
       }
@@ -12259,7 +12325,9 @@ export async function processOnlineStoreTransfer(
       outstandingIssueQuantity: toQuantity(Math.max(0, requestedQuantity - issuedQuantity)),
       outstandingReceiptQuantity: toQuantity(Math.max(0, issuedQuantity - nextReceivedQuantity)),
       message: [
-        `${transfer.transferNo} received ${formatNumberForMessage(quantity)} unit(s).`,
+        postStockImmediately
+          ? `${transfer.transferNo} received ${formatNumberForMessage(quantity)} unit(s).`
+          : `${transfer.transferNo} received ${formatNumberForMessage(quantity)} unit(s); destination stock update is pending HQ confirmation.`,
         fuelMirror.deliveryNo ? `Fuel tank receipt ${fuelMirror.deliveryNo} updated the matching tank book quantity.` : "",
         fuelMirror.skippedProducts.length > 0
           ? `Fuel tank mirror skipped for ${fuelMirror.skippedProducts.join(", ")} because no matching active tank exists.`
