@@ -31,6 +31,13 @@ type FinanceFilters = {
   storeCode: string;
 };
 
+type EnterpriseFinanceWorkspaceInput = {
+  dateFrom?: string | null;
+  dateTo?: string | null;
+  storeCode?: string | null;
+  retailOrgId?: string | null;
+};
+
 type GlAccountDefinition = {
   code: string;
   name: string;
@@ -428,7 +435,31 @@ export function buildUnavailableEnterpriseFinanceWorkspace(
   };
 }
 
-async function getEnterpriseContext(): Promise<EnterpriseContext | null> {
+async function getEnterpriseContext(preferredRetailOrgId?: string | null): Promise<EnterpriseContext | null> {
+  const preferredId = String(preferredRetailOrgId ?? "").trim();
+
+  if (preferredId) {
+    const retailOrg = await prisma.retailOrg.findUnique({
+      where: {
+        id: preferredId
+      },
+      select: {
+        id: true,
+        name: true,
+        baseCurrencyCode: true,
+        companySettingsJson: true
+      }
+    });
+
+    if (retailOrg) {
+      return {
+        retailOrgId: retailOrg.id,
+        retailOrgName: retailOrg.name,
+        currencyCode: resolveEnterpriseCurrencyCode(retailOrg)
+      };
+    }
+  }
+
   const enterpriseNode = await prisma.syncNode.findFirst({
     where: {
       nodeType: SyncNodeType.ENTERPRISE,
@@ -903,13 +934,14 @@ export async function assignAndPostOperatingExpenseAccounts(
     expenseId?: string | null;
     expenseAccountCode?: string | null;
     paymentAccountCode?: string | null;
+    retailOrgId?: string | null;
   },
   operatorName = "Enterprise finance"
 ) {
   await assertEnterpriseDatabaseReady();
   await ensureOperatingExpenseSchemaCompatibility();
 
-  const context = await getEnterpriseContext();
+  const context = await getEnterpriseContext(input.retailOrgId);
 
   if (!context) {
     throw new Error("Flash ERP needs an active enterprise node before posting operating expenses.");
@@ -1150,11 +1182,9 @@ async function countExpectedOperatingExpenses(input: {
   });
 }
 
-export async function getEnterpriseFinanceWorkspace(input?: {
-  dateFrom?: string | null;
-  dateTo?: string | null;
-  storeCode?: string | null;
-}): Promise<EnterpriseFinanceWorkspaceData> {
+export async function getEnterpriseFinanceWorkspace(
+  input?: EnterpriseFinanceWorkspaceInput
+): Promise<EnterpriseFinanceWorkspaceData> {
   const filters = defaultFinanceFilters(input);
 
   try {
@@ -1173,7 +1203,7 @@ export async function getEnterpriseFinanceWorkspace(input?: {
 
   await ensureOperatingExpenseSchemaCompatibility();
 
-  const context = await getEnterpriseContext();
+  const context = await getEnterpriseContext(input?.retailOrgId);
 
   if (!context) {
     return buildUnavailableEnterpriseFinanceWorkspace(

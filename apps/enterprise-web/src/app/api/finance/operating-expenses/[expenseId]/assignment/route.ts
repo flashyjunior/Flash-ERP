@@ -20,7 +20,8 @@ export async function POST(
       await assignAndPostOperatingExpenseAccounts(
         {
           ...payload,
-          expenseId: decodeURIComponent(expenseId)
+          expenseId: decodeURIComponent(expenseId),
+          retailOrgId: session.retailOrgId
         },
         session.displayName
       )

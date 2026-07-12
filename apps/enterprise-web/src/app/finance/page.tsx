@@ -16,12 +16,13 @@ type FinancePageProps = {
 };
 
 export default async function FinancePage({ searchParams }: FinancePageProps) {
-  await requireEnterprisePermission(["operations.dashboard.view"]);
+  const session = await requireEnterprisePermission(["operations.dashboard.view"]);
   const filters = (await searchParams) ?? {};
   const workspaceFilters = {
     dateFrom: filters.from ?? "",
     dateTo: filters.to ?? "",
-    storeCode: filters.shop ?? ""
+    storeCode: filters.shop ?? "",
+    retailOrgId: session.retailOrgId
   };
   const workspace = await getEnterpriseFinanceWorkspace(workspaceFilters).catch((error: unknown) =>
     buildUnavailableEnterpriseFinanceWorkspace(
