@@ -936,6 +936,7 @@ function DialogTextInput({
   label,
   min,
   onChange,
+  readOnly = false,
   step,
   type = "text",
   value
@@ -943,6 +944,7 @@ function DialogTextInput({
   label: string;
   min?: string;
   onChange: (value: string) => void;
+  readOnly?: boolean;
   step?: string;
   type?: "date" | "number" | "text";
   value: string | number | null | undefined;
@@ -954,6 +956,7 @@ function DialogTextInput({
         className="w-full rounded-xl border border-stone-200 bg-white px-2.5 py-2 text-sm outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
         min={min}
         onChange={(event) => onChange(event.target.value)}
+        readOnly={readOnly}
         step={step}
         type={type}
         value={value ?? ""}
@@ -1664,8 +1667,10 @@ export function FuelOperationsWorkspace({
       : "";
   const nozzleOptions = workspace.nozzleOptions.map((nozzle) => ({
     label: nozzle.label,
+    currentMeterReading: nozzle.currentMeterReading,
     value: nozzle.nozzleId
   }));
+  const nozzleById = new Map(nozzleOptions.map((nozzle) => [nozzle.value, nozzle] as const));
   const stationOptions = workspace.stationOptions.map((station) => ({
     customerId: station.customerId,
     storeId: station.storeId,
@@ -4247,7 +4252,14 @@ export function FuelOperationsWorkspace({
                       <DialogSelect
                         label="Nozzle"
                         onChange={(value) =>
-                          setMeterDraft((current) => ({ ...current, nozzleId: value }))
+                          setMeterDraft((current) => ({
+                            ...current,
+                            nozzleId: value,
+                            openingMeterReading:
+                              current.meterReadingId
+                                ? current.openingMeterReading
+                                : nozzleById.get(value)?.currentMeterReading ?? 0
+                          }))
                         }
                         options={nozzleOptions}
                         value={meterDraft.nozzleId ?? ""}
@@ -4263,12 +4275,16 @@ export function FuelOperationsWorkspace({
                       <DialogTextInput
                         label="Opening meter"
                         min="0"
-                        onChange={(value) =>
-                          setMeterDraft((current) => ({ ...current, openingMeterReading: value }))
-                        }
+                        onChange={() => undefined}
+                        readOnly
                         step="0.001"
                         type="number"
-                        value={meterDraft.openingMeterReading ?? ""}
+                        value={
+                          meterDraft.openingMeterReading ??
+                          (meterDraft.nozzleId
+                            ? nozzleById.get(meterDraft.nozzleId)?.currentMeterReading ?? ""
+                            : "")
+                        }
                       />
                       <DialogTextInput
                         label="Closing meter"

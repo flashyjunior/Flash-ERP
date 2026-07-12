@@ -6406,10 +6406,41 @@ export class MssqlStoreService {
     const normalizedStatus = input?.status?.trim().toUpperCase() || null;
     const normalizedLocationCode = normalizeCatalogCode(input?.locationCode);
     const limit = Math.min(Math.max(input?.limit ?? 12, 1), 24);
+    const localStoreCode = normalizeCatalogCode(
+      (await this.metadataValue("store_code")) ?? defaultStoreConfig.storeCode,
+    );
     const summaries = await this.getInterStoreTransferSummaries(60);
 
     return summaries
       .filter((transfer) => {
+        const sourceStoreCode = transfer.sourceStoreCode.trim().toUpperCase();
+        const destinationStoreCode = transfer.destinationStoreCode
+          .trim()
+          .toUpperCase();
+
+        if (
+          transfer.role === "SOURCE" &&
+          sourceStoreCode !== localStoreCode
+        ) {
+          return false;
+        }
+
+        if (
+          transfer.role === "DESTINATION" &&
+          destinationStoreCode !== localStoreCode
+        ) {
+          return false;
+        }
+
+        if (
+          transfer.role !== "SOURCE" &&
+          transfer.role !== "DESTINATION" &&
+          sourceStoreCode !== localStoreCode &&
+          destinationStoreCode !== localStoreCode
+        ) {
+          return false;
+        }
+
         if (normalizedRole && transfer.role.toUpperCase() !== normalizedRole) {
           return false;
         }

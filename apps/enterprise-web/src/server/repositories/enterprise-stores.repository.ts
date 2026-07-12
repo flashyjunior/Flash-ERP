@@ -3007,6 +3007,7 @@ export type EnterpriseStoreDetailData = {
     status: string;
     linkedStoreCount: number;
   }>;
+  storeGroupOptions: string[];
   metrics: {
     terminals: number;
     warehouses: number;
@@ -3278,6 +3279,7 @@ export async function getEnterpriseStoreDetail(
     recentTransactions,
     recentInventoryRows,
     availableReceiptTemplates,
+    storeGroups,
   ] = await Promise.all([
     prisma.posTransaction.count({
       where: {
@@ -3358,6 +3360,17 @@ export async function getEnterpriseStoreDetail(
         },
       },
     }),
+    prisma.store.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+      },
+      orderBy: [{ storeGroupName: "asc" }, { storeGroupCode: "asc" }],
+      select: {
+        region: true,
+        storeGroupCode: true,
+        storeGroupName: true,
+      },
+    }),
   ]);
 
   const receiptTemplateResolution = resolveStoreReceiptTemplateSelection({
@@ -3427,6 +3440,14 @@ export async function getEnterpriseStoreDetail(
       linkedStoreCount:
         template._count.salesStores + template._count.accountStores,
     })),
+    storeGroupOptions: Array.from(
+      new Set(
+        storeGroups
+          .map((row) => row.storeGroupName ?? row.storeGroupCode ?? row.region)
+          .map((value) => value?.trim() ?? "")
+          .filter((value) => value && value !== "Ungrouped"),
+      ),
+    ).sort((left, right) => left.localeCompare(right)),
     metrics: {
       terminals: store.terminals.length,
       warehouses: store.warehouses.length,

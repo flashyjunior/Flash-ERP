@@ -171,6 +171,18 @@ export function EnterpriseStoresWorkspace({
     status: "idle",
     message: "",
   });
+  const storeGroupOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          workspace.storeRows
+            .map((store) => store.storeGroupName ?? store.storeGroupCode ?? store.storeGroupLabel)
+            .map((value) => value.trim())
+            .filter((value) => value && value !== "Ungrouped"),
+        ),
+      ).sort((left, right) => left.localeCompare(right)),
+    [workspace.storeRows],
+  );
 
   const storeColumns = useMemo<ColumnDef<StoreRow>[]>(
     () => [
@@ -584,12 +596,18 @@ export function EnterpriseStoresWorkspace({
                       </span>
                       <input
                         className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
+                        list="enterprise-store-group-options"
                         onChange={(event) =>
                           setStoreGroupName(event.target.value)
                         }
                         placeholder="Region, area, cluster, or trading zone"
                         value={storeGroupName}
                       />
+                      <datalist id="enterprise-store-group-options">
+                        {storeGroupOptions.map((option) => (
+                          <option key={option} value={option} />
+                        ))}
+                      </datalist>
                     </label>
                     <label className="space-y-2 text-sm text-stone-700">
                       <span className="block font-semibold text-stone-900">

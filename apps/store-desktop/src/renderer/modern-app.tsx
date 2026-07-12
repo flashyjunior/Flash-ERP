@@ -20623,7 +20623,7 @@ function ManagerWorkspace(props: {
   >("shift");
   const [expenseDraftId, setExpenseDraftId] = useState("");
   const [expenseDate, setExpenseDate] = useState(todayInputValue());
-  const [expenseCategory, setExpenseCategory] = useState("UTILITIES");
+  const [expenseCategory, setExpenseCategory] = useState("GENERAL");
   const [expenseDescription, setExpenseDescription] = useState("");
   const [expenseSupplierName, setExpenseSupplierName] = useState("");
   const [expensePaymentMethod, setExpensePaymentMethod] = useState("CASH");
@@ -20637,6 +20637,11 @@ function ManagerWorkspace(props: {
     contentBase64: string;
   } | null>(null);
   const [expenseMessage, setExpenseMessage] = useState("");
+  const [pendingExpenseConfirmation, setPendingExpenseConfirmation] = useState<{
+    expenseId: string;
+    expenseNo: string;
+    amount: number;
+  } | null>(null);
 
   function createLocalExpenseDraftId() {
     const randomId =
@@ -20650,7 +20655,7 @@ function ManagerWorkspace(props: {
   function resetExpenseDraft() {
     setExpenseDraftId("");
     setExpenseDate(todayInputValue());
-    setExpenseCategory("UTILITIES");
+    setExpenseCategory("GENERAL");
     setExpenseDescription("");
     setExpenseSupplierName("");
     setExpensePaymentMethod("CASH");
@@ -20659,6 +20664,7 @@ function ManagerWorkspace(props: {
     setExpenseTaxAmount("");
     setExpenseNote("");
     setExpenseAttachment(null);
+    setPendingExpenseConfirmation(null);
   }
 
   function saveReceiptLogo(companyLogoUrl: string | null) {
@@ -20747,14 +20753,26 @@ function ManagerWorkspace(props: {
     setExpenseMessage(saved.message);
 
     if (confirmAfterSave) {
-      const confirmed = await props.runAction((runtime) =>
-        runtime.confirmStoreExpense(savedExpenseId),
-      );
+      setPendingExpenseConfirmation({
+        expenseId: savedExpenseId,
+        expenseNo: saved.expenseNo ?? "Expense",
+        amount: Number(expenseAmount || 0) + Number(expenseTaxAmount || 0),
+      });
+    }
+  }
 
-      if (confirmed) {
-        setExpenseMessage(confirmed.message);
-        resetExpenseDraft();
-      }
+  async function confirmPendingStoreExpense() {
+    if (!pendingExpenseConfirmation) {
+      return;
+    }
+
+    const confirmed = await props.runAction((runtime) =>
+      runtime.confirmStoreExpense(pendingExpenseConfirmation.expenseId),
+    );
+
+    if (confirmed) {
+      setExpenseMessage(confirmed.message);
+      resetExpenseDraft();
     }
   }
 
@@ -21031,22 +21049,6 @@ function ManagerWorkspace(props: {
                 value={expenseDate}
               />
               <select
-                onChange={(event) => setExpenseCategory(event.target.value)}
-                value={expenseCategory}
-              >
-                <option value="UTILITIES">Utilities</option>
-                <option value="CLEANING">Cleaning / toiletries</option>
-                <option value="REPAIRS">Repairs</option>
-                <option value="TRANSPORT">Transport</option>
-                <option value="STAFF_WELFARE">Staff welfare</option>
-                <option value="OTHER">Other</option>
-              </select>
-              <input
-                onChange={(event) => setExpenseSupplierName(event.target.value)}
-                placeholder="Supplier or payee"
-                value={expenseSupplierName}
-              />
-              <select
                 onChange={(event) => setExpensePaymentMethod(event.target.value)}
                 value={expensePaymentMethod}
               >
@@ -21069,14 +21071,6 @@ function ManagerWorkspace(props: {
                 type="number"
                 value={expenseAmount}
               />
-              <input
-                min="0"
-                onChange={(event) => setExpenseTaxAmount(event.target.value)}
-                placeholder="Tax"
-                step="0.01"
-                type="number"
-                value={expenseTaxAmount}
-              />
             </div>
             <div className="rms-form-grid">
               <textarea
@@ -21084,12 +21078,6 @@ function ManagerWorkspace(props: {
                 placeholder="Expense details"
                 rows={3}
                 value={expenseDescription}
-              />
-              <textarea
-                onChange={(event) => setExpenseNote(event.target.value)}
-                placeholder="Internal note"
-                rows={3}
-                value={expenseNote}
               />
               <label className="rms-button">
                 {expenseAttachment ? "Change attachment" : "Attach receipt"}
@@ -21111,6 +21099,32 @@ function ManagerWorkspace(props: {
                 </button>
               ) : null}
             </div>
+            {pendingExpenseConfirmation ? (
+              <div className="rms-confirm-popover">
+                <strong>Confirm store expense</strong>
+                <p>
+                  Send {pendingExpenseConfirmation.expenseNo} to HQ Finance for GL review?
+                </p>
+                <div className="rms-manager-action-strip">
+                  <button
+                    className="rms-button is-primary"
+                    disabled={props.isBusy}
+                    onClick={() => void confirmPendingStoreExpense()}
+                    type="button"
+                  >
+                    Confirm for HQ
+                  </button>
+                  <button
+                    className="rms-button"
+                    disabled={props.isBusy}
+                    onClick={() => setPendingExpenseConfirmation(null)}
+                    type="button"
+                  >
+                    Keep as draft
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="rms-manager-action-strip">
               <button
                 className="rms-button"

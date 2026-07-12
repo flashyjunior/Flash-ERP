@@ -605,6 +605,7 @@ export type EnterpriseReportingDashboardData = {
   storePerformanceRows: Array<{
     store: string;
     storeCode: string;
+    storeGroup: string;
     nodeCode: string | null;
     completedTransactions: number;
     salesValue: number;
@@ -2241,6 +2242,30 @@ export async function getEnterpriseReportingDashboard(
   const operationsByStoreCode = new Map(
     operationsDashboard.storeSummaries.map((row) => [row.storeCode, row] as const)
   );
+  const reportingContext = await getReportingEnterpriseContext();
+  const storeGroupProfiles =
+    reportingContext && storeCodes.length > 0
+      ? await prisma.store.findMany({
+          where: {
+            retailOrgId: reportingContext.retailOrgId,
+            code: {
+              in: storeCodes
+            }
+          },
+          select: {
+            code: true,
+            storeGroupName: true,
+            storeGroupCode: true,
+            region: true
+          }
+        })
+      : [];
+  const storeGroupByCode = new Map(
+    storeGroupProfiles.map((store) => [
+      store.code,
+      store.storeGroupName ?? store.storeGroupCode ?? store.region ?? "Ungrouped"
+    ] as const)
+  );
 
   const storePerformanceRows = storeCodes
     .map((storeCode) => {
@@ -2258,6 +2283,7 @@ export async function getEnterpriseReportingDashboard(
       return {
         store: operationsRow?.store ?? laneAggregate?.store ?? storeCode,
         storeCode,
+        storeGroup: storeGroupByCode.get(storeCode) ?? "Ungrouped",
         nodeCode: operationsRow?.nodeCode ?? laneAggregate?.nodeCodes[0] ?? null,
         completedTransactions,
         salesValue,

@@ -136,6 +136,12 @@ type StockCountUploadRow = {
 type StockCountConfirmation =
   | { action: "COMMIT"; sessionId: string; sessionNo: string }
   | { action: "SAVE_CALCULATED"; rowCount: number };
+type ExpenseConfirmation = {
+  expenseId: string;
+  expenseNo: string;
+  amount: number;
+  description: string;
+};
 type InventorySerialDraft = {
   title: string;
   productName: string;
@@ -1935,6 +1941,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [transferFeedbackDipReading, setTransferFeedbackDipReading] = useState("");
   const [transferFeedbackBeforeEvidence, setTransferFeedbackBeforeEvidence] = useState<TransferFeedbackEvidence[]>([]);
   const [transferFeedbackAfterEvidence, setTransferFeedbackAfterEvidence] = useState<TransferFeedbackEvidence[]>([]);
+  const [transferFeedbackUploadingSection, setTransferFeedbackUploadingSection] = useState<"before" | "after" | null>(null);
   const [transferFeedbackNote, setTransferFeedbackNote] = useState("");
   const [expenseDraftId, setExpenseDraftId] = useState("");
   const [expenseDate, setExpenseDate] = useState(activeDate);
@@ -1949,6 +1956,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [expenseAttachmentFileName, setExpenseAttachmentFileName] = useState("");
   const [expenseAttachmentUrl, setExpenseAttachmentUrl] = useState("");
   const [expenseMessage, setExpenseMessage] = useState("");
+  const [pendingExpenseConfirmation, setPendingExpenseConfirmation] =
+    useState<ExpenseConfirmation | null>(null);
   const [countedQuantity, setCountedQuantity] = useState("0");
   const [countNote, setCountNote] = useState("");
   const [activeCountEntryTab, setActiveCountEntryTab] = useState<CountEntryTab>("header");
@@ -2627,6 +2636,16 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     () => new Map(promotionPricing.lineResults.map((line) => [line.lineId, line] as const)),
     [promotionPricing.lineResults]
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (window.matchMedia("(max-width: 760px)").matches) {
+      setSidebarCollapsed(true);
+    }
+  }, []);
   const basketPricingLines = useMemo(
     () =>
       basket.map((line) => {
@@ -5570,6 +5589,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       return;
     }
 
+    setTransferFeedbackUploadingSection(section);
     setInventoryMessage(`Uploading ${files.length} transfer feedback photo${files.length === 1 ? "" : "s"}...`);
 
     try {
@@ -5617,6 +5637,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     } catch (error) {
       setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not upload transfer feedback evidence.");
     } finally {
+      setTransferFeedbackUploadingSection(null);
       event.target.value = "";
     }
   }
@@ -5627,6 +5648,21 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
     if (!transferDocument || !transferId) {
       setInventoryMessage("Choose a fuel transfer before saving feedback.");
+      return;
+    }
+
+    if (!transferFeedbackDipReading.trim()) {
+      setInventoryMessage("Capture the transfer dip reading before saving feedback.");
+      return;
+    }
+
+    if (transferFeedbackBeforeEvidence.length === 0 || transferFeedbackAfterEvidence.length === 0) {
+      setInventoryMessage("Capture before-discharge and after-discharge photo evidence before saving feedback.");
+      return;
+    }
+
+    if (transferFeedbackUploadingSection) {
+      setInventoryMessage("Wait for the transfer feedback photo upload to finish before saving.");
       return;
     }
 
@@ -5696,6 +5732,30 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setExpenseNote("");
     setExpenseAttachmentFileName("");
     setExpenseAttachmentUrl("");
+  }
+
+  function loadExpenseDraft(expense: (typeof workspace.storeExpenses)[number]) {
+    if (expense.status !== "DRAFT") {
+      setExpenseMessage("Only draft expenses can be edited from the store.");
+      return;
+    }
+
+    setExpenseDraftId(expense.expenseId);
+    const expenseDateValue = new Date(expense.expenseDate);
+    setExpenseDate(
+      Number.isNaN(expenseDateValue.getTime()) ? activeDate : formatDateInput(expenseDateValue)
+    );
+    setExpenseCategory(expense.category || "GENERAL");
+    setExpenseDescription(expense.description);
+    setExpenseSupplierName(expense.supplierName ?? "");
+    setExpensePaymentMethod(expense.paymentMethod ?? "CASH");
+    setExpenseReference(expense.externalReference ?? "");
+    setExpenseAmount(String(expense.amount));
+    setExpenseTaxAmount(String(expense.taxAmount ?? 0));
+    setExpenseNote(expense.note ?? "");
+    setExpenseAttachmentFileName(expense.attachmentFileName ?? "");
+    setExpenseAttachmentUrl(expense.attachmentUrl ?? "");
+    setExpenseMessage(`${expense.expenseNo} loaded for editing.`);
   }
 
   async function uploadExpenseAttachment(event: ChangeEvent<HTMLInputElement>) {
@@ -5770,18 +5830,14 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       }
 
       if (confirmAfterSave) {
-        const confirmResponse = await fetch(
-          `/api/online-store/expenses/${encodeURIComponent(payload.expenseId)}/confirm`,
-          { method: "POST" }
-        );
-        const confirmPayload = (await confirmResponse.json()) as { message?: string };
-
-        if (!confirmResponse.ok) {
-          throw new Error(confirmPayload.message ?? "Flash ERP saved the expense but could not confirm it.");
-        }
-
-        setExpenseMessage(confirmPayload.message ?? `${payload.expenseNo ?? "Expense"} confirmed.`);
-        resetExpenseDraft();
+        setExpenseDraftId(payload.expenseId);
+        setPendingExpenseConfirmation({
+          expenseId: payload.expenseId,
+          expenseNo: payload.expenseNo ?? "Expense",
+          amount: Number(expenseAmount || 0) + Number(expenseTaxAmount || 0),
+          description: expenseDescription.trim() || "Store expense"
+        });
+        setExpenseMessage(payload.message ?? `${payload.expenseNo ?? "Expense"} saved. Confirm when ready to send it to HQ Finance.`);
       } else {
         setExpenseDraftId(payload.expenseId);
         setExpenseMessage(payload.message ?? `${payload.expenseNo ?? "Expense"} saved.`);
@@ -5811,12 +5867,23 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       }
 
       setExpenseMessage(payload.message ?? "Store expense confirmed for HQ Finance.");
+      setPendingExpenseConfirmation(null);
+      resetExpenseDraft();
       router.refresh();
     } catch (error) {
       setExpenseMessage(error instanceof Error ? error.message : "Flash ERP could not confirm the store expense.");
     } finally {
       setIsPostingInventory(false);
     }
+  }
+
+  function requestExpenseConfirmation(expense: (typeof workspace.storeExpenses)[number]) {
+    setPendingExpenseConfirmation({
+      expenseId: expense.expenseId,
+      expenseNo: expense.expenseNo,
+      amount: expense.amount + expense.taxAmount,
+      description: expense.description
+    });
   }
 
   function openTransferSerialDialog(transfer: TransferRequest, action: "issue" | "receive") {
@@ -6434,15 +6501,28 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <small>{section.evidence.length} photo{section.evidence.length === 1 ? "" : "s"}</small>
                 </div>
                 <label className="rms-evidence-capture-button">
-                  <span>{section.key === "before" ? "Capture before photos" : "Capture after photos"}</span>
+                  <span>
+                    {transferFeedbackUploadingSection === section.key
+                      ? "Uploading photos..."
+                      : section.key === "before"
+                        ? "Capture before photos"
+                        : "Capture after photos"}
+                  </span>
                   <input
                     accept="image/*"
                     capture="environment"
+                    disabled={transferFeedbackUploadingSection !== null}
                     multiple
                     onChange={(event) => void uploadTransferFeedbackEvidence(event, section.key)}
                     type="file"
                   />
                 </label>
+                {transferFeedbackUploadingSection === section.key ? (
+                  <div className="rms-evidence-uploading" role="status">
+                    <span className="rms-inline-spinner" aria-hidden="true" />
+                    <span>Photo evidence is uploading. Keep this page open.</span>
+                  </div>
+                ) : null}
                 <div className="rms-transfer-feedback-evidence-list">
                   {section.evidence.map((item) => (
                     <div className="rms-transfer-feedback-evidence-item" key={item.url}>
@@ -6463,10 +6543,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           ) : null}
           <div className="rms-dialog-actions">
             <button className="rms-button" onClick={() => setSelectedTransferFeedbackKey(null)} type="button">Cancel</button>
-            <button className="rms-button" disabled={isPostingInventory} onClick={() => void postTransferFeedback("SAVE")} type="button">
+            <button className="rms-button" disabled={isPostingInventory || transferFeedbackUploadingSection !== null} onClick={() => void postTransferFeedback("SAVE")} type="button">
               Save
             </button>
-            <button className="rms-button is-primary" disabled={isPostingInventory} onClick={() => void postTransferFeedback("CONFIRM")} type="button">
+            <button className="rms-button is-primary" disabled={isPostingInventory || transferFeedbackUploadingSection !== null} onClick={() => void postTransferFeedback("CONFIRM")} type="button">
               Confirm
             </button>
           </div>
@@ -6773,7 +6853,15 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               aria-label={sidebarCollapsed ? item.label : undefined}
               className={activeWorkspace === item.id ? "is-active" : ""}
               key={item.id}
-              onClick={() => setActiveWorkspace(item.id)}
+              onClick={() => {
+                setActiveWorkspace(item.id);
+                if (
+                  typeof window !== "undefined" &&
+                  window.matchMedia("(max-width: 760px)").matches
+                ) {
+                  setSidebarCollapsed(true);
+                }
+              }}
               title={sidebarCollapsed ? item.label : undefined}
               type="button"
             >
@@ -8215,15 +8303,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               </div>
               <div className="rms-form-grid rms-expense-form">
                 <label><span>Date</span><input onChange={(event) => setExpenseDate(event.target.value)} type="date" value={expenseDate} /></label>
-                <label><span>Category</span><select onChange={(event) => setExpenseCategory(event.target.value)} value={expenseCategory}>
-                  <option value="GENERAL">General</option>
-                  <option value="UTILITIES">Utilities</option>
-                  <option value="TOILETRIES">Toiletries</option>
-                  <option value="REPAIRS">Repairs</option>
-                  <option value="TRANSPORT">Transport</option>
-                  <option value="SECURITY">Security</option>
-                  <option value="OTHER">Other</option>
-                </select></label>
                 <label><span>Payment</span><select onChange={(event) => setExpensePaymentMethod(event.target.value)} value={expensePaymentMethod}>
                   <option value="CASH">Cash</option>
                   <option value="MOBILE_MONEY">Mobile money</option>
@@ -8232,11 +8311,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <option value="PAYABLE">Payable</option>
                 </select></label>
                 <label><span>Amount</span><input min="0.01" onChange={(event) => setExpenseAmount(event.target.value)} step="0.01" type="number" value={expenseAmount} /></label>
-                <label><span>Tax</span><input min="0" onChange={(event) => setExpenseTaxAmount(event.target.value)} step="0.01" type="number" value={expenseTaxAmount} /></label>
-                <label><span>Supplier / payee</span><input onChange={(event) => setExpenseSupplierName(event.target.value)} value={expenseSupplierName} /></label>
                 <label><span>Reference</span><input onChange={(event) => setExpenseReference(event.target.value)} value={expenseReference} /></label>
                 <label className="rms-note-field"><span>Details</span><textarea onChange={(event) => setExpenseDescription(event.target.value)} rows={3} value={expenseDescription} /></label>
-                <label className="rms-note-field"><span>Note</span><textarea onChange={(event) => setExpenseNote(event.target.value)} rows={2} value={expenseNote} /></label>
               </div>
               <div className="rms-expense-attachment-row">
                 <label className="rms-evidence-capture-button">
@@ -8247,9 +8323,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <a className="rms-row-button" href={expenseAttachmentUrl} rel="noreferrer" target="_blank">
                     {expenseAttachmentFileName || "Open attachment"}
                   </a>
-                ) : (
-                  <StatusPill>Optional</StatusPill>
-                )}
+                ) : null}
               </div>
               <div className="rms-dialog-actions">
                 <button className="rms-button" onClick={resetExpenseDraft} type="button">Clear</button>
@@ -8263,17 +8337,55 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 <div><span>Recent expenses</span><h2>Store submissions</h2></div>
               </div>
               <div className="rms-table rms-expense-table">
-                <div className="rms-table-head"><span>Expense</span><span>Date</span><span>Category</span><span>Amount</span><span>Status</span><span>Attachment</span><span>Action</span></div>
+                <div className="rms-table-head"><span>Expense</span><span>Date</span><span>Payment</span><span>Amount</span><span>Status</span><span>Attachment</span><span>Action</span></div>
                 {workspace.storeExpenses.map((expense) => (
-                  <div className="rms-table-row" key={expense.expenseId}>
+                  <div
+                    className={`rms-table-row ${expense.status === "DRAFT" ? "is-clickable" : ""}`}
+                    key={expense.expenseId}
+                    onClick={() => {
+                      if (expense.status === "DRAFT") {
+                        loadExpenseDraft(expense);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        loadExpenseDraft(expense);
+                      }
+                    }}
+                    role={expense.status === "DRAFT" ? "button" : undefined}
+                    tabIndex={expense.status === "DRAFT" ? 0 : -1}
+                    title={expense.status === "DRAFT" ? "Open draft expense for editing" : undefined}
+                  >
                     <div><strong>{expense.expenseNo}</strong><small>{expense.description}</small></div>
                     <span>{formatDateTime(expense.expenseDate, workspace.store?.timezone ?? "Africa/Accra")}</span>
-                    <span>{expense.category}</span>
+                    <span>{expense.paymentMethod ?? "Cash"}</span>
                     <strong>{formatMoney(expense.amount + expense.taxAmount, currencyCode)}</strong>
                     <StatusPill tone={expense.status === "POSTED" ? "good" : expense.status === "APPROVED" ? "warning" : "neutral"}>{expense.status}</StatusPill>
-                    {expense.attachmentUrl ? <a href={expense.attachmentUrl} rel="noreferrer" target="_blank">Open</a> : <span>-</span>}
+                    {expense.attachmentUrl ? (
+                      <a
+                        href={expense.attachmentUrl}
+                        onClick={(event) => event.stopPropagation()}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        Open
+                      </a>
+                    ) : (
+                      <span>-</span>
+                    )}
                     {expense.status === "DRAFT" ? (
-                      <button className="rms-row-button is-add" disabled={isPostingInventory} onClick={() => void confirmStoreExpense(expense.expenseId)} type="button">Confirm</button>
+                      <button
+                        className="rms-row-button is-add"
+                        disabled={isPostingInventory}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          requestExpenseConfirmation(expense);
+                        }}
+                        type="button"
+                      >
+                        Confirm
+                      </button>
                     ) : (
                       <StatusPill>{expense.status === "POSTED" ? "Posted" : "HQ review"}</StatusPill>
                     )}
@@ -8644,6 +8756,30 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             : "Save calculated rows"
         }
         tone={pendingStockCountConfirmation?.action === "COMMIT" ? "warning" : "default"}
+      />
+      <ConfirmationDialog
+        confirmLabel="Confirm for HQ"
+        description={
+          <p>
+            This will send <strong>{pendingExpenseConfirmation?.expenseNo ?? "this expense"}</strong>{" "}
+            for HQ Finance review. Amount:{" "}
+            <strong>{formatMoney(pendingExpenseConfirmation?.amount ?? 0, currencyCode)}</strong>.
+          </p>
+        }
+        isSubmitting={isPostingInventory}
+        onCancel={() => {
+          if (!isPostingInventory) {
+            setPendingExpenseConfirmation(null);
+          }
+        }}
+        onConfirm={() => {
+          if (pendingExpenseConfirmation) {
+            void confirmStoreExpense(pendingExpenseConfirmation.expenseId);
+          }
+        }}
+        open={Boolean(pendingExpenseConfirmation)}
+        title="Confirm store expense"
+        tone="warning"
       />
       {isScreenLocked ? (
         <div className="rms-lock-overlay" role="dialog" aria-modal="true">

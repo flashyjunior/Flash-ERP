@@ -424,7 +424,14 @@ export type FuelOperationsWorkspaceData = {
     operatingSiteId: string | null;
     uomCode: string | null;
   }>;
-  nozzleOptions: Array<{ nozzleId: string; code: string; name: string; label: string; tankId: string }>;
+  nozzleOptions: Array<{
+    nozzleId: string;
+    code: string;
+    name: string;
+    label: string;
+    tankId: string;
+    currentMeterReading: number;
+  }>;
   stationOptions: Array<{
     stationId: string;
     stationCode: string;
@@ -3812,7 +3819,8 @@ export async function getFuelOperationsWorkspace(
         code: nozzle.code,
         name: nozzle.name,
         label: `${nozzle.pump.code}/${nozzle.code} - ${nozzle.name}`,
-        tankId: nozzle.tankId
+        tankId: nozzle.tankId,
+        currentMeterReading: toNumber(nozzle.currentMeterReading)
       })),
       stationOptions: scopedStations.map((station) => {
         const storeLabel = station.store
@@ -5993,8 +6001,11 @@ export async function createFuelMeterReading(
       throw new Error("Flash ERP could not find that nozzle.");
     }
 
+    const existingReadingId = normalizeOptionalText(input.meterReadingId);
     const readingDate = parseOperationDate(input.readingDate, "meter reading date");
-    const openingMeterReading = roundQuantity(numberOrZero(input.openingMeterReading));
+    const openingMeterReading = existingReadingId
+      ? roundQuantity(numberOrZero(input.openingMeterReading))
+      : roundQuantity(toNumber(nozzle.currentMeterReading));
     const closingMeterReading = roundQuantity(positiveNumber(input.closingMeterReading, "closing meter reading"));
     const adjustmentQuantity = roundQuantity(numberOrZero(input.adjustmentQuantity));
     const salesQuantity = roundQuantity(closingMeterReading - openingMeterReading + adjustmentQuantity);
@@ -6010,7 +6021,6 @@ export async function createFuelMeterReading(
         : roundMoney(numberOrZero(input.salesAmount));
     const evidenceImageUrl = normalizeEvidenceImageUrl(input.evidenceImageUrl, "meter reading");
 
-    const existingReadingId = normalizeOptionalText(input.meterReadingId);
     const existingReading = existingReadingId
       ? await tx.erpFuelMeterReading.findFirst({
           where: {

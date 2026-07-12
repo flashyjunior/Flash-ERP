@@ -1,4 +1,4 @@
-import { readJsonStringArray } from "./json-field";
+import { parseJsonField, readJsonStringArray } from "./json-field";
 
 
 import { prisma } from "@/lib/db/prisma";
@@ -89,6 +89,35 @@ function readOptionalStringArray(value: unknown) {
   }
 
   return nextValues;
+}
+
+function readTransferFeedbackEvidence(value: unknown) {
+  const parsed = parseJsonField(value);
+
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed
+    .map((item) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+
+      const url = readOptionalString(item.url);
+
+      if (!url) {
+        return null;
+      }
+
+      return {
+        url,
+        fileName: readOptionalString(item.fileName),
+        capturedAt: readOptionalString(item.capturedAt),
+        uploadedAt: readOptionalString(item.uploadedAt),
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
 }
 
 function calculateClaimAmount(
@@ -436,6 +465,19 @@ export type EnterpriseInventoryWorkspaceData = {
     quantityAfterDelivery: number | null;
     actualQuantityReceived: number | null;
     feedbackVarianceQuantity: number | null;
+    feedbackDipReading: number | null;
+    beforeDischargeEvidence: Array<{
+      url: string;
+      fileName: string | null;
+      capturedAt: string | null;
+      uploadedAt: string | null;
+    }>;
+    afterDischargeEvidence: Array<{
+      url: string;
+      fileName: string | null;
+      capturedAt: string | null;
+      uploadedAt: string | null;
+    }>;
     feedbackNote: string | null;
     feedbackRecordedAt: string | null;
     feedbackRecordedAtLabel: string;
@@ -888,6 +930,9 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         quantityAfterDelivery: true,
         actualQuantityReceived: true,
         feedbackVarianceQuantity: true,
+        feedbackDipReading: true,
+        beforeDischargeEvidenceJson: true,
+        afterDischargeEvidenceJson: true,
         feedbackNote: true,
         feedbackRecordedAt: true,
         feedbackConfirmedAt: true,
@@ -1481,6 +1526,12 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         transfer.feedbackVarianceQuantity === null
           ? null
           : Number(Number(transfer.feedbackVarianceQuantity).toFixed(3)),
+      feedbackDipReading:
+        transfer.feedbackDipReading === null
+          ? null
+          : Number(Number(transfer.feedbackDipReading).toFixed(3)),
+      beforeDischargeEvidence: readTransferFeedbackEvidence(transfer.beforeDischargeEvidenceJson),
+      afterDischargeEvidence: readTransferFeedbackEvidence(transfer.afterDischargeEvidenceJson),
       feedbackNote: transfer.feedbackNote,
       feedbackRecordedAt: toIsoString(transfer.feedbackRecordedAt),
       feedbackRecordedAtLabel: formatRelativeTime(transfer.feedbackRecordedAt),

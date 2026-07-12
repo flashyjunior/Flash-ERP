@@ -2781,6 +2781,34 @@ option {
   pointer-events: none;
 }
 
+.rms-online-desktop .rms-evidence-uploading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #c7decf;
+  border-radius: 8px;
+  background: #edf8f1;
+  color: #173c28;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 8px 10px;
+}
+
+.rms-online-desktop .rms-inline-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(47, 125, 77, 0.25);
+  border-top-color: #2f7d4d;
+  border-radius: 999px;
+  animation: rms-spin 0.8s linear infinite;
+}
+
+@keyframes rms-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .rms-online-desktop .rms-transfer-feedback-evidence-list {
   display: grid;
   gap: 8px;
@@ -2840,6 +2868,14 @@ option {
 .rms-online-desktop .rms-expense-table .rms-table-head,
 .rms-online-desktop .rms-expense-table .rms-table-row {
   grid-template-columns: minmax(180px, 1.1fr) 150px 108px 112px 94px 86px 96px;
+}
+
+.rms-online-desktop .rms-expense-table .rms-table-row.is-clickable {
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-expense-table .rms-table-row.is-clickable:hover {
+  background: #f3f8f4;
 }
 
 .rms-online-desktop .rms-reference-suggestions {
@@ -3067,6 +3103,18 @@ option {
     border-bottom: 1px solid #cad8ce;
   }
 
+  .rms-online-desktop.is-sidebar-collapsed .rms-sidebar {
+    display: flex;
+    align-items: center;
+    min-height: 58px;
+    overflow: hidden;
+  }
+
+  .rms-online-desktop.is-sidebar-collapsed .rms-nav,
+  .rms-online-desktop.is-sidebar-collapsed .rms-sidebar-status {
+    display: none;
+  }
+
   .rms-online-desktop .rms-main,
   .rms-online-desktop .rms-workspace {
     min-width: 0;
@@ -3108,10 +3156,57 @@ option {
     grid-template-columns: 1fr;
   }
 
-  .rms-online-desktop .rms-expense-workspace,
-  .rms-online-desktop .rms-expense-table .rms-table-head,
-  .rms-online-desktop .rms-expense-table .rms-table-row {
+  .rms-online-desktop .rms-expense-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-head {
+    display: none;
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+    border: 1px solid #dbe7df;
+    border-radius: 10px;
+    background: #fff;
+    padding: 12px;
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :first-child,
+  .rms-online-desktop .rms-expense-table .rms-table-row > :last-child {
+    grid-column: 1 / -1;
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(n + 2)::before {
+    display: block;
+    margin-bottom: 3px;
+    color: #5e6f64;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(2)::before {
+    content: "Date";
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(3)::before {
+    content: "Payment";
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(4)::before {
+    content: "Amount";
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(5)::before {
+    content: "Status";
+  }
+
+  .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(6)::before {
+    content: "Attachment";
   }
 
   .rms-online-desktop .rms-dialog-actions,

@@ -372,7 +372,7 @@ export function EnterpriseInventoryWorkspace({
   const [transferDeliveryNoteNo, setTransferDeliveryNoteNo] = useState("");
   const [transferDialogOpen, setTransferDialogOpen] = useState(false);
   const [editingTransferBatchNo, setEditingTransferBatchNo] = useState<string | null>(null);
-  const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<"header" | "details">(
+  const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<"header" | "details" | "feedback">(
     "header"
   );
   const [transferLines, setTransferLines] = useState<
@@ -1098,6 +1098,64 @@ export function EnterpriseInventoryWorkspace({
     }
   }
 
+  async function confirmTransferFeedback() {
+    const feedback = editingTransferFeedback;
+
+    if (!feedback) {
+      return;
+    }
+
+    setTransferSubmitting(true);
+    setTransferStatus({ tone: "idle", message: "" });
+
+    try {
+      const response = await fetch(
+        `/api/fuel-operations/station-deliveries/${encodeURIComponent(feedback.transferId)}/feedback`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "CONFIRM",
+            waterTestResult: feedback.waterTestResult,
+            quantityBeforeDelivery: feedback.quantityBeforeDelivery,
+            expectedQuantityReceived: feedback.expectedQuantityReceived,
+            expectedStockQuantity: feedback.expectedStockQuantity,
+            quantityAfterDelivery: feedback.quantityAfterDelivery,
+            actualQuantityReceived: feedback.actualQuantityReceived,
+            feedbackDipReading: feedback.feedbackDipReading,
+            beforeDischargeEvidence: feedback.beforeDischargeEvidence,
+            afterDischargeEvidence: feedback.afterDischargeEvidence,
+            feedbackNote: feedback.feedbackNote,
+            feedbackOperatorName: "HQ inventory",
+          }),
+        },
+      );
+      const payload = (await response.json()) as { message?: string; error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? payload.error ?? "Flash ERP could not confirm transfer feedback.");
+      }
+
+      setTransferStatus({
+        tone: "success",
+        message: payload.message ?? "Transfer feedback confirmed.",
+      });
+      router.refresh();
+    } catch (error) {
+      setTransferStatus({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not confirm transfer feedback.",
+      });
+    } finally {
+      setTransferSubmitting(false);
+    }
+  }
+
   const purchaseOrderColumns = useMemo<ColumnDef<PurchaseOrderRow>[]>(
     () => [
       {
@@ -1763,7 +1821,13 @@ export function EnterpriseInventoryWorkspace({
         >
           <div className="space-y-4">
             <div className="flex flex-wrap gap-2">
-              {(["header", "details"] as const).map((tab) => (
+              {(
+                [
+                  "header",
+                  "details",
+                  ...(editingTransferFeedback ? ["feedback"] : []),
+                ] as Array<"header" | "details" | "feedback">
+              ).map((tab) => (
                 <button
                   className={`rounded-full border px-4 py-2 text-sm font-semibold ${
                     activeTransferEntryTab === tab
@@ -1774,7 +1838,7 @@ export function EnterpriseInventoryWorkspace({
                   onClick={() => setActiveTransferEntryTab(tab)}
                   type="button"
                 >
-                  {tab === "header" ? "Header" : "Content"}
+                  {tab === "header" ? "Header" : tab === "details" ? "Content" : "Feedback"}
                 </button>
               ))}
             </div>
@@ -1893,50 +1957,8 @@ export function EnterpriseInventoryWorkspace({
                     value={transferNote}
                   />
                 </label>
-                {editingTransferFeedback ? (
-                  <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 lg:col-span-3">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
-                      Feedback
-                    </p>
-                    <div className="mt-3 grid gap-3 md:grid-cols-4">
-                      <div>
-                        <span className="text-xs text-stone-500">Status</span>
-                        <p className="text-sm font-semibold text-stone-900">
-                          {editingTransferFeedback.feedbackStatus}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-xs text-stone-500">Water test</span>
-                        <p className="text-sm font-semibold text-stone-900">
-                          {editingTransferFeedback.waterTestResult ?? "Not captured"}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-xs text-stone-500">Actual received</span>
-                        <p className="text-sm font-semibold text-stone-900">
-                          {editingTransferFeedback.actualQuantityReceived === null
-                            ? "Not captured"
-                            : quantityFormatter.format(editingTransferFeedback.actualQuantityReceived)}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-xs text-stone-500">Variance</span>
-                        <p className="text-sm font-semibold text-stone-900">
-                          {editingTransferFeedback.feedbackVarianceQuantity === null
-                            ? "Not captured"
-                            : quantityFormatter.format(editingTransferFeedback.feedbackVarianceQuantity)}
-                        </p>
-                      </div>
-                    </div>
-                    {editingTransferFeedback.feedbackNote ? (
-                      <p className="mt-3 text-sm text-stone-600">
-                        {editingTransferFeedback.feedbackNote}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
               </div>
-            ) : (
+            ) : activeTransferEntryTab === "details" ? (
               <div className="space-y-4">
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_8rem_auto]">
                   <select
@@ -2005,8 +2027,134 @@ export function EnterpriseInventoryWorkspace({
                   )}
                 </div>
               </div>
+            ) : (
+              <div className="space-y-4">
+                {editingTransferFeedback ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-4">
+                      {[
+                        { label: "Status", value: editingTransferFeedback.feedbackStatus },
+                        {
+                          label: "Water test",
+                          value: editingTransferFeedback.waterTestResult ?? "Not captured"
+                        },
+                        {
+                          label: "Dip reading",
+                          value:
+                            editingTransferFeedback.feedbackDipReading === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.feedbackDipReading)
+                        },
+                        {
+                          label: "Actual received",
+                          value:
+                            editingTransferFeedback.actualQuantityReceived === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.actualQuantityReceived)
+                        },
+                        {
+                          label: "Variance",
+                          value:
+                            editingTransferFeedback.feedbackVarianceQuantity === null
+                              ? "Not captured"
+                              : quantityFormatter.format(editingTransferFeedback.feedbackVarianceQuantity)
+                        },
+                        {
+                          label: "Recorded by",
+                          value: editingTransferFeedback.feedbackOperatorName ?? "Not captured"
+                        },
+                        {
+                          label: "Recorded",
+                          value: editingTransferFeedback.feedbackRecordedAt
+                            ? renderTimestamp(
+                                editingTransferFeedback.feedbackRecordedAt,
+                                editingTransferFeedback.feedbackRecordedAtLabel
+                              )
+                            : "Not captured"
+                        },
+                        {
+                          label: "Confirmed",
+                          value: editingTransferFeedback.feedbackConfirmedAt
+                            ? renderTimestamp(
+                                editingTransferFeedback.feedbackConfirmedAt,
+                                "Confirmed"
+                              )
+                            : "Not confirmed"
+                        }
+                      ].map((stat) => (
+                        <div className="rounded-xl border border-stone-200 bg-stone-50 p-3" key={stat.label}>
+                          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">
+                            {stat.label}
+                          </span>
+                          <div className="mt-1 text-sm font-semibold text-stone-900">
+                            {stat.value}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {editingTransferFeedback.feedbackNote ? (
+                      <div className="rounded-xl border border-stone-200 bg-white p-3">
+                        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">
+                          Feedback note
+                        </span>
+                        <p className="mt-1 text-sm text-stone-700">
+                          {editingTransferFeedback.feedbackNote}
+                        </p>
+                      </div>
+                    ) : null}
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {[
+                        ["Before discharge", editingTransferFeedback.beforeDischargeEvidence],
+                        ["After discharge", editingTransferFeedback.afterDischargeEvidence],
+                      ].map(([label, evidence]) => (
+                        <div className="rounded-xl border border-stone-200 bg-white p-3" key={label as string}>
+                          <div className="flex items-center justify-between gap-3">
+                            <strong className="text-sm text-stone-900">{label as string}</strong>
+                            <span className="text-xs font-semibold text-stone-500">
+                              {(evidence as typeof editingTransferFeedback.beforeDischargeEvidence).length} photo(s)
+                            </span>
+                          </div>
+                          <div className="mt-3 grid gap-2">
+                            {(evidence as typeof editingTransferFeedback.beforeDischargeEvidence).map((item) => (
+                              <a
+                                className="rounded-lg border border-stone-200 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50"
+                                href={item.url}
+                                key={item.url}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                {item.fileName ?? "Evidence photo"}
+                              </a>
+                            ))}
+                            {(evidence as typeof editingTransferFeedback.beforeDischargeEvidence).length === 0 ? (
+                              <span className="text-sm text-stone-500">No evidence uploaded.</span>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {!isTransferFeedbackFinal ? (
+                      <div className="flex justify-end">
+                        <button
+                          className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[var(--brand-deep)] disabled:cursor-not-allowed disabled:bg-stone-300"
+                          disabled={transferSubmitting}
+                          onClick={() => void confirmTransferFeedback()}
+                          type="button"
+                        >
+                          {transferSubmitting ? "Confirming" : "Confirm feedback"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
+                    No transfer feedback has been captured yet.
+                  </p>
+                )}
+              </div>
             )}
 
+            {activeTransferEntryTab !== "feedback" ? (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-stone-200 bg-white p-4">
               <div className="flex flex-wrap gap-3 text-sm text-stone-600">
                 <span>{numberFormatter.format(transferLines.length)} line(s)</span>
@@ -2040,6 +2188,7 @@ export function EnterpriseInventoryWorkspace({
                 ) : null}
               </div>
             </div>
+            ) : null}
             {interStoreRequestBlockReason && !transferSubmitting ? (
               <p className="text-xs font-medium text-stone-500">{interStoreRequestBlockReason}</p>
             ) : null}

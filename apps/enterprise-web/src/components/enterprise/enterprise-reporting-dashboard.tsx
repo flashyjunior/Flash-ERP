@@ -386,7 +386,7 @@ const storePerformanceFilter: FilterFn<StorePerformanceRow> = (row, _columnId, f
     return true;
   }
 
-  return [row.original.store, row.original.storeCode, row.original.nodeCode ?? ""]
+  return [row.original.store, row.original.storeCode, row.original.storeGroup, row.original.nodeCode ?? ""]
     .join(" ")
     .toLowerCase()
     .includes(query);
@@ -1323,6 +1323,10 @@ export function EnterpriseReportingDashboard({
         meta: {
           disableTruncate: true
         }
+      },
+      {
+        accessorKey: "storeGroup",
+        header: "Group"
       },
       {
         accessorKey: "salesValue",
@@ -3244,6 +3248,8 @@ export function EnterpriseReportingDashboard({
         return buildChoiceOptions(dashboard.counterpartyExposureRows.map((row) => row.partyType));
       case "managementExceptions":
         return buildChoiceOptions(dashboard.managementExceptionRows.map((row) => row.area));
+      case "storePerformance":
+        return buildChoiceOptions(dashboard.storePerformanceRows.map((row) => row.storeGroup));
       case "kpiScorecard":
         return buildChoiceOptions(dashboard.kpiScorecardRows.map((row) => row.group));
       case "profitAndLoss":
@@ -3832,14 +3838,15 @@ export function EnterpriseReportingDashboard({
             data={dashboard.storePerformanceRows.filter(
               (row) =>
                 matchesStoreScope([row.storeCode, row.store]) &&
-                matchesDate(row.lastActivityAt)
+                matchesDate(row.lastActivityAt) &&
+                matchesChoice(filters.category, [row.storeGroup])
             )}
             emptyLabel="No store performance rows are available for this report."
             exportFileName="flash-erp-store-performance"
             globalFilterFn={storePerformanceFilter}
             initialPageSize={12}
             initialSorting={[{ id: "salesValue", desc: true }]}
-            searchPlaceholder="Search stores, codes, or node IDs"
+            searchPlaceholder="Search stores, groups, codes, or node IDs"
           />
         );
       case "salesOrders":

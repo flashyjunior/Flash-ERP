@@ -6498,6 +6498,11 @@ export class LocalStoreService {
     const normalizedStatus = input?.status?.trim().toUpperCase() || null;
     const normalizedLocationCode =
       input?.locationCode?.trim().toUpperCase() || null;
+    const localStoreCode = (
+      this.metadata("store_code") ?? defaultStoreConfig.storeCode
+    )
+      .trim()
+      .toUpperCase();
     const limit = Math.min(Math.max(input?.limit ?? 12, 1), 24);
     const rows = this.db
       .prepare(
@@ -6627,6 +6632,34 @@ export class LocalStoreService {
         updatedAt: row.updated_at,
       }))
       .filter((transfer) => {
+        const sourceStoreCode = transfer.sourceStoreCode.trim().toUpperCase();
+        const destinationStoreCode = transfer.destinationStoreCode
+          .trim()
+          .toUpperCase();
+
+        if (
+          transfer.role === "SOURCE" &&
+          sourceStoreCode !== localStoreCode
+        ) {
+          return false;
+        }
+
+        if (
+          transfer.role === "DESTINATION" &&
+          destinationStoreCode !== localStoreCode
+        ) {
+          return false;
+        }
+
+        if (
+          transfer.role !== "SOURCE" &&
+          transfer.role !== "DESTINATION" &&
+          sourceStoreCode !== localStoreCode &&
+          destinationStoreCode !== localStoreCode
+        ) {
+          return false;
+        }
+
         if (normalizedRole && transfer.role.toUpperCase() !== normalizedRole) {
           return false;
         }
