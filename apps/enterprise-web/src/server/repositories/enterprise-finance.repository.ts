@@ -438,33 +438,12 @@ export function buildUnavailableEnterpriseFinanceWorkspace(
 async function getEnterpriseContext(preferredRetailOrgId?: string | null): Promise<EnterpriseContext | null> {
   const preferredId = String(preferredRetailOrgId ?? "").trim();
 
-  if (preferredId) {
-    const retailOrg = await prisma.retailOrg.findUnique({
-      where: {
-        id: preferredId
-      },
-      select: {
-        id: true,
-        name: true,
-        baseCurrencyCode: true,
-        companySettingsJson: true
-      }
-    });
-
-    if (retailOrg) {
-      return {
-        retailOrgId: retailOrg.id,
-        retailOrgName: retailOrg.name,
-        currencyCode: resolveEnterpriseCurrencyCode(retailOrg)
-      };
-    }
-  }
-
   const enterpriseNode = await prisma.syncNode.findFirst({
     where: {
       nodeType: SyncNodeType.ENTERPRISE,
       isPrimary: true,
-      status: RecordStatus.ACTIVE
+      status: RecordStatus.ACTIVE,
+      ...(preferredId ? { retailOrgId: preferredId } : {})
     },
     select: {
       retailOrgId: true,
@@ -478,14 +457,34 @@ async function getEnterpriseContext(preferredRetailOrgId?: string | null): Promi
     }
   });
 
-  if (!enterpriseNode) {
+  const fallbackEnterpriseNode =
+    enterpriseNode ??
+    (await prisma.syncNode.findFirst({
+      where: {
+        nodeType: SyncNodeType.ENTERPRISE,
+        isPrimary: true,
+        status: RecordStatus.ACTIVE
+      },
+      select: {
+        retailOrgId: true,
+        retailOrg: {
+          select: {
+            name: true,
+            baseCurrencyCode: true,
+            companySettingsJson: true
+          }
+        }
+      }
+    }));
+
+  if (!fallbackEnterpriseNode) {
     return null;
   }
 
   return {
-    retailOrgId: enterpriseNode.retailOrgId,
-    retailOrgName: enterpriseNode.retailOrg.name,
-    currencyCode: resolveEnterpriseCurrencyCode(enterpriseNode.retailOrg)
+    retailOrgId: fallbackEnterpriseNode.retailOrgId,
+    retailOrgName: fallbackEnterpriseNode.retailOrg.name,
+    currencyCode: resolveEnterpriseCurrencyCode(fallbackEnterpriseNode.retailOrg)
   };
 }
 
