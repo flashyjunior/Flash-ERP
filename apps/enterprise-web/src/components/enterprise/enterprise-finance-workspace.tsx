@@ -15,6 +15,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
+import { ActionDialog } from "@/components/dialogs/action-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import { WorkspaceTabs, WorkspaceTabsContent } from "@/components/layouts/workspace-tabs";
 import type { EnterpriseFinanceWorkspaceData } from "@/server/repositories/enterprise-finance.repository";
@@ -42,6 +43,23 @@ function formatDate(value: string) {
     day: "numeric",
     year: "numeric"
   });
+}
+
+function DetailItem({
+  label,
+  value
+}: {
+  label: string;
+  value: string | number | null | undefined;
+}) {
+  return (
+    <div className="min-w-0 rounded-xl border border-stone-200 bg-white/80 px-3 py-2">
+      <p className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-stone-400">
+        {label}
+      </p>
+      <p className="mt-1 truncate text-sm font-semibold text-stone-900">{value ?? "-"}</p>
+    </div>
+  );
 }
 
 function MetricCard({
@@ -164,8 +182,10 @@ export function EnterpriseFinanceWorkspace({
   workspace: EnterpriseFinanceWorkspaceData;
 }) {
   const router = useRouter();
-  const [expenseAccountDrafts, setExpenseAccountDrafts] = useState<Record<string, string>>({});
-  const [paymentAccountDrafts, setPaymentAccountDrafts] = useState<Record<string, string>>({});
+  const [selectedExpense, setSelectedExpense] = useState<ExpenseRow | null>(null);
+  const [expenseDialogOpen, setExpenseDialogOpen] = useState(false);
+  const [expenseAccountDraft, setExpenseAccountDraft] = useState("");
+  const [paymentAccountDraft, setPaymentAccountDraft] = useState("");
   const [postingExpenseId, setPostingExpenseId] = useState<string | null>(null);
   const [expensePostingMessage, setExpensePostingMessage] = useState<string | null>(null);
   const [expensePostingError, setExpensePostingError] = useState<string | null>(null);
@@ -191,9 +211,30 @@ export function EnterpriseFinanceWorkspace({
       ),
     [workspace.accountRows]
   );
+  const selectedExpenseIsPosted =
+    selectedExpense?.status === "POSTED" || Boolean(selectedExpense?.postedAt);
+  const selectedExpenseTotal = selectedExpense
+    ? selectedExpense.amount + selectedExpense.taxAmount
+    : 0;
+  const canPostSelectedExpense =
+    Boolean(selectedExpense) &&
+    !selectedExpenseIsPosted &&
+    Boolean(expenseAccountDraft) &&
+    Boolean(paymentAccountDraft) &&
+    postingExpenseId !== selectedExpense?.expenseId;
+
+  function openExpenseReview(row: ExpenseRow) {
+    setSelectedExpense(row);
+    setExpenseAccountDraft(row.financeExpenseAccountCode ?? "");
+    setPaymentAccountDraft(row.financePaymentAccountCode ?? "");
+    setExpensePostingError(null);
+    setExpensePostingMessage(null);
+    setExpenseDialogOpen(true);
+  }
+
   async function assignAndPostExpense(row: ExpenseRow) {
-    const expenseAccountCode = expenseAccountDrafts[row.expenseId] ?? row.financeExpenseAccountCode ?? "";
-    const paymentAccountCode = paymentAccountDrafts[row.expenseId] ?? row.financePaymentAccountCode ?? "";
+    const expenseAccountCode = expenseAccountDraft || row.financeExpenseAccountCode || "";
+    const paymentAccountCode = paymentAccountDraft || row.financePaymentAccountCode || "";
 
     setPostingExpenseId(row.expenseId);
     setExpensePostingError(null);
@@ -220,6 +261,8 @@ export function EnterpriseFinanceWorkspace({
       }
 
       setExpensePostingMessage(payload.message ?? `${row.expenseNo} posted to GL.`);
+      setExpenseDialogOpen(false);
+      setSelectedExpense(null);
       router.refresh();
     } catch (error) {
       setExpensePostingError(
@@ -494,74 +537,25 @@ export function EnterpriseFinanceWorkspace({
       },
       {
         id: "assignment",
-        header: "GL assignment",
+        header: "Action",
         cell: ({ row }) => {
           const isPosted = row.original.status === "POSTED" || Boolean(row.original.postedAt);
-          const disabled = isPosted || postingExpenseId === row.original.expenseId;
+          const hasAssignment = Boolean(
+            row.original.financeExpenseAccountCode && row.original.financePaymentAccountCode
+          );
 
           return (
-            <div className="grid min-w-[18rem] gap-2">
-              <select
-                className="rounded-xl border border-stone-200 bg-white px-2 py-1.5 text-xs font-semibold text-stone-700 outline-none"
-                disabled={disabled}
-                onChange={(event) =>
-                  setExpenseAccountDrafts((current) => ({
-                    ...current,
-                    [row.original.expenseId]: event.target.value
-                  }))
-                }
-                value={
-                  expenseAccountDrafts[row.original.expenseId] ??
-                  row.original.financeExpenseAccountCode ??
-                  ""
-                }
-              >
-                <option value="">Expense account</option>
-                {expenseAccountOptions.map((account) => (
-                  <option key={account.accountCode} value={account.accountCode}>
-                    {account.accountCode} · {account.accountName}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="rounded-xl border border-stone-200 bg-white px-2 py-1.5 text-xs font-semibold text-stone-700 outline-none"
-                disabled={disabled}
-                onChange={(event) =>
-                  setPaymentAccountDrafts((current) => ({
-                    ...current,
-                    [row.original.expenseId]: event.target.value
-                  }))
-                }
-                value={
-                  paymentAccountDrafts[row.original.expenseId] ??
-                  row.original.financePaymentAccountCode ??
-                  ""
-                }
-              >
-                <option value="">Payment / clearing</option>
-                {paymentAccountOptions.map((account) => (
-                  <option key={account.accountCode} value={account.accountCode}>
-                    {account.accountCode} · {account.accountName}
-                  </option>
-                ))}
-              </select>
+            <div className="flex min-w-[9rem] items-center gap-2">
+              <span className="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-stone-500">
+                {isPosted ? "Posted" : hasAssignment ? "Assigned" : "Review"}
+              </span>
               <button
-                className="inline-flex h-8 items-center justify-center rounded-xl bg-[var(--brand)] px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-stone-300"
-                disabled={disabled}
-                onClick={() => void assignAndPostExpense(row.original)}
+                className="inline-flex h-8 items-center justify-center rounded-xl bg-[var(--brand)] px-3 text-xs font-semibold text-white transition hover:brightness-95"
+                onClick={() => openExpenseReview(row.original)}
                 type="button"
               >
-                {isPosted
-                  ? "Posted"
-                  : postingExpenseId === row.original.expenseId
-                    ? "Posting..."
-                    : "Assign & post"}
+                {postingExpenseId === row.original.expenseId ? "Posting..." : isPosted ? "View" : "Review"}
               </button>
-              {row.original.financeAssignedBy ? (
-                <p className="text-[0.68rem] font-semibold uppercase tracking-[0.14em] text-stone-500">
-                  Assigned by {row.original.financeAssignedBy}
-                </p>
-              ) : null}
             </div>
           );
         },
@@ -586,10 +580,6 @@ export function EnterpriseFinanceWorkspace({
     ],
     [
       currencyFormatter,
-      expenseAccountDrafts,
-      expenseAccountOptions,
-      paymentAccountDrafts,
-      paymentAccountOptions,
       postingExpenseId
     ]
   );
@@ -834,6 +824,204 @@ export function EnterpriseFinanceWorkspace({
           />
         </WorkspaceTabsContent>
       </WorkspaceTabs>
+
+      <ActionDialog
+        description="Review the store submission, assign the expense and payment or clearing accounts, then post it to the general ledger."
+        hideTrigger
+        onOpenChange={(open) => {
+          setExpenseDialogOpen(open);
+
+          if (!open) {
+            setSelectedExpense(null);
+          }
+        }}
+        open={expenseDialogOpen}
+        title={selectedExpense ? `Expense ${selectedExpense.expenseNo}` : "Expense review"}
+        triggerLabel=""
+        widthClassName="max-w-5xl"
+      >
+        {selectedExpense ? (
+          <div className="grid gap-5">
+            {expensePostingError ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-800">
+                {expensePostingError}
+              </div>
+            ) : null}
+
+            <section className="grid gap-3 md:grid-cols-4">
+              <DetailItem label="Status" value={formatEnumLabel(selectedExpense.status)} />
+              <DetailItem label="Expense date" value={formatDate(selectedExpense.expenseDate)} />
+              <DetailItem
+                label="Shop"
+                value={selectedExpense.storeName ?? selectedExpense.storeCode ?? "HQ"}
+              />
+              <DetailItem label="Category" value={selectedExpense.category} />
+              <DetailItem label="Payment" value={selectedExpense.paymentMethod ?? "Not captured"} />
+              <DetailItem label="Supplier" value={selectedExpense.supplierName ?? "Internal"} />
+              <DetailItem
+                label="Reference"
+                value={selectedExpense.externalReference ?? "Not captured"}
+              />
+              <DetailItem
+                label="Attachment"
+                value={
+                  selectedExpense.attachmentFileName || selectedExpense.attachmentUrl
+                    ? "Available"
+                    : "None"
+                }
+              />
+            </section>
+
+            <section className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
+              <div className="rounded-xl border border-stone-200 bg-white/80 p-4">
+                <p className="text-[0.7rem] font-semibold uppercase tracking-[0.16em] text-stone-400">
+                  Submission detail
+                </p>
+                <h3 className="mt-2 text-lg font-semibold text-stone-950">
+                  {selectedExpense.description}
+                </h3>
+                {selectedExpense.note ? (
+                  <p className="mt-3 text-sm leading-6 text-stone-600">{selectedExpense.note}</p>
+                ) : null}
+                <div className="mt-4 grid gap-2 text-sm text-stone-600 sm:grid-cols-2">
+                  <p>
+                    Confirmed by{" "}
+                    <span className="font-semibold text-stone-900">
+                      {selectedExpense.confirmedBy ?? "-"}
+                    </span>
+                  </p>
+                  <p>
+                    Confirmed at{" "}
+                    <span className="font-semibold text-stone-900">
+                      {selectedExpense.confirmedAt ? formatDate(selectedExpense.confirmedAt) : "-"}
+                    </span>
+                  </p>
+                  <p>
+                    Approved by{" "}
+                    <span className="font-semibold text-stone-900">
+                      {selectedExpense.approvedBy ?? "-"}
+                    </span>
+                  </p>
+                  <p>
+                    Approved at{" "}
+                    <span className="font-semibold text-stone-900">
+                      {selectedExpense.approvedAt ? formatDate(selectedExpense.approvedAt) : "-"}
+                    </span>
+                  </p>
+                </div>
+                {selectedExpense.attachmentUrl ? (
+                  <Link
+                    className="mt-4 inline-flex h-10 items-center justify-center rounded-xl border border-stone-300 bg-white px-4 text-sm font-semibold text-stone-800 transition hover:border-[var(--brand)]"
+                    href={selectedExpense.attachmentUrl}
+                    target="_blank"
+                  >
+                    Open attachment
+                  </Link>
+                ) : null}
+              </div>
+
+              <div className="rounded-xl border border-stone-200 bg-white/80 p-4">
+                <p className="text-[0.7rem] font-semibold uppercase tracking-[0.16em] text-stone-400">
+                  Amounts
+                </p>
+                <div className="mt-3 space-y-2 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-stone-500">Expense</span>
+                    <span className="font-semibold text-stone-950">
+                      {currencyFormatter.format(selectedExpense.amount)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-stone-500">Tax</span>
+                    <span className="font-semibold text-stone-950">
+                      {currencyFormatter.format(selectedExpense.taxAmount)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 border-t border-stone-200 pt-3">
+                    <span className="font-semibold text-stone-700">Total</span>
+                    <span className="text-lg font-semibold text-stone-950">
+                      {currencyFormatter.format(selectedExpenseTotal)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-stone-200 bg-white/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-[0.7rem] font-semibold uppercase tracking-[0.16em] text-stone-400">
+                    GL assignment
+                  </p>
+                  <h3 className="mt-1 text-base font-semibold text-stone-950">
+                    {selectedExpenseIsPosted ? "Posted assignment" : "Assign accounts before posting"}
+                  </h3>
+                </div>
+                {selectedExpense.financeAssignedBy ? (
+                  <p className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-semibold text-stone-600">
+                    Assigned by {selectedExpense.financeAssignedBy}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Expense account
+                  <select
+                    className="h-11 rounded-xl border border-stone-200 bg-white px-3 text-sm font-semibold text-stone-800 outline-none focus:border-[var(--brand)]"
+                    disabled={selectedExpenseIsPosted}
+                    onChange={(event) => setExpenseAccountDraft(event.target.value)}
+                    value={expenseAccountDraft}
+                  >
+                    <option value="">Choose expense account</option>
+                    {expenseAccountOptions.map((account) => (
+                      <option key={account.accountCode} value={account.accountCode}>
+                        {account.accountCode} - {account.accountName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-stone-700">
+                  Payment / clearing account
+                  <select
+                    className="h-11 rounded-xl border border-stone-200 bg-white px-3 text-sm font-semibold text-stone-800 outline-none focus:border-[var(--brand)]"
+                    disabled={selectedExpenseIsPosted}
+                    onChange={(event) => setPaymentAccountDraft(event.target.value)}
+                    value={paymentAccountDraft}
+                  >
+                    <option value="">Choose payment or clearing account</option>
+                    {paymentAccountOptions.map((account) => (
+                      <option key={account.accountCode} value={account.accountCode}>
+                        {account.accountCode} - {account.accountName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">
+                  {selectedExpense.postedAt
+                    ? `Posted ${formatDate(selectedExpense.postedAt)}`
+                    : "Posting creates the GL journal and locks this expense."}
+                </p>
+                <button
+                  className="inline-flex h-10 items-center justify-center rounded-xl bg-[var(--brand)] px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-stone-300"
+                  disabled={!canPostSelectedExpense}
+                  onClick={() => void assignAndPostExpense(selectedExpense)}
+                  type="button"
+                >
+                  {postingExpenseId === selectedExpense.expenseId
+                    ? "Posting..."
+                    : selectedExpenseIsPosted
+                      ? "Posted"
+                      : "Assign & post"}
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+      </ActionDialog>
     </EnterpriseShell>
   );
 }

@@ -208,6 +208,7 @@ export type EnterpriseFinanceWorkspaceData = {
     supplierName: string | null;
     paymentMethod: string | null;
     externalReference: string | null;
+    note: string | null;
     amount: number;
     taxAmount: number;
     status: string;
@@ -1382,6 +1383,7 @@ export async function getEnterpriseFinanceWorkspace(
         supplierName: true,
         paymentMethod: true,
         externalReference: true,
+        note: true,
         amount: true,
         taxAmount: true,
         status: true,
@@ -1523,6 +1525,7 @@ export async function getEnterpriseFinanceWorkspace(
     supplierName: expense.supplierName,
     paymentMethod: expense.paymentMethod,
     externalReference: expense.externalReference,
+    note: expense.note,
     amount: roundMoney(Number(expense.amount)),
     taxAmount: roundMoney(Number(expense.taxAmount)),
     status: expense.status,
