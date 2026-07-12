@@ -395,6 +395,13 @@ function toIsoString(value: Date | string) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+function isAlreadyPostedSourceError(error: unknown) {
+  return (
+    error instanceof Error &&
+    /Flash ERP has already posted this source as\b/i.test(error.message)
+  );
+}
+
 export function buildUnavailableEnterpriseFinanceWorkspace(
   reason: string,
   input?: {
@@ -620,13 +627,25 @@ async function materializeSalesJournals(input: {
   let created = 0;
 
   for (const transaction of transactions) {
-    const result = await prisma.$transaction((tx) =>
-      postPosTransactionAccountingInTransaction(tx, {
-        retailOrgId: input.retailOrgId,
-        transactionId: transaction.id,
-        postedBy: "Enterprise finance"
-      })
-    );
+    const result = await prisma
+      .$transaction((tx) =>
+        postPosTransactionAccountingInTransaction(tx, {
+          retailOrgId: input.retailOrgId,
+          transactionId: transaction.id,
+          postedBy: "Enterprise finance"
+        })
+      )
+      .catch((error: unknown) => {
+        if (isAlreadyPostedSourceError(error)) {
+          return {
+            salesJournalCreated: false,
+            cogsJournalCount: 0,
+            cashbookEntryCount: 0
+          };
+        }
+
+        throw error;
+      });
 
     if (result.salesJournalCreated) {
       created += 1;
