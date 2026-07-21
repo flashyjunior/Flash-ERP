@@ -504,28 +504,47 @@ function formatNumber(value: number | null | undefined) {
   return numberFormatter.format(value ?? 0);
 }
 
-function isServiceCatalogItem(item: Pick<StoreCatalogBrowseItem, "productType">) {
-  return (item.productType ?? "").trim().toUpperCase() === "SERVICE";
+function isServiceCatalogItem(
+  item: Pick<StoreCatalogBrowseItem, "productType" | "trackInventory">,
+) {
+  return (
+    (item.productType ?? "").trim().toUpperCase() === "SERVICE" ||
+    item.trackInventory === false
+  );
 }
 
 function isCatalogItemSellable(
-  item: Pick<StoreCatalogBrowseItem, "productType" | "quantityOnHand" | "salesLocationQuantity">,
+  item: Pick<
+    StoreCatalogBrowseItem,
+    "productType" | "trackInventory" | "quantityOnHand" | "salesLocationQuantity"
+  >,
 ) {
   return isServiceCatalogItem(item) || (item.salesLocationQuantity ?? item.quantityOnHand) > 0;
 }
 
 function formatCatalogItemAvailability(
-  item: Pick<StoreCatalogBrowseItem, "productType" | "quantityOnHand" | "salesLocationQuantity" | "isSerialized">,
+  item: Pick<
+    StoreCatalogBrowseItem,
+    | "productType"
+    | "trackInventory"
+    | "quantityOnHand"
+    | "salesLocationQuantity"
+    | "isSerialized"
+  >,
 ) {
+  const quantity = item.salesLocationQuantity ?? item.quantityOnHand;
+
   if (isServiceCatalogItem(item)) {
     return "Service";
   }
 
   if (item.isSerialized) {
-    return "Serialized";
+    return quantity > 0
+      ? `Serialized - Stock ${formatNumber(quantity)}`
+      : "Serialized - Out of stock";
   }
 
-  return `Stock ${formatNumber(item.salesLocationQuantity ?? item.quantityOnHand)}`;
+  return quantity > 0 ? `Stock ${formatNumber(quantity)}` : "Out of stock";
 }
 
 function formatDiscountRate(rate: number) {
@@ -3314,7 +3333,7 @@ export function ModernDesktopApp() {
       let detachedSyncStarted = false;
 
       try {
-        if (runtime.startSyncCycle) {
+        if (runtime.startSyncCycle && input.trigger !== "manual") {
           const startResult = await withDesktopTimeout(
             runtime.startSyncCycle({
               ...input,
@@ -3348,8 +3367,6 @@ export function ModernDesktopApp() {
             "warn",
           );
           detachedSyncStarted = true;
-          syncActionInFlightRef.current = false;
-          setIsSyncRunning(false);
           return null;
         }
 
@@ -3360,7 +3377,7 @@ export function ModernDesktopApp() {
         const result = await withDesktopTimeout(
           runtime.runSyncCycle({
             ...input,
-            snapshotMode: input.snapshotMode ?? "status",
+            snapshotMode: "full",
           }),
           label,
           timeoutMs,
@@ -3373,6 +3390,7 @@ export function ModernDesktopApp() {
           generatedAt: result.snapshot.generatedAt,
         });
         const message = formatSyncCompletionMessage(result.message);
+        setSnapshot(result.snapshot);
         showDesktopSyncToast(message, "good");
         runtime.writeDesktopDiagnostic?.("info", "sync-render-result-toast-applied", {
           label,
@@ -3521,7 +3539,9 @@ export function ModernDesktopApp() {
         query: catalogQuery,
         departmentCode: catalogDepartment || null,
         categoryCode: catalogCategory || null,
-        sellableOnly: activeWorkspace !== "setup",
+        sellableOnly:
+          activeWorkspace !== "setup" &&
+          !(activeWorkspace === "pos" && saleMode === "SALES_ORDER"),
         includeInactiveCatalog: activeWorkspace === "setup",
         limit: activeWorkspace === "setup" ? 500 : 30,
       });
@@ -3536,7 +3556,14 @@ export function ModernDesktopApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [activeWorkspace, catalogCategory, catalogDepartment, catalogQuery, runtime]);
+  }, [
+    activeWorkspace,
+    catalogCategory,
+    catalogDepartment,
+    catalogQuery,
+    runtime,
+    saleMode,
+  ]);
 
   const browseInventory = useCallback(async () => {
     if (!runtime) {
@@ -3752,6 +3779,19 @@ export function ModernDesktopApp() {
       syncActionInFlightRef.current = false;
       setIsSyncRunning(false);
 
+      const snapshotRequest = runtime.getSyncSnapshot();
+      void snapshotRequest
+        .then((nextSnapshot) => setSnapshot(nextSnapshot))
+        .catch((nextError) => {
+          runtime.writeDesktopDiagnostic?.(
+            "warn",
+            "sync-render-status-refresh-failed",
+            {
+              message: formatDesktopActionError(nextError),
+            },
+          );
+        });
+
       const message =
         status.status === "completed"
           ? formatSyncCompletionMessage(status.message)
@@ -3869,6 +3909,12 @@ export function ModernDesktopApp() {
   }, [notice]);
 
   const activeBasket = snapshot?.activeBasket ?? null;
+  const activeSalesOrder =
+    snapshot?.salesOrders.find(
+      (order) =>
+        order.status === "OPEN" &&
+        order.sourceTransactionId === activeBasket?.transactionId,
+    ) ?? null;
   const activeShift = firstOpenShift(snapshot);
   const configuredShiftOpeningFloat = (
     snapshot?.optionSettings.shiftFloatPromptAmount ?? 0
@@ -4382,7 +4428,7 @@ export function ModernDesktopApp() {
       try {
         const results = await runtime.browseCatalogItems({
           query,
-          sellableOnly: true,
+          sellableOnly: saleMode !== "SALES_ORDER",
           limit: 8,
         });
 
@@ -4405,7 +4451,7 @@ export function ModernDesktopApp() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [renderedWorkspace, runtime, scanQuery, signedIn]);
+  }, [renderedWorkspace, runtime, saleMode, scanQuery, signedIn]);
 
   useEffect(() => {
     if (!runtime || !signedIn || renderedWorkspace !== "pos") {
@@ -4419,7 +4465,7 @@ export function ModernDesktopApp() {
           query: catalogQuery,
           departmentCode: catalogDepartment || null,
           categoryCode: catalogCategory || null,
-          sellableOnly: true,
+          sellableOnly: saleMode !== "SALES_ORDER",
           limit: 30,
         });
 
@@ -4448,6 +4494,7 @@ export function ModernDesktopApp() {
     catalogQuery,
     renderedWorkspace,
     runtime,
+    saleMode,
     signedIn,
   ]);
 
@@ -4829,7 +4876,7 @@ export function ModernDesktopApp() {
       let nextSnapshot = snapshot;
       const basketToClear = activeBasket;
 
-      if (basketToClear?.lines.length) {
+      if (basketToClear?.lines.length && !activeSalesOrder) {
         for (const line of basketToClear.lines) {
           const result = await runtime.removeBasketLine(line.lineId);
           nextSnapshot = result.snapshot;
@@ -4861,7 +4908,11 @@ export function ModernDesktopApp() {
       setOpenPriceDraft(null);
       setSaleMode("SALE");
       setVoidModeTransactionNo(null);
-      setNotice("Sale screen cleared.");
+      setNotice(
+        activeSalesOrder
+          ? `${activeSalesOrder.orderNo} was returned to pending orders without changes.`
+          : "Sale screen cleared.",
+      );
     } catch (nextError) {
       setError(
         nextError instanceof Error
@@ -5044,7 +5095,7 @@ export function ModernDesktopApp() {
 
     if (
       lookup?.mustEnterPriceAtPos ||
-      lookup?.isSerialized ||
+      (lookup?.isSerialized && saleMode !== "SALES_ORDER") ||
       needsMatrixChoice ||
       needsTrackedOptionChoice
     ) {
@@ -5086,6 +5137,7 @@ export function ModernDesktopApp() {
       desktopRuntime.addItemToBasket({
         lookupValue: scanQuery.trim(),
         quantity,
+        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         lineIntent: getCatalogLineIntent(snapshot),
       }),
     );
@@ -5122,7 +5174,7 @@ export function ModernDesktopApp() {
 
     if (
       item.mustEnterPriceAtPos ||
-      item.isSerialized ||
+      (item.isSerialized && saleMode !== "SALES_ORDER") ||
       needsMatrixChoice ||
       needsTrackedOptionChoice
     ) {
@@ -5175,6 +5227,7 @@ export function ModernDesktopApp() {
       desktopRuntime.addItemToBasket({
         lookupValue: item.productCode,
         quantity: 1,
+        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         lineIntent: getCatalogLineIntent(snapshot),
       }),
     );
@@ -5207,7 +5260,11 @@ export function ModernDesktopApp() {
       return;
     }
 
-    if (draft.isSerialized && serialNumbers.length !== quantity) {
+    if (
+      draft.isSerialized &&
+      saleMode !== "SALES_ORDER" &&
+      serialNumbers.length !== quantity
+    ) {
       setError(
         `Choose exactly ${quantity} serial number(s) before adding ${draft.productName}.`,
       );
@@ -5247,6 +5304,7 @@ export function ModernDesktopApp() {
       desktopRuntime.addItemToBasket({
         lookupValue: draft.lookupValue,
         quantity,
+        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         lineIntent: getCatalogLineIntent(snapshot),
         serialNumbers,
         unitPrice,
@@ -5298,6 +5356,7 @@ export function ModernDesktopApp() {
       desktopRuntime.updateBasketLine({
         lineId,
         quantity,
+        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         serialNumbers: line.serialNumbers,
         overrideDiscountAmount,
         configuredDiscountRate,
@@ -5348,8 +5407,11 @@ export function ModernDesktopApp() {
     }
 
     const payments = buildCheckoutPayments();
+    const basketTotal = activeSalesOrder
+      ? Math.max(0, activeSalesOrder.balanceAmount)
+      : Math.abs(activeBasket.totalAmount);
 
-    if (Math.abs(activeBasket.totalAmount) > 0 && payments.length === 0) {
+    if (basketTotal > 0 && payments.length === 0) {
       setError(
         "Add at least one valid payment row before completing the sale.",
       );
@@ -5360,8 +5422,6 @@ export function ModernDesktopApp() {
       (sum, payment) => sum + payment.amount,
       0,
     );
-    const basketTotal = Math.abs(activeBasket.totalAmount);
-
     if (basketTotal > 0 && tenderTotal + 0.005 < basketTotal) {
       setError(`Tender is short by ${formatMoney(basketTotal - tenderTotal)}.`);
       return;
@@ -5479,6 +5539,29 @@ export function ModernDesktopApp() {
     );
   }
 
+  async function fulfilSalesOrder(order: StoreSalesOrderSummary) {
+    const result = await runAction((desktopRuntime) =>
+      desktopRuntime.resumeSalesOrder(order.orderId),
+    );
+
+    if (!result) {
+      return;
+    }
+
+    setPaymentDrafts([
+      defaultPaymentDraft(
+        result.snapshot,
+        result.snapshot.activeBasket,
+        order.balanceAmount.toFixed(2),
+      ),
+    ]);
+    setSaleMode("SALE");
+    setSalesOrderPanelOpen(false);
+    setHeldSalePanelOpen(false);
+    setReceiptPanelOpen(false);
+    setAccountPanelOpen(false);
+  }
+
   async function resumeHeldSale(
     basket: NonNullable<StoreSyncSnapshot["parkedBaskets"]>[number],
   ) {
@@ -5583,6 +5666,7 @@ export function ModernDesktopApp() {
       const result = await runtime.updateBasketLine({
         lineId: line.lineId,
         quantity: line.quantity,
+        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         serialNumbers: line.serialNumbers,
         overrideDiscountAmount: discountAmount,
         configuredDiscountRate: rate,
@@ -7641,6 +7725,7 @@ export function ModernDesktopApp() {
             checkoutBasket={checkoutBasket}
             cancelSalesOrder={cancelSalesOrder}
             clearSaleScreen={clearSaleScreen}
+            fulfilSalesOrder={fulfilSalesOrder}
             customerQuery={customerQuery}
             customers={customers}
             isBusy={isBusy}
@@ -14528,6 +14613,7 @@ function POSWorkspace(props: {
   activateSalesOrderMode: () => Promise<void>;
   cancelSalesOrder: (order: StoreSalesOrderSummary) => Promise<void>;
   clearSaleScreen: () => Promise<void>;
+  fulfilSalesOrder: (order: StoreSalesOrderSummary) => Promise<void>;
   submitOpenPriceDraft: () => Promise<void>;
   searchCustomers: () => Promise<void>;
   searchAccountCustomers: () => Promise<void>;
@@ -14586,7 +14672,14 @@ function POSWorkspace(props: {
   const customerCreditLimit = selectedCustomer?.creditLimitAmount ?? null;
   const canSell = props.canUsePosLane;
   const isReadOnlyVoid = props.isVoidReviewBasket;
-  const canEditBasket = canSell && !isReadOnlyVoid;
+  const activeSalesOrder =
+    props.snapshot?.salesOrders.find(
+      (order) =>
+        order.status === "OPEN" &&
+        order.sourceTransactionId === props.activeBasket?.transactionId,
+    ) ?? null;
+  const isReadOnlySalesOrder = Boolean(activeSalesOrder);
+  const canEditBasket = canSell && !isReadOnlyVoid && !isReadOnlySalesOrder;
   const capabilities =
     props.snapshot?.activeOperatorSession?.capabilities ?? null;
   const canAttachCustomer =
@@ -14610,8 +14703,11 @@ function POSWorkspace(props: {
     0,
   );
   const basketTotal = Math.abs(props.activeBasket?.totalAmount ?? 0);
-  const amountDue = Math.max(0, basketTotal - paymentTotal);
-  const changeDue = Math.max(0, paymentTotal - basketTotal);
+  const payableTotal = activeSalesOrder
+    ? Math.max(0, activeSalesOrder.balanceAmount)
+    : basketTotal;
+  const amountDue = Math.max(0, payableTotal - paymentTotal);
+  const changeDue = Math.max(0, paymentTotal - payableTotal);
   function resolveLineDiscountRate(line: StoreBasketLineSummary) {
     if (!line.hasManualDiscountOverride || line.discountAmount <= 0) {
       return null;
@@ -14626,7 +14722,7 @@ function POSWorkspace(props: {
     }) ?? null;
   }
 
-  const isTenderShort = basketTotal > 0 && amountDue > 0.005;
+  const isTenderShort = payableTotal > 0 && amountDue > 0.005;
   const missingBankAccountTender = props.paymentDrafts.some((draft) => {
     const tender = props.tenderMethods.find(
       (method) => method.tenderMethodCode === draft.tenderMethodCode,
@@ -14652,7 +14748,10 @@ function POSWorkspace(props: {
     (capabilities?.cashierEligible === true ||
       capabilities?.canProcessSale === true ||
       capabilities?.canOpenShift === true);
-  const visibleCatalogItems = props.catalogItems.filter(isCatalogItemSellable);
+  const visibleCatalogItems =
+    props.saleMode === "SALES_ORDER"
+      ? props.catalogItems
+      : props.catalogItems.filter(isCatalogItemSellable);
   const receiptLinkedCorrectionActive =
     (props.activeBasket?.transactionType === "RETURN" ||
       props.activeBasket?.transactionType === "EXCHANGE") &&
@@ -14861,6 +14960,13 @@ function POSWorkspace(props: {
             use the final void button to post and print the correction receipt.
           </div>
         ) : null}
+        {activeSalesOrder ? (
+          <div className="rms-banner is-warn">
+            <strong>{activeSalesOrder.orderNo}</strong> is locked for
+            fulfilment. Deposit {formatMoney(activeSalesOrder.depositAmount)} -
+            Balance {formatMoney(activeSalesOrder.balanceAmount)}
+          </div>
+        ) : null}
         <div className="rms-pos-head">
           <div>
             <span>Customer</span>
@@ -14888,7 +14994,7 @@ function POSWorkspace(props: {
         <div className="rms-typeahead">
           <div className="rms-customer-strip">
             <input
-              disabled={isReadOnlyVoid}
+              disabled={isReadOnlyVoid || isReadOnlySalesOrder}
               onChange={(event) => props.setCustomerQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -14942,7 +15048,7 @@ function POSWorkspace(props: {
           <div className="rms-scan-strip">
             <input
               autoFocus
-              disabled={isReadOnlyVoid}
+              disabled={isReadOnlyVoid || isReadOnlySalesOrder}
               onChange={(event) => props.setScanQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -15278,6 +15384,9 @@ function POSWorkspace(props: {
             <div className="rms-payment-summary">
               <strong>{formatMoney(paymentTotal)}</strong>
               <span>
+                {activeSalesOrder
+                  ? `Deposit ${formatMoney(activeSalesOrder.depositAmount)} - `
+                  : ""}
                 Due {formatMoney(amountDue)} · Change {formatMoney(changeDue)}
               </span>
               <button
@@ -15421,7 +15530,7 @@ function POSWorkspace(props: {
           </div>
           <button
             className="rms-button"
-            disabled={props.isBusy || isReadOnlyVoid}
+            disabled={props.isBusy || isReadOnlyVoid || isReadOnlySalesOrder}
             onClick={() => void props.browseCatalog()}
             type="button"
           >
@@ -15500,12 +15609,16 @@ function POSWorkspace(props: {
           ) : (
             <EmptyState
               title={
-                isStandaloneDeployment(props.snapshot)
+                props.saleMode === "SALES_ORDER"
+                  ? "No active catalog products"
+                  : isStandaloneDeployment(props.snapshot)
                   ? "No local stock available"
                   : "No sellable stock available"
               }
               detail={
-                isStandaloneDeployment(props.snapshot)
+                props.saleMode === "SALES_ORDER"
+                  ? "Sync or publish active products before creating this order."
+                  : isStandaloneDeployment(props.snapshot)
                   ? "Add products with quantity on hand before using the POS lane."
                   : "Receive, transfer, or sync stock into the shop sales location."
               }
@@ -15518,7 +15631,7 @@ function POSWorkspace(props: {
         <div className="rms-action-mode">
           <button
             className={`rms-action-button${props.saleMode === "SALE" ? " is-selected" : ""}`}
-            disabled={props.isBusy || isReadOnlyVoid}
+            disabled={props.isBusy || isReadOnlyVoid || isReadOnlySalesOrder}
             onClick={() => props.setSaleMode("SALE")}
             type="button"
           >
@@ -15526,7 +15639,7 @@ function POSWorkspace(props: {
           </button>
           <button
             className={`rms-action-button${props.saleMode === "SALES_ORDER" ? " is-selected is-order" : ""}`}
-            disabled={props.isBusy || isReadOnlyVoid}
+            disabled={props.isBusy || isReadOnlyVoid || isReadOnlySalesOrder}
             onClick={() => void props.activateSalesOrderMode()}
             type="button"
           >
@@ -15539,12 +15652,16 @@ function POSWorkspace(props: {
           onClick={() => void props.clearSaleScreen()}
           type="button"
         >
-          Clear screen
+          {activeSalesOrder ? "Exit fulfilment" : "Clear screen"}
         </button>
         <button
           className="rms-action-button is-hold"
           disabled={
-            props.isBusy || isReadOnlyVoid || !canSell || !props.activeBasket
+            props.isBusy ||
+            isReadOnlyVoid ||
+            isReadOnlySalesOrder ||
+            !canSell ||
+            !props.activeBasket
           }
           onClick={() =>
             void props
@@ -15564,7 +15681,7 @@ function POSWorkspace(props: {
         </button>
         <button
           className="rms-action-button is-details"
-          disabled={props.isBusy || isReadOnlyVoid}
+          disabled={props.isBusy || isReadOnlyVoid || isReadOnlySalesOrder}
           onClick={() => props.setTransactionDetailsOpen(true)}
           type="button"
         >
@@ -16220,17 +16337,7 @@ function POSWorkspace(props: {
                         Boolean(props.activeBasket) ||
                         order.status !== "OPEN"
                       }
-                      onClick={() =>
-                        void props
-                          .runAction((desktopRuntime) =>
-                            desktopRuntime.resumeSalesOrder(order.orderId),
-                          )
-                          .then((result) => {
-                            if (result) {
-                              props.setSalesOrderPanelOpen(false);
-                            }
-                          })
-                      }
+                      onClick={() => void props.fulfilSalesOrder(order)}
                       type="button"
                     >
                       Fulfil

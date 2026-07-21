@@ -4127,7 +4127,6 @@ function parseStorePosShiftClosedPayload(
     0,
     readOptionalNumber(payload, "depositAmount") ?? 0,
   );
-
   return {
     shiftId: readRequiredString(
       payload,
@@ -4613,6 +4612,7 @@ function parseStoreSalesOrderRecordedPayload(
     0,
     readOptionalNumber(payload, "depositAmount") ?? 0,
   );
+  const rawLines = Array.isArray(payload.lines) ? payload.lines : null;
 
   return {
     orderId: readRequiredString(
@@ -4707,6 +4707,81 @@ function parseStoreSalesOrderRecordedPayload(
       toOptionalDate(
         readOptionalString(payload, "cancelledAt"),
       )?.toISOString() ?? null,
+    lines: rawLines?.map((rawLine, index) => {
+      const lineEventType = `${event.eventType}:line:${index + 1}`;
+      const line = toJsonObject(
+        rawLine,
+        event.aggregateType,
+        lineEventType,
+      );
+
+      return {
+        lineId: readRequiredString(
+          line,
+          "lineId",
+          event.aggregateType,
+          lineEventType,
+        ),
+        productCode: readRequiredString(
+          line,
+          "productCode",
+          event.aggregateType,
+          lineEventType,
+        ),
+        productVariantCode: readOptionalString(line, "productVariantCode"),
+        productName: readRequiredString(
+          line,
+          "productName",
+          event.aggregateType,
+          lineEventType,
+        ),
+        variantSize: readOptionalString(line, "variantSize"),
+        variantColor: readOptionalString(line, "variantColor"),
+        variantAttributesSnapshot: readOptionalString(
+          line,
+          "variantAttributesSnapshot",
+        ),
+        lineNote: readOptionalString(line, "lineNote"),
+        quantity: readRequiredNumber(
+          line,
+          "quantity",
+          event.aggregateType,
+          lineEventType,
+        ),
+        unitPrice: readRequiredNumber(
+          line,
+          "unitPrice",
+          event.aggregateType,
+          lineEventType,
+        ),
+        discountAmount: readRequiredNumber(
+          line,
+          "discountAmount",
+          event.aggregateType,
+          lineEventType,
+        ),
+        taxAmount: readRequiredNumber(
+          line,
+          "taxAmount",
+          event.aggregateType,
+          lineEventType,
+        ),
+        lineTotal: readRequiredNumber(
+          line,
+          "lineTotal",
+          event.aggregateType,
+          lineEventType,
+        ),
+        appliedPromotionCode: readOptionalString(
+          line,
+          "appliedPromotionCode",
+        ),
+        appliedPromotionName: readOptionalString(
+          line,
+          "appliedPromotionName",
+        ),
+      };
+    }),
   };
 }
 
@@ -8136,15 +8211,45 @@ async function projectStoreSalesOrder(
       data,
     });
 
-    return true;
+  } else {
+    await tx.salesOrder.create({
+      data: {
+        id: payload.orderId,
+        ...data,
+      },
+    });
   }
 
-  await tx.salesOrder.create({
-    data: {
-      id: payload.orderId,
-      ...data,
-    },
-  });
+  if (payload.lines !== undefined) {
+    await tx.salesOrderLine.deleteMany({
+      where: {
+        salesOrderId: payload.orderId,
+      },
+    });
+
+    if (payload.lines.length > 0) {
+      await tx.salesOrderLine.createMany({
+        data: payload.lines.map((line) => ({
+          id: line.lineId,
+          salesOrderId: payload.orderId,
+          productCodeSnapshot: line.productCode,
+          productVariantCodeSnapshot: line.productVariantCode,
+          productNameSnapshot: line.productName,
+          variantSizeSnapshot: line.variantSize,
+          variantColorSnapshot: line.variantColor,
+          variantAttributesSnapshot: line.variantAttributesSnapshot,
+          lineNote: line.lineNote,
+          quantity: line.quantity,
+          unitPrice: toMoneyString(line.unitPrice),
+          discountAmount: toMoneyString(line.discountAmount),
+          taxAmount: toMoneyString(line.taxAmount),
+          lineTotal: toMoneyString(line.lineTotal),
+          appliedPromotionCode: line.appliedPromotionCode,
+          appliedPromotionName: line.appliedPromotionName,
+        })),
+      });
+    }
+  }
 
   return true;
 }

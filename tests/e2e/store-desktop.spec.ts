@@ -1,5 +1,6 @@
 import { _electron as electron, expect, test } from "@playwright/test";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 
@@ -30,16 +31,85 @@ type DesktopRuntime = {
   }>;
   getDesktopWindowStatus: () => Promise<{ supportLogPath: string }>;
   getSyncSnapshot: () => Promise<{
+    activeOperatorSession: { loginId: string; displayName: string } | null;
+    activeBasket: {
+      transactionId: string;
+      lines: Array<{ lineId: string; productCode: string }>;
+    } | null;
     activeShift: { expectedCashAmount: number } | null;
     recentClosedShifts: Array<{ shiftNo: string }>;
+    salesOrders: Array<{
+      orderId: string;
+      orderNo: string;
+      sourceTransactionId: string;
+      itemCount: number;
+      depositAmount: number;
+      balanceAmount: number;
+      status: string;
+    }>;
   }>;
+  bootstrapStandaloneAdmin: (input: {
+    loginId: string;
+    displayName: string;
+    password: string;
+  }) => Promise<{ message: string }>;
   signInOperator: (input: { loginId: string; password: string }) => Promise<{ message: string }>;
+  saveStandaloneProduct: (input: {
+    productCode: string;
+    productName: string;
+    unitPrice: number;
+    quantityOnHand: number;
+    trackInventory: boolean;
+  }) => Promise<{ message: string }>;
+  saveStandaloneTenderMethod: (input: {
+    tenderMethodCode: string;
+    tenderMethodName: string;
+    paymentMethod: "CASH";
+    allowChange: boolean;
+  }) => Promise<{ message: string }>;
+  saveStandaloneCustomer: (input: {
+    customerNo: string;
+    fullName: string;
+    customerType: string;
+  }) => Promise<{ message: string }>;
+  browseCatalogItems: (input: {
+    query: string;
+    sellableOnly: boolean;
+  }) => Promise<Array<{ productCode: string; quantityOnHand: number }>>;
   openShift: (input: { cashierCode: string; openingFloatAmount: number }) => Promise<{ message: string }>;
+  addItemToBasket: (input: {
+    lookupValue: string;
+    quantity: number;
+    deferInventoryValidationForSalesOrder?: boolean;
+  }) => Promise<{ message: string }>;
+  updateBasketLine: (input: {
+    lineId: string;
+    quantity: number;
+    deferInventoryValidationForSalesOrder?: boolean;
+  }) => Promise<{ message: string }>;
+  attachCustomerToActiveBasket: (input: { customerId: string }) => Promise<{ message: string }>;
+  createSalesOrderFromActiveBasket: (input: {
+    operatorName: string;
+    depositAmount: number;
+    depositTenderMethodCode: string;
+    depositReference: string;
+  }) => Promise<{ message: string; salesOrderNo?: string | null }>;
+  resumeSalesOrder: (orderId: string) => Promise<{ message: string }>;
+  discardActiveBasket: () => Promise<{ message: string }>;
+  checkoutActiveBasket: (input: {
+    payments: Array<{
+      method: "CASH";
+      tenderMethodCode: string;
+      tenderMethodName: string;
+      amount: number;
+      reference: null;
+    }>;
+  }) => Promise<{ message: string }>;
   captureScannedSale: (input: { lookupValue: string; quantity: number }) => Promise<{ message: string }>;
   closeActiveShift: (input: { declaredCashAmount: number }) => Promise<{ message: string }>;
   startSyncCycle?: (input: {
-    trigger: "tray";
-    snapshotMode: "status";
+    trigger: "manual" | "scheduled" | "tray";
+    snapshotMode: "full" | "status";
     drainDownstream?: boolean;
   }) => Promise<{
     accepted: boolean;
@@ -48,7 +118,16 @@ type DesktopRuntime = {
     message: string;
     startedAt: string | null;
   }>;
-  runSyncCycle: (input: { trigger: "tray" }) => Promise<{ message: string }>;
+  onSyncCycleStatus?: (listener: (status: {
+    traceId: string;
+    trigger: "manual" | "scheduled" | "tray" | "startup";
+    status: "completed" | "failed";
+    message: string;
+  }) => void) => () => void;
+  runSyncCycle: (input: {
+    trigger: "manual" | "scheduled" | "tray";
+    snapshotMode?: "full" | "status";
+  }) => Promise<{ message: string }>;
 };
 
 declare global {
@@ -76,6 +155,80 @@ function findFreePort() {
       server.close(() => resolve(port));
     });
   });
+}
+
+async function startEmptySyncServer(port: number) {
+  const syncPolicy = {
+    autoSyncEnabled: true,
+    intervalMinutes: 15,
+    activeFromMinutes: 0,
+    activeToMinutes: 24 * 60,
+    jitterSeconds: 0,
+    backoffBaseSeconds: 30,
+    backoffMaxSeconds: 300,
+    nextScheduledSyncAt: null,
+    lastManualSyncAt: null,
+    lastAutoSyncAt: null
+  };
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      let payload: Record<string, unknown> = {};
+
+      try {
+        payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
+      } catch {
+        response.writeHead(400).end();
+        return;
+      }
+
+      const now = new Date().toISOString();
+      let result: Record<string, unknown>;
+
+      if (request.url?.endsWith("/pull")) {
+        result = {
+          batch: {
+            direction: "downstream",
+            sourceNodeCode: "enterprise-hq",
+            targetNodeCode: String(payload.sourceNodeCode ?? "store-node"),
+            cursor: payload.cursor ?? null,
+            sentAt: now,
+            events: []
+          },
+          serverCheckpoint: null,
+          serverReceivedAt: now,
+          serverProcessedAt: now,
+          syncPolicy
+        };
+      } else if (request.url?.endsWith("/push")) {
+        result = {
+          acceptedEventIds: [],
+          duplicateEventIds: [],
+          rejected: [],
+          acknowledgedDownstreamEventIds: Array.isArray(payload.acknowledgedDownstreamEventIds)
+            ? payload.acknowledgedDownstreamEventIds
+            : [],
+          serverReceivedAt: now,
+          serverProcessedAt: now,
+          syncPolicy
+        };
+      } else {
+        response.writeHead(404).end();
+        return;
+      }
+
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+
+  return server;
 }
 
 function wait(milliseconds: number) {
@@ -240,9 +393,9 @@ test("desktop renderer starts detached sync through the local store-server proce
     expect(supportLogPath).toBeTruthy();
     const completionLog = await waitForSupportLog(
       supportLogPath ?? "",
-      /Store Desktop isolated sync worker process exited\./
+      /Store Desktop isolated sync worker process settled\./
     );
-    expect(completionLog).toMatch(/Store Desktop isolated sync worker process started\./);
+    expect(completionLog).toMatch(/Store Desktop isolated sync worker launch requested\./);
     expect(completionLog).not.toMatch(/sync-cycle-page-\d+-completed/);
 
     const statusAfter = await page.evaluate(async () =>
@@ -279,7 +432,7 @@ test("desktop renderer starts detached sync through the local store-server proce
     expect(recoveryStart.accepted).toBe(true);
     await waitForSupportLogCount(
       supportLogPath ?? "",
-      /Store Desktop isolated sync worker process exited\./,
+      /Store Desktop isolated sync worker process settled\./,
       2
     );
     await page.evaluate(async () => window.desktopRuntime?.getSyncSnapshot());
@@ -299,6 +452,323 @@ test("desktop renderer starts detached sync through the local store-server proce
     if (child.exitCode === null && !child.killed) {
       child.kill("SIGTERM");
     }
+  }
+});
+
+test("manual and scheduled sync preserve the signed-in desktop operator", async () => {
+  test.skip(
+    !existsSync(desktopEntry),
+    "Run npm --workspace @flash-erp/store-desktop run build before Electron E2E certification."
+  );
+
+  const proofRoot = path.resolve(".e2e", "store-desktop-sync-session", String(Date.now()));
+  const setupUserDataPath = path.join(proofRoot, "setup-electron-profile");
+  const electronUserDataPath = path.join(proofRoot, "hq-electron-profile");
+  const storeDataPath = path.join(proofRoot, "store-data");
+  const databasePath = path.join(storeDataPath, "store-sync-session.sqlite");
+  const setupPort = await findFreePort();
+  const storePort = await findFreePort();
+  const syncPort = await findFreePort();
+  const loginId = "sync.admin";
+  const displayName = "Sync Session Admin";
+  const password = "SyncSession123!";
+  mkdirSync(setupUserDataPath, { recursive: true });
+  mkdirSync(electronUserDataPath, { recursive: true });
+  mkdirSync(storeDataPath, { recursive: true });
+
+  const baseStoreEnv = {
+    FLASH_ERP_DESKTOP_USE_DIST: "1",
+    FLASH_ERP_STORE_RUNTIME_ROLE: "embedded",
+    FLASH_ERP_STORE_DATABASE_PROVIDER: "sqlite",
+    FLASH_ERP_STORE_DATABASE_URL: "",
+    FLASH_ERP_STORE_DB_PATH: databasePath,
+    FLASH_ERP_STORE_USER_DATA_PATH: storeDataPath,
+    FLASH_ERP_STORE_TERMINAL_CODE: "sync-session-01",
+    FLASH_ERP_STORE_TERMINAL_NAME: "Sync Session Terminal",
+    FLASH_ERP_STORE_SERVER_ENABLED: "1",
+    FLASH_ERP_STORE_SERVER_HOST: "127.0.0.1",
+    FLASH_ERP_STORE_SERVER_TIMEOUT_MS: "2500",
+    FLASH_ERP_STORE_SERVER_URL: ""
+  };
+  const setupApp = await electron.launch({
+    args: [desktopEntry, `--user-data-dir=${setupUserDataPath}`],
+    env: createElectronLaunchEnv({
+      ...baseStoreEnv,
+      FLASH_ERP_STORE_DEPLOYMENT_MODE: "STANDALONE",
+      FLASH_ERP_STORE_SERVER_PORT: String(setupPort),
+      FLASH_ERP_STORE_SYNC_BASE_URL: ""
+    })
+  });
+
+  try {
+    const setupPage = await setupApp.firstWindow();
+    await setupPage.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+    await setupPage.waitForFunction(
+      () => Boolean(window.desktopRuntime?.bootstrapStandaloneAdmin),
+      undefined,
+      { timeout: 30_000 }
+    );
+    await setupPage.evaluate(
+      async ({ nextLoginId, nextDisplayName, nextPassword }) => {
+        const runtime = window.desktopRuntime;
+        if (!runtime) throw new Error("Desktop runtime was unavailable during setup.");
+        await runtime.bootstrapStandaloneAdmin({
+          loginId: nextLoginId,
+          displayName: nextDisplayName,
+          password: nextPassword
+        });
+      },
+      { nextLoginId: loginId, nextDisplayName: displayName, nextPassword: password }
+    );
+  } finally {
+    await setupApp.close().catch(() => undefined);
+  }
+
+  const syncServer = await startEmptySyncServer(syncPort);
+  const app = await electron.launch({
+    args: [desktopEntry, `--user-data-dir=${electronUserDataPath}`],
+    env: createElectronLaunchEnv({
+      ...baseStoreEnv,
+      FLASH_ERP_STORE_DEPLOYMENT_MODE: "HQ_MANAGED",
+      FLASH_ERP_STORE_SERVER_PORT: String(storePort),
+      FLASH_ERP_STORE_SYNC_BASE_URL: `http://127.0.0.1:${syncPort}`
+    })
+  });
+
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+    await page.getByPlaceholder("Enter your username").fill(loginId);
+    await page.getByPlaceholder("Enter your password").fill(password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.locator(".rms-desktop")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".rms-sidebar-status strong")).toHaveText(displayName);
+
+    const navigation = page.getByRole("navigation", { name: "Desktop workspaces" });
+    await navigation.getByRole("button", { name: "Sync", exact: true }).click();
+    await page.getByRole("tab", { name: "Queues", exact: true }).click();
+    await page.getByRole("button", { name: "Run sync", exact: true }).click();
+    await expect(page.locator(".rms-sync-toast").last()).toContainText(
+      "reached enterprise successfully",
+      { timeout: 30_000 }
+    );
+    await expect(page.locator(".rms-sidebar-status strong")).toHaveText(displayName);
+
+    const scheduledStatus = await page.evaluate(async () => {
+      const runtime = window.desktopRuntime;
+      if (!runtime?.startSyncCycle || !runtime.onSyncCycleStatus) {
+        throw new Error("Detached sync status APIs were unavailable.");
+      }
+
+      return new Promise<{ status: string; trigger: string }>(async (resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+        const timeout = window.setTimeout(() => {
+          unsubscribe?.();
+          reject(new Error("Scheduled sync did not report completion."));
+        }, 30_000);
+        unsubscribe = runtime.onSyncCycleStatus?.((status) => {
+          if (status.trigger !== "scheduled") return;
+          window.clearTimeout(timeout);
+          unsubscribe?.();
+          resolve({ status: status.status, trigger: status.trigger });
+        });
+        const result = await runtime.startSyncCycle?.({
+          trigger: "scheduled",
+          snapshotMode: "status",
+          drainDownstream: false
+        });
+        if (!result?.accepted) {
+          window.clearTimeout(timeout);
+          unsubscribe?.();
+          reject(new Error(result?.message ?? "Scheduled sync was not accepted."));
+        }
+      });
+    });
+
+    expect(scheduledStatus).toEqual({ status: "completed", trigger: "scheduled" });
+    await expect(page.locator(".rms-desktop")).toBeVisible();
+    await expect(page.locator(".rms-sidebar-status strong")).toHaveText(displayName);
+    await expect(page.getByText("Welcome Back", { exact: true })).toHaveCount(0);
+    const snapshot = await page.evaluate(async () => window.desktopRuntime?.getSyncSnapshot());
+    expect(snapshot?.activeOperatorSession?.loginId).toBe(loginId.toUpperCase());
+  } finally {
+    await app.close().catch(() => undefined);
+    await new Promise<void>((resolve) => syncServer.close(() => resolve()));
+  }
+});
+
+test("zero-stock sales orders retain their lines and remain locked until fulfilment", async () => {
+  test.skip(
+    !existsSync(desktopEntry),
+    "Run npm --workspace @flash-erp/store-desktop run build before Electron E2E certification."
+  );
+
+  const proofRoot = path.resolve(".e2e", "store-desktop-zero-stock-order", String(Date.now()));
+  const electronUserDataPath = path.join(proofRoot, "electron-profile");
+  const storeDataPath = path.join(proofRoot, "store-data");
+  const databasePath = path.join(storeDataPath, "zero-stock-order.sqlite");
+  const storePort = await findFreePort();
+  const loginId = "order.admin";
+  const displayName = "Order Mode Admin";
+  const password = "OrderMode123!";
+  const productCode = "ORDER-ZERO-001";
+  const customerId = "standalone-customer-order-customer";
+  mkdirSync(electronUserDataPath, { recursive: true });
+  mkdirSync(storeDataPath, { recursive: true });
+
+  const app = await electron.launch({
+    args: [desktopEntry, `--user-data-dir=${electronUserDataPath}`],
+    env: createElectronLaunchEnv({
+      FLASH_ERP_DESKTOP_USE_DIST: "1",
+      FLASH_ERP_STORE_DEPLOYMENT_MODE: "STANDALONE",
+      FLASH_ERP_STORE_RUNTIME_ROLE: "embedded",
+      FLASH_ERP_STORE_DATABASE_PROVIDER: "sqlite",
+      FLASH_ERP_STORE_DATABASE_URL: "",
+      FLASH_ERP_STORE_DB_PATH: databasePath,
+      FLASH_ERP_STORE_USER_DATA_PATH: storeDataPath,
+      FLASH_ERP_STORE_TERMINAL_CODE: "order-mode-01",
+      FLASH_ERP_STORE_TERMINAL_NAME: "Order Mode Terminal",
+      FLASH_ERP_STORE_SERVER_ENABLED: "1",
+      FLASH_ERP_STORE_SERVER_HOST: "127.0.0.1",
+      FLASH_ERP_STORE_SERVER_PORT: String(storePort),
+      FLASH_ERP_STORE_SERVER_TIMEOUT_MS: "2500",
+      FLASH_ERP_STORE_SERVER_URL: "",
+      FLASH_ERP_STORE_SYNC_BASE_URL: ""
+    })
+  });
+
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+    await page.waitForFunction(
+      () => Boolean(window.desktopRuntime?.bootstrapStandaloneAdmin),
+      undefined,
+      { timeout: 30_000 }
+    );
+
+    await page.evaluate(
+      async ({ nextLoginId, nextDisplayName, nextPassword }) => {
+        const runtime = window.desktopRuntime;
+        if (!runtime) throw new Error("Desktop runtime was unavailable during order setup.");
+        await runtime.bootstrapStandaloneAdmin({
+          loginId: nextLoginId,
+          displayName: nextDisplayName,
+          password: nextPassword
+        });
+        await runtime.signInOperator({ loginId: nextLoginId, password: nextPassword });
+        await runtime.saveStandaloneTenderMethod({
+          tenderMethodCode: "CASH",
+          tenderMethodName: "Cash",
+          paymentMethod: "CASH",
+          allowChange: true
+        });
+        await runtime.saveStandaloneCustomer({
+          customerNo: "ORDER-CUSTOMER",
+          fullName: "Order Customer",
+          customerType: "OTHER"
+        });
+        await runtime.saveStandaloneProduct({
+          productCode: "ORDER-ZERO-001",
+          productName: "Zero Stock Order Product",
+          unitPrice: 25,
+          quantityOnHand: 0,
+          trackInventory: true
+        });
+        await runtime.openShift({ cashierCode: nextLoginId, openingFloatAmount: 0 });
+      },
+      { nextLoginId: loginId, nextDisplayName: displayName, nextPassword: password }
+    );
+
+    const catalogProof = await page.evaluate(async (code) => {
+      const runtime = window.desktopRuntime;
+      if (!runtime) throw new Error("Desktop runtime was unavailable during catalog verification.");
+      return {
+        orderCatalog: await runtime.browseCatalogItems({ query: code, sellableOnly: false }),
+        saleCatalog: await runtime.browseCatalogItems({ query: code, sellableOnly: true })
+      };
+    }, productCode);
+    expect(catalogProof.orderCatalog.map((product) => product.productCode)).toContain(productCode);
+    expect(catalogProof.saleCatalog.map((product) => product.productCode)).not.toContain(productCode);
+
+    const normalSaleError = await page.evaluate(async (code) => {
+      try {
+        await window.desktopRuntime?.addItemToBasket({ lookupValue: code, quantity: 1 });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, productCode);
+    expect(normalSaleError).toMatch(/Only 0(?:\.000)? unit\(s\)/);
+
+    const createdOrder = await page.evaluate(
+      async ({ code, nextCustomerId }) => {
+        const runtime = window.desktopRuntime;
+        if (!runtime) throw new Error("Desktop runtime was unavailable during order creation.");
+        await runtime.addItemToBasket({
+          lookupValue: code,
+          quantity: 1,
+          deferInventoryValidationForSalesOrder: true
+        });
+        await runtime.attachCustomerToActiveBasket({ customerId: nextCustomerId });
+        await runtime.createSalesOrderFromActiveBasket({
+          operatorName: "Order Mode Admin",
+          depositAmount: 5,
+          depositTenderMethodCode: "CASH",
+          depositReference: "DEP-001"
+        });
+        return runtime.getSyncSnapshot();
+      },
+      { code: productCode, nextCustomerId: customerId }
+    );
+    const order = createdOrder.salesOrders.find((candidate) => candidate.status === "OPEN");
+    expect(order).toMatchObject({ itemCount: 1, depositAmount: 5, balanceAmount: 20 });
+    expect(createdOrder.activeBasket).toBeNull();
+    if (!order) throw new Error("The sales order was not created.");
+
+    const fulfilmentProof = await page.evaluate(async (orderId) => {
+      const runtime = window.desktopRuntime;
+      if (!runtime) throw new Error("Desktop runtime was unavailable during fulfilment verification.");
+      await runtime.resumeSalesOrder(orderId);
+      const resumed = await runtime.getSyncSnapshot();
+      const line = resumed.activeBasket?.lines[0];
+      let editError: string | null = null;
+      try {
+        if (line) await runtime.updateBasketLine({ lineId: line.lineId, quantity: 2 });
+      } catch (error) {
+        editError = error instanceof Error ? error.message : String(error);
+      }
+      await runtime.discardActiveBasket();
+      const afterExit = await runtime.getSyncSnapshot();
+      await runtime.resumeSalesOrder(orderId);
+      return { resumed, editError, afterExit };
+    }, order.orderId);
+    expect(fulfilmentProof.resumed.activeBasket?.lines.map((line) => line.productCode)).toEqual([
+      productCode
+    ]);
+    expect(fulfilmentProof.editError).toMatch(/locked for fulfilment/i);
+    expect(fulfilmentProof.afterExit.activeBasket).toBeNull();
+    expect(fulfilmentProof.afterExit.salesOrders.find((candidate) => candidate.orderId === order.orderId))
+      .toMatchObject({ itemCount: 1, depositAmount: 5, balanceAmount: 20, status: "OPEN" });
+
+    const checkoutError = await page.evaluate(async () => {
+      try {
+        await window.desktopRuntime?.checkoutActiveBasket({
+          payments: [{
+            method: "CASH",
+            tenderMethodCode: "CASH",
+            tenderMethodName: "Cash",
+            amount: 20,
+            reference: null
+          }]
+        });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(checkoutError).toMatch(/available for checkout/i);
+  } finally {
+    await app.close().catch(() => undefined);
   }
 });
 

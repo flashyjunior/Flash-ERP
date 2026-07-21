@@ -1195,6 +1195,258 @@ export async function getEnterprisePosTransactionDetail(
   };
 }
 
+export type EnterpriseSalesOrderDetailData = {
+  currencyCode: string;
+  order: {
+    id: string;
+    orderNo: string;
+    status: string;
+    storeName: string;
+    storeCode: string;
+    terminalCode: string | null;
+    sourceTransactionNo: string;
+    customerNo: string | null;
+    customerName: string | null;
+    operatorName: string | null;
+    note: string | null;
+    totalAmount: number;
+    depositAmount: number;
+    balanceAmount: number;
+    depositTenderName: string | null;
+    depositReference: string | null;
+    fulfilledTransactionNo: string | null;
+    createdAt: string;
+    updatedAt: string;
+    fulfilledAt: string | null;
+    cancelledAt: string | null;
+  };
+  lines: Array<{
+    id: string;
+    productCode: string;
+    productName: string;
+    variant: string | null;
+    lineNote: string | null;
+    quantity: number;
+    unitPrice: number;
+    discountAmount: number;
+    taxAmount: number;
+    lineTotal: number;
+    promotionName: string | null;
+  }>;
+  syncTrail: Array<{
+    eventId: string;
+    eventType: string;
+    status: string;
+    receivedAt: string;
+    receivedAtLabel: string;
+    errorMessage: string | null;
+  }>;
+  statusMessage: string;
+  refreshedAt: string;
+};
+
+export async function getEnterpriseSalesOrderDetail(
+  orderNo: string
+): Promise<EnterpriseSalesOrderDetailData | null> {
+  const enterpriseNode = await getEnterpriseContext();
+
+  if (!enterpriseNode) {
+    return null;
+  }
+
+  const order = await prisma.salesOrder.findFirst({
+    where: {
+      retailOrgId: enterpriseNode.retailOrgId,
+      orderNo
+    },
+    select: {
+      id: true,
+      orderNo: true,
+      status: true,
+      sourceTransactionId: true,
+      sourceTransactionNo: true,
+      customerNoSnapshot: true,
+      customerNameSnapshot: true,
+      operatorName: true,
+      note: true,
+      totalAmount: true,
+      depositAmount: true,
+      balanceAmount: true,
+      depositTenderMethodNameSnapshot: true,
+      depositReference: true,
+      fulfilledTransactionNo: true,
+      createdAt: true,
+      updatedAt: true,
+      fulfilledAt: true,
+      cancelledAt: true,
+      store: {
+        select: {
+          name: true,
+          code: true
+        }
+      },
+      terminal: {
+        select: {
+          code: true
+        }
+      },
+      customer: {
+        select: {
+          customerNo: true,
+          fullName: true
+        }
+      },
+      lines: {
+        select: {
+          id: true,
+          productCodeSnapshot: true,
+          productNameSnapshot: true,
+          productVariantCodeSnapshot: true,
+          variantSizeSnapshot: true,
+          variantColorSnapshot: true,
+          variantAttributesSnapshot: true,
+          lineNote: true,
+          quantity: true,
+          unitPrice: true,
+          discountAmount: true,
+          taxAmount: true,
+          lineTotal: true,
+          appliedPromotionName: true,
+          appliedPromotionCode: true
+        }
+      }
+    }
+  });
+
+  if (!order) {
+    return null;
+  }
+
+  const [fallbackLines, syncTrail] = await Promise.all([
+    order.lines.length === 0
+      ? prisma.posTransactionLine.findMany({
+          where: {
+            posTransactionId: order.sourceTransactionId
+          },
+          orderBy: {
+            createdAt: "asc"
+          },
+          select: {
+            id: true,
+            productCodeSnapshot: true,
+            productNameSnapshot: true,
+            variantSizeSnapshot: true,
+            variantColorSnapshot: true,
+            lineNote: true,
+            quantity: true,
+            unitPrice: true,
+            discountAmount: true,
+            taxAmount: true,
+            lineTotal: true,
+            appliedPromotionNameSnapshot: true,
+            appliedPromotionCodeSnapshot: true
+          }
+        })
+      : Promise.resolve([]),
+    prisma.syncInboundEvent.findMany({
+      where: {
+        syncNodeId: enterpriseNode.id,
+        aggregateType: "salesOrder",
+        aggregateId: order.id
+      },
+      orderBy: {
+        receivedAt: "desc"
+      },
+      take: 20,
+      select: {
+        id: true,
+        eventType: true,
+        status: true,
+        receivedAt: true,
+        errorMessage: true
+      }
+    })
+  ]);
+  const lines = order.lines.length > 0
+    ? order.lines.map((line) => ({
+        id: line.id,
+        productCode: line.productCodeSnapshot,
+        productName: line.productNameSnapshot,
+        variant:
+          [
+            line.productVariantCodeSnapshot,
+            line.variantSizeSnapshot,
+            line.variantColorSnapshot,
+            line.variantAttributesSnapshot
+          ].filter(Boolean).join(" · ") || null,
+        lineNote: line.lineNote,
+        quantity: Number(line.quantity),
+        unitPrice: Number(line.unitPrice),
+        discountAmount: Number(line.discountAmount),
+        taxAmount: Number(line.taxAmount),
+        lineTotal: Number(line.lineTotal),
+        promotionName: line.appliedPromotionName ?? line.appliedPromotionCode
+      }))
+    : fallbackLines.map((line) => ({
+        id: line.id,
+        productCode: line.productCodeSnapshot,
+        productName: line.productNameSnapshot,
+        variant:
+          [line.variantSizeSnapshot, line.variantColorSnapshot]
+            .filter(Boolean)
+            .join(" · ") || null,
+        lineNote: line.lineNote,
+        quantity: Number(line.quantity),
+        unitPrice: Number(line.unitPrice),
+        discountAmount: Number(line.discountAmount),
+        taxAmount: Number(line.taxAmount),
+        lineTotal: Number(line.lineTotal),
+        promotionName:
+          line.appliedPromotionNameSnapshot ?? line.appliedPromotionCodeSnapshot
+      }));
+
+  return {
+    currencyCode: enterpriseNode.retailOrg.baseCurrencyCode,
+    order: {
+      id: order.id,
+      orderNo: order.orderNo,
+      status: order.status,
+      storeName: order.store.name,
+      storeCode: order.store.code,
+      terminalCode: order.terminal?.code ?? null,
+      sourceTransactionNo: order.sourceTransactionNo,
+      customerNo: order.customer?.customerNo ?? order.customerNoSnapshot,
+      customerName: order.customer?.fullName ?? order.customerNameSnapshot,
+      operatorName: order.operatorName,
+      note: order.note,
+      totalAmount: Number(order.totalAmount),
+      depositAmount: Number(order.depositAmount),
+      balanceAmount: Number(order.balanceAmount),
+      depositTenderName: order.depositTenderMethodNameSnapshot,
+      depositReference: order.depositReference,
+      fulfilledTransactionNo: order.fulfilledTransactionNo,
+      createdAt: order.createdAt.toISOString(),
+      updatedAt: order.updatedAt.toISOString(),
+      fulfilledAt: toIsoString(order.fulfilledAt),
+      cancelledAt: toIsoString(order.cancelledAt)
+    },
+    lines,
+    syncTrail: syncTrail.map((event) => ({
+      eventId: event.id,
+      eventType: event.eventType,
+      status: event.status,
+      receivedAt: event.receivedAt.toISOString(),
+      receivedAtLabel: formatRelativeTime(event.receivedAt),
+      errorMessage: event.errorMessage
+    })),
+    statusMessage:
+      lines.length > 0
+        ? `${lines.length} original order line(s) are available for enterprise review.`
+        : "This order was synced before line-level sales-order detail was enabled.",
+    refreshedAt: new Date().toISOString()
+  };
+}
+
 export type EnterprisePosExceptionDetailData = {
   currencyCode: string;
   event: {

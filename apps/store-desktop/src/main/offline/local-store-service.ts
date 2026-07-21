@@ -8780,6 +8780,7 @@ export class LocalStoreService {
         input.customerId === null
           ? this.requireActiveBasket()
           : this.ensureActiveBasket(timestamp);
+      this.assertBasketIsEditable(basket.id);
 
       if (input.customerId === null) {
         this.db
@@ -8874,6 +8875,7 @@ export class LocalStoreService {
 
     this.withTransaction(() => {
       const basket = this.requireActiveBasket();
+      this.assertBasketIsEditable(basket.id);
       const basketLines = this.getBasketLines(basket.id);
       const appliedPromotions =
         this.getPublicAppliedPromotionSummaries(basketLines);
@@ -9825,8 +9827,24 @@ export class LocalStoreService {
     }
   }
 
+  private assertBasketIsEditable(basketId: string) {
+    const linkedOrder = this.db
+      .prepare(
+        "SELECT order_no FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
+      )
+      .get(basketId) as { order_no: string } | undefined;
+
+    if (linkedOrder) {
+      throw new Error(
+        `${linkedOrder.order_no} is locked for fulfilment. Exit fulfilment to return it to pending orders.`,
+      );
+    }
+  }
+
   addItemToBasket(input: StoreBasketItemRequest): StoreSyncActionResult {
     const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+    const deferInventoryValidation =
+      input.deferInventoryValidationForSalesOrder === true;
     const activeBasket = this.getActiveBasketSummary();
     const requiredPermission =
       activeBasket?.transactionType === "RETURN"
@@ -9857,6 +9875,7 @@ export class LocalStoreService {
 
     this.withTransaction(() => {
       const basket = this.ensureActiveBasket(timestamp);
+      this.assertBasketIsEditable(basket.id);
       const basketType = basket.transaction_type;
       const lineIntent = getLineIntentForBasket(
         basket.transaction_type,
@@ -9939,14 +9958,18 @@ export class LocalStoreService {
       const isSerialized = asBooleanFlag(match.is_serialized);
       const salesLocationCode =
         match.sales_location_code ?? this.getDefaultSalesLocationCode();
+      const requestedSerialNumbers = input.serialNumbers ?? [];
+      const validateSerialSelection =
+        isSerialized &&
+        (!deferInventoryValidation || requestedSerialNumbers.length > 0);
       const nextSerialNumbers = validateSerializedLineInput({
-        isSerialized,
+        isSerialized: validateSerialSelection,
         productName: match.product_name,
         quantity: normalizedQuantity,
-        serialNumbers: input.serialNumbers ?? [],
+        serialNumbers: requestedSerialNumbers,
       });
 
-      if (isSerialized && nextSerialNumbers.length > 0) {
+      if (validateSerialSelection && nextSerialNumbers.length > 0) {
         const activeBasketSerialKeys = new Set(
           this.getBasketLines(basket.id)
             .filter(
@@ -9986,7 +10009,11 @@ export class LocalStoreService {
         });
       }
 
-      if (lineIntent === "SALE" && tracksInventory) {
+      if (
+        lineIntent === "SALE" &&
+        tracksInventory &&
+        !deferInventoryValidation
+      ) {
         const availableQuantity =
           selectedVariant
             ? Number(asNumber(selectedVariant.quantity_on_hand).toFixed(3))
@@ -10440,6 +10467,8 @@ export class LocalStoreService {
 
   updateBasketLine(input: StoreBasketLineUpdateRequest): StoreSyncActionResult {
     const activeBasket = this.getActiveBasketSummary();
+    const deferInventoryValidation =
+      input.deferInventoryValidationForSalesOrder === true;
 
     this.requireActiveCashierLaneSession({
       permissionCodes: [
@@ -10500,6 +10529,7 @@ export class LocalStoreService {
 
     this.withTransaction(() => {
       const basket = this.requireActiveBasket();
+      this.assertBasketIsEditable(basket.id);
       const line = this.getBasketLine(input.lineId);
 
       if (!line || line.pos_transaction_id !== basket.id) {
@@ -10645,16 +10675,19 @@ export class LocalStoreService {
       const discountOverrideChanged =
         typeof requestedOverrideDiscountAmount === "number" &&
         requestedOverrideDiscountAmount !== currentDiscountAmount;
+      const requestedSerialNumbers =
+        input.serialNumbers ?? readSerializedLineNumbers(line.serial_numbers_json);
+      const validateSerialSelection =
+        isSerialized &&
+        (!deferInventoryValidation || requestedSerialNumbers.length > 0);
       const nextSerialNumbers = validateSerializedLineInput({
-        isSerialized,
+        isSerialized: validateSerialSelection,
         productName: line.product_name_snapshot,
         quantity: normalizedQuantity,
-        serialNumbers:
-          input.serialNumbers ??
-          readSerializedLineNumbers(line.serial_numbers_json),
+        serialNumbers: requestedSerialNumbers,
       });
 
-      if (isSerialized && nextSerialNumbers.length > 0) {
+      if (validateSerialSelection && nextSerialNumbers.length > 0) {
         const allowedSerialNumbers =
           line.line_intent === "RETURN"
             ? this.listLocallyReturnableSerialNumbers(
@@ -10683,7 +10716,11 @@ export class LocalStoreService {
         );
       }
 
-      if (line.line_intent === "SALE" && tracksInventory) {
+      if (
+        line.line_intent === "SALE" &&
+        tracksInventory &&
+        !deferInventoryValidation
+      ) {
         const availableQuantity =
           match.sales_location_quantity ??
           Number(asNumber(match.quantity_on_hand).toFixed(3));
@@ -10905,6 +10942,7 @@ export class LocalStoreService {
 
     this.withTransaction(() => {
       const basket = this.requireActiveBasket();
+      this.assertBasketIsEditable(basket.id);
       const line = this.getBasketLine(lineId);
 
       if (!line || line.pos_transaction_id !== basket.id) {
@@ -10943,19 +10981,19 @@ export class LocalStoreService {
     });
     const basket = this.requireActiveBasket();
     const lines = this.getBasketLines(basket.id);
+    const linkedOrder = this.db
+      .prepare(
+        "SELECT order_no FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
+      )
+      .get(basket.id) as { order_no: string } | undefined;
 
-    if (lines.length > 0) {
+    if (lines.length > 0 && !linkedOrder) {
       throw new Error(
         "Clear every basket line before resetting the active POS screen.",
       );
     }
 
     const timestamp = isoNow();
-    const linkedOrder = this.db
-      .prepare(
-        "SELECT order_no FROM sales_order WHERE source_transaction_id = ? AND status = 'OPEN' LIMIT 1",
-      )
-      .get(basket.id) as { order_no: string } | undefined;
     const basketLabel =
       (linkedOrder?.order_no ?? basket.source_transaction_no)
         ? `${basket.transaction_no} for ${linkedOrder?.order_no ?? basket.source_transaction_no}`
@@ -11298,6 +11336,23 @@ export class LocalStoreService {
         fulfilledTransactionNo: null,
         fulfilledAt: null,
         cancelledAt: null,
+        lines: lines.map((line) => ({
+          lineId: line.id,
+          productCode: line.product_code_snapshot,
+          productVariantCode: line.product_variant_code_snapshot,
+          productName: line.product_name_snapshot,
+          variantSize: line.variant_size,
+          variantColor: line.variant_color,
+          variantAttributesSnapshot: line.variant_attributes_snapshot,
+          lineNote: line.line_note,
+          quantity: Number(asNumber(line.quantity).toFixed(3)),
+          unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+          discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+          taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+          lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+          appliedPromotionCode: line.applied_promotion_code,
+          appliedPromotionName: line.applied_promotion_name,
+        })),
       };
 
       this.db

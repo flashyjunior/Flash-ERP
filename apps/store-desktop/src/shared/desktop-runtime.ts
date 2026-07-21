@@ -2227,6 +2227,7 @@ export type StoreOperatorSignInInput = {
 export type StoreSellCaptureRequest = {
   lookupValue: string;
   quantity: number;
+  deferInventoryValidationForSalesOrder?: boolean | null;
   productVariantCode?: string | null;
   serialNumbers?: string[];
   unitPrice?: number | null;
@@ -2243,6 +2244,7 @@ export type StoreBasketItemRequest = StoreSellCaptureRequest & {
 export type StoreBasketLineUpdateRequest = {
   lineId: string;
   quantity: number;
+  deferInventoryValidationForSalesOrder?: boolean | null;
   serialNumbers?: string[];
   overrideUnitPrice?: number | null;
   overrideDiscountAmount?: number | null;

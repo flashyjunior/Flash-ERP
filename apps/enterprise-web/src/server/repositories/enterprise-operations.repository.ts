@@ -448,6 +448,7 @@ export type EnterpriseOperationsDashboardData = {
     storeCode: string;
     nodeCode: string | null;
     postedTransactions: number;
+    salesOrders: number;
     salesValue: number;
     stockMovements: number;
     lastPostedAt: string | null;
@@ -700,6 +701,20 @@ export async function getEnterpriseOperationsDashboard(
     },
     ...(ledgerDateFilter ? { depositedAt: ledgerDateFilter } : {})
   };
+  const salesOrderWhere: Prisma.SalesOrderWhereInput = {
+    retailOrgId: enterpriseNode.retailOrgId,
+    storeId: {
+      in: salesScopedStoreIds
+    },
+    ...(transactionDateFilter
+      ? {
+          OR: [
+            { createdAt: transactionDateFilter },
+            { updatedAt: transactionDateFilter }
+          ]
+        }
+      : {})
+  };
 
   const [
     transactionAggregate,
@@ -718,6 +733,7 @@ export async function getEnterpriseOperationsDashboard(
     bankingRows,
     transactionGroups,
     inventoryGroups,
+    salesOrderGroups,
     customerCount,
     loyaltyCustomerCount,
     productCount,
@@ -992,6 +1008,17 @@ export async function getEnterpriseOperationsDashboard(
         occurredAt: true
       }
     }),
+    prisma.salesOrder.groupBy({
+      by: ["storeId"],
+      where: salesOrderWhere,
+      _count: {
+        _all: true
+      },
+      _max: {
+        createdAt: true,
+        updatedAt: true
+      }
+    }),
     prisma.customer.count({
       where: {
         retailOrgId: enterpriseNode.retailOrgId,
@@ -1039,6 +1066,9 @@ export async function getEnterpriseOperationsDashboard(
   const inventoryGroupByStoreId = new Map(
     inventoryGroups.map((group) => [group.storeId ?? "unassigned", group] as const)
   );
+  const salesOrderGroupByStoreId = new Map(
+    salesOrderGroups.map((group) => [group.storeId ?? "unassigned", group] as const)
+  );
 
   const postedTransactions = transactionAggregate._count._all;
   const postedRevenue = Number(transactionAggregate._sum.totalAmount ?? 0);
@@ -1049,10 +1079,13 @@ export async function getEnterpriseOperationsDashboard(
     .map((store) => {
       const salesGroup = transactionGroupByStoreId.get(store.id);
       const inventoryGroup = inventoryGroupByStoreId.get(store.id);
+      const salesOrderGroup = salesOrderGroupByStoreId.get(store.id);
       const lastPostedAt = latestDate(
         salesGroup?._max.completedAt ?? null,
         salesGroup?._max.createdAt ?? null,
-        inventoryGroup?._max.occurredAt ?? null
+        inventoryGroup?._max.occurredAt ?? null,
+        salesOrderGroup?._max.updatedAt ?? null,
+        salesOrderGroup?._max.createdAt ?? null
       );
 
       return {
@@ -1060,6 +1093,7 @@ export async function getEnterpriseOperationsDashboard(
         storeCode: store.code,
         nodeCode: primaryNodeCodeByStoreId.get(store.id) ?? null,
         postedTransactions: salesGroup?._count._all ?? 0,
+        salesOrders: salesOrderGroup?._count._all ?? 0,
         salesValue: Number(salesGroup?._sum.totalAmount ?? 0),
         stockMovements: inventoryGroup?._count._all ?? 0,
         lastPostedAt: toIsoString(lastPostedAt),

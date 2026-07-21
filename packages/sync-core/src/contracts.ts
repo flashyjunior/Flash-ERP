@@ -282,6 +282,25 @@ export type StoreSalesOrderRecordedPayload = {
   fulfilledTransactionNo: string | null;
   fulfilledAt: string | null;
   cancelledAt: string | null;
+  lines?: StoreSalesOrderLinePayload[];
+};
+
+export type StoreSalesOrderLinePayload = {
+  lineId: string;
+  productCode: string;
+  productVariantCode: string | null;
+  productName: string;
+  variantSize: string | null;
+  variantColor: string | null;
+  variantAttributesSnapshot: string | null;
+  lineNote: string | null;
+  quantity: number;
+  unitPrice: number;
+  discountAmount: number;
+  taxAmount: number;
+  lineTotal: number;
+  appliedPromotionCode: string | null;
+  appliedPromotionName: string | null;
 };
 
 export type StoreEodReconciliationRecordedPayload = {

@@ -533,6 +533,7 @@ export function EnterprisePosWorkspace({
             data={workspace.salesOrderRows}
             emptyLabel="No store-created sales orders have landed in enterprise yet."
             exportFileName="flash-erp-enterprise-sales-orders"
+            getRowHref={(row) => `/pos/sales-orders/${encodeURIComponent(row.orderNo)}`}
             globalFilterFn={salesOrderFilter}
             searchPlaceholder="Search orders, baskets, customers, or fulfilment references"
             toolbarActions={

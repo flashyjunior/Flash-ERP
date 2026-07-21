@@ -10023,10 +10023,25 @@ export class PostgresStoreService {
     }
   }
 
+  private async assertBasketIsEditable(basketId: string) {
+    const result = await this.pool.query<{ order_no: string }>(
+      "SELECT order_no FROM sales_order WHERE source_transaction_id = $1 AND status = 'OPEN' LIMIT 1",
+      [basketId],
+    );
+
+    if (result.rows[0]) {
+      throw new Error(
+        `${result.rows[0].order_no} is locked for fulfilment. Exit fulfilment to return it to pending orders.`,
+      );
+    }
+  }
+
   async addItemToBasket(
     input: StoreBasketItemRequest,
   ): Promise<StoreSyncActionResult> {
     const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+    const deferInventoryValidation =
+      input.deferInventoryValidationForSalesOrder === true;
 
     await this.requireActiveOperatorSession({
       permissionCodes: ["pos.sale.process"],
@@ -10047,6 +10062,7 @@ export class PostgresStoreService {
 
     const timestamp = isoNow();
     const basket = await this.ensureActiveBasket(timestamp);
+    await this.assertBasketIsEditable(basket.id);
     const lineIntent: SyncPosLineIntent =
       basket.transaction_type === "RETURN"
         ? "RETURN"
@@ -10112,11 +10128,16 @@ export class PostgresStoreService {
           line.source_line_id === null,
       )
       .reduce((sum, line) => sum + asNumber(line.quantity), 0);
+    const isSerialized = asBooleanFlag(match.is_serialized);
+    const requestedSerialNumbers = input.serialNumbers ?? [];
+    const validateSerialSelection =
+      isSerialized &&
+      (!deferInventoryValidation || requestedSerialNumbers.length > 0);
     const nextSerialNumbers = validateSerializedLineInput({
-      isSerialized: asBooleanFlag(match.is_serialized),
+      isSerialized: validateSerialSelection,
       productName: match.product_name,
       quantity: normalizedQuantity,
-      serialNumbers: input.serialNumbers ?? [],
+      serialNumbers: requestedSerialNumbers,
     });
     const requestedQuantity = Number(
       (currentBasketProductQuantity + normalizedQuantity).toFixed(3),
@@ -10130,6 +10151,7 @@ export class PostgresStoreService {
       lineIntent === "SALE" &&
       asBooleanFlag(match.track_inventory) &&
       !isServiceProductType(match.product_type) &&
+      !deferInventoryValidation &&
       availableQuantity < requestedQuantity
     ) {
       throw new Error(
@@ -10137,7 +10159,11 @@ export class PostgresStoreService {
       );
     }
 
-    if (lineIntent === "SALE" && nextSerialNumbers.length > 0) {
+    if (
+      lineIntent === "SALE" &&
+      validateSerialSelection &&
+      nextSerialNumbers.length > 0
+    ) {
       const activeBasketSerialKeys = new Set(
         activeBasketLines
           .filter(
@@ -10379,6 +10405,8 @@ export class PostgresStoreService {
   async updateBasketLine(
     input: StoreBasketLineUpdateRequest,
   ): Promise<StoreSyncActionResult> {
+    const deferInventoryValidation =
+      input.deferInventoryValidationForSalesOrder === true;
     await this.requireActiveOperatorSession({
       permissionCodes: ["pos.sale.process"],
       purpose: "updating the active basket",
@@ -10396,6 +10424,7 @@ export class PostgresStoreService {
     }
 
     const basket = await this.requireActiveBasket();
+    await this.assertBasketIsEditable(basket.id);
     const line = await this.getBasketLine(input.lineId);
 
     if (!line || line.pos_transaction_id !== basket.id) {
@@ -10451,7 +10480,8 @@ export class PostgresStoreService {
 
     if (
       asBooleanFlag(product.track_inventory) &&
-      !isServiceProductType(product.product_type)
+      !isServiceProductType(product.product_type) &&
+      !deferInventoryValidation
     ) {
       const availableQuantity = asNumber(
         product.sales_location_quantity ?? product.quantity_on_hand,
@@ -10464,16 +10494,20 @@ export class PostgresStoreService {
       }
     }
 
+    const isSerialized = asBooleanFlag(product.is_serialized);
+    const requestedSerialNumbers =
+      input.serialNumbers ?? readSerializedLineNumbers(line.serial_numbers_json);
+    const validateSerialSelection =
+      isSerialized &&
+      (!deferInventoryValidation || requestedSerialNumbers.length > 0);
     const nextSerialNumbers = validateSerializedLineInput({
-      isSerialized: asBooleanFlag(product.is_serialized),
+      isSerialized: validateSerialSelection,
       productName: product.product_name,
       quantity: normalizedQuantity,
-      serialNumbers:
-        input.serialNumbers ??
-        readSerializedLineNumbers(line.serial_numbers_json),
+      serialNumbers: requestedSerialNumbers,
     });
 
-    if (nextSerialNumbers.length > 0) {
+    if (validateSerialSelection && nextSerialNumbers.length > 0) {
       ensureSerialSelectionWithinAllowedSet({
         productName: product.product_name,
         selectedSerialNumbers: nextSerialNumbers,
@@ -10586,6 +10620,7 @@ export class PostgresStoreService {
       purpose: "removing an item from the active basket",
     });
     const basket = await this.requireActiveBasket();
+    await this.assertBasketIsEditable(basket.id);
     const line = await this.getBasketLine(lineId);
 
     if (!line || line.pos_transaction_id !== basket.id) {
@@ -10614,18 +10649,18 @@ export class PostgresStoreService {
     });
     const basket = await this.requireActiveBasket();
     const lines = await this.getBasketLines(basket.id);
-
-    if (lines.length > 0) {
-      throw new Error(
-        "Clear every basket line before resetting the active POS screen.",
-      );
-    }
-
     const orderResult = await this.pool.query<{ order_no: string }>(
       "SELECT order_no FROM sales_order WHERE source_transaction_id = $1 AND status = 'OPEN' LIMIT 1",
       [basket.id],
     );
     const linkedOrder = orderResult.rows[0] ?? null;
+
+    if (lines.length > 0 && !linkedOrder) {
+      throw new Error(
+        "Clear every basket line before resetting the active POS screen.",
+      );
+    }
+
     const timestamp = isoNow();
     const client = await this.pool.connect();
 
@@ -10688,6 +10723,7 @@ export class PostgresStoreService {
       input.customerId === null
         ? await this.requireActiveBasket()
         : await this.ensureActiveBasket(timestamp);
+    await this.assertBasketIsEditable(basket.id);
 
     if (!input.customerId) {
       await this.pool.query(
@@ -10791,6 +10827,7 @@ export class PostgresStoreService {
     }
 
     const basket = await this.requireActiveBasket();
+    await this.assertBasketIsEditable(basket.id);
     const timestamp = isoNow();
     const grossTotalAmount = Number(
       (asNumber(basket.subtotal_amount) + asNumber(basket.tax_amount)).toFixed(
@@ -13012,66 +13049,6 @@ export class PostgresStoreService {
         : input.additionalDetails?.trim() || null;
 
     const salesOrderLocationCode = await this.getDefaultSalesOrderLocationCode();
-    const requestedOrderQuantityByProduct = new Map<string, number>();
-
-    for (const line of lines) {
-      const product = await this.requireBasketProductLookup(
-        line.product_code_snapshot,
-      );
-      const quantity = Number(asNumber(line.quantity).toFixed(3));
-      const serialNumbers = validateSerializedLineInput({
-        isSerialized: asBooleanFlag(product.is_serialized),
-        productName: line.product_name_snapshot,
-        quantity,
-        serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
-      });
-
-      if (serialNumbers.length > 0) {
-        ensureSerialSelectionWithinAllowedSet({
-          productName: line.product_name_snapshot,
-          selectedSerialNumbers: serialNumbers,
-          allowedSerialNumbers: await this.listAvailableSaleSerialNumbers(
-            line.product_code_snapshot,
-            salesOrderLocationCode,
-          ),
-        });
-      }
-
-      if (!asBooleanFlag(product.track_inventory)) {
-        continue;
-      }
-
-      const availableQuantity =
-        salesOrderLocationCode !== null
-          ? await this.getOptionalLocationQuantity(
-              salesOrderLocationCode,
-              line.product_code_snapshot,
-            )
-          : null;
-      const localAvailableQuantity = Number(
-        asNumber(availableQuantity ?? product.quantity_on_hand).toFixed(3),
-      );
-      const requestedProductQuantity = Number(
-        (
-          (requestedOrderQuantityByProduct.get(line.product_code_snapshot) ?? 0) +
-          quantity
-        ).toFixed(3),
-      );
-
-      if (localAvailableQuantity < requestedProductQuantity) {
-        throw new Error(
-          `Only ${localAvailableQuantity.toFixed(3)} unit(s) of ${
-            line.product_name_snapshot
-          } are available for this sales order.`,
-        );
-      }
-
-      requestedOrderQuantityByProduct.set(
-        line.product_code_snapshot,
-        requestedProductQuantity,
-      );
-    }
-
     const metadata = await this.metadata();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
     const terminalCode = this.getTerminalCode();
@@ -13154,6 +13131,23 @@ export class PostgresStoreService {
       fulfilledTransactionNo: null,
       fulfilledAt: null,
       cancelledAt: null,
+      lines: lines.map((line) => ({
+        lineId: line.id,
+        productCode: line.product_code_snapshot,
+        productVariantCode: line.product_variant_code_snapshot,
+        productName: line.product_name_snapshot,
+        variantSize: line.variant_size,
+        variantColor: line.variant_color,
+        variantAttributesSnapshot: line.variant_attributes_snapshot,
+        lineNote: line.line_note,
+        quantity: Number(asNumber(line.quantity).toFixed(3)),
+        unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+        discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+        taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+        lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+        appliedPromotionCode: line.applied_promotion_code,
+        appliedPromotionName: line.applied_promotion_name,
+      })),
     };
     const client = await this.pool.connect();
 

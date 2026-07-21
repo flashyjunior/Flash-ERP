@@ -4764,11 +4764,35 @@ model SalesOrder {
   store                           Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
   terminal                        Terminal  @relation(fields: [terminalId], references: [id], onDelete: Cascade)
   customer                        Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  lines                           SalesOrderLine[]
 
   @@unique([retailOrgId, orderNo])
   @@index([storeId, status, updatedAt])
   @@index([customerId, updatedAt])
   @@index([terminalId])
+}
+
+model SalesOrderLine {
+  id                         String     @id
+  salesOrderId               String
+  productCodeSnapshot        String
+  productVariantCodeSnapshot String?
+  productNameSnapshot        String
+  variantSizeSnapshot        String?
+  variantColorSnapshot       String?
+  variantAttributesSnapshot  String?
+  lineNote                   String?
+  quantity                   Decimal    @db.Decimal(18, 3)
+  unitPrice                  Decimal    @db.Decimal(18, 2)
+  discountAmount             Decimal    @default(0) @db.Decimal(18, 2)
+  taxAmount                  Decimal    @default(0) @db.Decimal(18, 2)
+  lineTotal                  Decimal    @db.Decimal(18, 2)
+  appliedPromotionCode       String?
+  appliedPromotionName       String?
+  salesOrder                 SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+
+  @@index([salesOrderId])
+  @@index([productCodeSnapshot])
 }
 
 model EodReconciliation {

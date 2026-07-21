@@ -10377,52 +10377,6 @@ export class MssqlStoreService {
         : input.additionalDetails?.trim() || null;
 
     const salesOrderLocationCode = await this.getDefaultSalesOrderLocationCode();
-    const requestedOrderQuantityByProduct = new Map<string, number>();
-
-    for (const line of lines) {
-      if (line.line_intent !== "SALE") {
-        continue;
-      }
-
-      const product = await this.requireBasketProductLookup(
-        line.product_code_snapshot,
-      );
-
-      if (!asBooleanFlag(product.track_inventory)) {
-        continue;
-      }
-
-      const quantity = Number(asNumber(line.quantity).toFixed(3));
-      const availableQuantity =
-        salesOrderLocationCode !== null
-          ? await this.getOptionalLocationQuantity(
-              salesOrderLocationCode,
-              line.product_code_snapshot,
-            )
-          : null;
-      const localAvailableQuantity = Number(
-        asNumber(availableQuantity ?? product.quantity_on_hand).toFixed(3),
-      );
-      const requestedProductQuantity = Number(
-        (
-          (requestedOrderQuantityByProduct.get(line.product_code_snapshot) ?? 0) +
-          quantity
-        ).toFixed(3),
-      );
-
-      if (localAvailableQuantity < requestedProductQuantity) {
-        throw new Error(
-          `Only ${localAvailableQuantity.toFixed(3)} unit(s) of ${
-            line.product_name_snapshot
-          } are available for this sales order.`,
-        );
-      }
-
-      requestedOrderQuantityByProduct.set(
-        line.product_code_snapshot,
-        requestedProductQuantity,
-      );
-    }
 
     const existingOrder = await this.query<{
       id: string;
@@ -10573,6 +10527,23 @@ export class MssqlStoreService {
       fulfilledTransactionNo: null,
       fulfilledAt: null,
       cancelledAt: null,
+      lines: lines.map((line) => ({
+        lineId: line.id,
+        productCode: line.product_code_snapshot,
+        productVariantCode: line.product_variant_code_snapshot,
+        productName: line.product_name_snapshot,
+        variantSize: line.variant_size,
+        variantColor: line.variant_color,
+        variantAttributesSnapshot: line.variant_attributes_snapshot,
+        lineNote: line.line_note,
+        quantity: Number(asNumber(line.quantity).toFixed(3)),
+        unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+        discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+        taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+        lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+        appliedPromotionCode: line.applied_promotion_code,
+        appliedPromotionName: line.applied_promotion_name,
+      })),
     };
 
     await this.withTransaction(async (transaction) => {
@@ -12204,6 +12175,7 @@ export class MssqlStoreService {
       input.customerId === null
         ? await this.requireActiveBasket()
         : await this.ensureActiveBasket(timestamp);
+    await this.assertBasketIsEditable(basket.id);
 
     if (!input.customerId) {
       await this.query(
@@ -12318,6 +12290,7 @@ export class MssqlStoreService {
     }
 
     const basket = await this.requireActiveBasket();
+    await this.assertBasketIsEditable(basket.id);
     const timestamp = isoNow();
 
     await this.query(
@@ -12347,10 +12320,28 @@ export class MssqlStoreService {
     };
   }
 
+  private async assertBasketIsEditable(basketId: string) {
+    const result = await this.query<{ order_no: string }>(
+      `SELECT TOP (1) [order_no]
+       FROM [dbo].[sales_order]
+       WHERE [source_transaction_id] = @basketId
+         AND [status] = N'OPEN'`,
+      { basketId },
+    );
+
+    if (result.recordset[0]) {
+      throw new Error(
+        `${result.recordset[0].order_no} is locked for fulfilment. Exit fulfilment to return it to pending orders.`,
+      );
+    }
+  }
+
   async addItemToBasket(
     input: StoreBasketItemRequest,
   ): Promise<StoreSyncActionResult> {
     const normalizedQuantity = Number(Number(input.quantity).toFixed(3));
+    const deferInventoryValidation =
+      input.deferInventoryValidationForSalesOrder === true;
 
     await this.requireActiveOperatorSession({
       permissionCodes: ["pos.sale.process"],
@@ -12371,6 +12362,7 @@ export class MssqlStoreService {
 
     const timestamp = isoNow();
     const basket = await this.ensureActiveBasket(timestamp);
+    await this.assertBasketIsEditable(basket.id);
     const lineIntent: SyncPosLineIntent =
       basket.transaction_type === "RETURN"
         ? "RETURN"
@@ -12437,11 +12429,16 @@ export class MssqlStoreService {
           line.source_line_id === null,
       )
       .reduce((sum, line) => sum + asNumber(line.quantity), 0);
+    const isSerialized = asBooleanFlag(match.is_serialized);
+    const requestedSerialNumbers = input.serialNumbers ?? [];
+    const validateSerialSelection =
+      isSerialized &&
+      (!deferInventoryValidation || requestedSerialNumbers.length > 0);
     const nextSerialNumbers = validateSerializedLineInput({
-      isSerialized: asBooleanFlag(match.is_serialized),
+      isSerialized: validateSerialSelection,
       productName: match.product_name,
       quantity: normalizedQuantity,
-      serialNumbers: input.serialNumbers ?? [],
+      serialNumbers: requestedSerialNumbers,
     });
     const requestedQuantity = Number(
       (currentBasketProductQuantity + normalizedQuantity).toFixed(3),
@@ -12455,6 +12452,7 @@ export class MssqlStoreService {
       lineIntent === "SALE" &&
       asBooleanFlag(match.track_inventory) &&
       !isServiceProductType(match.product_type) &&
+      !deferInventoryValidation &&
       availableQuantity < requestedQuantity
     ) {
       throw new Error(
@@ -12462,7 +12460,11 @@ export class MssqlStoreService {
       );
     }
 
-    if (lineIntent === "SALE" && nextSerialNumbers.length > 0) {
+    if (
+      lineIntent === "SALE" &&
+      validateSerialSelection &&
+      nextSerialNumbers.length > 0
+    ) {
       const activeBasketSerialKeys = new Set(
         activeBasketLines
           .filter(
@@ -12731,6 +12733,8 @@ export class MssqlStoreService {
   async updateBasketLine(
     input: StoreBasketLineUpdateRequest,
   ): Promise<StoreSyncActionResult> {
+    const deferInventoryValidation =
+      input.deferInventoryValidationForSalesOrder === true;
     await this.requireActiveOperatorSession({
       permissionCodes: ["pos.sale.process"],
       purpose: "updating the active basket",
@@ -12748,6 +12752,7 @@ export class MssqlStoreService {
     }
 
     const basket = await this.requireActiveBasket();
+    await this.assertBasketIsEditable(basket.id);
     const line = await this.getBasketLine(input.lineId);
 
     if (!line || line.pos_transaction_id !== basket.id) {
@@ -12801,16 +12806,20 @@ export class MssqlStoreService {
       throw new Error("Flash ERP needs a manual discount of zero or greater.");
     }
 
+    const isSerialized = asBooleanFlag(product.is_serialized);
+    const requestedSerialNumbers =
+      input.serialNumbers ?? readSerializedLineNumbers(line.serial_numbers_json);
+    const validateSerialSelection =
+      isSerialized &&
+      (!deferInventoryValidation || requestedSerialNumbers.length > 0);
     const nextSerialNumbers = validateSerializedLineInput({
-      isSerialized: asBooleanFlag(product.is_serialized),
+      isSerialized: validateSerialSelection,
       productName: product.product_name,
       quantity: normalizedQuantity,
-      serialNumbers:
-        input.serialNumbers ??
-        readSerializedLineNumbers(line.serial_numbers_json),
+      serialNumbers: requestedSerialNumbers,
     });
 
-    if (nextSerialNumbers.length > 0) {
+    if (validateSerialSelection && nextSerialNumbers.length > 0) {
       ensureSerialSelectionWithinAllowedSet({
         productName: product.product_name,
         selectedSerialNumbers: nextSerialNumbers,
@@ -12925,6 +12934,7 @@ export class MssqlStoreService {
       purpose: "removing an item from the active basket",
     });
     const basket = await this.requireActiveBasket();
+    await this.assertBasketIsEditable(basket.id);
     const line = await this.getBasketLine(lineId);
 
     if (!line || line.pos_transaction_id !== basket.id) {
@@ -12954,8 +12964,16 @@ export class MssqlStoreService {
     });
     const basket = await this.requireActiveBasket();
     const lines = await this.getBasketLines(basket.id);
+    const orderResult = await this.query<{ order_no: string }>(
+      `SELECT TOP (1) [order_no]
+       FROM [dbo].[sales_order]
+       WHERE [source_transaction_id] = @transactionId
+         AND [status] = N'OPEN'`,
+      { transactionId: basket.id },
+    );
+    const linkedOrder = orderResult.recordset[0] ?? null;
 
-    if (lines.length > 0) {
+    if (lines.length > 0 && !linkedOrder) {
       throw new Error(
         "Clear every basket line before resetting the active POS screen.",
       );
@@ -12965,19 +12983,25 @@ export class MssqlStoreService {
 
     await this.withTransaction(async (transaction) => {
       await this.deleteMetadata(this.getActiveBasketMetadataKey(), transaction);
-      await this.query(
-        `DELETE FROM [dbo].[pos_transaction]
-         WHERE [id] = @transactionId
-           AND [status] = N'PARKED'`,
-        { transactionId: basket.id },
-        transaction,
-      );
+
+      if (!linkedOrder) {
+        await this.query(
+          `DELETE FROM [dbo].[pos_transaction]
+           WHERE [id] = @transactionId
+             AND [status] = N'PARKED'`,
+          { transactionId: basket.id },
+          transaction,
+        );
+      }
+
       await this.setMetadata("last_local_write_at", timestamp, transaction);
     });
     await this.insertRunLog({
       runKind: "LOCAL_WRITE",
       result: "SUCCESS",
-      summary: `${basket.transaction_no} was discarded from the SQL Server POS lane before completion.`,
+      summary: linkedOrder
+        ? `${basket.transaction_no} was removed from the SQL Server sell lane and ${linkedOrder.order_no} remains available for fulfilment.`
+        : `${basket.transaction_no} was discarded from the SQL Server POS lane before completion.`,
       upstreamProcessed: 0,
       downstreamApplied: 0,
       startedAt: timestamp,
@@ -12985,7 +13009,9 @@ export class MssqlStoreService {
     });
 
     return {
-      message: `Flash ERP cleared basket ${basket.transaction_no} from the POS screen.`,
+      message: linkedOrder
+        ? `${linkedOrder.order_no} was returned to pending orders.`
+        : `Flash ERP cleared basket ${basket.transaction_no} from the POS screen.`,
       snapshot: await this.getSyncSnapshot(),
     };
   }

@@ -30,6 +30,9 @@ function requireScript(packageSource: string, scriptName: string) {
 const rootPackage = requireFile("package.json");
 const desktopRuntime = requireFile("apps/store-desktop/src/shared/desktop-runtime.ts");
 const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.tsx");
+const desktopSqliteService = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
+const desktopPostgresService = requireFile("apps/store-desktop/src/main/postgres/postgres-store-service.ts");
+const desktopMssqlService = requireFile("apps/store-desktop/src/main/mssql/mssql-store-service.ts");
 const onlineRepository = requireFile("apps/enterprise-web/src/server/repositories/online-store.repository.ts");
 const onlineWorkspace = requireFile("apps/enterprise-web/src/components/enterprise/online-store-workspace.tsx");
 const onlineSpec = requireFile("tests/e2e/online-store-parity.spec.ts");
@@ -80,6 +83,49 @@ for (const desktopUiAnchor of [
   "Stock count"
 ]) {
   requireIncludes(desktopRenderer, desktopUiAnchor, `desktop UI baseline must retain ${desktopUiAnchor}.`);
+}
+
+requireIncludes(
+  desktopRuntime,
+  "deferInventoryValidationForSalesOrder?: boolean | null",
+  "desktop runtime must expose deferred inventory validation for sales-order basket lines."
+);
+requireIncludes(
+  desktopRenderer,
+  'sellableOnly: saleMode !== "SALES_ORDER"',
+  "desktop sales-order mode must browse the full active catalog."
+);
+requireIncludes(
+  desktopRenderer,
+  'deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER"',
+  "desktop sales-order basket edits must defer inventory validation."
+);
+requireIncludes(
+  desktopRenderer,
+  'runtime.startSyncCycle && input.trigger !== "manual"',
+  "manual desktop sync must execute immediately instead of waiting for a detached cycle."
+);
+requireIncludes(
+  desktopRenderer,
+  'setSnapshot(result.snapshot)',
+  "manual desktop sync must refresh the signed-in renderer snapshot."
+);
+
+for (const [serviceName, serviceSource] of [
+  ["SQLite", desktopSqliteService],
+  ["PostgreSQL", desktopPostgresService],
+  ["SQL Server", desktopMssqlService]
+] as const) {
+  requireIncludes(
+    serviceSource,
+    "input.deferInventoryValidationForSalesOrder === true",
+    `${serviceName} basket service must recognize sales-order inventory deferral.`
+  );
+  requireIncludes(
+    serviceSource,
+    "!deferInventoryValidation",
+    `${serviceName} basket service must retain normal sale inventory validation.`
+  );
 }
 
 for (const onlineRepositoryAnchor of [
@@ -147,6 +193,32 @@ for (const onlineUiAnchor of [
 ]) {
   requireIncludes(onlineWorkspace, onlineUiAnchor, `online-store UI must retain ${onlineUiAnchor}.`);
 }
+
+requireIncludes(
+  onlineRepository,
+  "const catalogProducts = mappedProducts.map",
+  "online-store workspace must retain the full active catalog."
+);
+requireIncludes(
+  onlineRepository,
+  "products: catalogProducts",
+  "online-store workspace must return the full active catalog for order mode."
+);
+requireIncludes(
+  onlineWorkspace,
+  "? workspace.products",
+  "online-store sales-order mode must expose the full active catalog."
+);
+requireIncludes(
+  onlineWorkspace,
+  ": workspace.products.filter(isSellableCatalogProduct)",
+  "online-store normal sale mode must remain stock-filtered."
+);
+requireIncludes(
+  onlineWorkspace,
+  'saleMode !== "SALES_ORDER" &&',
+  "online-store sales orders must defer matrix stock validation until fulfilment."
+);
 
 for (const route of [
   "apps/enterprise-web/src/app/api/online-store/sales/route.ts",

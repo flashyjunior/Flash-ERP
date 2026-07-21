@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import {
@@ -4179,35 +4181,34 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   };
   const mappedProducts = productsForCatalog.map(mapWorkspaceProduct);
   const mappedInventoryProducts = inventoryManagedProducts.map(mapWorkspaceProduct);
-  const serviceCatalogProducts = mappedProducts.filter((product) => isServiceProductType(product.productType));
-  const stockedCatalogProducts = mappedProducts
+  const catalogProducts = mappedProducts.map((product) => ({
+    productId: product.productId,
+    productCode: product.productCode,
+    productName: product.productName,
+    productType: product.productType,
+    unitOfMeasure: product.unitOfMeasure,
+    price: product.price,
+    department: product.department,
+    category: product.category,
+    imageUrl: product.imageUrl,
+    quantityOnHand: product.quantityOnHand,
+    taxRatePercent: product.taxRatePercent,
+    taxInclusive: product.taxInclusive,
+    mustEnterPriceAtPos: product.mustEnterPriceAtPos,
+    isSerialized: product.isSerialized,
+    trackInventory: product.trackInventory,
+    trackSize: product.trackSize,
+    trackColor: product.trackColor,
+    matrixVariants: product.matrixVariants
+  }));
+  const serviceCatalogProducts = catalogProducts.filter((product) => isServiceProductType(product.productType));
+  const stockedCatalogProducts = catalogProducts
     .filter((product) => !isServiceProductType(product.productType) && product.quantityOnHand > 0)
     .slice(0, 80);
   const sellableProductIds = new Set(
     [...stockedCatalogProducts, ...serviceCatalogProducts].map((product) => product.productId)
   );
-  const sellableProducts = mappedProducts
-    .filter((product) => sellableProductIds.has(product.productId))
-    .map((product) => ({
-      productId: product.productId,
-      productCode: product.productCode,
-      productName: product.productName,
-      productType: product.productType,
-      unitOfMeasure: product.unitOfMeasure,
-      price: product.price,
-      department: product.department,
-      category: product.category,
-      imageUrl: product.imageUrl,
-      quantityOnHand: product.quantityOnHand,
-      taxRatePercent: product.taxRatePercent,
-      taxInclusive: product.taxInclusive,
-      mustEnterPriceAtPos: product.mustEnterPriceAtPos,
-      isSerialized: product.isSerialized,
-      trackInventory: product.trackInventory,
-      trackSize: product.trackSize,
-      trackColor: product.trackColor,
-      matrixVariants: product.matrixVariants
-    }));
+  const sellableProducts = catalogProducts.filter((product) => sellableProductIds.has(product.productId));
   const shiftSummaries = recentShifts.map((shift) => summarizeOnlineShift(shift));
   const activeShiftSummary = shiftSummaries.find((shift) => shift.status === PosShiftStatus.OPEN) ?? null;
   const mappedEodReconciliations = eodReconciliations.map((reconciliation) => {
@@ -4780,7 +4781,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     loyaltyPolicy,
     promotions,
     customers: mappedCustomers,
-    products: sellableProducts,
+    products: catalogProducts,
     inventoryProducts: mappedInventoryProducts.map((product) => ({
       productId: product.productId,
       productCode: product.productCode,
@@ -8061,7 +8062,26 @@ export async function createOnlineStoreSalesOrder(
         operatorName: user.displayName ?? user.loginId,
         note,
         originNodeCode: "ONLINE_DIRECT",
-        createdAt: now
+        createdAt: now,
+        lines: {
+          create: pricedLines.map((line) => ({
+            id: randomUUID(),
+            productCodeSnapshot: line.product.code,
+            productVariantCodeSnapshot: null,
+            productNameSnapshot: line.product.name,
+            variantSizeSnapshot: line.variantSize,
+            variantColorSnapshot: line.variantColor,
+            variantAttributesSnapshot: null,
+            lineNote: line.lineNote,
+            quantity: line.quantity,
+            unitPrice: line.unitPrice,
+            discountAmount: line.discountAmount,
+            taxAmount: line.taxAmount,
+            lineTotal: line.lineTotal,
+            appliedPromotionCode: line.appliedPromotionCode,
+            appliedPromotionName: line.appliedPromotionName
+          }))
+        }
       },
       select: {
         id: true,

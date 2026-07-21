@@ -233,14 +233,22 @@ function isServiceCatalogProduct(product: Pick<Product, "productType">) {
   return product.productType.trim().toUpperCase() === "SERVICE";
 }
 
-function isSellableCatalogProduct(product: Pick<Product, "productType" | "quantityOnHand">) {
-  return isServiceCatalogProduct(product) || product.quantityOnHand > 0;
+function isSellableCatalogProduct(
+  product: Pick<Product, "productType" | "trackInventory" | "quantityOnHand">
+) {
+  return isServiceCatalogProduct(product) || product.trackInventory === false || product.quantityOnHand > 0;
 }
 
-function formatCatalogAvailability(product: Pick<Product, "productType" | "quantityOnHand">) {
-  return isServiceCatalogProduct(product)
-    ? "Service"
-    : `Stock ${formatNumber.format(product.quantityOnHand)}`;
+function formatCatalogAvailability(
+  product: Pick<Product, "productType" | "trackInventory" | "quantityOnHand">
+) {
+  if (isServiceCatalogProduct(product) || product.trackInventory === false) {
+    return "Service";
+  }
+
+  return product.quantityOnHand > 0
+    ? `Stock ${formatNumber.format(product.quantityOnHand)}`
+    : "Out of stock";
 }
 
 function paymentDraftId() {
@@ -2142,8 +2150,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           )
           .values.join(", ")
       : "#d6e0d6 0 100%";
-  const sellableProducts = workspace.products.filter(isSellableCatalogProduct);
-  const filteredProducts = sellableProducts.filter((product) => {
+  const modeProducts =
+    saleMode === "SALES_ORDER"
+      ? workspace.products
+      : workspace.products.filter(isSellableCatalogProduct);
+  const filteredProducts = modeProducts.filter((product) => {
     const query = searchQuery.trim().toLowerCase();
     const departmentMatch = !catalogDepartment || product.department === catalogDepartment;
     const categoryMatch = !catalogCategory || product.category === catalogCategory;
@@ -2352,11 +2363,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const declaredCloseCashAmount = parseAmount(eodDeclaredCash);
   const shiftCloseVariance = currentShift ? roundMoney(declaredCloseCashAmount - currentShift.expectedCashAmount) : 0;
   const departments = Array.from(
-    new Set(sellableProducts.map((product) => product.department).filter((value): value is string => Boolean(value)))
+    new Set(modeProducts.map((product) => product.department).filter((value): value is string => Boolean(value)))
   );
   const categories = Array.from(
     new Set(
-      sellableProducts
+      modeProducts
         .filter((product) => !catalogDepartment || product.department === catalogDepartment)
         .map((product) => product.category)
         .filter((value): value is string => Boolean(value))
@@ -3510,6 +3521,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setCustomerQuery(customer ? `${customer.customerNo} · ${customer.fullName}` : order.customerName);
     setSourceTransactionId(order.sourceTransactionId);
     setFulfillingSalesOrderId(order.orderId);
+    setPaymentDrafts([
+      createPaymentDraft(
+        defaultTenderCode,
+        Math.max(0, order.balanceAmount).toFixed(2)
+      )
+    ]);
     setLoyaltyPointsToRedeem("0");
     setSaleMode("SALE");
     resetTransactionDetails();
@@ -4277,7 +4294,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       return;
     }
 
-    if (matrixVariant && normalizedQuantity > matrixVariant.quantityOnHand) {
+    if (
+      saleMode !== "SALES_ORDER" &&
+      matrixVariant &&
+      normalizedQuantity > matrixVariant.quantityOnHand
+    ) {
       setCheckoutMessage(`Only ${formatNumber.format(matrixVariant.quantityOnHand)} unit(s) of ${matrixVariant.displayName ?? matrixVariant.code} are available.`);
       return;
     }
@@ -4343,7 +4364,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     const product = filteredProducts[0];
 
     if (!product) {
-      setCheckoutMessage("No matching stocked item was found for the scan/search value.");
+      setCheckoutMessage(
+        saleMode === "SALES_ORDER"
+          ? "No matching active catalog item was found for the scan/search value."
+          : "No matching stocked item was found for the scan/search value."
+      );
       return;
     }
 
@@ -7054,6 +7079,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   {activeSalesOrder ? "FULFIL ORDER" : saleMode}
                 </StatusPill>
               </div>
+              {activeSalesOrder ? (
+                <div className="rms-banner is-warn">
+                  <strong>{activeSalesOrder.orderNo}</strong> is locked for fulfilment. Deposit {formatMoney(activeSalesOrder.depositAmount, currencyCode)} · Balance {formatMoney(activeSalesOrder.balanceAmount, currencyCode)}
+                </div>
+              ) : null}
               <div className="rms-customer-strip">
                 <input
                   disabled={isRecalledBasket}
@@ -7212,7 +7242,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 </div>
                 <input
                   aria-label="Loyalty points to redeem"
-                  disabled={!selectedCustomer || !basket.length}
+                  disabled={isRecalledBasket || !selectedCustomer || !basket.length}
                   min="0"
                   onChange={(event) => setLoyaltyPointsToRedeem(event.target.value)}
                   step={workspace.loyaltyPolicy.loyaltyRedemptionPointsStep}
@@ -7221,13 +7251,13 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 />
                 <button
                   className="rms-row-button"
-                  disabled={!canApplyMaxLoyaltyRedemption}
+                  disabled={isRecalledBasket || !canApplyMaxLoyaltyRedemption}
                   onClick={() => setLoyaltyPointsToRedeem(String(loyaltyRedemption.maxRedeemablePoints))}
                   type="button"
                 >
                   Redeem
                 </button>
-                <button className="rms-row-button" disabled={requestedLoyaltyPoints <= 0} onClick={() => setLoyaltyPointsToRedeem("0")} type="button">Clear</button>
+                <button className="rms-row-button" disabled={isRecalledBasket || requestedLoyaltyPoints <= 0} onClick={() => setLoyaltyPointsToRedeem("0")} type="button">Clear</button>
               </div>
               {saleMode === "SALES_ORDER" && !activeSalesOrder ? (
                 <div className="rms-payment-panel is-order-mode">
@@ -7251,8 +7281,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               ) : (
               <div className="rms-payment-panel">
                 <div className="rms-payment-summary">
-                  <strong>{formatMoney(total, currencyCode)}</strong>
-                  <span>Due {formatMoney(amountDue, currencyCode)} · Change {formatMoney(changeDue, currencyCode)}</span>
+                  <strong>{formatMoney(payableTotal, currencyCode)}</strong>
+                  <span>{activeSalesOrder ? `Deposit ${formatMoney(activeSalesOrder.depositAmount, currencyCode)} · ` : ""}Due {formatMoney(amountDue, currencyCode)} · Change {formatMoney(changeDue, currencyCode)}</span>
                   <button className="rms-row-button is-add" onClick={() => addPaymentDraft(setPaymentDrafts)} type="button">Add</button>
                 </div>
                 {paymentDrafts.map((draft) => {
@@ -7339,7 +7369,9 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   </button>
                 )) : (
                   <div className="rms-empty-catalog">
-                    No stock or service items are available for this online store location.
+                    {saleMode === "SALES_ORDER"
+                      ? "No active catalog items are available for this online store."
+                      : "No stock or service items are available for this online store location."}
                   </div>
                 )}
               </div>
@@ -7349,7 +7381,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 <button className={`rms-action-button ${saleMode === "SALE" && !activeSalesOrder ? "is-selected" : ""}`} disabled={isRecalledBasket} onClick={() => setSaleMode("SALE")} type="button">Sale mode</button>
                 <button className={`rms-action-button is-order ${saleMode === "SALES_ORDER" ? "is-selected" : ""}`} disabled={isRecalledBasket} onClick={activateSalesOrderMode} type="button">Sales order mode</button>
               </div>
-              <button className="rms-action-button is-clear" disabled={!hasSaleScreenState} onClick={clearSaleScreen} type="button">Clear screen</button>
+              <button className="rms-action-button is-clear" disabled={!hasSaleScreenState} onClick={clearSaleScreen} type="button">{activeSalesOrder ? "Exit fulfilment" : "Clear screen"}</button>
               <button className="rms-action-button is-hold" disabled={isPostingPosAction || isRecalledBasket || !hasOpenShift || !basket.length} onClick={() => void holdSale()} type="button">Hold sale</button>
               <button className="rms-action-button is-details" disabled={isRecalledBasket} onClick={() => setActiveDrawer("details")} type="button">Details</button>
               <button className="rms-action-button is-save-order" disabled={isPostingPosAction || isRecalledBasket || !hasOpenShift || !basket.length || !selectedCustomer} onClick={() => void saveSalesOrder()} type="button">Save order</button>

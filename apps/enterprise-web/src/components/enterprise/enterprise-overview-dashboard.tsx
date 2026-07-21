@@ -158,7 +158,7 @@ function StoreSalesCard({
             {formatCurrency(row.salesValue, currencyCode)}
           </p>
           <p className="mt-1 truncate text-xs font-medium text-white/78">
-            {numberFormatter.format(row.postedTransactions)} sale(s) / {row.lastPostedAtLabel}
+            {numberFormatter.format(row.postedTransactions)} sale(s), {numberFormatter.format(row.salesOrders)} order(s) / {row.lastPostedAtLabel}
           </p>
         </div>
         <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-sm ${tone.icon}`}>
