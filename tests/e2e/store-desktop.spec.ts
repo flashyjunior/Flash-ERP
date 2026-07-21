@@ -54,6 +54,7 @@ type DesktopRuntime = {
     password: string;
   }) => Promise<{ message: string }>;
   signInOperator: (input: { loginId: string; password: string }) => Promise<{ message: string }>;
+  signOutOperator: () => Promise<{ message: string }>;
   saveStandaloneProduct: (input: {
     productCode: string;
     productName: string;
@@ -725,7 +726,21 @@ test("zero-stock sales orders retain their lines and remain locked until fulfilm
     expect(createdOrder.activeBasket).toBeNull();
     if (!order) throw new Error("The sales order was not created.");
 
-    const fulfilmentProof = await page.evaluate(async (orderId) => {
+    await app.evaluate(
+      async (_electron, { nextDatabasePath, nextProductCode }) => {
+        const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
+        const database = new DatabaseSync(nextDatabasePath);
+        database
+          .prepare(
+            "UPDATE product_snapshot SET catalog_membership_active = 0 WHERE product_code = ?"
+          )
+          .run(nextProductCode);
+        database.close();
+      },
+      { nextDatabasePath: databasePath, nextProductCode: productCode }
+    );
+
+    const fulfilmentProof = await page.evaluate(async ({ orderId, nextLoginId, nextPassword }) => {
       const runtime = window.desktopRuntime;
       if (!runtime) throw new Error("Desktop runtime was unavailable during fulfilment verification.");
       await runtime.resumeSalesOrder(orderId);
@@ -740,8 +755,11 @@ test("zero-stock sales orders retain their lines and remain locked until fulfilm
       await runtime.discardActiveBasket();
       const afterExit = await runtime.getSyncSnapshot();
       await runtime.resumeSalesOrder(orderId);
-      return { resumed, editError, afterExit };
-    }, order.orderId);
+      await runtime.signOutOperator();
+      await runtime.signInOperator({ loginId: nextLoginId, password: nextPassword });
+      const afterRelogin = await runtime.getSyncSnapshot();
+      return { resumed, editError, afterExit, afterRelogin };
+    }, { orderId: order.orderId, nextLoginId: loginId, nextPassword: password });
     expect(fulfilmentProof.resumed.activeBasket?.lines.map((line) => line.productCode)).toEqual([
       productCode
     ]);
@@ -749,6 +767,10 @@ test("zero-stock sales orders retain their lines and remain locked until fulfilm
     expect(fulfilmentProof.afterExit.activeBasket).toBeNull();
     expect(fulfilmentProof.afterExit.salesOrders.find((candidate) => candidate.orderId === order.orderId))
       .toMatchObject({ itemCount: 1, depositAmount: 5, balanceAmount: 20, status: "OPEN" });
+    expect(fulfilmentProof.afterRelogin.activeOperatorSession?.loginId).toBe(loginId.toUpperCase());
+    expect(fulfilmentProof.afterRelogin.activeBasket?.lines.map((line) => line.productCode)).toEqual([
+      productCode
+    ]);
 
     const checkoutError = await page.evaluate(async () => {
       try {
@@ -766,7 +788,9 @@ test("zero-stock sales orders retain their lines and remain locked until fulfilm
         return error instanceof Error ? error.message : String(error);
       }
     });
-    expect(checkoutError).toMatch(/available for checkout/i);
+    expect(checkoutError).toMatch(
+      /requires 1\.000 available unit\(s\).*only 0\.000 unit\(s\) are available/i
+    );
   } finally {
     await app.close().catch(() => undefined);
   }

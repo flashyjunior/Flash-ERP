@@ -3422,7 +3422,7 @@ export class MssqlStoreService {
   }
 
   private async requireBasketProductLookup(productCode: string) {
-    const match = await this.findCatalogLookup(productCode);
+    const match = await this.findBasketProductLookup(productCode);
 
     if (!match) {
       throw new Error(
@@ -3433,6 +3433,82 @@ export class MssqlStoreService {
     return match;
   }
 
+  private async findBasketProductLookup(productCode: string) {
+    const activeMatch = await this.findCatalogLookup(productCode);
+
+    if (activeMatch) {
+      return activeMatch;
+    }
+
+    const normalizedProductCode = productCode.trim().toUpperCase();
+
+    if (!normalizedProductCode) {
+      return null;
+    }
+
+    const result = await this.query<ProductRow>(
+      `SELECT TOP (1)
+        [id],
+        [product_code],
+        [product_name],
+        [product_type],
+        [short_name],
+        [description],
+        [primary_image_url],
+        [department_code],
+        [category_code],
+        [subcategory],
+        [unit_of_measure],
+        [taxable],
+        [tax_profile_code],
+        [tax_profile_name],
+        [tax_rate_percent],
+        [tax_inclusive],
+        [track_inventory],
+        [is_serialized],
+        [track_size],
+        [track_color],
+        [must_enter_price_at_pos],
+        [min_stock_level],
+        [reorder_point],
+        [safety_stock_level],
+        [catalog_membership_active],
+        [catalog_sort_order],
+        [unit_price],
+        [quantity_on_hand],
+        [updated_at]
+       FROM [dbo].[product_snapshot]
+       WHERE [product_code] = @productCode`,
+      { productCode: normalizedProductCode },
+    );
+    const product = result.recordset[0] ?? null;
+
+    if (!product) {
+      return null;
+    }
+
+    const [barcode, salesLocationCode] = await Promise.all([
+      this.getRepresentativeBarcode(product.product_code),
+      this.getDefaultSalesLocationCode(),
+    ]);
+
+    return {
+      ...product,
+      barcode_code: barcode?.barcode_code ?? null,
+      barcode_type: barcode?.barcode_type ?? null,
+      matched_on: "productCode" as const,
+      product_variant_code: null,
+      sales_location_code: salesLocationCode,
+      sales_location_quantity:
+        salesLocationCode !== null
+          ? await this.getOptionalLocationQuantity(
+              salesLocationCode,
+              product.product_code,
+            )
+          : null,
+    };
+  }
+
   private async getBasketLineAvailableSerialNumbers(
     header: BasketHeaderRow,
     line: BasketLineRow,
@@ -3441,9 +3517,13 @@ export class MssqlStoreService {
       return readSerializedLineNumbers(line.serial_numbers_json);
     }
 
-    const product = await this.requireBasketProductLookup(
+    const product = await this.findBasketProductLookup(
       line.product_code_snapshot,
     );
+
+    if (!product) {
+      return readSerializedLineNumbers(line.serial_numbers_json);
+    }
 
     if (!asBooleanFlag(product.is_serialized)) {
       return [];
@@ -3467,10 +3547,11 @@ export class MssqlStoreService {
     line: BasketLineRow,
   ): Promise<StoreBasketLineSummary> {
     const [product, barcode, availableSerialNumbers] = await Promise.all([
-      this.requireBasketProductLookup(line.product_code_snapshot),
+      this.findBasketProductLookup(line.product_code_snapshot),
       this.getRepresentativeBarcode(line.product_code_snapshot),
       this.getBasketLineAvailableSerialNumbers(header, line),
     ]);
+    const serialNumbers = readSerializedLineNumbers(line.serial_numbers_json);
 
     return {
       lineId: line.id,
@@ -3484,8 +3565,9 @@ export class MssqlStoreService {
       variantAttributesSnapshot: line.variant_attributes_snapshot,
       lineNote: line.line_note,
       barcode: barcode?.barcode_code ?? null,
-      isSerialized: asBooleanFlag(product.is_serialized),
-      serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+      isSerialized:
+        asBooleanFlag(product?.is_serialized) || serialNumbers.length > 0,
+      serialNumbers,
       availableSerialNumbers,
       quantity: Number(asNumber(line.quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
@@ -10330,8 +10412,9 @@ export class MssqlStoreService {
   }
 
   async createSalesOrderFromActiveBasket(
-    input: StoreCreateSalesOrderRequest = {},
+    input: StoreCreateSalesOrderRequest | null = {},
   ): Promise<StoreSyncActionResult> {
+    input ??= {};
     await this.requireActiveOperatorSession({
       permissionCodes: ["pos.sale.process"],
       purpose: "creating a sales order from the active basket",
@@ -13314,9 +13397,9 @@ export class MssqlStoreService {
 
         if (localAvailableQuantity < requestedProductQuantity) {
           throw new Error(
-            `Only ${localAvailableQuantity.toFixed(3)} unit(s) of ${
-              line.product_name_snapshot
-            } are available for checkout.`,
+            openSalesOrder
+              ? `${line.product_name_snapshot} requires ${requestedProductQuantity.toFixed(3)} available unit(s) to fulfil ${openSalesOrder.order_no}, but only ${localAvailableQuantity.toFixed(3)} unit(s) are available at the fulfilment location. Add or transfer inventory quantity before continuing.`
+              : `${line.product_name_snapshot} requires ${requestedProductQuantity.toFixed(3)} available unit(s) to complete this sale, but only ${localAvailableQuantity.toFixed(3)} unit(s) are available at the sales location.`,
           );
         }
 

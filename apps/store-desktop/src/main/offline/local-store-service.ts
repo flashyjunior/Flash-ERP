@@ -11160,8 +11160,9 @@ export class LocalStoreService {
   }
 
   createSalesOrderFromActiveBasket(
-    input: StoreCreateSalesOrderRequest = {},
+    input: StoreCreateSalesOrderRequest | null = {},
   ): StoreSyncActionResult {
+    input ??= {};
     const activeBasket = this.getActiveBasketSummary();
 
     this.requireActiveCashierLaneSession({
@@ -12898,7 +12899,14 @@ export class LocalStoreService {
     header: BasketHeaderRow,
     line: BasketLineRow,
   ) {
-    const product = this.requireBasketProductLookup(line.product_code_snapshot);
+    const selectedSerialNumbers = readSerializedLineNumbers(
+      line.serial_numbers_json,
+    );
+    const product = this.findBasketProductLookup(line.product_code_snapshot);
+
+    if (!product) {
+      return selectedSerialNumbers;
+    }
 
     if (!asBooleanFlag(product.is_serialized)) {
       return [] as string[];
@@ -14232,7 +14240,8 @@ export class LocalStoreService {
     header: BasketHeaderRow,
     line: BasketLineRow,
   ): StoreBasketLineSummary {
-    const product = this.requireBasketProductLookup(line.product_code_snapshot);
+    const product = this.findBasketProductLookup(line.product_code_snapshot);
+    const serialNumbers = readSerializedLineNumbers(line.serial_numbers_json);
 
     return {
       lineId: line.id,
@@ -14248,8 +14257,9 @@ export class LocalStoreService {
       barcode:
         this.getRepresentativeBarcode(line.product_code_snapshot)
           ?.barcode_code ?? null,
-      isSerialized: asBooleanFlag(product.is_serialized),
-      serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+      isSerialized:
+        asBooleanFlag(product?.is_serialized) || serialNumbers.length > 0,
+      serialNumbers,
       availableSerialNumbers: this.getBasketLineAvailableSerialNumbers(
         header,
         line,
@@ -14377,6 +14387,14 @@ export class LocalStoreService {
 
     if (automaticLines.length === 0) {
       return "Automatic promotions are blocked because all sale lines have manual price or discount overrides.";
+    }
+
+    if (
+      automaticLines.some(
+        (line) => !this.findBasketProductLookup(line.product_code_snapshot),
+      )
+    ) {
+      return "A saved item is missing from the local product cache. Run sync before changing or completing this basket.";
     }
 
     const policies = this.listAutomaticPromotionPolicies(isoNow());
@@ -14809,7 +14827,7 @@ export class LocalStoreService {
   }
 
   private requireBasketProductLookup(productCode: string) {
-    const match = this.findCatalogLookup(productCode);
+    const match = this.findBasketProductLookup(productCode);
 
     if (!match) {
       throw new Error(
@@ -14818,6 +14836,51 @@ export class LocalStoreService {
     }
 
     return match;
+  }
+
+  private findBasketProductLookup(productCode: string) {
+    const activeMatch = this.findCatalogLookup(productCode);
+
+    if (activeMatch) {
+      return activeMatch;
+    }
+
+    const normalizedProductCode = productCode.trim().toUpperCase();
+
+    if (!normalizedProductCode) {
+      return null;
+    }
+
+    const product = this.db
+      .prepare(
+        `SELECT ${productSnapshotSelectSql} FROM product_snapshot WHERE product_code = ? LIMIT 1`,
+      )
+      .get(normalizedProductCode) as ProductRow | undefined;
+
+    if (!product) {
+      return null;
+    }
+
+    const representativeBarcode = this.getRepresentativeBarcode(
+      product.product_code,
+    );
+    const salesLocationCode = this.getDefaultSalesLocationCode();
+
+    return {
+      ...product,
+      barcode_code: representativeBarcode?.barcode_code ?? null,
+      barcode_type: representativeBarcode?.barcode_type ?? null,
+      matched_on: "productCode" as const,
+      product_variant_code: null,
+      sales_location_code: salesLocationCode,
+      sales_location_quantity:
+        salesLocationCode !== null
+          ? this.getOptionalLocationQuantity(
+              salesLocationCode,
+              product.product_code,
+            )
+          : null,
+    };
   }
 
   private normalizeCheckoutPayments(
@@ -15255,7 +15318,9 @@ export class LocalStoreService {
 
           if (availableQuantity < nextProductQuantity) {
             throw new Error(
-              `Only ${availableQuantity.toFixed(3)} unit(s) of ${line.product_name_snapshot} are available for checkout.`,
+              openSalesOrder
+                ? `${line.product_name_snapshot} requires ${nextProductQuantity.toFixed(3)} available unit(s) to fulfil ${openSalesOrder.order_no}, but only ${availableQuantity.toFixed(3)} unit(s) are available at the fulfilment location. Add or transfer inventory quantity before continuing.`
+                : `${line.product_name_snapshot} requires ${nextProductQuantity.toFixed(3)} available unit(s) to complete this sale, but only ${availableQuantity.toFixed(3)} unit(s) are available at the sales location.`,
             );
           }
 
