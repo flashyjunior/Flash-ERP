@@ -1,5 +1,30 @@
 # Flash ERP Store Desktop Production Deployment
 
+## Windows Code Signing Prerequisite
+
+Production installers must be Authenticode-signed by Flash Code Solutions using a publicly trusted code-signing certificate or Microsoft Artifact Signing. The certificate and password must never be committed to this repository.
+
+For a PFX certificate, configure the build machine or CI secret store before packaging:
+
+```powershell
+$env:WIN_CSC_LINK="D:\secure\FlashCodeSolutions-CodeSigning.pfx"
+$env:WIN_CSC_KEY_PASSWORD="<certificate-password>"
+```
+
+`electron-builder` signs the packaged application and NSIS installer automatically when these variables contain a valid certificate. The build also verifies that both files have a valid timestamped Authenticode signature.
+
+Unsigned Windows packaging is blocked by default. For local packaging tests only, use the explicit unsigned command:
+
+```powershell
+npm --workspace @flash-erp/store-desktop run dist:win:unsigned
+```
+
+This command intentionally skips signature verification. Never publish artifacts produced by it. Verify a production release manually with:
+
+```powershell
+npm --workspace @flash-erp/store-desktop run verify:win-signature
+```
+
 ## Release Build
 
 The store desktop app is packaged with `electron-builder`. The Windows installer is an NSIS installer that includes the renderer, Electron main process, app icon, and update feed metadata.
@@ -137,9 +162,11 @@ $env:FLASH_ERP_DESKTOP_ENABLE_DEV_UPDATES = "1"
 
 ## Release Checklist
 
+- Confirm `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD` are supplied by the secure build environment.
 - Bump `apps/store-desktop/package.json` version before every production release.
 - Confirm the desktop Setup page shows the correct update feed URL and save it to `store-runtime-config.json`.
 - Build with `npm --workspace @flash-erp/store-desktop run dist:win`.
+- Confirm `npm --workspace @flash-erp/store-desktop run verify:win-signature` reports a valid signer for the installer and packaged application.
 - Smoke test the installer on a clean Windows user profile.
 - Receipt printer, barcode scanner, cash drawer, and any payment-terminal hardware must pass the certification matrix in `docs/13-desktop-hardware-certification-matrix.md`.
 - Upload the installer, `latest.yml`, and blockmap files to the update URL.

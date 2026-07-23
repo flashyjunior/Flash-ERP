@@ -1,4 +1,6 @@
 const updateUrl = "https://updates.flashcodesolutions.com/flash-erp/store-desktop/";
+const allowUnsignedWindowsBuild =
+  process.env.FLASH_ERP_ALLOW_UNSIGNED_WINDOWS_BUILD === "1";
 
 module.exports = {
   appId: "com.flashcodesolutions.erp.storedesktop",
@@ -47,6 +49,7 @@ module.exports = {
     }
   ],
   win: {
+    forceCodeSigning: !allowUnsignedWindowsBuild,
     target: [
       {
         target: "nsis",

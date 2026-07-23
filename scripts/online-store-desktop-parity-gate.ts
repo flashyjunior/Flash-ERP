@@ -19,6 +19,12 @@ function requireIncludes(source: string, needle: string, label: string) {
   }
 }
 
+function requireExcludes(source: string, needle: string, label: string) {
+  if (source.includes(needle)) {
+    throw new Error(`Online-store desktop parity gate failed: ${label}`);
+  }
+}
+
 function requireScript(packageSource: string, scriptName: string) {
   const parsed = JSON.parse(packageSource) as { scripts?: Record<string, string> };
 
@@ -99,6 +105,15 @@ requireIncludes(
   desktopRenderer,
   'deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER"',
   "desktop sales-order basket edits must defer inventory validation."
+);
+requireIncludes(
+  desktopRenderer,
+  `lineId: line.lineId,
+        quantity: line.quantity,
+        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        serialNumbers: line.serialNumbers,
+        overrideDiscountAmount: discountAmount`,
+  "desktop sales-order line discounts must not trigger inventory validation."
 );
 requireIncludes(
   desktopRenderer,
@@ -218,6 +233,29 @@ requireIncludes(
   onlineWorkspace,
   'saleMode !== "SALES_ORDER" &&',
   "online-store sales orders must defer matrix stock validation until fulfilment."
+);
+requireIncludes(
+  onlineRepository,
+  'by: ["productId", "productVariantId"]',
+  "online-store fulfilment must validate the exact matrix variant stock position."
+);
+requireIncludes(
+  onlineRepository,
+  "productVariantCodeSnapshot: line.productVariant?.code ?? null",
+  "online-store sales orders must retain their selected matrix variant."
+);
+const onlineSalesOrderStart = onlineRepository.indexOf(
+  "export async function createOnlineStoreSalesOrder("
+);
+const onlineSalesOrderEnd = onlineRepository.indexOf(
+  "export async function cancelOnlineStoreSalesOrder(",
+  onlineSalesOrderStart
+);
+const onlineSalesOrderSource = onlineRepository.slice(onlineSalesOrderStart, onlineSalesOrderEnd);
+requireExcludes(
+  onlineSalesOrderSource,
+  "assertOnlineStoreSaleStockAvailable(",
+  "online-store sales-order creation must not validate stock before fulfilment."
 );
 
 for (const route of [

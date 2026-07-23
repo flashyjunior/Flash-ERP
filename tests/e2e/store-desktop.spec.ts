@@ -710,6 +710,21 @@ test("zero-stock sales orders retain their lines and remain locked until fulfilm
           quantity: 1,
           deferInventoryValidationForSalesOrder: true
         });
+        const orderBasket = (await runtime.getSyncSnapshot()).activeBasket;
+        const orderLine = orderBasket?.lines.find((line) => line.productCode === code);
+
+        if (!orderLine) {
+          throw new Error("The zero-stock sales-order line was not available for editing.");
+        }
+
+        await runtime.updateBasketLine({
+          lineId: orderLine.lineId,
+          quantity: orderLine.quantity,
+          deferInventoryValidationForSalesOrder: true,
+          serialNumbers: orderLine.serialNumbers,
+          overrideDiscountAmount: 0,
+          configuredDiscountRate: null
+        });
         await runtime.attachCustomerToActiveBasket({ customerId: nextCustomerId });
         await runtime.createSalesOrderFromActiveBasket({
           operatorName: "Order Mode Admin",

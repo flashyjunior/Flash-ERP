@@ -6352,7 +6352,26 @@ async function prepareOnlineStoreBasketLines(
     }
 
     const quantity = normalizeQuantity(line.quantity);
-    const baseUnitPrice = Number(product.storeProductPrices[0]?.unitPrice ?? product.baseUnitPrice);
+    const productVariantCode = optionalText(line.productVariantCode)?.toUpperCase() ?? null;
+    const productVariant =
+      product.productType === "MATRIX"
+        ? product.matrixVariants.find((variant) => variant.code.toUpperCase() === productVariantCode) ?? null
+        : null;
+
+    if (product.productType === "MATRIX" && !productVariant) {
+      throw new Error(`Choose a matrix option for ${product.name}.`);
+    }
+
+    const variantAttributesSnapshot =
+      productVariant?.values
+        .map((value) => `${value.attribute.name}: ${value.valueLabelSnapshot || value.attributeValue.label}`)
+        .join(" / ") ?? null;
+    const baseUnitPrice = Number(
+      productVariant?.storeProductPrices[0]?.unitPrice ??
+        productVariant?.unitPrice ??
+        product.storeProductPrices[0]?.unitPrice ??
+        product.baseUnitPrice
+    );
     const requestedPrice = Number(line.unitPrice ?? baseUnitPrice);
     const unitPrice =
       product.mustEnterPriceAtPos && Number.isFinite(requestedPrice) && requestedPrice > 0
@@ -6367,6 +6386,8 @@ async function prepareOnlineStoreBasketLines(
 
     return {
       product,
+      productVariant,
+      variantAttributesSnapshot,
       quantity,
       variantSize: product.trackSize ? optionalText(line.variantSize) : null,
       variantColor: product.trackColor ? optionalText(line.variantColor) : null,
@@ -6573,6 +6594,11 @@ async function assertOnlineStoreSaleStockAvailable(
       productType?: string | null;
       trackInventory: boolean;
     };
+    productVariant?: {
+      id: string;
+      code: string;
+      displayName?: string | null;
+    } | null;
     quantity: number;
   }>,
   actionLabel: string
@@ -6580,27 +6606,30 @@ async function assertOnlineStoreSaleStockAvailable(
   const trackedProductIds = [
     ...new Set(
       preparedLines
-        .filter((line) => isOnlineStoreStockManagedProduct(line.product) && line.product.productType !== "MATRIX")
+        .filter((line) => isOnlineStoreStockManagedProduct(line.product))
         .map((line) => line.product.id)
     )
   ];
-  const requestedQuantityByProduct = new Map<string, number>();
+  const positionKey = (productId: string, productVariantId?: string | null) =>
+    `${productId}:${productVariantId ?? ""}`;
+  const requestedQuantityByPosition = new Map<string, number>();
 
   for (const line of preparedLines) {
-    if (!isOnlineStoreStockManagedProduct(line.product) || line.product.productType === "MATRIX") {
+    if (!isOnlineStoreStockManagedProduct(line.product)) {
       continue;
     }
 
-    requestedQuantityByProduct.set(
-      line.product.id,
-      toQuantity((requestedQuantityByProduct.get(line.product.id) ?? 0) + line.quantity)
+    const key = positionKey(line.product.id, line.productVariant?.id);
+    requestedQuantityByPosition.set(
+      key,
+      toQuantity((requestedQuantityByPosition.get(key) ?? 0) + line.quantity)
     );
   }
 
   const stockPositions =
     trackedProductIds.length > 0
       ? await tx.inventoryLedgerEntry.groupBy({
-          by: ["productId"],
+          by: ["productId", "productVariantId"],
           where: {
             retailOrgId: context.session.retailOrgId,
             storeId: context.store.id,
@@ -6614,16 +6643,22 @@ async function assertOnlineStoreSaleStockAvailable(
           }
         })
       : [];
-  const availableQuantityByProduct = new Map(
-    stockPositions.map((position) => [position.productId, toQuantity(position._sum.quantity)] as const)
+  const availableQuantityByPosition = new Map(
+    stockPositions.map(
+      (position) => [
+        positionKey(position.productId, position.productVariantId),
+        toQuantity(position._sum.quantity)
+      ] as const
+    )
   );
   const insufficientLine = preparedLines.find((line) => {
     if (!isOnlineStoreStockManagedProduct(line.product)) {
       return false;
     }
 
-    const requestedQuantity = requestedQuantityByProduct.get(line.product.id) ?? line.quantity;
-    const availableQuantity = availableQuantityByProduct.get(line.product.id) ?? 0;
+    const key = positionKey(line.product.id, line.productVariant?.id);
+    const requestedQuantity = requestedQuantityByPosition.get(key) ?? line.quantity;
+    const availableQuantity = availableQuantityByPosition.get(key) ?? 0;
     return availableQuantity < requestedQuantity;
   });
 
@@ -6631,11 +6666,15 @@ async function assertOnlineStoreSaleStockAvailable(
     return;
   }
 
-  const requestedQuantity = requestedQuantityByProduct.get(insufficientLine.product.id) ?? insufficientLine.quantity;
-  const availableQuantity = availableQuantityByProduct.get(insufficientLine.product.id) ?? 0;
+  const key = positionKey(insufficientLine.product.id, insufficientLine.productVariant?.id);
+  const requestedQuantity = requestedQuantityByPosition.get(key) ?? insufficientLine.quantity;
+  const availableQuantity = availableQuantityByPosition.get(key) ?? 0;
+  const itemLabel = insufficientLine.productVariant
+    ? `${insufficientLine.product.name} (${insufficientLine.productVariant.displayName ?? insufficientLine.productVariant.code})`
+    : insufficientLine.product.name;
 
   throw new Error(
-    `Only ${formatNumberForMessage(availableQuantity)} ${insufficientLine.product.name} is available in ${salesLocation.code}. Receive or transfer stock into the online store sales location before ${actionLabel} ${formatNumberForMessage(requestedQuantity)}.`
+    `Only ${formatNumberForMessage(availableQuantity)} ${itemLabel} is available in ${salesLocation.code}. Receive or transfer stock into the online store sales location before ${actionLabel} ${formatNumberForMessage(requestedQuantity)}.`
   );
 }
 
@@ -6735,10 +6774,12 @@ async function completeOnlineStoreParkedTransaction(
         },
         select: {
           productId: true,
+          productVariantId: true,
           productCodeSnapshot: true,
           productNameSnapshot: true,
           variantSizeSnapshot: true,
           variantColorSnapshot: true,
+          variantAttributesSnapshot: true,
           quantity: true,
           unitPrice: true,
           discountAmount: true,
@@ -6747,6 +6788,13 @@ async function completeOnlineStoreParkedTransaction(
           taxAmount: true,
           lineTotal: true,
           lineNote: true,
+          productVariant: {
+            select: {
+              id: true,
+              code: true,
+              displayName: true
+            }
+          },
           product: {
             select: {
               id: true,
@@ -6794,6 +6842,7 @@ async function completeOnlineStoreParkedTransaction(
       baseCostPrice: line.product.baseCostPrice,
       trackInventory: line.product.trackInventory
     },
+    productVariant: line.productVariant,
     productId: line.productId,
     productCodeSnapshot: line.productCodeSnapshot,
     productNameSnapshot: line.productNameSnapshot,
@@ -6947,6 +6996,7 @@ async function completeOnlineStoreParkedTransaction(
       warehouseId: salesLocation.warehouseId,
       inventoryLocationId: salesLocation.id,
       productId: line.productId,
+      productVariantId: line.productVariant?.id ?? null,
       movementType: InventoryMovementType.SALE,
       quantity: line.quantity * -1,
       unitCost: line.product.baseCostPrice,
@@ -6963,6 +7013,24 @@ async function completeOnlineStoreParkedTransaction(
       data: inventoryMovements
     });
   }
+
+  for (const line of preparedLines) {
+    if (!line.productVariant || !isOnlineStoreStockManagedProduct(line.product)) {
+      continue;
+    }
+
+    await tx.productMatrixVariant.update({
+      where: {
+        id: line.productVariant.id
+      },
+      data: {
+        quantityOnHand: {
+          decrement: line.quantity
+        }
+      }
+    });
+  }
+
   const fuelTankReduction = await reduceOnlineFuelTankForSale(tx, {
     retailOrgId: session.retailOrgId,
     storeId: store.id,
@@ -7821,12 +7889,14 @@ export async function createOnlineStoreHeldSale(
         lines: {
           create: pricedLines.map((line) => ({
             productId: line.product.id,
+            productVariantId: line.productVariant?.id ?? null,
             inventoryLocationId: salesOrderLocation.id,
             lineIntent: PosTransactionLineIntent.SALE,
             productCodeSnapshot: line.product.code,
             productNameSnapshot: line.product.name,
-            variantSizeSnapshot: line.variantSize,
+            variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
+            variantAttributesSnapshot: line.variantAttributesSnapshot,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -8011,11 +8081,13 @@ export async function createOnlineStoreSalesOrder(
         lines: {
           create: pricedLines.map((line) => ({
             productId: line.product.id,
+            productVariantId: line.productVariant?.id ?? null,
             lineIntent: PosTransactionLineIntent.SALE,
             productCodeSnapshot: line.product.code,
             productNameSnapshot: line.product.name,
-            variantSizeSnapshot: line.variantSize,
+            variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
+            variantAttributesSnapshot: line.variantAttributesSnapshot,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -8067,11 +8139,11 @@ export async function createOnlineStoreSalesOrder(
           create: pricedLines.map((line) => ({
             id: randomUUID(),
             productCodeSnapshot: line.product.code,
-            productVariantCodeSnapshot: null,
+            productVariantCodeSnapshot: line.productVariant?.code ?? null,
             productNameSnapshot: line.product.name,
-            variantSizeSnapshot: line.variantSize,
+            variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
-            variantAttributesSnapshot: null,
+            variantAttributesSnapshot: line.variantAttributesSnapshot,
             lineNote: line.lineNote,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
