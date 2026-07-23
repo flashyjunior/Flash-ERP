@@ -40,6 +40,9 @@ const desktopSqliteService = requireFile("apps/store-desktop/src/main/offline/lo
 const desktopPostgresService = requireFile("apps/store-desktop/src/main/postgres/postgres-store-service.ts");
 const desktopMssqlService = requireFile("apps/store-desktop/src/main/mssql/mssql-store-service.ts");
 const onlineRepository = requireFile("apps/enterprise-web/src/server/repositories/online-store.repository.ts");
+const enterprisePosRepository = requireFile(
+  "apps/enterprise-web/src/server/repositories/enterprise-pos.repository.ts"
+);
 const onlineWorkspace = requireFile("apps/enterprise-web/src/components/enterprise/online-store-workspace.tsx");
 const onlineSpec = requireFile("tests/e2e/online-store-parity.spec.ts");
 const playwrightConfig = requireFile("playwright.config.ts");
@@ -142,6 +145,27 @@ for (const [serviceName, serviceSource] of [
     `${serviceName} basket service must retain normal sale inventory validation.`
   );
 }
+
+requireIncludes(
+  desktopMssqlService,
+  "queueMissingSalesOrderLineSnapshots",
+  "SQL Server desktop sync must repair legacy sales-order events that omitted line snapshots."
+);
+requireIncludes(
+  desktopMssqlService,
+  "lines: this.toSalesOrderPayloadLines(lines)",
+  "SQL Server sales-order lifecycle events must retain complete line snapshots."
+);
+requireIncludes(
+  desktopMssqlService,
+  "N':detail-repair'",
+  "SQL Server sales-order line repair events must use a deterministic idempotency key."
+);
+requireIncludes(
+  enterprisePosRepository,
+  "getSalesOrderPayloadLines(syncTrail)",
+  "HQ sales-order details must recover lines from retained inbound sync payloads."
+);
 
 for (const onlineRepositoryAnchor of [
   "readOnlineStoreBranding",

@@ -129,6 +129,71 @@ function getFirstNumber(payload: Record<string, unknown>, fields: string[]) {
   return null;
 }
 
+function getSalesOrderPayloadLines(
+  events: Array<{ id: string; payload: Prisma.JsonValue }>
+) {
+  for (const event of events) {
+    const payload = getPayloadRecord(event.payload);
+
+    if (!Array.isArray(payload.lines)) {
+      continue;
+    }
+
+    const lines = payload.lines.flatMap((value, index) => {
+      const line = getPayloadRecord(value);
+      const productCode = getFirstString(line, ["productCode"]);
+      const productName = getFirstString(line, ["productName"]);
+      const quantity = getFirstNumber(line, ["quantity"]);
+      const unitPrice = getFirstNumber(line, ["unitPrice"]);
+      const discountAmount = getFirstNumber(line, ["discountAmount"]) ?? 0;
+      const taxAmount = getFirstNumber(line, ["taxAmount"]) ?? 0;
+      const lineTotal =
+        getFirstNumber(line, ["lineTotal"]) ??
+        (quantity !== null && unitPrice !== null
+          ? quantity * unitPrice - discountAmount + taxAmount
+          : null);
+
+      if (
+        !productCode ||
+        !productName ||
+        quantity === null ||
+        unitPrice === null ||
+        lineTotal === null
+      ) {
+        return [];
+      }
+
+      return [{
+        id: getFirstString(line, ["lineId"]) ?? `${event.id}:line:${index + 1}`,
+        productCode,
+        productName,
+        variant:
+          [
+            getFirstString(line, ["productVariantCode"]),
+            getFirstString(line, ["variantSize"]),
+            getFirstString(line, ["variantColor"]),
+            getFirstString(line, ["variantAttributesSnapshot"])
+          ].filter(Boolean).join(" · ") || null,
+        lineNote: getFirstString(line, ["lineNote"]),
+        quantity,
+        unitPrice,
+        discountAmount,
+        taxAmount,
+        lineTotal,
+        promotionName:
+          getFirstString(line, ["appliedPromotionName"]) ??
+          getFirstString(line, ["appliedPromotionCode"])
+      }];
+    });
+
+    if (lines.length > 0) {
+      return lines;
+    }
+  }
+
+  return [];
+}
+
 function getStringArray(value: unknown) {
   if (!Array.isArray(value)) {
     return [] as string[];
@@ -1361,49 +1426,56 @@ export async function getEnterpriseSalesOrderDetail(
       select: {
         id: true,
         eventType: true,
+        payload: true,
         status: true,
         receivedAt: true,
         errorMessage: true
       }
     })
   ]);
-  const lines = order.lines.length > 0
-    ? order.lines.map((line) => ({
-        id: line.id,
-        productCode: line.productCodeSnapshot,
-        productName: line.productNameSnapshot,
-        variant:
-          [
-            line.productVariantCodeSnapshot,
-            line.variantSizeSnapshot,
-            line.variantColorSnapshot,
-            line.variantAttributesSnapshot
-          ].filter(Boolean).join(" · ") || null,
-        lineNote: line.lineNote,
-        quantity: Number(line.quantity),
-        unitPrice: Number(line.unitPrice),
-        discountAmount: Number(line.discountAmount),
-        taxAmount: Number(line.taxAmount),
-        lineTotal: Number(line.lineTotal),
-        promotionName: line.appliedPromotionName ?? line.appliedPromotionCode
-      }))
-    : fallbackLines.map((line) => ({
-        id: line.id,
-        productCode: line.productCodeSnapshot,
-        productName: line.productNameSnapshot,
-        variant:
-          [line.variantSizeSnapshot, line.variantColorSnapshot]
-            .filter(Boolean)
-            .join(" · ") || null,
-        lineNote: line.lineNote,
-        quantity: Number(line.quantity),
-        unitPrice: Number(line.unitPrice),
-        discountAmount: Number(line.discountAmount),
-        taxAmount: Number(line.taxAmount),
-        lineTotal: Number(line.lineTotal),
-        promotionName:
-          line.appliedPromotionNameSnapshot ?? line.appliedPromotionCodeSnapshot
-      }));
+  const projectedLines = order.lines.map((line) => ({
+    id: line.id,
+    productCode: line.productCodeSnapshot,
+    productName: line.productNameSnapshot,
+    variant:
+      [
+        line.productVariantCodeSnapshot,
+        line.variantSizeSnapshot,
+        line.variantColorSnapshot,
+        line.variantAttributesSnapshot
+      ].filter(Boolean).join(" · ") || null,
+    lineNote: line.lineNote,
+    quantity: Number(line.quantity),
+    unitPrice: Number(line.unitPrice),
+    discountAmount: Number(line.discountAmount),
+    taxAmount: Number(line.taxAmount),
+    lineTotal: Number(line.lineTotal),
+    promotionName: line.appliedPromotionName ?? line.appliedPromotionCode
+  }));
+  const transactionLines = fallbackLines.map((line) => ({
+    id: line.id,
+    productCode: line.productCodeSnapshot,
+    productName: line.productNameSnapshot,
+    variant:
+      [line.variantSizeSnapshot, line.variantColorSnapshot]
+        .filter(Boolean)
+        .join(" · ") || null,
+    lineNote: line.lineNote,
+    quantity: Number(line.quantity),
+    unitPrice: Number(line.unitPrice),
+    discountAmount: Number(line.discountAmount),
+    taxAmount: Number(line.taxAmount),
+    lineTotal: Number(line.lineTotal),
+    promotionName:
+      line.appliedPromotionNameSnapshot ?? line.appliedPromotionCodeSnapshot
+  }));
+  const payloadLines = getSalesOrderPayloadLines(syncTrail);
+  const lines =
+    projectedLines.length > 0
+      ? projectedLines
+      : transactionLines.length > 0
+        ? transactionLines
+        : payloadLines;
 
   return {
     currencyCode: enterpriseNode.retailOrg.baseCurrencyCode,
@@ -1441,8 +1513,12 @@ export async function getEnterpriseSalesOrderDetail(
     })),
     statusMessage:
       lines.length > 0
-        ? `${lines.length} original order line(s) are available for enterprise review.`
-        : "This order was synced before line-level sales-order detail was enabled.",
+        ? payloadLines.length > 0 &&
+          projectedLines.length === 0 &&
+          transactionLines.length === 0
+          ? `${lines.length} original order line(s) were recovered from the store sync snapshot.`
+          : `${lines.length} original order line(s) are available for enterprise review.`
+        : "HQ has not received a line snapshot for this order. Run Sync from the updated store desktop to repair it.",
     refreshedAt: new Date().toISOString()
   };
 }

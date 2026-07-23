@@ -3421,6 +3421,28 @@ export class MssqlStoreService {
     return result.recordset;
   }
 
+  private toSalesOrderPayloadLines(
+    lines: BasketLineRow[],
+  ): NonNullable<StoreSalesOrderRecordedPayload["lines"]> {
+    return lines.map((line) => ({
+      lineId: line.id,
+      productCode: line.product_code_snapshot,
+      productVariantCode: line.product_variant_code_snapshot,
+      productName: line.product_name_snapshot,
+      variantSize: line.variant_size,
+      variantColor: line.variant_color,
+      variantAttributesSnapshot: line.variant_attributes_snapshot,
+      lineNote: line.line_note,
+      quantity: Number(asNumber(line.quantity).toFixed(3)),
+      unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
+      discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
+      taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
+      lineTotal: Number(asNumber(line.line_total).toFixed(2)),
+      appliedPromotionCode: line.applied_promotion_code,
+      appliedPromotionName: line.applied_promotion_name,
+    }));
+  }
+
   private async requireBasketProductLookup(productCode: string) {
     const match = await this.findBasketProductLookup(productCode);
 
@@ -10610,23 +10632,7 @@ export class MssqlStoreService {
       fulfilledTransactionNo: null,
       fulfilledAt: null,
       cancelledAt: null,
-      lines: lines.map((line) => ({
-        lineId: line.id,
-        productCode: line.product_code_snapshot,
-        productVariantCode: line.product_variant_code_snapshot,
-        productName: line.product_name_snapshot,
-        variantSize: line.variant_size,
-        variantColor: line.variant_color,
-        variantAttributesSnapshot: line.variant_attributes_snapshot,
-        lineNote: line.line_note,
-        quantity: Number(asNumber(line.quantity).toFixed(3)),
-        unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
-        discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
-        taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
-        lineTotal: Number(asNumber(line.line_total).toFixed(2)),
-        appliedPromotionCode: line.applied_promotion_code,
-        appliedPromotionName: line.applied_promotion_name,
-      })),
+      lines: this.toSalesOrderPayloadLines(lines),
     };
 
     await this.withTransaction(async (transaction) => {
@@ -10889,6 +10895,7 @@ export class MssqlStoreService {
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
     const operatorName = input.operatorName?.trim() || order.operator_name;
     const note = input.note?.trim() || order.note;
+    const lines = await this.getBasketLines(order.source_transaction_id);
     const payload: StoreSalesOrderRecordedPayload = {
       orderId: order.id,
       orderNo: order.order_no,
@@ -10915,6 +10922,7 @@ export class MssqlStoreService {
       fulfilledTransactionNo: null,
       fulfilledAt: null,
       cancelledAt: timestamp,
+      lines: this.toSalesOrderPayloadLines(lines),
     };
 
     await this.withTransaction(async (transaction) => {
@@ -13858,6 +13866,7 @@ export class MssqlStoreService {
           fulfilledTransactionNo: refreshedBasket.transaction_no,
           fulfilledAt: timestamp,
           cancelledAt: null,
+          lines: this.toSalesOrderPayloadLines(lines),
         };
 
         await this.query(
@@ -16270,6 +16279,135 @@ export class MssqlStoreService {
     };
   }
 
+  private async queueMissingSalesOrderLineSnapshots(
+    nodeCode: string,
+    timestamp: string,
+    limit = 10,
+  ) {
+    const candidates = await this.query<{ id: string }>(
+      `SELECT TOP (@limit) sales_order.[id]
+       FROM [dbo].[sales_order] AS sales_order
+       WHERE EXISTS (
+         SELECT 1
+         FROM [dbo].[sync_outbox] AS source_event
+         WHERE source_event.[aggregate_type] = N'salesOrder'
+           AND source_event.[aggregate_id] = sales_order.[id]
+       )
+         AND EXISTS (
+           SELECT 1
+           FROM [dbo].[pos_transaction_line] AS source_line
+           WHERE source_line.[pos_transaction_id] = sales_order.[source_transaction_id]
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM [dbo].[sync_outbox] AS detail_event
+           WHERE detail_event.[aggregate_type] = N'salesOrder'
+             AND detail_event.[aggregate_id] = sales_order.[id]
+             AND JSON_QUERY(
+               CASE
+                 WHEN ISJSON(detail_event.[payload_json]) = 1
+                   THEN detail_event.[payload_json]
+                 ELSE N'{}'
+               END,
+               '$.lines'
+             ) IS NOT NULL
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM [dbo].[sync_outbox] AS repair_event
+           WHERE repair_event.[idempotency_key] = CONCAT(
+             @nodeCode,
+             N':salesOrder:',
+             sales_order.[order_no],
+             N':detail-repair'
+           )
+         )
+       ORDER BY sales_order.[updated_at] DESC`,
+      { limit, nodeCode },
+    );
+
+    if (candidates.recordset.length === 0) {
+      return 0;
+    }
+
+    const metadata = await this.metadata();
+    const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
+    const terminalCode = this.getTerminalCode();
+    let queued = 0;
+
+    for (const candidate of candidates.recordset) {
+      const order = await this.getSalesOrderRow(candidate.id);
+
+      if (!order) {
+        continue;
+      }
+
+      const lines = await this.getBasketLines(order.source_transaction_id);
+
+      if (lines.length === 0) {
+        continue;
+      }
+
+      const versionResult = await this.query<{ value: number }>(
+        `SELECT ISNULL(MAX([record_version]), 0) AS [value]
+         FROM [dbo].[sync_outbox]
+         WHERE [aggregate_type] = N'salesOrder'
+           AND [aggregate_id] = @orderId`,
+        { orderId: order.id },
+      );
+      const recordVersion =
+        Math.max(1, Math.trunc(asNumber(versionResult.recordset[0]?.value))) + 1;
+      const payload: StoreSalesOrderRecordedPayload = {
+        orderId: order.id,
+        orderNo: order.order_no,
+        storeCode,
+        terminalCode,
+        sourceTransactionId: order.source_transaction_id,
+        sourceTransactionNo: order.source_transaction_no,
+        customerId: order.customer_id,
+        customerNo: order.customer_no,
+        customerName: order.customer_name,
+        totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
+        depositAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
+        balanceAmount: Number(asNumber(order.balance_amount).toFixed(2)),
+        depositTenderMethodCode: order.deposit_tender_method_code,
+        depositTenderMethodName: order.deposit_tender_method_name,
+        depositPaymentMethod: order.deposit_payment_method,
+        depositReference: order.deposit_reference,
+        depositPaidAt: order.deposit_paid_at,
+        status: order.status,
+        operatorName: order.operator_name,
+        note: order.note,
+        createdAt: order.created_at,
+        fulfilledTransactionId: order.fulfilled_transaction_id,
+        fulfilledTransactionNo: order.fulfilled_transaction_no,
+        fulfilledAt: order.fulfilled_at,
+        cancelledAt: order.cancelled_at,
+        lines: this.toSalesOrderPayloadLines(lines),
+      };
+      const eventType =
+        order.status === "FULFILLED"
+          ? "sales-order.fulfilled"
+          : order.status === "CANCELLED"
+            ? "sales-order.cancelled"
+            : "sales-order.recorded";
+
+      await this.insertOutboxEvent({
+        nodeCode,
+        timestamp,
+        aggregateType: "salesOrder",
+        aggregateId: order.id,
+        eventType,
+        idempotencyKey: `${nodeCode}:salesOrder:${order.order_no}:detail-repair`,
+        payload,
+        recordVersion,
+      });
+      queued += 1;
+    }
+
+    return queued;
+  }
+
   private async runRemoteSyncCycle(
     startedAt: string,
     trigger: StoreNodeSyncTrigger,
@@ -16285,6 +16423,7 @@ export class MssqlStoreService {
       drainDownstream,
     );
 
+    await this.queueMissingSalesOrderLineSnapshots(nodeCode, startedAt);
     await this.expireExhaustedOutboxRetries(startedAt);
     const upstreamRows = await this.getPendingUpstreamRows(25);
     const replayedDownstreamIds =

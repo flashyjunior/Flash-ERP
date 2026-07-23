@@ -150,7 +150,7 @@ export function EnterpriseSalesOrderDetail({
           <SharedDataGrid
             columns={lineColumns}
             data={detail.lines}
-            emptyLabel="Line details are unavailable for sales orders synced before this update."
+            emptyLabel="HQ has not received this order's line snapshot. Run Sync from the updated store desktop."
             exportFileName={`flash-erp-${detail.order.orderNo}-items`}
             searchPlaceholder="Search order items"
           />
