@@ -2592,15 +2592,21 @@ function summarizeOnlineShift(shift: {
   openedAt: Date;
   closedAt: Date | null;
   posTransactions: Array<{
+    id: string;
     transactionType: PosTransactionType | string;
     totalAmount: Prisma.Decimal | number | string;
     changeAmount: Prisma.Decimal | number | string;
-    payments: Array<{
-      method: PaymentMethod | string;
-      tenderMethodCodeSnapshot: string | null;
-      tenderMethodNameSnapshot: string | null;
-      amount: Prisma.Decimal | number | string;
-    }>;
+  }>;
+  receivedPayments: Array<{
+    posTransactionId: string;
+    method: PaymentMethod | string;
+    tenderMethodCodeSnapshot: string | null;
+    tenderMethodNameSnapshot: string | null;
+    amount: Prisma.Decimal | number | string;
+    posTransaction: {
+      transactionType: PosTransactionType | string;
+      totalAmount: Prisma.Decimal | number | string;
+    };
   }>;
 }): OnlineShiftSummary {
   const tenderTotals = new Map<string, OnlineShiftSummary["tenderTotals"][number]>();
@@ -2628,35 +2634,43 @@ function summarizeOnlineShift(shift: {
       exchangeCount += 1;
     }
 
-    if (transaction.payments.some((payment) => payment.method === PaymentMethod.CASH) && !isRefundSettlement) {
+    if (
+      shift.receivedPayments.some(
+        (payment) =>
+          payment.posTransactionId === transaction.id &&
+          payment.method === PaymentMethod.CASH
+      ) &&
+      !isRefundSettlement
+    ) {
       expectedCashAmount = toMoney(expectedCashAmount - Number(transaction.changeAmount));
     }
+  }
 
-    for (const payment of transaction.payments) {
-      const signedAmount = signedPaymentAmount({
-        transactionType: transaction.transactionType,
-        totalAmount,
-        paymentAmount: Number(payment.amount)
-      });
-      const tenderKey = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
-      const current = tenderTotals.get(tenderKey) ?? {
-        paymentMethod: String(payment.method),
-        tenderMethodCode: payment.tenderMethodCodeSnapshot,
-        tenderMethodName: payment.tenderMethodNameSnapshot,
-        transactionCount: 0,
-        netAmount: 0
-      };
+  for (const payment of shift.receivedPayments) {
+    const totalAmount = toMoney(Number(payment.posTransaction.totalAmount));
+    const signedAmount = signedPaymentAmount({
+      transactionType: payment.posTransaction.transactionType,
+      totalAmount,
+      paymentAmount: Number(payment.amount)
+    });
+    const tenderKey = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
+    const current = tenderTotals.get(tenderKey) ?? {
+      paymentMethod: String(payment.method),
+      tenderMethodCode: payment.tenderMethodCodeSnapshot,
+      tenderMethodName: payment.tenderMethodNameSnapshot,
+      transactionCount: 0,
+      netAmount: 0
+    };
 
-      current.transactionCount += 1;
-      current.netAmount = toMoney(current.netAmount + signedAmount);
-      tenderTotals.set(tenderKey, current);
+    current.transactionCount += 1;
+    current.netAmount = toMoney(current.netAmount + signedAmount);
+    tenderTotals.set(tenderKey, current);
 
-      if (payment.method === PaymentMethod.CASH) {
-        cashTenderedAmount = toMoney(cashTenderedAmount + signedAmount);
-        expectedCashAmount = toMoney(expectedCashAmount + signedAmount);
-      } else {
-        nonCashTenderedAmount = toMoney(nonCashTenderedAmount + signedAmount);
-      }
+    if (payment.method === PaymentMethod.CASH) {
+      cashTenderedAmount = toMoney(cashTenderedAmount + signedAmount);
+      expectedCashAmount = toMoney(expectedCashAmount + signedAmount);
+    } else {
+      nonCashTenderedAmount = toMoney(nonCashTenderedAmount + signedAmount);
     }
   }
 
@@ -2866,6 +2880,13 @@ async function prepareOnlinePayments(
     allowChange: boolean;
     refund?: boolean;
     settlementLabel: string;
+    paymentPurpose?: "TRANSACTION_SETTLEMENT" | "SALES_ORDER_DEPOSIT" | "SALES_ORDER_BALANCE";
+    receiptContext?: {
+      shiftId: string;
+      shiftNo: string;
+      terminalCode: string;
+      cashierCode: string;
+    };
   }
 ) {
   const expectedAmount = toMoney(Math.abs(settlementAmount));
@@ -2970,6 +2991,13 @@ async function prepareOnlinePayments(
       bankAccountNumberSnapshot: bankAccount?.accountNumber ?? null,
       bankAccountNameSnapshot: bankAccount?.accountName ?? null,
       method: tender.paymentMethod,
+      paymentPurpose: options.paymentPurpose ?? "TRANSACTION_SETTLEMENT",
+      ...(options.receiptContext
+        ? { receivedShift: { connect: { id: options.receiptContext.shiftId } } }
+        : {}),
+      receivedShiftNoSnapshot: options.receiptContext?.shiftNo ?? null,
+      receivedTerminalCodeSnapshot: options.receiptContext?.terminalCode ?? null,
+      receivedCashierCodeSnapshot: options.receiptContext?.cashierCode ?? null,
       amount,
       reference,
       receivedAt: new Date()
@@ -3547,15 +3575,28 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             status: PosTransactionStatus.COMPLETED
           },
           select: {
+            id: true,
             transactionType: true,
             totalAmount: true,
-            changeAmount: true,
-            payments: {
+            changeAmount: true
+          }
+        },
+        receivedPayments: {
+          where: {
+            posTransaction: {
+              deletedAt: null
+            }
+          },
+          select: {
+            posTransactionId: true,
+            method: true,
+            tenderMethodCodeSnapshot: true,
+            tenderMethodNameSnapshot: true,
+            amount: true,
+            posTransaction: {
               select: {
-                method: true,
-                tenderMethodCodeSnapshot: true,
-                tenderMethodNameSnapshot: true,
-                amount: true
+                transactionType: true,
+                totalAmount: true
               }
             }
           }
@@ -4035,7 +4076,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   const recentSourceLineIds = recentTransactions.flatMap((transaction) =>
     transaction.lines.map((line) => line.id)
   );
-  const [returnedLineQuantities, reportTransactions] = await Promise.all([
+  const [returnedLineQuantities, reportTransactions, reportPayments] = await Promise.all([
     recentSourceLineIds.length > 0
       ? prisma.posTransactionLine.groupBy({
           by: ["sourceLineId"],
@@ -4095,13 +4136,30 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             lineTotal: true,
             lineNote: true
           }
+        }
+      }
+    }),
+    prisma.posPayment.findMany({
+      where: {
+        receivedAt: {
+          gte: startOfDay
         },
-        payments: {
+        posTransaction: {
+          retailOrgId: assignment.session.retailOrgId,
+          storeId: assignment.store.id,
+          deletedAt: null
+        }
+      },
+      orderBy: [{ receivedAt: "desc" }, { createdAt: "desc" }],
+      select: {
+        method: true,
+        tenderMethodCodeSnapshot: true,
+        tenderMethodNameSnapshot: true,
+        amount: true,
+        posTransaction: {
           select: {
-            method: true,
-            tenderMethodCodeSnapshot: true,
-            tenderMethodNameSnapshot: true,
-            amount: true
+            transactionType: true,
+            totalAmount: true
           }
         }
       }
@@ -4566,31 +4624,32 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   const reportProductMap = new Map<string, OnlineStoreWorkspaceData["reports"]["productRows"][number]>();
   let reportReturnAmount = 0;
 
+  for (const payment of reportPayments) {
+    const totalAmount = Number(payment.posTransaction.totalAmount);
+    const signedAmount = signedPaymentAmount({
+      transactionType: payment.posTransaction.transactionType,
+      totalAmount,
+      paymentAmount: Number(payment.amount)
+    });
+    const tenderKey = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
+    const current = reportTenderMap.get(tenderKey) ?? {
+      paymentMethod: payment.method,
+      tenderMethodCode: payment.tenderMethodCodeSnapshot,
+      tenderMethodName: payment.tenderMethodNameSnapshot,
+      transactionCount: 0,
+      netAmount: 0
+    };
+
+    current.transactionCount += 1;
+    current.netAmount = toMoney(current.netAmount + signedAmount);
+    reportTenderMap.set(tenderKey, current);
+  }
+
   for (const transaction of reportTransactions) {
     const totalAmount = Number(transaction.totalAmount);
 
     if (transaction.transactionType === PosTransactionType.RETURN) {
       reportReturnAmount = toMoney(reportReturnAmount + Math.abs(totalAmount));
-    }
-
-    for (const payment of transaction.payments) {
-      const signedAmount = signedPaymentAmount({
-        transactionType: transaction.transactionType,
-        totalAmount,
-        paymentAmount: Number(payment.amount)
-      });
-      const tenderKey = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
-      const current = reportTenderMap.get(tenderKey) ?? {
-        paymentMethod: payment.method,
-        tenderMethodCode: payment.tenderMethodCodeSnapshot,
-        tenderMethodName: payment.tenderMethodNameSnapshot,
-        transactionCount: 0,
-        netAmount: 0
-      };
-
-      current.transactionCount += 1;
-      current.netAmount = toMoney(current.netAmount + signedAmount);
-      reportTenderMap.set(tenderKey, current);
     }
 
     for (const line of transaction.lines) {
@@ -4992,6 +5051,47 @@ export async function browseOnlineStoreReports(
         }
       : {})
   };
+  const paymentWhere: Prisma.PosPaymentWhereInput = {
+    posTransaction: {
+      retailOrgId: session.retailOrgId,
+      storeId: store.id,
+      deletedAt: null,
+      ...(criteria.customerQuery
+        ? {
+            OR: [
+              { customerNameSnapshot: { contains: criteria.customerQuery } },
+              { customer: { customerNo: { contains: criteria.customerQuery } } },
+              { customer: { fullName: { contains: criteria.customerQuery } } }
+            ]
+          }
+        : {}),
+      ...(criteria.productQuery
+        ? {
+            lines: {
+              some: {
+                OR: [
+                  { productCodeSnapshot: { contains: criteria.productQuery } },
+                  { productNameSnapshot: { contains: criteria.productQuery } }
+                ]
+              }
+            }
+          }
+        : {})
+    },
+    ...(dateFrom || dateTo
+      ? {
+          receivedAt: {
+            ...(dateFrom ? { gte: dateFrom } : {}),
+            ...(dateTo ? { lte: dateTo } : {})
+          }
+        }
+      : {}),
+    ...(criteria.cashierCode ? { receivedCashierCodeSnapshot: criteria.cashierCode } : {}),
+    ...(criteria.shiftId ? { receivedShiftId: criteria.shiftId } : {}),
+    ...(criteria.tenderMethodCode
+      ? { tenderMethodCodeSnapshot: criteria.tenderMethodCode }
+      : {})
+  };
   const salesOrderWhere: Prisma.SalesOrderWhereInput = {
     retailOrgId: session.retailOrgId,
     storeId: store.id,
@@ -5029,7 +5129,7 @@ export async function browseOnlineStoreReports(
         }
       : {})
   };
-  const [transactions, shifts, bankingDeposits, inventoryEntries, salesOrderReportRows] = await Promise.all([
+  const [transactions, reportPayments, shifts, bankingDeposits, inventoryEntries, salesOrderReportRows] = await Promise.all([
     prisma.posTransaction.findMany({
       where: transactionWhere,
       orderBy: [{ completedAt: "desc" }, { createdAt: "desc" }],
@@ -5059,13 +5159,21 @@ export async function browseOnlineStoreReports(
             taxAmount: true,
             lineTotal: true
           }
-        },
-        payments: {
+        }
+      }
+    }),
+    prisma.posPayment.findMany({
+      where: paymentWhere,
+      orderBy: [{ receivedAt: "desc" }, { createdAt: "desc" }],
+      select: {
+        method: true,
+        tenderMethodCodeSnapshot: true,
+        tenderMethodNameSnapshot: true,
+        amount: true,
+        posTransaction: {
           select: {
-            method: true,
-            tenderMethodCodeSnapshot: true,
-            tenderMethodNameSnapshot: true,
-            amount: true
+            transactionType: true,
+            totalAmount: true
           }
         }
       }
@@ -5111,15 +5219,28 @@ export async function browseOnlineStoreReports(
             status: PosTransactionStatus.COMPLETED
           },
           select: {
+            id: true,
             transactionType: true,
             totalAmount: true,
-            changeAmount: true,
-            payments: {
+            changeAmount: true
+          }
+        },
+        receivedPayments: {
+          where: {
+            posTransaction: {
+              deletedAt: null
+            }
+          },
+          select: {
+            posTransactionId: true,
+            method: true,
+            tenderMethodCodeSnapshot: true,
+            tenderMethodNameSnapshot: true,
+            amount: true,
+            posTransaction: {
               select: {
-                method: true,
-                tenderMethodCodeSnapshot: true,
-                tenderMethodNameSnapshot: true,
-                amount: true
+                transactionType: true,
+                totalAmount: true
               }
             }
           }
@@ -5255,31 +5376,32 @@ export async function browseOnlineStoreReports(
   const productRowsByKey = new Map<string, OnlineStoreWorkspaceData["reports"]["productRows"][number]>();
   let returnAmount = 0;
 
+  for (const payment of reportPayments) {
+    const totalAmount = Number(payment.posTransaction.totalAmount);
+    const signedAmount = signedPaymentAmount({
+      transactionType: payment.posTransaction.transactionType,
+      totalAmount,
+      paymentAmount: Number(payment.amount)
+    });
+    const key = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
+    const current = tenderRowsByKey.get(key) ?? {
+      paymentMethod: payment.method,
+      tenderMethodCode: payment.tenderMethodCodeSnapshot,
+      tenderMethodName: payment.tenderMethodNameSnapshot,
+      transactionCount: 0,
+      netAmount: 0
+    };
+
+    current.transactionCount += 1;
+    current.netAmount = toMoney(current.netAmount + signedAmount);
+    tenderRowsByKey.set(key, current);
+  }
+
   for (const transaction of transactions) {
     const totalAmount = Number(transaction.totalAmount);
 
     if (transaction.transactionType === PosTransactionType.RETURN) {
       returnAmount = toMoney(returnAmount + Math.abs(totalAmount));
-    }
-
-    for (const payment of transaction.payments) {
-      const signedAmount = signedPaymentAmount({
-        transactionType: transaction.transactionType,
-        totalAmount,
-        paymentAmount: Number(payment.amount)
-      });
-      const key = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
-      const current = tenderRowsByKey.get(key) ?? {
-        paymentMethod: payment.method,
-        tenderMethodCode: payment.tenderMethodCodeSnapshot,
-        tenderMethodName: payment.tenderMethodNameSnapshot,
-        transactionCount: 0,
-        netAmount: 0
-      };
-
-      current.transactionCount += 1;
-      current.netAmount = toMoney(current.netAmount + signedAmount);
-      tenderRowsByKey.set(key, current);
     }
 
     for (const line of transaction.lines) {
@@ -6902,7 +7024,14 @@ async function completeOnlineStoreParkedTransaction(
     settlementAmount,
     {
       allowChange: true,
-      settlementLabel: openSalesOrder ? "sales order fulfilment" : "held sale checkout"
+      settlementLabel: openSalesOrder ? "sales order fulfilment" : "held sale checkout",
+      paymentPurpose: openSalesOrder ? "SALES_ORDER_BALANCE" : "TRANSACTION_SETTLEMENT",
+      receiptContext: {
+        shiftId: shift.id,
+        shiftNo: shift.shiftNo,
+        terminalCode: onlineTerminalCode,
+        cashierCode: user.loginId
+      }
     }
   );
   const existingReceiptPayments = sourceTransaction.payments.map((payment) => ({
@@ -7559,7 +7688,13 @@ export async function createOnlineStoreSale(
     });
     const preparedPayments = await prepareOnlinePayments(tx, session.retailOrgId, paymentInputs, totalAmount, {
       allowChange: true,
-      settlementLabel: "sale checkout"
+      settlementLabel: "sale checkout",
+      receiptContext: {
+        shiftId: shift.id,
+        shiftNo: shift.shiftNo,
+        terminalCode: onlineTerminalCode,
+        cashierCode: user.loginId
+      }
     });
     const transactionNo = `WEB-${store.code.toUpperCase()}-${Date.now()}`;
     const transaction = await tx.posTransaction.create({
@@ -8051,7 +8186,14 @@ export async function createOnlineStoreSalesOrder(
             requestedDepositAmount,
             {
               allowChange: false,
-              settlementLabel: "sales order deposit"
+              settlementLabel: "sales order deposit",
+              paymentPurpose: "SALES_ORDER_DEPOSIT",
+              receiptContext: {
+                shiftId: shift.id,
+                shiftNo: shift.shiftNo,
+                terminalCode: onlineTerminalCode,
+                cashierCode: user.loginId
+              }
             }
           )
         : { paymentTotal: 0, changeAmount: 0, payments: [] as Prisma.PosPaymentCreateWithoutPosTransactionInput[] };
@@ -10146,15 +10288,21 @@ export async function createOnlineStoreCorrection(
           })
         : [];
     const paymentInputs = Array.isArray(input.payments) ? input.payments : defaultRefundPayments;
-    const preparedPayments = await prepareOnlinePayments(tx, session.retailOrgId, paymentInputs, settlementAmount, {
-      allowChange: totalAmount > 0,
-      refund: correctionType === PosTransactionType.RETURN || totalAmount < 0,
-      settlementLabel: correctionType === PosTransactionType.RETURN ? "return refund" : "exchange settlement"
-    });
     const { terminal, shift } = await ensureOnlineRegisterShift(tx, {
       session,
       user,
       store
+    });
+    const preparedPayments = await prepareOnlinePayments(tx, session.retailOrgId, paymentInputs, settlementAmount, {
+      allowChange: totalAmount > 0,
+      refund: correctionType === PosTransactionType.RETURN || totalAmount < 0,
+      settlementLabel: correctionType === PosTransactionType.RETURN ? "return refund" : "exchange settlement",
+      receiptContext: {
+        shiftId: shift.id,
+        shiftNo: shift.shiftNo,
+        terminalCode: onlineTerminalCode,
+        cashierCode: user.loginId
+      }
     });
     const transactionNo = `WEB-${correctionType === PosTransactionType.RETURN ? "RET" : "EXC"}-${store.code.toUpperCase()}-${Date.now()}`;
     const transaction = await tx.posTransaction.create({
@@ -10463,15 +10611,28 @@ export async function openOnlineStoreShift(
             status: PosTransactionStatus.COMPLETED
           },
           select: {
+            id: true,
             transactionType: true,
             totalAmount: true,
-            changeAmount: true,
-            payments: {
+            changeAmount: true
+          }
+        },
+        receivedPayments: {
+          where: {
+            posTransaction: {
+              deletedAt: null
+            }
+          },
+          select: {
+            posTransactionId: true,
+            method: true,
+            tenderMethodCodeSnapshot: true,
+            tenderMethodNameSnapshot: true,
+            amount: true,
+            posTransaction: {
               select: {
-                method: true,
-                tenderMethodCodeSnapshot: true,
-                tenderMethodNameSnapshot: true,
-                amount: true
+                transactionType: true,
+                totalAmount: true
               }
             }
           }
@@ -10567,15 +10728,28 @@ export async function recordOnlineStoreEod(
             status: PosTransactionStatus.COMPLETED
           },
           select: {
+            id: true,
             transactionType: true,
             totalAmount: true,
-            changeAmount: true,
-            payments: {
+            changeAmount: true
+          }
+        },
+        receivedPayments: {
+          where: {
+            posTransaction: {
+              deletedAt: null
+            }
+          },
+          select: {
+            posTransactionId: true,
+            method: true,
+            tenderMethodCodeSnapshot: true,
+            tenderMethodNameSnapshot: true,
+            amount: true,
+            posTransaction: {
               select: {
-                method: true,
-                tenderMethodCodeSnapshot: true,
-                tenderMethodNameSnapshot: true,
-                amount: true
+                transactionType: true,
+                totalAmount: true
               }
             }
           }

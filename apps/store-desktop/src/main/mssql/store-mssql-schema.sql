@@ -899,11 +899,48 @@ BEGIN
     [bank_account_number] nvarchar(100) NULL,
     [bank_account_name] nvarchar(200) NULL,
     [method] nvarchar(50) NOT NULL,
+    [payment_purpose] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_payment_purpose] DEFAULT N'TRANSACTION_SETTLEMENT',
     [amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_pos_payment_amount] DEFAULT 0,
     [reference] nvarchar(200) NULL,
+    [received_shift_id] nvarchar(100) NULL,
+    [received_shift_no] nvarchar(100) NULL,
+    [received_terminal_code] nvarchar(100) NULL,
+    [received_cashier_code] nvarchar(100) NULL,
     [received_at] nvarchar(40) NOT NULL
   );
 END;
+
+IF COL_LENGTH(N'[dbo].[pos_payment]', N'payment_purpose') IS NULL
+BEGIN
+  ALTER TABLE [dbo].[pos_payment]
+    ADD [payment_purpose] nvarchar(50) NOT NULL
+      CONSTRAINT [DF_pos_payment_purpose_upgrade] DEFAULT N'TRANSACTION_SETTLEMENT';
+END;
+
+IF COL_LENGTH(N'[dbo].[pos_payment]', N'received_shift_id') IS NULL
+  ALTER TABLE [dbo].[pos_payment] ADD [received_shift_id] nvarchar(100) NULL;
+IF COL_LENGTH(N'[dbo].[pos_payment]', N'received_shift_no') IS NULL
+  ALTER TABLE [dbo].[pos_payment] ADD [received_shift_no] nvarchar(100) NULL;
+IF COL_LENGTH(N'[dbo].[pos_payment]', N'received_terminal_code') IS NULL
+  ALTER TABLE [dbo].[pos_payment] ADD [received_terminal_code] nvarchar(100) NULL;
+IF COL_LENGTH(N'[dbo].[pos_payment]', N'received_cashier_code') IS NULL
+  ALTER TABLE [dbo].[pos_payment] ADD [received_cashier_code] nvarchar(100) NULL;
+
+IF NOT EXISTS (
+  SELECT 1 FROM sys.indexes
+  WHERE name = N'IX_pos_payment_received_shift'
+    AND object_id = OBJECT_ID(N'[dbo].[pos_payment]')
+)
+  EXEC(N'CREATE INDEX [IX_pos_payment_received_shift]
+    ON [dbo].[pos_payment]([received_shift_id]);');
+
+IF NOT EXISTS (
+  SELECT 1 FROM sys.indexes
+  WHERE name = N'IX_pos_payment_received_at'
+    AND object_id = OBJECT_ID(N'[dbo].[pos_payment]')
+)
+  CREATE INDEX [IX_pos_payment_received_at]
+    ON [dbo].[pos_payment]([received_at]);
 
 IF OBJECT_ID(N'[dbo].[customer_account_entry]', N'U') IS NULL
 BEGIN
@@ -1020,6 +1057,63 @@ BEGIN
     WHERE [balance_amount] = 0
       AND [status] = N''OPEN'';');
 END;
+
+EXEC(N'
+UPDATE payment
+SET [received_shift_id] = matched_shift.[id]
+FROM [dbo].[pos_payment] AS payment
+LEFT JOIN [dbo].[pos_transaction] AS txn
+  ON txn.[id] = payment.[pos_transaction_id]
+LEFT JOIN [dbo].[pos_shift] AS transaction_shift
+  ON transaction_shift.[id] = txn.[shift_id]
+OUTER APPLY (
+  SELECT TOP (1) shift.[id]
+  FROM [dbo].[pos_shift] AS shift
+  WHERE shift.[opened_at] <= payment.[received_at]
+    AND (shift.[closed_at] IS NULL OR shift.[closed_at] >= payment.[received_at])
+    AND (
+      transaction_shift.[terminal_code] IS NULL
+      OR shift.[terminal_code] = transaction_shift.[terminal_code]
+    )
+  ORDER BY shift.[opened_at] DESC
+) AS matched_shift
+WHERE payment.[received_shift_id] IS NULL
+  AND matched_shift.[id] IS NOT NULL;
+
+UPDATE payment
+SET [received_shift_id] = txn.[shift_id]
+FROM [dbo].[pos_payment] AS payment
+INNER JOIN [dbo].[pos_transaction] AS txn
+  ON txn.[id] = payment.[pos_transaction_id]
+WHERE payment.[received_shift_id] IS NULL;
+
+UPDATE payment
+SET [received_shift_no] = COALESCE(payment.[received_shift_no], shift.[shift_no]),
+    [received_terminal_code] = COALESCE(payment.[received_terminal_code], shift.[terminal_code]),
+    [received_cashier_code] = COALESCE(payment.[received_cashier_code], shift.[cashier_code])
+FROM [dbo].[pos_payment] AS payment
+INNER JOIN [dbo].[pos_shift] AS shift
+  ON shift.[id] = payment.[received_shift_id];
+
+UPDATE payment
+SET [payment_purpose] = N''SALES_ORDER_DEPOSIT''
+FROM [dbo].[pos_payment] AS payment
+INNER JOIN [dbo].[sales_order] AS sales_order
+  ON sales_order.[source_transaction_id] = payment.[pos_transaction_id]
+WHERE payment.[payment_purpose] = N''TRANSACTION_SETTLEMENT''
+  AND sales_order.[deposit_paid_at] IS NOT NULL
+  AND payment.[received_at] <= sales_order.[deposit_paid_at];
+
+UPDATE payment
+SET [payment_purpose] = N''SALES_ORDER_BALANCE''
+FROM [dbo].[pos_payment] AS payment
+INNER JOIN [dbo].[sales_order] AS sales_order
+  ON sales_order.[source_transaction_id] = payment.[pos_transaction_id]
+WHERE payment.[payment_purpose] = N''TRANSACTION_SETTLEMENT''
+  AND (
+    sales_order.[deposit_paid_at] IS NULL
+    OR payment.[received_at] > sales_order.[deposit_paid_at]
+  );');
 
 IF OBJECT_ID(N'[dbo].[eod_reconciliation]', N'U') IS NULL
 BEGIN

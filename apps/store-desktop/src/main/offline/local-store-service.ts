@@ -891,6 +891,11 @@ type ReceiptPrintPaymentRow = {
   method: SyncPaymentMethod;
   amount: number | string;
   reference: string | null;
+  payment_purpose: "TRANSACTION_SETTLEMENT" | "SALES_ORDER_DEPOSIT" | "SALES_ORDER_BALANCE";
+  received_shift_id: string | null;
+  received_shift_no: string | null;
+  received_terminal_code: string | null;
+  received_cashier_code: string | null;
   received_at: string;
 };
 
@@ -7035,8 +7040,52 @@ export class LocalStoreService {
       )
       .all(...salesParams, limit) as ReportSalesRow[];
 
-    const tenderWhere = [...salesWhere];
-    const tenderParams = [...salesParams];
+    const tenderWhere = ["1 = 1"];
+    const tenderParams: SQLInputValue[] = [];
+
+    if (dateFrom) {
+      tenderWhere.push("payment.received_at >= ?");
+      tenderParams.push(dateFrom);
+    }
+
+    if (dateTo) {
+      tenderWhere.push("payment.received_at <= ?");
+      tenderParams.push(dateTo);
+    }
+
+    if (cashierCode) {
+      tenderWhere.push(
+        "COALESCE(payment.received_cashier_code, txn.cashier_code, shift.cashier_code) = ?",
+      );
+      tenderParams.push(cashierCode);
+    }
+
+    if (shiftId) {
+      tenderWhere.push("COALESCE(payment.received_shift_id, txn.shift_id) = ?");
+      tenderParams.push(shiftId);
+    }
+
+    if (customerQuery) {
+      tenderWhere.push(
+        "(UPPER(COALESCE(customer.customer_no, '')) LIKE ? OR UPPER(COALESCE(customer.full_name, '')) LIKE ?)",
+      );
+      tenderParams.push(`%${customerQuery}%`, `%${customerQuery}%`);
+    }
+
+    if (productQuery) {
+      tenderWhere.push(
+        `EXISTS (
+          SELECT 1
+          FROM pos_transaction_line AS line_filter
+          WHERE line_filter.pos_transaction_id = txn.id
+            AND (
+              UPPER(line_filter.product_code_snapshot) LIKE ?
+              OR UPPER(line_filter.product_name_snapshot) LIKE ?
+            )
+        )`,
+      );
+      tenderParams.push(`%${productQuery}%`, `%${productQuery}%`);
+    }
     const accountWhere = ["1 = 1"];
     const accountParams: SQLInputValue[] = [];
 
@@ -8768,7 +8817,7 @@ export class LocalStoreService {
   attachCustomerToActiveBasket(
     input: StoreBasketCustomerAttachmentInput,
   ): StoreSyncActionResult {
-    this.requireActiveCashierLaneSession({
+    const { session, openShift } = this.requireActiveCashierLaneSession({
       permissionCodes: ["pos.customer.attach"],
       purpose: "attaching a customer to the active basket",
     });
@@ -11165,10 +11214,17 @@ export class LocalStoreService {
     input ??= {};
     const activeBasket = this.getActiveBasketSummary();
 
-    this.requireActiveCashierLaneSession({
+    const { session } = this.requireActiveCashierLaneSession({
       permissionCodes: ["pos.sale.process"],
       purpose: "creating a sales order from the active basket",
     });
+    const openShift = this.getOpenShiftRow();
+
+    if (!openShift) {
+      throw new Error(
+        "Open a cashier shift before creating a sales order on this terminal.",
+      );
+    }
 
     if (activeBasket?.transactionType !== "SALE") {
       throw new Error(
@@ -11311,6 +11367,9 @@ export class LocalStoreService {
         );
       }
 
+      const depositPaymentId =
+        depositAmount > 0 && depositTender ? randomUUID() : null;
+
       const payload: StoreSalesOrderRecordedPayload = {
         orderId,
         orderNo,
@@ -11321,6 +11380,9 @@ export class LocalStoreService {
         customerId: refreshedBasket.customer_id,
         customerNo: refreshedBasket.customer_no,
         customerName: refreshedBasket.customer_name,
+        subtotalAmount: Number(asNumber(refreshedBasket.subtotal_amount).toFixed(2)),
+        discountAmount: Number(asNumber(refreshedBasket.discount_amount).toFixed(2)),
+        taxAmount: Number(asNumber(refreshedBasket.tax_amount).toFixed(2)),
         totalAmount,
         depositAmount,
         balanceAmount,
@@ -11354,6 +11416,25 @@ export class LocalStoreService {
           appliedPromotionCode: line.applied_promotion_code,
           appliedPromotionName: line.applied_promotion_name,
         })),
+        payments:
+          depositPaymentId && depositTender
+            ? [
+                {
+                  paymentId: depositPaymentId,
+                  method: depositTender.paymentMethod,
+                  tenderMethodCode: depositTender.tenderMethodCode,
+                  tenderMethodName: depositTender.tenderMethodName,
+                  amount: depositAmount,
+                  reference: depositReference ?? `DEP-${orderNo}`,
+                  paymentPurpose: "SALES_ORDER_DEPOSIT",
+                  receivedShiftId: openShift.id,
+                  receivedShiftNo: openShift.shift_no,
+                  receivedTerminalCode: terminalCode,
+                  receivedCashierCode: session.loginId,
+                  receivedAt: timestamp,
+                },
+              ]
+            : [],
       };
 
       this.db
@@ -11381,19 +11462,23 @@ export class LocalStoreService {
           timestamp,
           timestamp,
         );
-      if (depositAmount > 0 && depositTender) {
+      if (depositPaymentId && depositTender) {
         this.db
           .prepare(
-            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, payment_purpose, amount, reference, received_shift_id, received_shift_no, received_terminal_code, received_cashier_code, received_at) VALUES (?, ?, ?, ?, ?, 'SALES_ORDER_DEPOSIT', ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
-            randomUUID(),
+            depositPaymentId,
             refreshedBasket.id,
             depositTender.tenderMethodCode,
             depositTender.tenderMethodName,
             depositTender.paymentMethod,
             depositAmount,
             depositReference ?? `DEP-${orderNo}`,
+            openShift.id,
+            openShift.shift_no,
+            terminalCode,
+            session.loginId,
             timestamp,
           );
         this.db
@@ -13649,6 +13734,11 @@ export class LocalStoreService {
           method,
           amount,
           reference,
+          payment_purpose,
+          received_shift_id,
+          received_shift_no,
+          received_terminal_code,
+          received_cashier_code,
           received_at
         FROM pos_payment
         WHERE pos_transaction_id = ?
@@ -13881,6 +13971,10 @@ export class LocalStoreService {
               FROM pos_payment AS payment
               WHERE payment.pos_transaction_id = txn.id
                 AND payment.method = 'CASH'
+                AND (
+                  payment.received_shift_id = txn.shift_id
+                  OR payment.received_shift_id IS NULL
+                )
             ) THEN 1
             ELSE 0
           END AS has_cash_payment
@@ -13910,8 +14004,12 @@ export class LocalStoreService {
           FROM pos_payment AS payment
           INNER JOIN pos_transaction AS txn
             ON txn.id = payment.pos_transaction_id
-          WHERE txn.shift_id = ?
-            AND txn.status = 'COMPLETED'
+          WHERE payment.received_shift_id = ?
+             OR (
+               payment.received_shift_id IS NULL
+               AND txn.shift_id = ?
+               AND txn.status = 'COMPLETED'
+             )
           UNION ALL
           SELECT
             entry.id AS pos_transaction_id,
@@ -13928,7 +14026,7 @@ export class LocalStoreService {
         )
         ORDER BY sort_occurred_at ASC, sort_id ASC`,
       )
-      .all(shiftId, shiftId) as ShiftPaymentSummaryRow[];
+      .all(shiftId, shiftId, shiftId) as ShiftPaymentSummaryRow[];
   }
 
   private toShiftSummary(shift: PosShiftRow): StoreShiftSummary {
@@ -15160,12 +15258,18 @@ export class LocalStoreService {
           bankAccountName: payment.bank_account_name,
           amount: Number(asNumber(payment.amount).toFixed(2)),
           reference: payment.reference,
+          paymentPurpose: payment.payment_purpose,
+          receivedShiftId: payment.received_shift_id,
+          receivedShiftNo: payment.received_shift_no,
+          receivedTerminalCode: payment.received_terminal_code,
+          receivedCashierCode: payment.received_cashier_code,
           receivedAt: payment.received_at,
         }));
       const combinedPaymentPayloads: StorePosTransactionCompletedPayload["payments"] =
         [
           ...existingPaymentPayloads,
-          ...checkoutPayments.payments.map((payment) => ({
+          ...checkoutPayments.payments.map(
+            (payment): StorePosTransactionCompletedPayload["payments"][number] => ({
             paymentId: payment.paymentId,
             method: payment.method,
             tenderMethodCode: payment.tenderMethodCode,
@@ -15179,8 +15283,16 @@ export class LocalStoreService {
             bankAccountName: payment.bankAccountName,
             amount: payment.amount,
             reference: payment.reference,
+            paymentPurpose: openSalesOrder
+              ? "SALES_ORDER_BALANCE"
+              : "TRANSACTION_SETTLEMENT",
+            receivedShiftId: shift.id,
+            receivedShiftNo: shift.shift_no,
+            receivedTerminalCode: terminalCode,
+            receivedCashierCode: saleCashierCode,
             receivedAt: payment.receivedAt,
-          })),
+            }),
+          ),
         ];
       const paidAmount = Number(
         combinedPaymentPayloads
@@ -15538,7 +15650,7 @@ export class LocalStoreService {
       for (const payment of checkoutPayments.payments) {
         this.db
           .prepare(
-            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, bank_account_id, bank_code, bank_name, bank_branch_code, bank_branch_name, bank_account_number, bank_account_name, method, amount, reference, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, bank_account_id, bank_code, bank_name, bank_branch_code, bank_branch_name, bank_account_number, bank_account_name, method, payment_purpose, amount, reference, received_shift_id, received_shift_no, received_terminal_code, received_cashier_code, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             payment.paymentId,
@@ -15553,8 +15665,15 @@ export class LocalStoreService {
             payment.bankAccountNumber,
             payment.bankAccountName,
             payment.method,
+            openSalesOrder
+              ? "SALES_ORDER_BALANCE"
+              : "TRANSACTION_SETTLEMENT",
             payment.amount,
             payment.reference,
+            shift.id,
+            shift.shift_no,
+            terminalCode,
+            saleCashierCode,
             payment.receivedAt,
           );
       }
@@ -15829,6 +15948,11 @@ export class LocalStoreService {
             tenderMethodName: defaultTenderMethod?.tenderMethodName ?? null,
             amount: linePricing.lineTotal,
             reference: `CASH-${transactionNo}`,
+            paymentPurpose: "TRANSACTION_SETTLEMENT",
+            receivedShiftId: shift.id,
+            receivedShiftNo: shift.shift_no,
+            receivedTerminalCode: terminalCode,
+            receivedCashierCode: saleCashierCode,
             receivedAt: timestamp,
           },
         ],
@@ -15893,7 +16017,7 @@ export class LocalStoreService {
         );
       this.db
         .prepare(
-          "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, amount, reference, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, payment_purpose, amount, reference, received_shift_id, received_shift_no, received_terminal_code, received_cashier_code, received_at) VALUES (?, ?, ?, ?, ?, 'TRANSACTION_SETTLEMENT', ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           paymentId,
@@ -15903,6 +16027,10 @@ export class LocalStoreService {
           defaultTenderMethod?.paymentMethod ?? "CASH",
           linePricing.lineTotal,
           `CASH-${transactionNo}`,
+          shift.id,
+          shift.shift_no,
+          terminalCode,
+          saleCashierCode,
           timestamp,
         );
       if (
@@ -23512,6 +23640,90 @@ export class LocalStoreService {
     this.ensureColumn("pos_payment", "bank_branch_name", "TEXT");
     this.ensureColumn("pos_payment", "bank_account_number", "TEXT");
     this.ensureColumn("pos_payment", "bank_account_name", "TEXT");
+    this.ensureColumn(
+      "pos_payment",
+      "payment_purpose",
+      "TEXT NOT NULL DEFAULT 'TRANSACTION_SETTLEMENT'",
+    );
+    this.ensureColumn("pos_payment", "received_shift_id", "TEXT");
+    this.ensureColumn("pos_payment", "received_shift_no", "TEXT");
+    this.ensureColumn("pos_payment", "received_terminal_code", "TEXT");
+    this.ensureColumn("pos_payment", "received_cashier_code", "TEXT");
+    this.db.exec(`
+      UPDATE pos_payment
+      SET payment_purpose = 'SALES_ORDER_DEPOSIT'
+      WHERE payment_purpose = 'TRANSACTION_SETTLEMENT'
+        AND EXISTS (
+          SELECT 1
+          FROM sales_order
+          WHERE sales_order.source_transaction_id = pos_payment.pos_transaction_id
+            AND sales_order.deposit_paid_at IS NOT NULL
+            AND pos_payment.received_at <= sales_order.deposit_paid_at
+        );
+
+      UPDATE pos_payment
+      SET payment_purpose = 'SALES_ORDER_BALANCE'
+      WHERE payment_purpose = 'TRANSACTION_SETTLEMENT'
+        AND EXISTS (
+          SELECT 1
+          FROM sales_order
+          WHERE sales_order.source_transaction_id = pos_payment.pos_transaction_id
+            AND (
+              sales_order.deposit_paid_at IS NULL
+              OR pos_payment.received_at > sales_order.deposit_paid_at
+            )
+        );
+
+      UPDATE pos_payment
+      SET received_shift_id = (
+        SELECT shift.id
+        FROM pos_shift AS shift
+        WHERE pos_payment.received_at >= shift.opened_at
+          AND (shift.closed_at IS NULL OR pos_payment.received_at <= shift.closed_at)
+          AND shift.terminal_code = COALESCE(
+            (
+              SELECT transaction_shift.terminal_code
+              FROM pos_transaction AS txn
+              LEFT JOIN pos_shift AS transaction_shift
+                ON transaction_shift.id = txn.shift_id
+              WHERE txn.id = pos_payment.pos_transaction_id
+            ),
+            shift.terminal_code
+          )
+        ORDER BY shift.opened_at DESC
+        LIMIT 1
+      )
+      WHERE received_shift_id IS NULL;
+
+      UPDATE pos_payment
+      SET received_shift_id = (
+        SELECT txn.shift_id
+        FROM pos_transaction AS txn
+        WHERE txn.id = pos_payment.pos_transaction_id
+      )
+      WHERE received_shift_id IS NULL;
+
+      UPDATE pos_payment
+      SET received_shift_no = (
+            SELECT shift.shift_no FROM pos_shift AS shift
+            WHERE shift.id = pos_payment.received_shift_id
+          ),
+          received_terminal_code = (
+            SELECT shift.terminal_code FROM pos_shift AS shift
+            WHERE shift.id = pos_payment.received_shift_id
+          ),
+          received_cashier_code = (
+            SELECT shift.cashier_code FROM pos_shift AS shift
+            WHERE shift.id = pos_payment.received_shift_id
+          )
+      WHERE received_shift_id IS NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_pos_payment_received_shift
+      ON pos_payment(received_shift_id);
+
+      CREATE INDEX IF NOT EXISTS idx_pos_payment_received_at
+      ON pos_payment(received_at);
+    `);
     this.ensureColumn("customer_account_entry", "bank_account_id", "TEXT");
     this.ensureColumn("customer_account_entry", "bank_code", "TEXT");
     this.ensureColumn("customer_account_entry", "bank_name", "TEXT");

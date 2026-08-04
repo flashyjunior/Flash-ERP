@@ -45,6 +45,14 @@ const requiredStoreMssqlColumns = [
     columnName: "balance_amount"
   },
   {
+    tableName: "pos_payment",
+    columnName: "payment_purpose"
+  },
+  {
+    tableName: "pos_payment",
+    columnName: "received_shift_id"
+  },
+  {
     tableName: "product_snapshot",
     columnName: "track_size"
   },

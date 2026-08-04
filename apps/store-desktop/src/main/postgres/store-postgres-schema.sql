@@ -697,10 +697,23 @@ CREATE TABLE IF NOT EXISTS pos_payment (
   bank_account_number TEXT,
   bank_account_name TEXT,
   method TEXT NOT NULL,
+  payment_purpose TEXT NOT NULL DEFAULT 'TRANSACTION_SETTLEMENT',
   amount NUMERIC NOT NULL DEFAULT 0,
   reference TEXT,
+  received_shift_id TEXT,
+  received_shift_no TEXT,
+  received_terminal_code TEXT,
+  received_cashier_code TEXT,
   received_at TEXT NOT NULL
 );
+
+ALTER TABLE pos_payment ADD COLUMN IF NOT EXISTS payment_purpose TEXT NOT NULL DEFAULT 'TRANSACTION_SETTLEMENT';
+ALTER TABLE pos_payment ADD COLUMN IF NOT EXISTS received_shift_id TEXT;
+ALTER TABLE pos_payment ADD COLUMN IF NOT EXISTS received_shift_no TEXT;
+ALTER TABLE pos_payment ADD COLUMN IF NOT EXISTS received_terminal_code TEXT;
+ALTER TABLE pos_payment ADD COLUMN IF NOT EXISTS received_cashier_code TEXT;
+CREATE INDEX IF NOT EXISTS idx_pos_payment_received_shift ON pos_payment(received_shift_id);
+CREATE INDEX IF NOT EXISTS idx_pos_payment_received_at ON pos_payment(received_at);
 
 CREATE TABLE IF NOT EXISTS customer_account_entry (
   id TEXT PRIMARY KEY,

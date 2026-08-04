@@ -4617,6 +4617,7 @@ model PosShift {
   terminal            Terminal         @relation(fields: [terminalId], references: [id], onDelete: Cascade)
   cashierUser         RetailUser       @relation(fields: [cashierUserId], references: [id], onDelete: NoAction)
   posTransactions     PosTransaction[]
+  receivedPayments    PosPayment[]     @relation("PosPaymentReceivedShift")
 
   @@unique([storeId, shiftNo])
   @@index([retailOrgId])
@@ -4704,34 +4705,43 @@ model PosTransactionLine {
 }
 
 model PosPayment {
-  id                        String         @id @default(uuid())
-  posTransactionId          String
-  tenderMethodId            String?
-  bankAccountId             String?
-  tenderMethodCodeSnapshot  String?
-  tenderMethodNameSnapshot  String?
-  bankCodeSnapshot          String?
-  bankNameSnapshot          String?
-  bankBranchCodeSnapshot    String?
-  bankBranchNameSnapshot    String?
-  bankAccountNumberSnapshot String?
-  bankAccountNameSnapshot   String?
-  method                    String
-  amount                    Decimal        @db.Decimal(18, 2)
-  reference                 String?
-  receivedAt                DateTime       @default(now())
-  createdAt                 DateTime       @default(now())
-  posTransaction            PosTransaction @relation(fields: [posTransactionId], references: [id], onDelete: Cascade)
-  tenderMethod              TenderMethod?  @relation(fields: [tenderMethodId], references: [id], onDelete: SetNull)
-  bankAccount               BankAccount?   @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  id                           String         @id @default(uuid())
+  posTransactionId             String
+  tenderMethodId               String?
+  bankAccountId                String?
+  tenderMethodCodeSnapshot     String?
+  tenderMethodNameSnapshot     String?
+  bankCodeSnapshot             String?
+  bankNameSnapshot             String?
+  bankBranchCodeSnapshot       String?
+  bankBranchNameSnapshot       String?
+  bankAccountNumberSnapshot    String?
+  bankAccountNameSnapshot      String?
+  method                       String
+  amount                       Decimal        @db.Decimal(18, 2)
+  reference                    String?
+  paymentPurpose               String         @default("TRANSACTION_SETTLEMENT")
+  receivedShiftId              String?
+  receivedShiftNoSnapshot      String?
+  receivedTerminalCodeSnapshot String?
+  receivedCashierCodeSnapshot  String?
+  receivedAt                   DateTime       @default(now())
+  createdAt                    DateTime       @default(now())
+  posTransaction               PosTransaction @relation(fields: [posTransactionId], references: [id], onDelete: Cascade)
+  receivedShift                PosShift?      @relation("PosPaymentReceivedShift", fields: [receivedShiftId], references: [id], onDelete: SetNull)
+  tenderMethod                 TenderMethod?  @relation(fields: [tenderMethodId], references: [id], onDelete: SetNull)
+  bankAccount                  BankAccount?   @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
 
   @@index([posTransactionId])
   @@index([tenderMethodId])
   @@index([bankAccountId])
+  @@index([receivedShiftId])
+  @@index([receivedAt])
+  @@index([paymentPurpose, receivedAt])
 }
 
 model SalesOrder {
-  id                              String    @id @default(uuid())
+  id                              String           @id @default(uuid())
   retailOrgId                     String
   storeId                         String
   terminalId                      String
@@ -4741,10 +4751,10 @@ model SalesOrder {
   sourceTransactionNo             String
   customerNoSnapshot              String?
   customerNameSnapshot            String?
-  status                          String    @default("OPEN")
-  totalAmount                     Decimal   @db.Decimal(18, 2)
-  depositAmount                   Decimal   @default(0) @db.Decimal(18, 2)
-  balanceAmount                   Decimal   @default(0) @db.Decimal(18, 2)
+  status                          String           @default("OPEN")
+  totalAmount                     Decimal          @db.Decimal(18, 2)
+  depositAmount                   Decimal          @default(0) @db.Decimal(18, 2)
+  balanceAmount                   Decimal          @default(0) @db.Decimal(18, 2)
   depositTenderMethodCodeSnapshot String?
   depositTenderMethodNameSnapshot String?
   depositPaymentMethodSnapshot    String?
@@ -4755,15 +4765,15 @@ model SalesOrder {
   fulfilledTransactionId          String?
   fulfilledTransactionNo          String?
   originNodeCode                  String?
-  recordVersion                   Int       @default(1)
+  recordVersion                   Int              @default(1)
   createdAt                       DateTime
   fulfilledAt                     DateTime?
   cancelledAt                     DateTime?
-  updatedAt                       DateTime  @updatedAt
-  retailOrg                       RetailOrg @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  store                           Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  terminal                        Terminal  @relation(fields: [terminalId], references: [id], onDelete: Cascade)
-  customer                        Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  updatedAt                       DateTime         @updatedAt
+  retailOrg                       RetailOrg        @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store                           Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  terminal                        Terminal         @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  customer                        Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
   lines                           SalesOrderLine[]
 
   @@unique([retailOrgId, orderNo])

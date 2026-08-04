@@ -92,6 +92,7 @@ import type {
   StoreExpenseConfirmedPayload,
   StorePosShiftClosedPayload,
   StorePosShiftOpenedPayload,
+  StorePosPaymentPayload,
   StorePosTransactionCompletedPayload,
   StoreSalesOrderRecordedPayload,
   StoreSyncRecoveryTaskCompletedPayload,
@@ -121,6 +122,7 @@ import type {
   SupplierClaimStatus as SyncSupplierClaimStatus,
   SyncInventoryMovementType,
   SyncPaymentMethod,
+  SyncPosPaymentPurpose,
   SyncPosTransactionType,
   SyncPromotionDiscountType,
   SyncPromotionTargetScope,
@@ -1141,6 +1143,88 @@ function toPaymentMethod(value: string): SyncPaymentMethod {
 
 function toOptionalPaymentMethod(value: string | null): SyncPaymentMethod | null {
   return value ? toPaymentMethod(value) : null;
+}
+
+function toPosPaymentPurpose(
+  value: string | null,
+  fallback: SyncPosPaymentPurpose,
+): SyncPosPaymentPurpose {
+  if (
+    value === "SALES_ORDER_DEPOSIT" ||
+    value === "SALES_ORDER_BALANCE" ||
+    value === "TRANSACTION_SETTLEMENT"
+  ) {
+    return value;
+  }
+
+  return fallback;
+}
+
+function parseStorePosPaymentPayload(
+  rawPayment: unknown,
+  event: SyncEnvelope,
+  index: number,
+  fallbackPurpose: SyncPosPaymentPurpose,
+): StorePosPaymentPayload {
+  const paymentEventType = `${event.eventType}:payment:${index + 1}`;
+  const paymentPayload = toJsonObject(
+    rawPayment,
+    event.aggregateType,
+    paymentEventType,
+  );
+
+  return {
+    paymentId: readRequiredString(
+      paymentPayload,
+      "paymentId",
+      event.aggregateType,
+      paymentEventType,
+    ),
+    method: toPaymentMethod(
+      readRequiredString(
+        paymentPayload,
+        "method",
+        event.aggregateType,
+        paymentEventType,
+      ),
+    ),
+    amount: readRequiredNumber(
+      paymentPayload,
+      "amount",
+      event.aggregateType,
+      paymentEventType,
+    ),
+    tenderMethodCode: readOptionalString(paymentPayload, "tenderMethodCode"),
+    tenderMethodName: readOptionalString(paymentPayload, "tenderMethodName"),
+    bankAccountId: readOptionalString(paymentPayload, "bankAccountId"),
+    bankCode: readOptionalString(paymentPayload, "bankCode"),
+    bankName: readOptionalString(paymentPayload, "bankName"),
+    bankBranchCode: readOptionalString(paymentPayload, "bankBranchCode"),
+    bankBranchName: readOptionalString(paymentPayload, "bankBranchName"),
+    bankAccountNumber: readOptionalString(paymentPayload, "bankAccountNumber"),
+    bankAccountName: readOptionalString(paymentPayload, "bankAccountName"),
+    reference: readOptionalString(paymentPayload, "reference"),
+    paymentPurpose: toPosPaymentPurpose(
+      readOptionalString(paymentPayload, "paymentPurpose"),
+      fallbackPurpose,
+    ),
+    receivedShiftId: readOptionalString(paymentPayload, "receivedShiftId"),
+    receivedShiftNo: readOptionalString(paymentPayload, "receivedShiftNo"),
+    receivedTerminalCode: readOptionalString(
+      paymentPayload,
+      "receivedTerminalCode",
+    ),
+    receivedCashierCode: readOptionalString(
+      paymentPayload,
+      "receivedCashierCode",
+    ),
+    receivedAt: readRequiredDate(
+      paymentPayload,
+      "receivedAt",
+      event.aggregateType,
+      paymentEventType,
+    ).toISOString(),
+  };
 }
 
 function isNonRetryableAggregateType(aggregateType: string) {
@@ -4427,61 +4511,14 @@ function parseStorePosTransactionCompletedPayload(
         ),
       };
     }),
-    payments: rawPayments.map((rawPayment, index) => {
-      const paymentPayload = toJsonObject(
+    payments: rawPayments.map((rawPayment, index) =>
+      parseStorePosPaymentPayload(
         rawPayment,
-        event.aggregateType,
-        `${event.eventType}:payment:${index + 1}`,
-      );
-
-      return {
-        paymentId: readRequiredString(
-          paymentPayload,
-          "paymentId",
-          event.aggregateType,
-          `${event.eventType}:payment:${index + 1}`,
-        ),
-        method: toPaymentMethod(
-          readRequiredString(
-            paymentPayload,
-            "method",
-            event.aggregateType,
-            `${event.eventType}:payment:${index + 1}`,
-          ),
-        ),
-        amount: readRequiredNumber(
-          paymentPayload,
-          "amount",
-          event.aggregateType,
-          `${event.eventType}:payment:${index + 1}`,
-        ),
-        tenderMethodCode: readOptionalString(
-          paymentPayload,
-          "tenderMethodCode",
-        ),
-        tenderMethodName: readOptionalString(
-          paymentPayload,
-          "tenderMethodName",
-        ),
-        bankAccountId: readOptionalString(paymentPayload, "bankAccountId"),
-        bankCode: readOptionalString(paymentPayload, "bankCode"),
-        bankName: readOptionalString(paymentPayload, "bankName"),
-        bankBranchCode: readOptionalString(paymentPayload, "bankBranchCode"),
-        bankBranchName: readOptionalString(paymentPayload, "bankBranchName"),
-        bankAccountNumber: readOptionalString(
-          paymentPayload,
-          "bankAccountNumber",
-        ),
-        bankAccountName: readOptionalString(paymentPayload, "bankAccountName"),
-        reference: readOptionalString(paymentPayload, "reference"),
-        receivedAt: readRequiredDate(
-          paymentPayload,
-          "receivedAt",
-          event.aggregateType,
-          `${event.eventType}:payment:${index + 1}`,
-        ).toISOString(),
-      };
-    }),
+        event,
+        index,
+        "TRANSACTION_SETTLEMENT",
+      ),
+    ),
   };
 }
 
@@ -4613,6 +4650,7 @@ function parseStoreSalesOrderRecordedPayload(
     readOptionalNumber(payload, "depositAmount") ?? 0,
   );
   const rawLines = Array.isArray(payload.lines) ? payload.lines : null;
+  const rawPayments = Array.isArray(payload.payments) ? payload.payments : null;
 
   return {
     orderId: readRequiredString(
@@ -4654,6 +4692,9 @@ function parseStoreSalesOrderRecordedPayload(
     customerId: readOptionalString(payload, "customerId"),
     customerNo: readOptionalString(payload, "customerNo"),
     customerName: readOptionalString(payload, "customerName"),
+    subtotalAmount: readOptionalNumber(payload, "subtotalAmount") ?? totalAmount,
+    discountAmount: readOptionalNumber(payload, "discountAmount") ?? 0,
+    taxAmount: readOptionalNumber(payload, "taxAmount") ?? 0,
     totalAmount,
     depositAmount,
     balanceAmount:
@@ -4782,6 +4823,14 @@ function parseStoreSalesOrderRecordedPayload(
         ),
       };
     }),
+    payments: rawPayments?.map((rawPayment, index) =>
+      parseStorePosPaymentPayload(
+        rawPayment,
+        event,
+        index,
+        "SALES_ORDER_DEPOSIT",
+      ),
+    ),
   };
 }
 
@@ -8251,6 +8300,167 @@ async function projectStoreSalesOrder(
     }
   }
 
+  if (
+    event.eventType === "sales-order.recorded" &&
+    payload.payments &&
+    payload.payments.length > 0
+  ) {
+    const sourceTransactionNo = payload.sourceTransactionNo;
+    const existingSourceTransaction = await tx.posTransaction.findFirst({
+      where: {
+        OR: [
+          { id: payload.sourceTransactionId },
+          {
+            retailOrgId: target.storeNode.retailOrgId,
+            transactionNo: sourceTransactionNo,
+          },
+        ],
+      },
+      select: {
+        id: true,
+        storeId: true,
+        originNodeCode: true,
+        status: true,
+      },
+    });
+
+    if (existingSourceTransaction) {
+      if (
+        existingSourceTransaction.id !== payload.sourceTransactionId ||
+        existingSourceTransaction.storeId !== target.storeNode.store.id ||
+        existingSourceTransaction.originNodeCode !== target.storeNode.code
+      ) {
+        throw new StoreProjectionError(
+          "STALE_VERSION",
+          `Flash ERP already has source transaction "${sourceTransactionNo}" from another store event.`,
+          false,
+        );
+      }
+
+      if (
+        existingSourceTransaction.status === PosTransactionStatus.PARKED ||
+        existingSourceTransaction.status === PosTransactionStatus.COMPLETED
+      ) {
+        return true;
+      }
+    }
+
+    const requestedShiftIds = [
+      ...new Set(
+        payload.payments
+          .map((payment) => payment.receivedShiftId)
+          .filter((shiftId): shiftId is string => Boolean(shiftId)),
+      ),
+    ];
+    const projectedPaymentShifts =
+      requestedShiftIds.length > 0
+        ? await tx.posShift.findMany({
+            where: {
+              id: { in: requestedShiftIds },
+              storeId: target.storeNode.store.id,
+              terminalId: target.storeNode.terminal.id,
+              originNodeCode: target.storeNode.code,
+            },
+            select: { id: true },
+          })
+        : [];
+    const validPaymentShiftIds = new Set(
+      projectedPaymentShifts.map((shift) => shift.id),
+    );
+    const firstReceivedShiftId = payload.payments
+      .map((payment) => payment.receivedShiftId)
+      .find((shiftId): shiftId is string =>
+        Boolean(shiftId && validPaymentShiftIds.has(shiftId)),
+      );
+    const tenderCodes = [
+      ...new Set(
+        payload.payments
+          .map((payment) => payment.tenderMethodCode?.trim().toUpperCase())
+          .filter((code): code is string => Boolean(code)),
+      ),
+    ];
+    const tenderMethodIdByCode =
+      tenderCodes.length > 0
+        ? new Map(
+            (
+              await tx.tenderMethod.findMany({
+                where: {
+                  retailOrgId: target.storeNode.retailOrgId,
+                  code: { in: tenderCodes },
+                  status: RecordStatus.ACTIVE,
+                  deletedAt: null,
+                },
+                select: { id: true, code: true },
+              })
+            ).map((method) => [method.code.toUpperCase(), method.id] as const),
+          )
+        : new Map<string, string>();
+
+    await tx.posTransaction.create({
+      data: {
+        id: payload.sourceTransactionId,
+        retailOrgId: target.storeNode.retailOrgId,
+        storeId: target.storeNode.store.id,
+        terminalId: target.storeNode.terminal.id,
+        posShiftId: firstReceivedShiftId ?? null,
+        customerId: customer?.id ?? null,
+        transactionNo: sourceTransactionNo,
+        transactionType: PosTransactionType.SALE,
+        status: PosTransactionStatus.PARKED,
+        customerNameSnapshot: payload.customerName ?? null,
+        cashierCodeSnapshot:
+          payload.payments[0]?.receivedCashierCode ?? payload.operatorName,
+        subtotalAmount: toMoneyString(
+          payload.subtotalAmount ?? payload.totalAmount,
+        ),
+        discountAmount: toMoneyString(payload.discountAmount ?? 0),
+        taxAmount: toMoneyString(payload.taxAmount ?? 0),
+        totalAmount: toMoneyString(payload.totalAmount),
+        paidAmount: toMoneyString(payload.depositAmount ?? 0),
+        changeAmount: toMoneyString(0),
+        notes: payload.note,
+        originNodeCode: target.storeNode.code,
+        recordVersion: nextRecordVersion,
+        payments: {
+          createMany: {
+            data: payload.payments.map((payment) => ({
+              id: payment.paymentId,
+              tenderMethodId: payment.tenderMethodCode
+                ? tenderMethodIdByCode.get(
+                    payment.tenderMethodCode.trim().toUpperCase(),
+                  ) ?? null
+                : null,
+              ...(payment.bankAccountId
+                ? { bankAccountId: payment.bankAccountId }
+                : {}),
+              tenderMethodCodeSnapshot: payment.tenderMethodCode,
+              tenderMethodNameSnapshot: payment.tenderMethodName,
+              bankCodeSnapshot: payment.bankCode,
+              bankNameSnapshot: payment.bankName,
+              bankBranchCodeSnapshot: payment.bankBranchCode,
+              bankBranchNameSnapshot: payment.bankBranchName,
+              bankAccountNumberSnapshot: payment.bankAccountNumber,
+              bankAccountNameSnapshot: payment.bankAccountName,
+              method: payment.method,
+              amount: toMoneyString(payment.amount),
+              reference: payment.reference,
+              paymentPurpose: "SALES_ORDER_DEPOSIT",
+              receivedShiftId:
+                payment.receivedShiftId &&
+                validPaymentShiftIds.has(payment.receivedShiftId)
+                  ? payment.receivedShiftId
+                  : null,
+              receivedShiftNoSnapshot: payment.receivedShiftNo,
+              receivedTerminalCodeSnapshot: payment.receivedTerminalCode,
+              receivedCashierCodeSnapshot: payment.receivedCashierCode,
+              receivedAt: new Date(payment.receivedAt),
+            })),
+          },
+        },
+      },
+    });
+  }
+
   return true;
 }
 
@@ -8972,6 +9182,46 @@ async function projectStorePosTransaction(
     );
   }
 
+  const existingTransactionById = await tx.posTransaction.findUnique({
+    where: {
+      id: payload.transactionId,
+    },
+    select: {
+      id: true,
+      storeId: true,
+      originNodeCode: true,
+      status: true,
+    },
+  });
+  let parkedTransactionId: string | null = null;
+
+  if (existingTransactionById) {
+    if (
+      existingTransactionById.storeId === target.storeNode.store.id &&
+      existingTransactionById.originNodeCode === target.storeNode.code
+    ) {
+      if (existingTransactionById.status === PosTransactionStatus.COMPLETED) {
+        return true;
+      }
+
+      if (existingTransactionById.status === PosTransactionStatus.PARKED) {
+        parkedTransactionId = existingTransactionById.id;
+      } else {
+        throw new StoreProjectionError(
+          "STALE_VERSION",
+          `Flash ERP cannot replace transaction id "${payload.transactionId}" while it is in status "${existingTransactionById.status}".`,
+          false,
+        );
+      }
+    } else {
+      throw new StoreProjectionError(
+        "STALE_VERSION",
+        `Flash ERP already has transaction id "${payload.transactionId}" from another store event.`,
+        false,
+      );
+    }
+  }
+
   const existingTransaction = await tx.posTransaction.findUnique({
     where: {
       retailOrgId_transactionNo: {
@@ -8983,23 +9233,35 @@ async function projectStorePosTransaction(
       id: true,
       storeId: true,
       originNodeCode: true,
+      status: true,
     },
   });
 
   if (existingTransaction) {
     if (
-      existingTransaction.id === payload.transactionId &&
       existingTransaction.storeId === target.storeNode.store.id &&
       existingTransaction.originNodeCode === target.storeNode.code
     ) {
-      return true;
-    }
+      if (existingTransaction.status === PosTransactionStatus.COMPLETED) {
+        return true;
+      }
 
-    throw new StoreProjectionError(
-      "STALE_VERSION",
-      `Flash ERP already has transaction "${payload.transactionNo}" from another store event.`,
-      false,
-    );
+      if (existingTransaction.status === PosTransactionStatus.PARKED) {
+        parkedTransactionId = existingTransaction.id;
+      } else {
+        throw new StoreProjectionError(
+          "STALE_VERSION",
+          `Flash ERP cannot replace transaction "${payload.transactionNo}" while it is in status "${existingTransaction.status}".`,
+          false,
+        );
+      }
+    } else {
+      throw new StoreProjectionError(
+        "STALE_VERSION",
+        `Flash ERP already has transaction "${payload.transactionNo}" from another store event.`,
+        false,
+      );
+    }
   }
 
   const productsByCode = await resolveProductsByCode(
@@ -9063,6 +9325,28 @@ async function projectStorePosTransaction(
         },
       })
     : null;
+  const requestedPaymentShiftIds = [
+    ...new Set(
+      payload.payments
+        .map((payment) => payment.receivedShiftId)
+        .filter((shiftId): shiftId is string => Boolean(shiftId)),
+    ),
+  ];
+  const projectedPaymentShifts =
+    requestedPaymentShiftIds.length > 0
+      ? await tx.posShift.findMany({
+          where: {
+            id: { in: requestedPaymentShiftIds },
+            storeId: target.storeNode.store.id,
+            terminalId: target.storeNode.terminal.id,
+            originNodeCode: target.storeNode.code,
+          },
+          select: { id: true },
+        })
+      : [];
+  const validPaymentShiftIds = new Set(
+    projectedPaymentShifts.map((shift) => shift.id),
+  );
   const completedAt = new Date(payload.completedAt);
   const inventoryLocationCodes = [
     ...new Set(
@@ -9118,6 +9402,12 @@ async function projectStorePosTransaction(
           ).map((method) => [method.code.toUpperCase(), method.id] as const),
         )
       : new Map<string, string>();
+
+  if (parkedTransactionId) {
+    await tx.posTransaction.delete({
+      where: { id: parkedTransactionId },
+    });
+  }
 
   await tx.posTransaction.create({
     data: {
@@ -9236,6 +9526,16 @@ async function projectStorePosTransaction(
             method: payment.method,
             amount: toMoneyString(payment.amount),
             reference: payment.reference,
+            paymentPurpose:
+              payment.paymentPurpose ?? "TRANSACTION_SETTLEMENT",
+            receivedShiftId:
+              payment.receivedShiftId &&
+              validPaymentShiftIds.has(payment.receivedShiftId)
+                ? payment.receivedShiftId
+                : null,
+            receivedShiftNoSnapshot: payment.receivedShiftNo,
+            receivedTerminalCodeSnapshot: payment.receivedTerminalCode,
+            receivedCashierCodeSnapshot: payment.receivedCashierCode,
             receivedAt: new Date(payment.receivedAt),
           })),
         },

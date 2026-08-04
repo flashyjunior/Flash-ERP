@@ -762,6 +762,11 @@ type PosPaymentRow = {
   method: SyncPaymentMethod;
   amount: string | number;
   reference: string | null;
+  payment_purpose: "TRANSACTION_SETTLEMENT" | "SALES_ORDER_DEPOSIT" | "SALES_ORDER_BALANCE";
+  received_shift_id: string | null;
+  received_shift_no: string | null;
+  received_terminal_code: string | null;
+  received_cashier_code: string | null;
   received_at: string;
 };
 
@@ -1855,6 +1860,103 @@ export class MssqlStoreService {
       BEGIN
         ALTER TABLE [dbo].[pos_transaction_line]
         ADD [line_note] nvarchar(max) NULL;
+      END
+    `);
+    await this.query(`
+      IF OBJECT_ID(N'[dbo].[pos_payment]', N'U') IS NOT NULL
+         AND COL_LENGTH(N'[dbo].[pos_payment]', N'payment_purpose') IS NULL
+      BEGIN
+        ALTER TABLE [dbo].[pos_payment]
+        ADD [payment_purpose] nvarchar(50) NOT NULL
+          CONSTRAINT [DF_pos_payment_purpose_runtime] DEFAULT N'TRANSACTION_SETTLEMENT';
+      END
+    `);
+    for (const [columnName, columnType] of [
+      ["received_shift_id", "nvarchar(100) NULL"],
+      ["received_shift_no", "nvarchar(100) NULL"],
+      ["received_terminal_code", "nvarchar(100) NULL"],
+      ["received_cashier_code", "nvarchar(100) NULL"],
+    ] as const) {
+      await this.query(`
+        IF OBJECT_ID(N'[dbo].[pos_payment]', N'U') IS NOT NULL
+           AND COL_LENGTH(N'[dbo].[pos_payment]', N'${columnName}') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[pos_payment]
+          ADD [${columnName}] ${columnType};
+        END
+      `);
+    }
+    await this.query(`
+      IF OBJECT_ID(N'[dbo].[pos_payment]', N'U') IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM sys.indexes
+           WHERE [name] = N'IX_pos_payment_received_shift'
+             AND [object_id] = OBJECT_ID(N'[dbo].[pos_payment]')
+         )
+      BEGIN
+        CREATE INDEX [IX_pos_payment_received_shift]
+          ON [dbo].[pos_payment]([received_shift_id]);
+      END
+    `);
+    await this.query(`
+      UPDATE payment
+      SET [received_shift_id] = matched_shift.[id]
+      FROM [dbo].[pos_payment] AS payment
+      LEFT JOIN [dbo].[pos_transaction] AS txn
+        ON txn.[id] = payment.[pos_transaction_id]
+      LEFT JOIN [dbo].[pos_shift] AS transaction_shift
+        ON transaction_shift.[id] = txn.[shift_id]
+      OUTER APPLY (
+        SELECT TOP (1) shift.[id]
+        FROM [dbo].[pos_shift] AS shift
+        WHERE shift.[opened_at] <= payment.[received_at]
+          AND (shift.[closed_at] IS NULL OR shift.[closed_at] >= payment.[received_at])
+          AND (
+            transaction_shift.[terminal_code] IS NULL
+            OR shift.[terminal_code] = transaction_shift.[terminal_code]
+          )
+        ORDER BY shift.[opened_at] DESC
+      ) AS matched_shift
+      WHERE payment.[received_shift_id] IS NULL
+        AND matched_shift.[id] IS NOT NULL;
+
+      UPDATE payment
+      SET [received_shift_id] = txn.[shift_id]
+      FROM [dbo].[pos_payment] AS payment
+      INNER JOIN [dbo].[pos_transaction] AS txn
+        ON txn.[id] = payment.[pos_transaction_id]
+      WHERE payment.[received_shift_id] IS NULL;
+
+      UPDATE payment
+      SET [received_shift_no] = COALESCE(payment.[received_shift_no], shift.[shift_no]),
+          [received_terminal_code] = COALESCE(payment.[received_terminal_code], shift.[terminal_code]),
+          [received_cashier_code] = COALESCE(payment.[received_cashier_code], shift.[cashier_code])
+      FROM [dbo].[pos_payment] AS payment
+      INNER JOIN [dbo].[pos_shift] AS shift
+        ON shift.[id] = payment.[received_shift_id];
+    `);
+    await this.query(`
+      IF OBJECT_ID(N'[dbo].[sales_order]', N'U') IS NOT NULL
+      BEGIN
+        UPDATE payment
+        SET [payment_purpose] = N'SALES_ORDER_DEPOSIT'
+        FROM [dbo].[pos_payment] AS payment
+        INNER JOIN [dbo].[sales_order] AS sales_order
+          ON sales_order.[source_transaction_id] = payment.[pos_transaction_id]
+        WHERE payment.[payment_purpose] = N'TRANSACTION_SETTLEMENT'
+          AND sales_order.[deposit_paid_at] IS NOT NULL
+          AND payment.[received_at] <= sales_order.[deposit_paid_at];
+
+        UPDATE payment
+        SET [payment_purpose] = N'SALES_ORDER_BALANCE'
+        FROM [dbo].[pos_payment] AS payment
+        INNER JOIN [dbo].[sales_order] AS sales_order
+          ON sales_order.[source_transaction_id] = payment.[pos_transaction_id]
+        WHERE payment.[payment_purpose] = N'TRANSACTION_SETTLEMENT'
+          AND (
+            sales_order.[deposit_paid_at] IS NULL
+            OR payment.[received_at] > sales_order.[deposit_paid_at]
+          );
       END
     `);
   }
@@ -3088,6 +3190,7 @@ export class MssqlStoreService {
           FROM [dbo].[pos_payment] AS payment
           WHERE payment.[pos_transaction_id] = txn.[id]
             AND payment.[method] = N'CASH'
+            AND COALESCE(payment.[received_shift_id], txn.[shift_id]) = txn.[shift_id]
         ) THEN 1 ELSE 0 END AS [has_cash_payment]
        FROM [dbo].[pos_transaction] AS txn
        WHERE txn.[shift_id] = @shiftId
@@ -3128,8 +3231,7 @@ export class MssqlStoreService {
          FROM [dbo].[pos_payment] AS payment
          INNER JOIN [dbo].[pos_transaction] AS txn
            ON txn.[id] = payment.[pos_transaction_id]
-         WHERE txn.[shift_id] = @shiftId
-           AND txn.[status] = N'COMPLETED'
+         WHERE COALESCE(payment.[received_shift_id], txn.[shift_id]) = @shiftId
          UNION ALL
          SELECT
            N'ACCOUNT_PAYMENT' AS [transaction_type],
@@ -8617,6 +8719,54 @@ export class MssqlStoreService {
        ORDER BY txn.[completed_at] DESC, txn.[transaction_no] DESC`,
       salesParams,
     );
+    const tenderWhere = ["1 = 1"];
+    const tenderParams: Record<string, unknown> = {};
+
+    if (dateFrom) {
+      tenderWhere.push("payment.[received_at] >= @dateFrom");
+      tenderParams.dateFrom = dateFrom;
+    }
+
+    if (dateTo) {
+      tenderWhere.push("payment.[received_at] <= @dateTo");
+      tenderParams.dateTo = dateTo;
+    }
+
+    if (cashierCode) {
+      tenderWhere.push(
+        "COALESCE(payment.[received_cashier_code], txn.[cashier_code], shift.[cashier_code]) = @cashierCode",
+      );
+      tenderParams.cashierCode = cashierCode;
+    }
+
+    if (shiftId) {
+      tenderWhere.push(
+        "COALESCE(payment.[received_shift_id], txn.[shift_id]) = @shiftId",
+      );
+      tenderParams.shiftId = shiftId;
+    }
+
+    if (customerQuery) {
+      tenderWhere.push(
+        "(UPPER(ISNULL(customer.[customer_no], N'')) LIKE @customerQuery OR UPPER(ISNULL(customer.[full_name], N'')) LIKE @customerQuery)",
+      );
+      tenderParams.customerQuery = `%${customerQuery}%`;
+    }
+
+    if (productQuery) {
+      tenderWhere.push(
+        `EXISTS (
+          SELECT 1
+          FROM [dbo].[pos_transaction_line] AS line_filter
+          WHERE line_filter.[pos_transaction_id] = txn.[id]
+            AND (
+              UPPER(line_filter.[product_code_snapshot]) LIKE @productQuery
+              OR UPPER(line_filter.[product_name_snapshot]) LIKE @productQuery
+            )
+        )`,
+      );
+      tenderParams.productQuery = `%${productQuery}%`;
+    }
     const tenderResult = await this.query<ReportTenderRow>(
       `SELECT
         [method],
@@ -8642,11 +8792,11 @@ export class MssqlStoreService {
           ON customer.[id] = txn.[customer_id]
         LEFT JOIN [dbo].[pos_shift] AS shift
           ON shift.[id] = txn.[shift_id]
-        WHERE ${salesWhere.join(" AND ")}
+        WHERE ${tenderWhere.join(" AND ")}
        ) AS tender_source
        GROUP BY [method], [tender_method_code], [tender_method_name]
        ORDER BY SUM([net_amount]) DESC, [method] ASC`,
-      salesParams,
+      tenderParams,
     );
 
     const accountWhere = ["1 = 1"];
@@ -9352,6 +9502,11 @@ export class MssqlStoreService {
         [method],
         [amount],
         [reference],
+        [payment_purpose],
+        [received_shift_id],
+        [received_shift_no],
+        [received_terminal_code],
+        [received_cashier_code],
         [received_at]
        FROM [dbo].[pos_payment]
        WHERE [pos_transaction_id] = @transactionId
@@ -9819,6 +9974,11 @@ export class MssqlStoreService {
         method: payment.method,
         amount: Number(asNumber(payment.amount).toFixed(2)),
         reference: payment.reference,
+        paymentPurpose: payment.payment_purpose,
+        receivedShiftId: payment.received_shift_id,
+        receivedShiftNo: payment.received_shift_no,
+        receivedTerminalCode: payment.received_terminal_code,
+        receivedCashierCode: payment.received_cashier_code,
         receivedAt: payment.received_at,
       })),
     };
@@ -9921,6 +10081,11 @@ export class MssqlStoreService {
         method: payment.method,
         amount: Number(asNumber(payment.amount).toFixed(2)),
         reference: payment.reference,
+        paymentPurpose: payment.payment_purpose,
+        receivedShiftId: payment.received_shift_id,
+        receivedShiftNo: payment.received_shift_no,
+        receivedTerminalCode: payment.received_terminal_code,
+        receivedCashierCode: payment.received_cashier_code,
         receivedAt: payment.received_at,
       })),
     };
@@ -10033,6 +10198,11 @@ export class MssqlStoreService {
         method: payment.method,
         amount: Number(asNumber(payment.amount).toFixed(2)),
         reference: payment.reference,
+        paymentPurpose: payment.payment_purpose,
+        receivedShiftId: payment.received_shift_id,
+        receivedShiftNo: payment.received_shift_no,
+        receivedTerminalCode: payment.received_terminal_code,
+        receivedCashierCode: payment.received_cashier_code,
         receivedAt: payment.received_at,
       })),
     };
@@ -10437,10 +10607,17 @@ export class MssqlStoreService {
     input: StoreCreateSalesOrderRequest | null = {},
   ): Promise<StoreSyncActionResult> {
     input ??= {};
-    await this.requireActiveOperatorSession({
+    const operatorSession = await this.requireActiveOperatorSession({
       permissionCodes: ["pos.sale.process"],
       purpose: "creating a sales order from the active basket",
     });
+    const openShift = await this.getOpenShiftRow();
+
+    if (!openShift) {
+      throw new Error(
+        "Open a cashier shift before creating a sales order on this terminal.",
+      );
+    }
 
     const timestamp = isoNow();
     const basket = await this.requireActiveBasket();
@@ -10605,6 +10782,8 @@ export class MssqlStoreService {
         `Flash ERP needs a reference for ${depositTender.tenderMethodName}.`,
       );
     }
+    const depositPaymentId =
+      depositAmount > 0 && depositTender ? randomUUID() : null;
 
     const payload: StoreSalesOrderRecordedPayload = {
       orderId,
@@ -10616,6 +10795,13 @@ export class MssqlStoreService {
       customerId: refreshedBasket.customer_id,
       customerNo: refreshedBasket.customer_no,
       customerName: refreshedBasket.customer_name,
+      subtotalAmount: Number(
+        asNumber(refreshedBasket.subtotal_amount).toFixed(2),
+      ),
+      discountAmount: Number(
+        asNumber(refreshedBasket.discount_amount).toFixed(2),
+      ),
+      taxAmount: Number(asNumber(refreshedBasket.tax_amount).toFixed(2)),
       totalAmount,
       depositAmount,
       balanceAmount,
@@ -10633,6 +10819,32 @@ export class MssqlStoreService {
       fulfilledAt: null,
       cancelledAt: null,
       lines: this.toSalesOrderPayloadLines(lines),
+      payments:
+        depositAmount > 0 && depositTender && depositPaymentId
+          ? [
+              {
+                paymentId: depositPaymentId,
+                method: depositTender.paymentMethod,
+                tenderMethodCode: depositTender.tenderMethodCode,
+                tenderMethodName: depositTender.tenderMethodName,
+                bankAccountId: null,
+                bankCode: null,
+                bankName: null,
+                bankBranchCode: null,
+                bankBranchName: null,
+                bankAccountNumber: null,
+                bankAccountName: null,
+                amount: depositAmount,
+                reference: depositReference ?? `DEP-${orderNo}`,
+                paymentPurpose: "SALES_ORDER_DEPOSIT",
+                receivedShiftId: openShift.id,
+                receivedShiftNo: openShift.shift_no,
+                receivedTerminalCode: terminalCode,
+                receivedCashierCode: operatorSession.loginId,
+                receivedAt: timestamp,
+              },
+            ]
+          : [],
     };
 
     await this.withTransaction(async (transaction) => {
@@ -10721,8 +10933,13 @@ export class MssqlStoreService {
             [tender_method_code],
             [tender_method_name],
             [method],
+            [payment_purpose],
             [amount],
             [reference],
+            [received_shift_id],
+            [received_shift_no],
+            [received_terminal_code],
+            [received_cashier_code],
             [received_at]
           ) VALUES (
             @paymentId,
@@ -10730,18 +10947,27 @@ export class MssqlStoreService {
             @tenderMethodCode,
             @tenderMethodName,
             @method,
+            N'SALES_ORDER_DEPOSIT',
             @amount,
             @reference,
+            @receivedShiftId,
+            @receivedShiftNo,
+            @receivedTerminalCode,
+            @receivedCashierCode,
             @receivedAt
           )`,
           {
-            paymentId: randomUUID(),
+            paymentId: depositPaymentId,
             transactionId: refreshedBasket.id,
             tenderMethodCode: depositTender.tenderMethodCode,
             tenderMethodName: depositTender.tenderMethodName,
             method: depositTender.paymentMethod,
             amount: depositAmount,
             reference: depositReference ?? `DEP-${orderNo}`,
+            receivedShiftId: openShift.id,
+            receivedShiftNo: openShift.shift_no,
+            receivedTerminalCode: terminalCode,
+            receivedCashierCode: operatorSession.loginId,
             receivedAt: timestamp,
           },
           transaction,
@@ -13279,12 +13505,18 @@ export class MssqlStoreService {
         bankAccountName: payment.bank_account_name,
         amount: Number(asNumber(payment.amount).toFixed(2)),
         reference: payment.reference,
+        paymentPurpose: payment.payment_purpose,
+        receivedShiftId: payment.received_shift_id,
+        receivedShiftNo: payment.received_shift_no,
+        receivedTerminalCode: payment.received_terminal_code,
+        receivedCashierCode: payment.received_cashier_code,
         receivedAt: payment.received_at,
       }));
     const combinedPaymentPayloads: StorePosTransactionCompletedPayload["payments"] =
       [
         ...existingPaymentPayloads,
-        ...checkoutPayments.payments.map((payment) => ({
+        ...checkoutPayments.payments.map(
+          (payment): StorePosTransactionCompletedPayload["payments"][number] => ({
           paymentId: payment.paymentId,
           method: payment.method,
           tenderMethodCode: payment.tenderMethodCode,
@@ -13298,8 +13530,16 @@ export class MssqlStoreService {
           bankAccountName: payment.bankAccountName,
           amount: payment.amount,
           reference: payment.reference,
+          paymentPurpose: openSalesOrder
+            ? "SALES_ORDER_BALANCE"
+            : "TRANSACTION_SETTLEMENT",
+          receivedShiftId: shift.id,
+          receivedShiftNo: shift.shift_no,
+          receivedTerminalCode: terminalCode,
+          receivedCashierCode: saleCashierCode,
           receivedAt: payment.receivedAt,
-        })),
+          }),
+        ),
       ];
     const paidAmount = Number(
       combinedPaymentPayloads
@@ -13558,8 +13798,13 @@ export class MssqlStoreService {
             [bank_account_number],
             [bank_account_name],
             [method],
+            [payment_purpose],
             [amount],
             [reference],
+            [received_shift_id],
+            [received_shift_no],
+            [received_terminal_code],
+            [received_cashier_code],
             [received_at]
           ) VALUES (
             @paymentId,
@@ -13574,8 +13819,13 @@ export class MssqlStoreService {
             @bankAccountNumber,
             @bankAccountName,
             @method,
+            @paymentPurpose,
             @amount,
             @reference,
+            @receivedShiftId,
+            @receivedShiftNo,
+            @receivedTerminalCode,
+            @receivedCashierCode,
             @receivedAt
           )`,
           {
@@ -13591,8 +13841,15 @@ export class MssqlStoreService {
             bankAccountNumber: payment.bankAccountNumber,
             bankAccountName: payment.bankAccountName,
             method: payment.method,
+            paymentPurpose: openSalesOrder
+              ? "SALES_ORDER_BALANCE"
+              : "TRANSACTION_SETTLEMENT",
             amount: payment.amount,
             reference: payment.reference,
+            receivedShiftId: shift.id,
+            receivedShiftNo: shift.shift_no,
+            receivedTerminalCode: terminalCode,
+            receivedCashierCode: saleCashierCode,
             receivedAt: payment.receivedAt,
           },
           transaction,

@@ -672,6 +672,16 @@ export async function getEnterpriseOperationsDashboard(
     },
     ...transactionDateWhere
   };
+  const paymentWhere: Prisma.PosPaymentWhereInput = {
+    posTransaction: {
+      retailOrgId: enterpriseNode.retailOrgId,
+      deletedAt: null,
+      storeId: {
+        in: salesScopedStoreIds
+      }
+    },
+    ...(transactionDateFilter ? { receivedAt: transactionDateFilter } : {})
+  };
   const allShopTransactionWhere: Prisma.PosTransactionWhereInput = {
     retailOrgId: enterpriseNode.retailOrgId,
     status: PosTransactionStatus.COMPLETED,
@@ -872,9 +882,7 @@ export async function getEnterpriseOperationsDashboard(
     }),
     prisma.posPayment.groupBy({
       by: ["method", "tenderMethodCodeSnapshot", "tenderMethodNameSnapshot"],
-      where: {
-        posTransaction: transactionWhere
-      },
+      where: paymentWhere,
       _count: {
         _all: true
       },

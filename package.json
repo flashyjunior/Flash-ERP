@@ -31,6 +31,7 @@
     "cert:hardware": "tsx scripts/desktop-hardware-certification-gate.ts",
     "acceptance:rms": "tsx scripts/rms-acceptance-gates.ts",
     "acceptance:sync-hardening": "tsx scripts/sync-hardening-gates.ts",
+    "acceptance:sales-order-payments": "node --experimental-sqlite --import tsx scripts/sales-order-payment-attribution-gate.ts",
     "acceptance:desktop-stability": "tsx scripts/desktop-stability-gates.ts",
     "acceptance:parity": "tsx scripts/rms-parity-closure-gates.ts && npm run acceptance:online-store-parity",
     "acceptance:online-store-parity": "tsx scripts/online-store-desktop-parity-gate.ts",

@@ -89,6 +89,11 @@ export type SyncPaymentMethod =
   | "GIFT_CARD"
   | "OTHER";
 
+export type SyncPosPaymentPurpose =
+  | "TRANSACTION_SETTLEMENT"
+  | "SALES_ORDER_DEPOSIT"
+  | "SALES_ORDER_BALANCE";
+
 export type SyncInventoryMovementType =
   | "OPENING_BALANCE"
   | "GOODS_RECEIPT"
@@ -169,6 +174,11 @@ export type StorePosPaymentPayload = {
   bankAccountName?: string | null;
   amount: number;
   reference: string | null;
+  paymentPurpose?: SyncPosPaymentPurpose;
+  receivedShiftId?: string | null;
+  receivedShiftNo?: string | null;
+  receivedTerminalCode?: string | null;
+  receivedCashierCode?: string | null;
   receivedAt: string;
 };
 
@@ -266,6 +276,9 @@ export type StoreSalesOrderRecordedPayload = {
   customerId: string | null;
   customerNo: string | null;
   customerName: string | null;
+  subtotalAmount?: number;
+  discountAmount?: number;
+  taxAmount?: number;
   totalAmount: number;
   depositAmount?: number;
   balanceAmount?: number;
@@ -283,6 +296,7 @@ export type StoreSalesOrderRecordedPayload = {
   fulfilledAt: string | null;
   cancelledAt: string | null;
   lines?: StoreSalesOrderLinePayload[];
+  payments?: StorePosPaymentPayload[];
 };
 
 export type StoreSalesOrderLinePayload = {

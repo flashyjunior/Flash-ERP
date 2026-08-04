@@ -740,8 +740,13 @@ CREATE TABLE IF NOT EXISTS pos_payment (
   bank_account_number TEXT,
   bank_account_name TEXT,
   method TEXT NOT NULL,
+  payment_purpose TEXT NOT NULL DEFAULT 'TRANSACTION_SETTLEMENT',
   amount NUMERIC NOT NULL,
   reference TEXT,
+  received_shift_id TEXT,
+  received_shift_no TEXT,
+  received_terminal_code TEXT,
+  received_cashier_code TEXT,
   received_at TEXT NOT NULL
 );
 
