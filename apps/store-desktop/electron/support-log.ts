@@ -1,8 +1,16 @@
 import { app } from "electron";
-import { appendFileSync, mkdirSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 
 let supportLoggingInstalled = false;
+const maxSupportLogBytes = 5 * 1024 * 1024;
 
 export function getDesktopSupportLogPath() {
   const logDirectory = path.join(app.getPath("userData"), "logs");
@@ -42,12 +50,23 @@ function serializeSupportLogValue(value: unknown) {
 
 export function writeDesktopSupportLog(level: string, ...values: unknown[]) {
   try {
+    const supportLogPath = getDesktopSupportLogPath();
+
+    if (
+      existsSync(supportLogPath) &&
+      statSync(supportLogPath).size >= maxSupportLogBytes
+    ) {
+      const archivedLogPath = `${supportLogPath}.1`;
+      rmSync(archivedLogPath, { force: true });
+      renameSync(supportLogPath, archivedLogPath);
+    }
+
     const line = [
       new Date().toISOString(),
       level.toUpperCase(),
       values.map((value) => serializeSupportLogValue(value)).join(" ")
     ].join(" | ");
-    appendFileSync(getDesktopSupportLogPath(), `${line}\n`, "utf8");
+    appendFileSync(supportLogPath, `${line}\n`, "utf8");
   } catch {
     // Logging must never become the reason the desktop cannot start.
   }

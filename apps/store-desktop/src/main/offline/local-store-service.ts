@@ -68,7 +68,13 @@ import {
   normalizeLoyaltyPolicy,
   shouldMoveToDeadLetter,
 } from "@flash-erp/sync-core";
-import { deriveRetailUserCapabilities } from "@flash-erp/domain";
+import {
+  allocateInventoryBatchesFefo,
+  deriveInventoryBatchStatus,
+  deriveRetailUserCapabilities,
+  inventoryBatchDaysUntilExpiry,
+  validateInventoryBatchReceipt,
+} from "@flash-erp/domain";
 
 import {
   computeNextStoreSyncAt,
@@ -198,6 +204,7 @@ import type {
   StoreProductSalesReportRow,
   StoreInventoryReportRow,
   StoreBankingReportRow,
+  StoreInventoryBatchAllocation,
 } from "../../shared/desktop-runtime.js";
 import { localStoreSchemaSql } from "./local-store-schema.js";
 import {
@@ -417,6 +424,8 @@ const productSnapshotColumns = [
   "tax_rate_percent",
   "tax_inclusive",
   "track_inventory",
+  "track_expiry",
+  "shelf_life_days",
   "is_serialized",
   "track_size",
   "track_color",
@@ -825,6 +834,10 @@ type BasketLineRow = {
   variant_attributes_snapshot: string | null;
   line_note: string | null;
   serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
+  batch_no: string | null;
+  manufactured_at: string | null;
+  expiry_date: string | null;
   quantity: number | string;
   unit_price: number | string;
   discount_amount: number | string;
@@ -917,6 +930,8 @@ type ProductRow = {
   tax_rate_percent: number | string | null;
   tax_inclusive: number | string;
   track_inventory: number | string;
+  track_expiry: number | string;
+  shelf_life_days: number | string | null;
   is_serialized: number | string;
   track_size: number | string;
   track_color: number | string;
@@ -1079,6 +1094,7 @@ type InventoryBrowseRow = {
   safety_stock_level: number | string | null;
   unit_price: number | string;
   is_serialized: number | string;
+  track_expiry: number | string;
   updated_at: string;
 };
 
@@ -1134,6 +1150,7 @@ type PurchaseOrderLineSnapshotRow = {
   category_name: string | null;
   subcategory: string | null;
   is_serialized: number | string;
+  track_expiry: number | string;
   ordered_quantity: number | string;
   received_quantity: number | string;
   exception_quantity: number | string;
@@ -1174,6 +1191,9 @@ type LocalGoodsReceiptLineRow = {
   quantity: number | string;
   unit_cost: number | string | null;
   serial_numbers_json: string | null;
+  batch_no: string | null;
+  manufactured_at: string | null;
+  expiry_date: string | null;
 };
 
 type LocalGoodsReceiptExceptionRow = {
@@ -1230,6 +1250,7 @@ type LocalSupplierReturnLineRow = {
   quantity: number | string;
   unit_cost: number | string | null;
   serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
 };
 
 type InterStoreTransferSnapshotRow = {
@@ -1257,6 +1278,7 @@ type InterStoreTransferSnapshotRow = {
   category_name: string | null;
   subcategory: string | null;
   is_serialized: number | string;
+  track_expiry: number | string;
   requested_quantity: number | string;
   issued_quantity: number | string;
   received_quantity: number | string;
@@ -1265,6 +1287,8 @@ type InterStoreTransferSnapshotRow = {
   unit_cost: number | string | null;
   issued_serial_numbers_json: string | null;
   received_serial_numbers_json: string | null;
+  issued_batch_allocations_json: string | null;
+  received_batch_allocations_json: string | null;
   request_note: string | null;
   issue_note: string | null;
   receipt_note: string | null;
@@ -1346,6 +1370,8 @@ type StockCountSessionRow = {
   variance_quantity: number | string;
   previous_serial_numbers_json: string | null;
   counted_serial_numbers_json: string | null;
+  previous_batch_quantities_json: string | null;
+  counted_batch_quantities_json: string | null;
   note: string | null;
   operator_name: string;
   submitted_at: string | null;
@@ -1498,6 +1524,11 @@ type SyncDeadLetterRow = {
   event_type: string;
   node_code: string | null;
   attempt_count: number | string;
+  failure_kind: string | null;
+  last_http_status: number | string | null;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
+  sync_run_id: string | null;
   payload_json: string;
   error_message: string | null;
   created_at: string;
@@ -1852,6 +1883,16 @@ function asBooleanFlag(value: number | string | bigint | null | undefined) {
   return asNumber(value) > 0;
 }
 
+function tracksInventoryForSale(row: {
+  product_type?: string | null;
+  track_inventory?: number | string | bigint | null;
+}) {
+  return (
+    asBooleanFlag(row.track_inventory) &&
+    row.product_type?.trim().toUpperCase() !== "SERVICE"
+  );
+}
+
 function formatLocalLocationDefaults(input: {
   defaults: string | null | undefined;
   is_sales_default: number | string | bigint | null | undefined;
@@ -1937,6 +1978,49 @@ function readSerializedLineNumbers(value: string | null | undefined) {
 
 function writeSerializedLineNumbers(serialNumbers: string[]) {
   return serialNumbers.length > 0 ? JSON.stringify(serialNumbers) : null;
+}
+
+function readInventoryBatchAllocations(value: string | null | undefined) {
+  if (!value) {
+    return [] as StoreInventoryBatchAllocation[];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      return [] as StoreInventoryBatchAllocation[];
+    }
+
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return [];
+      }
+
+      const row = entry as Record<string, unknown>;
+      const batchNo = typeof row.batchNo === "string" ? row.batchNo.trim().toUpperCase() : "";
+      const expiryDate = typeof row.expiryDate === "string" ? row.expiryDate.trim() : "";
+      const quantity = Number(row.quantity);
+
+      if (!batchNo || !expiryDate || !Number.isFinite(quantity) || quantity <= 0) {
+        return [];
+      }
+
+      return [{
+        batchId: typeof row.batchId === "string" ? row.batchId : null,
+        batchNo,
+        manufacturedAt: typeof row.manufacturedAt === "string" ? row.manufacturedAt : null,
+        expiryDate,
+        quantity: Number(quantity.toFixed(3)),
+      }];
+    });
+  } catch {
+    return [] as StoreInventoryBatchAllocation[];
+  }
+}
+
+function writeInventoryBatchAllocations(allocations: StoreInventoryBatchAllocation[]) {
+  return allocations.length > 0 ? JSON.stringify(allocations) : null;
 }
 
 function readStringArray(value: string | null | undefined) {
@@ -3526,6 +3610,9 @@ export class LocalStoreService {
       const currencyCode = optionalSetupText(input.currencyCode)?.toUpperCase();
       const timezone = optionalSetupText(input.timezone);
       const companyLogoUrl = optionalSetupText(input.companyLogoUrl);
+      const loginBackgroundImageUrl = optionalSetupText(
+        input.loginBackgroundImageUrl,
+      );
       const receiptHeader = optionalSetupText(input.receiptHeader);
       const receiptFooter = optionalSetupText(input.receiptFooter);
 
@@ -3557,11 +3644,109 @@ export class LocalStoreService {
           input.showCriticalStocksOnStartup ? "1" : "0",
         );
       }
+      if (typeof input.showExpiringBatchesOnStartup === "boolean") {
+        this.setMetadata(
+          "show_expiring_batches_on_startup",
+          input.showExpiringBatchesOnStartup ? "1" : "0",
+        );
+      }
+      if (
+        (input.expiryAlertLeadDays !== undefined &&
+          input.expiryAlertLeadDays !== null) ||
+        (input.expiryCriticalDays !== undefined &&
+          input.expiryCriticalDays !== null)
+      ) {
+        const currentMetadata = this.getMetadata();
+        const expiryAlertLeadDays = normalizePolicyInteger(
+          input.expiryAlertLeadDays ?? currentMetadata.expiry_alert_lead_days,
+          30,
+          1,
+          3650,
+        );
+        const expiryCriticalDays = normalizePolicyInteger(
+          input.expiryCriticalDays ?? currentMetadata.expiry_critical_days,
+          7,
+          0,
+          expiryAlertLeadDays,
+        );
+        this.setMetadata("expiry_alert_lead_days", String(expiryAlertLeadDays));
+        this.setMetadata("expiry_critical_days", String(expiryCriticalDays));
+      }
+
+      const booleanSettings = [
+        ["allow_negative_inventory", input.allowNegativeInventory],
+        ["allow_offline_sales", input.allowOfflineSales],
+        ["auto_print_receipts", input.autoPrintReceipts],
+        ["enforce_serialized_scan_at_pos", input.enforceSerializedScanAtPos],
+        ["require_customer_for_credit_sales", input.requireCustomerForCreditSales],
+        [
+          "require_supervisor_for_receiptless_return",
+          input.requireSupervisorForReceiptlessReturn,
+        ],
+      ] as const;
+
+      for (const [key, value] of booleanSettings) {
+        if (typeof value === "boolean") {
+          this.setMetadata(key, value ? "1" : "0");
+        }
+      }
+
+      if (
+        input.defaultReceiptSearchDays !== undefined &&
+        input.defaultReceiptSearchDays !== null
+      ) {
+        this.setMetadata(
+          "default_receipt_search_days",
+          String(
+            normalizePolicyInteger(input.defaultReceiptSearchDays, 30, 1, 365),
+          ),
+        );
+      }
+
+      if (
+        input.shiftFloatPromptAmount !== undefined &&
+        input.shiftFloatPromptAmount !== null
+      ) {
+        this.setMetadata(
+          "shift_float_prompt_amount",
+          Math.max(0, Number(input.shiftFloatPromptAmount) || 0).toFixed(2),
+        );
+      }
+
+      if (Array.isArray(input.productSizes)) {
+        this.setMetadata(
+          "product_sizes_json",
+          JSON.stringify(optionalSetupStringList(input.productSizes) ?? []),
+        );
+      }
+
+      if (Array.isArray(input.posDiscountRates)) {
+        this.setMetadata(
+          "pos_discount_rates_json",
+          JSON.stringify(optionalSetupNumberList(input.posDiscountRates) ?? []),
+        );
+      }
+
+      if (Array.isArray(input.posExpressChargeRates)) {
+        this.setMetadata(
+          "pos_express_charge_rates_json",
+          JSON.stringify(optionalSetupNumberList(input.posExpressChargeRates) ?? []),
+        );
+      }
 
       if (companyLogoUrl) {
         this.setMetadata("local_company_logo_url", companyLogoUrl);
       } else if (input.companyLogoUrl !== undefined) {
         this.deleteMetadata("local_company_logo_url");
+      }
+
+      if (loginBackgroundImageUrl) {
+        this.setMetadata(
+          "login_background_image_url",
+          loginBackgroundImageUrl,
+        );
+      } else if (input.loginBackgroundImageUrl !== undefined) {
+        this.deleteMetadata("login_background_image_url");
       }
 
       if (receiptHeader) {
@@ -4315,6 +4500,7 @@ export class LocalStoreService {
               ? asBooleanFlag(taxProfile.is_tax_inclusive)
               : false,
             trackInventory: input.trackInventory !== false,
+            trackExpiry: input.trackExpiry === true,
             isSerialized: input.isSerialized === true,
             trackSize: input.trackSize === true,
             trackColor: input.trackColor === true,
@@ -4333,7 +4519,10 @@ export class LocalStoreService {
               input.safetyStockLevel == null
                 ? null
                 : normalizeSetupNumber(input.safetyStockLevel, 0, 3),
-            shelfLifeDays: null,
+            shelfLifeDays:
+              input.shelfLifeDays == null
+                ? null
+                : Math.trunc(normalizeSetupNumber(input.shelfLifeDays, 0, 0)),
             weightKg: null,
             volumeLitres: null,
             unitPrice: normalizeSetupNumber(input.unitPrice, 0, 2),
@@ -4880,6 +5069,11 @@ export class LocalStoreService {
           event_type,
           target_node_code AS node_code,
           attempt_count,
+          failure_kind,
+          last_http_status,
+          last_attempt_at,
+          next_retry_at,
+          sync_run_id,
           payload_json,
           error_message,
           created_at,
@@ -4896,6 +5090,11 @@ export class LocalStoreService {
           event_type,
           source_node_code AS node_code,
           0 AS attempt_count,
+          NULL AS failure_kind,
+          NULL AS last_http_status,
+          NULL AS last_attempt_at,
+          NULL AS next_retry_at,
+          NULL AS sync_run_id,
           payload_json,
           error_message,
           received_at AS created_at,
@@ -4917,6 +5116,11 @@ export class LocalStoreService {
           event_type,
           target_node_code AS node_code,
           attempt_count,
+          failure_kind,
+          last_http_status,
+          last_attempt_at,
+          next_retry_at,
+          sync_run_id,
           payload_json,
           error_message,
           created_at,
@@ -4934,6 +5138,11 @@ export class LocalStoreService {
           event_type,
           source_node_code AS node_code,
           0 AS attempt_count,
+          NULL AS failure_kind,
+          NULL AS last_http_status,
+          NULL AS last_attempt_at,
+          NULL AS next_retry_at,
+          NULL AS sync_run_id,
           payload_json,
           error_message,
           received_at AS created_at,
@@ -5138,6 +5347,14 @@ export class LocalStoreService {
           eventType: row.event_type,
           nodeCode: row.node_code,
           attemptCount: Math.trunc(asNumber(row.attempt_count)),
+          failureKind: row.failure_kind,
+          lastHttpStatus:
+            row.last_http_status == null
+              ? null
+              : Math.trunc(asNumber(row.last_http_status)),
+          lastAttemptAt: row.last_attempt_at,
+          nextRetryAt: row.next_retry_at,
+          syncRunId: row.sync_run_id,
           errorMessage: row.error_message,
           diagnosticSummary: this.describeSyncEventPayload(
             row.aggregate_type,
@@ -5158,6 +5375,14 @@ export class LocalStoreService {
         eventType: row.event_type,
         nodeCode: row.node_code,
         attemptCount: Math.trunc(asNumber(row.attempt_count)),
+        failureKind: row.failure_kind,
+        lastHttpStatus:
+          row.last_http_status == null
+            ? null
+            : Math.trunc(asNumber(row.last_http_status)),
+        lastAttemptAt: row.last_attempt_at,
+        nextRetryAt: row.next_retry_at,
+        syncRunId: row.sync_run_id,
         summary: this.describeSyncEventPayload(
           row.aggregate_type,
           row.event_type,
@@ -5661,6 +5886,25 @@ export class LocalStoreService {
           taxable: asBooleanFlag(row.taxable),
           taxProfileCode: row.tax_profile_code,
           trackInventory: asBooleanFlag(row.track_inventory),
+          trackExpiry: asBooleanFlag(row.track_expiry),
+          shelfLifeDays:
+            row.shelf_life_days === null
+              ? null
+              : Math.trunc(asNumber(row.shelf_life_days)),
+          earliestExpiryDate:
+            salesLocationCode === null
+              ? null
+              : this.getInventoryBatchRows(salesLocationCode, row.product_code)[0]
+                  ?.expiry_date ?? null,
+          expiringQuantity:
+            salesLocationCode === null
+              ? 0
+              : Number(
+                  this.getInventoryBatchRows(salesLocationCode, row.product_code)
+                    .filter((batch) => inventoryBatchDaysUntilExpiry(batch.expiry_date) <= 30)
+                    .reduce((sum, batch) => sum + asNumber(batch.quantity_on_hand), 0)
+                    .toFixed(3),
+                ),
           trackSize: asBooleanFlag(row.track_size),
           trackColor: asBooleanFlag(row.track_color),
           primaryImageUrl: row.primary_image_url,
@@ -5726,9 +5970,10 @@ export class LocalStoreService {
       input?.categoryCode?.trim().toUpperCase() || null;
     const serializedOnly = input?.serializedOnly === true;
     const criticalOnly = input?.criticalOnly === true;
+    const expiringOnly = input?.expiringOnly === true;
     const limit = Math.min(
       Math.max(input?.limit ?? 12, 1),
-      criticalOnly ? 100 : 30,
+      criticalOnly || expiringOnly || input?.forStartupAlert === true ? 100 : 30,
     );
     const getCriticalStockFloor = (row: InventoryBrowseRow) => {
       const thresholds = [
@@ -5778,6 +6023,7 @@ export class LocalStoreService {
           product.safety_stock_level AS safety_stock_level,
           product.unit_price AS unit_price,
           product.is_serialized AS is_serialized,
+          product.track_expiry AS track_expiry,
           COALESCE(balance.updated_at, product.updated_at) AS updated_at
         FROM product_snapshot AS product
         LEFT JOIN inventory_location_balance AS balance
@@ -5839,6 +6085,21 @@ export class LocalStoreService {
         }
       }
 
+      if (expiringOnly) {
+        const hasExpiringBatch =
+          asBooleanFlag(row.track_expiry) &&
+          this.getInventoryBatchRows(row.location_code, row.product_code).some(
+            (batch) => {
+              const days = inventoryBatchDaysUntilExpiry(batch.expiry_date);
+              return asNumber(batch.quantity_on_hand) > 0 && days >= 0 && days <= 30;
+            },
+          );
+
+        if (!hasExpiringBatch) {
+          return false;
+        }
+      }
+
       if (!normalizedQuery) {
         return true;
       }
@@ -5875,11 +6136,30 @@ export class LocalStoreService {
 
         return left.product_name.localeCompare(right.product_name);
       });
+    } else if (expiringOnly) {
+      filteredRows.sort((left, right) => {
+        const leftExpiry = this.getInventoryBatchRows(
+          left.location_code,
+          left.product_code,
+        )[0]?.expiry_date;
+        const rightExpiry = this.getInventoryBatchRows(
+          right.location_code,
+          right.product_code,
+        )[0]?.expiry_date;
+        return (leftExpiry ?? "9999-12-31").localeCompare(
+          rightExpiry ?? "9999-12-31",
+        );
+      });
     }
 
     return filteredRows
       .slice(0, limit)
-      .map<StoreInventoryBrowseItem>((row) => ({
+      .map<StoreInventoryBrowseItem>((row) => {
+        const batches = asBooleanFlag(row.track_expiry)
+          ? this.getInventoryBatchRows(row.location_code, row.product_code)
+          : [];
+
+        return {
         locationCode: row.location_code,
         locationName: row.location_name,
         productCode: row.product_code,
@@ -5907,8 +6187,27 @@ export class LocalStoreService {
             : Number(asNumber(row.safety_stock_level).toFixed(3)),
         unitPrice: Number(asNumber(row.unit_price).toFixed(2)),
         isSerialized: asBooleanFlag(row.is_serialized),
+        trackExpiry: asBooleanFlag(row.track_expiry),
+        earliestExpiryDate: batches[0]?.expiry_date ?? null,
+        expiringQuantity: Number(
+          batches
+            .filter((batch) => {
+              const days = inventoryBatchDaysUntilExpiry(batch.expiry_date);
+              return days >= 0 && days <= 30;
+            })
+            .reduce((sum, batch) => sum + asNumber(batch.quantity_on_hand), 0)
+            .toFixed(3),
+        ),
+        batchQuantities: batches.map((batch) => ({
+          batchId: batch.id,
+          batchNo: batch.batch_no,
+          manufacturedAt: batch.manufactured_at,
+          expiryDate: batch.expiry_date,
+          quantity: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+        })),
         updatedAt: row.updated_at,
-      }));
+        };
+      });
   }
 
   async lookupRemoteStoreInventory(
@@ -6164,6 +6463,7 @@ export class LocalStoreService {
                 category.category_name AS category_name,
                 line.subcategory AS subcategory,
                 line.is_serialized AS is_serialized,
+                line.track_expiry AS track_expiry,
                 line.ordered_quantity AS ordered_quantity,
                 line.received_quantity AS received_quantity,
                 line.exception_quantity AS exception_quantity,
@@ -6208,6 +6508,7 @@ export class LocalStoreService {
         categoryName: line.category_name,
         subcategory: line.subcategory,
         isSerialized: asBooleanFlag(line.is_serialized),
+        trackExpiry: asBooleanFlag(line.track_expiry),
         orderedQuantity,
         receivedQuantity,
         exceptionQuantity,
@@ -6372,7 +6673,8 @@ export class LocalStoreService {
             product.category_code,
             category.category_name,
             product.subcategory,
-            product.is_serialized
+            product.is_serialized,
+            product.track_expiry
           FROM product_snapshot AS product
           LEFT JOIN product_department_snapshot AS department
             ON department.department_code = product.department_code
@@ -6391,6 +6693,7 @@ export class LocalStoreService {
             category_name: string | null;
             subcategory: string | null;
             is_serialized: number | string;
+            track_expiry: number | string;
           }
         | undefined;
 
@@ -6439,6 +6742,7 @@ export class LocalStoreService {
         categoryName: line.product.category_name,
         subcategory: line.product.subcategory,
         isSerialized: asBooleanFlag(line.product.is_serialized),
+        trackExpiry: asBooleanFlag(line.product.track_expiry),
         orderedQuantity: line.orderedQuantity,
         receivedQuantity: 0,
         exceptionQuantity: 0,
@@ -6536,6 +6840,7 @@ export class LocalStoreService {
           category.category_name AS category_name,
           transfer.subcategory AS subcategory,
           transfer.is_serialized AS is_serialized,
+          transfer.track_expiry AS track_expiry,
           transfer.requested_quantity AS requested_quantity,
           transfer.issued_quantity AS issued_quantity,
           transfer.received_quantity AS received_quantity,
@@ -6544,6 +6849,8 @@ export class LocalStoreService {
           transfer.unit_cost AS unit_cost,
           transfer.issued_serial_numbers_json AS issued_serial_numbers_json,
           transfer.received_serial_numbers_json AS received_serial_numbers_json,
+          transfer.issued_batch_allocations_json AS issued_batch_allocations_json,
+          transfer.received_batch_allocations_json AS received_batch_allocations_json,
           transfer.request_note AS request_note,
           transfer.issue_note AS issue_note,
           transfer.receipt_note AS receipt_note,
@@ -6604,6 +6911,7 @@ export class LocalStoreService {
         categoryName: row.category_name,
         subcategory: row.subcategory,
         isSerialized: asBooleanFlag(row.is_serialized),
+        trackExpiry: asBooleanFlag(row.track_expiry),
         requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
         issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
         receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
@@ -6619,6 +6927,12 @@ export class LocalStoreService {
         ),
         receivedSerialNumbers: readSerializedLineNumbers(
           row.received_serial_numbers_json,
+        ),
+        issuedBatchAllocations: readInventoryBatchAllocations(
+          row.issued_batch_allocations_json,
+        ),
+        receivedBatchAllocations: readInventoryBatchAllocations(
+          row.received_batch_allocations_json,
         ),
         requestNote: row.request_note,
         issueNote: row.issue_note,
@@ -7446,17 +7760,38 @@ export class LocalStoreService {
         ).length,
         netSalesAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.totalAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.totalAmount)
+                  : row.totalAmount),
+              0,
+            )
             .toFixed(2),
         ),
         discountAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.discountAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.discountAmount)
+                  : row.discountAmount),
+              0,
+            )
             .toFixed(2),
         ),
         taxAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.taxAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.taxAmount)
+                  : row.taxAmount),
+              0,
+            )
             .toFixed(2),
         ),
         tenderedAmount: Number(
@@ -7888,6 +8223,7 @@ export class LocalStoreService {
             category_code,
             subcategory,
             is_serialized,
+            track_expiry,
             quantity,
             external_reference,
             note,
@@ -8078,6 +8414,13 @@ export class LocalStoreService {
       purpose: "saving a stock count session",
     });
     const timestamp = isoNow();
+    const requestedBatchQuantities = (input.batchQuantities ?? []).map((batch) => ({
+      batchId: batch.batchId ?? null,
+      batchNo: batch.batchNo?.trim().toUpperCase(),
+      manufacturedAt: batch.manufacturedAt?.trim() || null,
+      expiryDate: batch.expiryDate?.trim(),
+      quantity: Number(Number(batch.quantity).toFixed(3)),
+    }));
 
     if (!input.inventoryLocationCode?.trim()) {
       throw new Error("Choose a location before saving the local stock count.");
@@ -8179,9 +8522,84 @@ export class LocalStoreService {
             location.location_code,
           )
         : [];
+      const previousBatchQuantities = asBooleanFlag(product.track_expiry)
+        ? this.getInventoryBatchRows(
+            location.location_code,
+            product.product_code,
+          ).map((batch) => ({
+            batchId: batch.id,
+            batchNo: batch.batch_no,
+            manufacturedAt: batch.manufactured_at,
+            expiryDate: batch.expiry_date,
+            quantity: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+          }))
+        : [];
+      let countedBatchQuantities: StoreInventoryBatchAllocation[] = [];
+
+      if (asBooleanFlag(product.track_expiry)) {
+        const previousByBatchNo = new Map(
+          previousBatchQuantities.map((batch) => [batch.batchNo, batch] as const),
+        );
+        const seenBatchNos = new Set<string>();
+
+        countedBatchQuantities = requestedBatchQuantities.map((batch) => {
+          if (!batch.batchNo || !batch.expiryDate || !Number.isFinite(batch.quantity) || batch.quantity < 0) {
+            throw new Error(
+              `${product.product_name} needs a valid non-negative counted quantity for every batch.`,
+            );
+          }
+
+          if (seenBatchNos.has(batch.batchNo)) {
+            throw new Error(`${batch.batchNo} was entered more than once in this stock count.`);
+          }
+          seenBatchNos.add(batch.batchNo);
+
+          const previousBatch = previousByBatchNo.get(batch.batchNo);
+          if (!previousBatch) {
+            throw new Error(
+              `Batch ${batch.batchNo} is not registered for ${product.product_name} in ${location.location_code}. Receive it before counting it into stock.`,
+            );
+          }
+
+          if (previousBatch.expiryDate.slice(0, 10) !== batch.expiryDate.slice(0, 10)) {
+            throw new Error(
+              `Batch ${batch.batchNo} is registered with expiry ${previousBatch.expiryDate.slice(0, 10)}.`,
+            );
+          }
+
+          return { ...previousBatch, quantity: batch.quantity };
+        });
+
+        const omittedBatch = previousBatchQuantities.find(
+          (batch) => !seenBatchNos.has(batch.batchNo),
+        );
+        if (omittedBatch) {
+          throw new Error(
+            `Include batch ${omittedBatch.batchNo} in the count, using zero if no units remain.`,
+          );
+        }
+      } else if (requestedBatchQuantities.length > 0) {
+        throw new Error(`${product.product_name} is not configured for expiry batch tracking.`);
+      }
+
       const countedQuantity = asBooleanFlag(product.is_serialized)
         ? countedSerialNumbers.length
-        : requestedCountedQuantity;
+        : asBooleanFlag(product.track_expiry)
+          ? Number(
+              countedBatchQuantities
+                .reduce((sum, batch) => sum + batch.quantity, 0)
+                .toFixed(3),
+            )
+          : requestedCountedQuantity;
+
+      if (
+        asBooleanFlag(product.track_expiry) &&
+        Math.abs(countedQuantity - requestedCountedQuantity) > 0.0001
+      ) {
+        throw new Error(
+          `The batch count totals ${countedQuantity.toFixed(3)}, but the entered product count is ${requestedCountedQuantity.toFixed(3)}.`,
+        );
+      }
 
       if (asBooleanFlag(product.is_serialized)) {
         validateSerializedLineInput({
@@ -8272,12 +8690,14 @@ export class LocalStoreService {
             variance_quantity,
             previous_serial_numbers_json,
             counted_serial_numbers_json,
+            previous_batch_quantities_json,
+            counted_batch_quantities_json,
             note,
             operator_name,
             submitted_at,
             committed_at,
             updated_at
-          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
         )
         .run(
           sessionId,
@@ -8295,6 +8715,8 @@ export class LocalStoreService {
           varianceQuantity,
           writeSerializedLineNumbers(previousSerialNumbers),
           writeSerializedLineNumbers(countedSerialNumbers),
+          writeInventoryBatchAllocations(previousBatchQuantities),
+          writeInventoryBatchAllocations(countedBatchQuantities),
           note,
           operatorName,
           timestamp,
@@ -8360,6 +8782,8 @@ export class LocalStoreService {
             session.variance_quantity,
             session.previous_serial_numbers_json,
             session.counted_serial_numbers_json,
+            session.previous_batch_quantities_json,
+            session.counted_batch_quantities_json,
             session.note,
             session.operator_name,
             session.submitted_at,
@@ -8406,6 +8830,12 @@ export class LocalStoreService {
         ),
         countedSerialNumbers: readSerializedLineNumbers(
           session.counted_serial_numbers_json,
+        ),
+        previousBatchQuantities: readInventoryBatchAllocations(
+          session.previous_batch_quantities_json,
+        ),
+        countedBatchQuantities: readInventoryBatchAllocations(
+          session.counted_batch_quantities_json,
         ),
         operatorName: session.operator_name,
         note: session.note,
@@ -8500,6 +8930,8 @@ export class LocalStoreService {
             session.variance_quantity,
             session.previous_serial_numbers_json,
             session.counted_serial_numbers_json,
+            session.previous_batch_quantities_json,
+            session.counted_batch_quantities_json,
             session.note,
             session.operator_name,
             session.submitted_at,
@@ -8577,6 +9009,33 @@ export class LocalStoreService {
         }
       }
 
+      const previousBatchQuantities = readInventoryBatchAllocations(
+        session.previous_batch_quantities_json,
+      );
+      const countedBatchQuantities = readInventoryBatchAllocations(
+        session.counted_batch_quantities_json,
+      );
+
+      if (previousBatchQuantities.length > 0 || countedBatchQuantities.length > 0) {
+        const currentBatches = this.getInventoryBatchRows(
+          session.inventory_location_code,
+          session.product_code,
+        );
+        const currentByBatchNo = new Map(
+          currentBatches.map((batch) => [batch.batch_no, asNumber(batch.quantity_on_hand)] as const),
+        );
+        const changedBatch = previousBatchQuantities.find(
+          (batch) =>
+            Math.abs((currentByBatchNo.get(batch.batchNo) ?? 0) - batch.quantity) > 0.0001,
+        );
+
+        if (changedBatch) {
+          throw new Error(
+            `${session.session_no} can no longer be committed because batch ${changedBatch.batchNo} changed after the count was saved. Start a new count from the latest posture.`,
+          );
+        }
+      }
+
       const appliedCount = this.applyLocalCountVariance({
         referenceId: session.id,
         referenceLabel: session.session_no,
@@ -8586,6 +9045,35 @@ export class LocalStoreService {
         countedSerialNumbers,
         updatedAt: timestamp,
       });
+
+      for (const batch of countedBatchQuantities) {
+        const status = batch.quantity <= 0
+          ? "DEPLETED"
+          : inventoryBatchDaysUntilExpiry(batch.expiryDate, timestamp) < 0
+            ? "EXPIRED"
+            : "ACTIVE";
+        const result = this.db
+          .prepare(
+            `UPDATE inventory_batch_registry
+             SET quantity_on_hand = ?, status = ?, source_reference_type = 'STOCK_COUNT_SESSION',
+                 source_reference_id = ?, source_reference_label = ?, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(
+            batch.quantity,
+            status,
+            session.id,
+            session.session_no,
+            timestamp,
+            batch.batchId ?? null,
+          );
+
+        if (result.changes !== 1) {
+          throw new Error(
+            `Flash ERP could not update batch ${batch.batchNo} during ${session.session_no}.`,
+          );
+        }
+      }
 
       const ledgerEntryId = `inventory-count-session-${session.id}`;
       const payload: StoreInventoryLedgerRecordedPayload = {
@@ -10017,6 +10505,20 @@ export class LocalStoreService {
         quantity: normalizedQuantity,
         serialNumbers: requestedSerialNumbers,
       });
+      const preferredBatchId = optionalSetupText(input.preferredBatchId);
+      const preferredBatchAllocations =
+        lineIntent === "SALE" &&
+        tracksInventory &&
+        asBooleanFlag(match.track_expiry) &&
+        !deferInventoryValidation
+          ? this.allocateInventoryBatches(
+              salesLocationCode ?? this.getDefaultSalesLocationCode() ?? "",
+              match.product_code,
+              match.product_name,
+              normalizedQuantity,
+              preferredBatchId,
+            )
+          : [];
 
       if (validateSerialSelection && nextSerialNumbers.length > 0) {
         const activeBasketSerialKeys = new Set(
@@ -10089,7 +10591,7 @@ export class LocalStoreService {
 
       this.db
         .prepare(
-          "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+          "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
         )
         .run(
           randomUUID(),
@@ -10104,6 +10606,7 @@ export class LocalStoreService {
           variantAttributesSnapshot,
           lineNote,
           writeSerializedLineNumbers(nextSerialNumbers),
+          writeInventoryBatchAllocations(preferredBatchAllocations),
           normalizedQuantity,
           unitPrice,
           lineAmounts.taxAmount,
@@ -11326,8 +11829,17 @@ export class LocalStoreService {
       const totalAmount = Number(
         asNumber(refreshedBasket.total_amount).toFixed(2),
       );
+      const hasDepositPaymentRows =
+        Array.isArray(input.payments) && input.payments.length > 0;
       const requestedDepositAmount = Number(
-        Number(input.depositAmount ?? 0).toFixed(2),
+        (
+          hasDepositPaymentRows
+            ? input.payments!.reduce(
+                (sum, payment) => sum + Number(payment.amount ?? 0),
+                0,
+              )
+            : Number(input.depositAmount ?? 0)
+        ).toFixed(2),
       );
 
       if (
@@ -11345,17 +11857,15 @@ export class LocalStoreService {
         );
       }
 
-      const depositAmount = requestedDepositAmount;
-      const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
       const depositReference = input.depositReference?.trim() || null;
       const depositTender =
-        depositAmount > 0
+        !hasDepositPaymentRows && requestedDepositAmount > 0
           ? this.getTenderMethodByCode(
               input.depositTenderMethodCode?.trim().toUpperCase() ?? "",
             )
           : null;
 
-      if (depositAmount > 0 && !depositTender) {
+      if (!hasDepositPaymentRows && requestedDepositAmount > 0 && !depositTender) {
         throw new Error(
           "Choose an active tender method before taking a sales order deposit.",
         );
@@ -11367,8 +11877,37 @@ export class LocalStoreService {
         );
       }
 
-      const depositPaymentId =
-        depositAmount > 0 && depositTender ? randomUUID() : null;
+      const depositPaymentRequest =
+        hasDepositPaymentRows && input.payments
+          ? input.payments
+          : requestedDepositAmount > 0 && depositTender
+            ? [
+                {
+                  method: depositTender.paymentMethod,
+                  tenderMethodCode: depositTender.tenderMethodCode,
+                  tenderMethodName: depositTender.tenderMethodName,
+                  amount: requestedDepositAmount,
+                  reference: depositReference,
+                },
+              ]
+            : [];
+      const preparedDepositPayments =
+        requestedDepositAmount > 0
+          ? this.normalizeCheckoutPayments(
+              { payments: depositPaymentRequest },
+              requestedDepositAmount,
+              orderNo,
+              timestamp,
+              "SALE",
+            )
+          : {
+              payments: [] as NormalizedCheckoutPayment[],
+              paidAmount: 0,
+              changeAmount: 0,
+            };
+      const depositAmount = preparedDepositPayments.paidAmount;
+      const primaryDepositPayment = preparedDepositPayments.payments[0] ?? null;
+      const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
 
       const payload: StoreSalesOrderRecordedPayload = {
         orderId,
@@ -11386,10 +11925,10 @@ export class LocalStoreService {
         totalAmount,
         depositAmount,
         balanceAmount,
-        depositTenderMethodCode: depositTender?.tenderMethodCode ?? null,
-        depositTenderMethodName: depositTender?.tenderMethodName ?? null,
-        depositPaymentMethod: depositTender?.paymentMethod ?? null,
-        depositReference,
+        depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
+        depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
+        depositPaymentMethod: primaryDepositPayment?.method ?? null,
+        depositReference: primaryDepositPayment?.reference ?? null,
         depositPaidAt: depositAmount > 0 ? timestamp : null,
         status: "OPEN",
         operatorName,
@@ -11416,25 +11955,27 @@ export class LocalStoreService {
           appliedPromotionCode: line.applied_promotion_code,
           appliedPromotionName: line.applied_promotion_name,
         })),
-        payments:
-          depositPaymentId && depositTender
-            ? [
-                {
-                  paymentId: depositPaymentId,
-                  method: depositTender.paymentMethod,
-                  tenderMethodCode: depositTender.tenderMethodCode,
-                  tenderMethodName: depositTender.tenderMethodName,
-                  amount: depositAmount,
-                  reference: depositReference ?? `DEP-${orderNo}`,
-                  paymentPurpose: "SALES_ORDER_DEPOSIT",
-                  receivedShiftId: openShift.id,
-                  receivedShiftNo: openShift.shift_no,
-                  receivedTerminalCode: terminalCode,
-                  receivedCashierCode: session.loginId,
-                  receivedAt: timestamp,
-                },
-              ]
-            : [],
+        payments: preparedDepositPayments.payments.map((payment) => ({
+          paymentId: payment.paymentId,
+          method: payment.method,
+          tenderMethodCode: payment.tenderMethodCode,
+          tenderMethodName: payment.tenderMethodName,
+          bankAccountId: payment.bankAccountId,
+          bankCode: payment.bankCode,
+          bankName: payment.bankName,
+          bankBranchCode: payment.bankBranchCode,
+          bankBranchName: payment.bankBranchName,
+          bankAccountNumber: payment.bankAccountNumber,
+          bankAccountName: payment.bankAccountName,
+          amount: payment.amount,
+          reference: payment.reference,
+          paymentPurpose: "SALES_ORDER_DEPOSIT",
+          receivedShiftId: openShift.id,
+          receivedShiftNo: openShift.shift_no,
+          receivedTerminalCode: terminalCode,
+          receivedCashierCode: session.loginId,
+          receivedAt: payment.receivedAt,
+        })),
       };
 
       this.db
@@ -11452,35 +11993,44 @@ export class LocalStoreService {
           totalAmount,
           depositAmount,
           balanceAmount,
-          depositTender?.tenderMethodCode ?? null,
-          depositTender?.tenderMethodName ?? null,
-          depositTender?.paymentMethod ?? null,
-          depositReference,
+          primaryDepositPayment?.tenderMethodCode ?? null,
+          primaryDepositPayment?.tenderMethodName ?? null,
+          primaryDepositPayment?.method ?? null,
+          primaryDepositPayment?.reference ?? null,
           depositAmount > 0 ? timestamp : null,
           operatorName,
           note,
           timestamp,
           timestamp,
         );
-      if (depositPaymentId && depositTender) {
+      for (const payment of preparedDepositPayments.payments) {
         this.db
           .prepare(
-            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, method, payment_purpose, amount, reference, received_shift_id, received_shift_no, received_terminal_code, received_cashier_code, received_at) VALUES (?, ?, ?, ?, ?, 'SALES_ORDER_DEPOSIT', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO pos_payment (id, pos_transaction_id, tender_method_code, tender_method_name, bank_account_id, bank_code, bank_name, bank_branch_code, bank_branch_name, bank_account_number, bank_account_name, method, payment_purpose, amount, reference, received_shift_id, received_shift_no, received_terminal_code, received_cashier_code, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SALES_ORDER_DEPOSIT', ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
-            depositPaymentId,
+            payment.paymentId,
             refreshedBasket.id,
-            depositTender.tenderMethodCode,
-            depositTender.tenderMethodName,
-            depositTender.paymentMethod,
-            depositAmount,
-            depositReference ?? `DEP-${orderNo}`,
+            payment.tenderMethodCode,
+            payment.tenderMethodName,
+            payment.bankAccountId,
+            payment.bankCode,
+            payment.bankName,
+            payment.bankBranchCode,
+            payment.bankBranchName,
+            payment.bankAccountNumber,
+            payment.bankAccountName,
+            payment.method,
+            payment.amount,
+            payment.reference,
             openShift.id,
             openShift.shift_no,
             terminalCode,
             session.loginId,
-            timestamp,
+            payment.receivedAt,
           );
+      }
+      if (depositAmount > 0) {
         this.db
           .prepare(
             "UPDATE pos_transaction SET paid_amount = ?, updated_at = ? WHERE id = ?",
@@ -12387,6 +12937,7 @@ export class LocalStoreService {
         tax_rate_percent: product.tax_rate_percent,
         tax_inclusive: product.tax_inclusive,
         track_inventory: product.track_inventory,
+        track_expiry: product.track_expiry,
         is_serialized: product.is_serialized,
         track_size: product.track_size,
         track_color: product.track_color,
@@ -12551,6 +13102,7 @@ export class LocalStoreService {
       categoryName: this.getCategoryName(match.category_code),
       subcategory: match.subcategory,
       isSerialized: asBooleanFlag(match.is_serialized),
+      trackExpiry: asBooleanFlag(match.track_expiry),
       trackSize: asBooleanFlag(match.track_size),
       trackColor: asBooleanFlag(match.track_color),
       mustEnterPriceAtPos: asBooleanFlag(match.must_enter_price_at_pos),
@@ -12560,6 +13112,31 @@ export class LocalStoreService {
             match.sales_location_code ?? this.getDefaultSalesLocationCode(),
           )
         : [],
+      availableBatches:
+        asBooleanFlag(match.track_expiry) &&
+        (match.sales_location_code ?? this.getDefaultSalesLocationCode())
+          ? this.getInventoryBatchRows(
+              match.sales_location_code ?? this.getDefaultSalesLocationCode()!,
+              match.product_code,
+            )
+              .filter(
+                (batch) =>
+                  asNumber(batch.quantity_on_hand) > 0 &&
+                  deriveInventoryBatchStatus({
+                    expiryDate: batch.expiry_date,
+                    quantityOnHand: asNumber(batch.quantity_on_hand),
+                    status: batch.status,
+                  }) === "ACTIVE",
+              )
+              .map((batch) => ({
+                batchId: batch.id,
+                batchNo: batch.batch_no,
+                manufacturedAt: batch.manufactured_at,
+                expiryDate: batch.expiry_date,
+                quantityOnHand: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+                status: batch.status,
+              }))
+          : [],
       unitPrice: Number(asNumber(match.unit_price).toFixed(2)),
       quantityOnHand: Number(asNumber(match.quantity_on_hand).toFixed(3)),
       barcode: match.barcode_code,
@@ -14051,7 +14628,10 @@ export class LocalStoreService {
         transaction.transaction_type === "RETURN" ||
         (transaction.transaction_type === "EXCHANGE" && totalAmount < 0);
 
-      netSalesAmount += totalAmount;
+      netSalesAmount +=
+        transaction.transaction_type === "RETURN"
+          ? Number((-Math.abs(totalAmount)).toFixed(2))
+          : totalAmount;
 
       if (transaction.transaction_type === "SALE") {
         salesCount += 1;
@@ -14277,7 +14857,7 @@ export class LocalStoreService {
   private getBasketLine(lineId: string) {
     return this.db
       .prepare(
-        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE id = ? LIMIT 1",
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE id = ? LIMIT 1",
       )
       .get(lineId) as BasketLineRow | undefined;
   }
@@ -14289,7 +14869,7 @@ export class LocalStoreService {
   ) {
     return this.db
       .prepare(
-        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? AND product_code_snapshot = ? AND line_intent = ? AND source_line_id IS NULL LIMIT 1",
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? AND product_code_snapshot = ? AND line_intent = ? AND source_line_id IS NULL LIMIT 1",
       )
       .get(transactionId, productCode, lineIntent) as BasketLineRow | undefined;
   }
@@ -14300,7 +14880,7 @@ export class LocalStoreService {
   ) {
     return this.db
       .prepare(
-        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? AND source_line_id = ? LIMIT 1",
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? AND source_line_id = ? LIMIT 1",
       )
       .get(transactionId, sourceLineId) as BasketLineRow | undefined;
   }
@@ -14308,7 +14888,7 @@ export class LocalStoreService {
   private getBasketLines(transactionId: string) {
     return this.db
       .prepare(
-        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? ORDER BY line_intent DESC, product_name_snapshot ASC, id ASC",
+        "SELECT id, pos_transaction_id, product_id, line_intent, source_line_id, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override FROM pos_transaction_line WHERE pos_transaction_id = ? ORDER BY line_intent DESC, product_name_snapshot ASC, id ASC",
       )
       .all(transactionId) as BasketLineRow[];
   }
@@ -14361,6 +14941,9 @@ export class LocalStoreService {
       availableSerialNumbers: this.getBasketLineAvailableSerialNumbers(
         header,
         line,
+      ),
+      batchAllocations: readInventoryBatchAllocations(
+        line.batch_allocations_json,
       ),
       quantity: Number(asNumber(line.quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
@@ -15396,6 +15979,7 @@ export class LocalStoreService {
           quantity,
           serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
         });
+        let batchAllocations: StoreInventoryBatchAllocation[] = [];
 
         if (selectedSerialNumbers.length > 0) {
           ensureSerialSelectionWithinAllowedSet({
@@ -15439,11 +16023,60 @@ export class LocalStoreService {
           saleQuantityByProduct.set(quantityKey, nextProductQuantity);
         }
 
+        if (tracksInventory && asBooleanFlag(product.track_expiry)) {
+          if (!salesLocationCode) {
+            throw new Error(
+              `${line.product_name_snapshot} is expiry-controlled, but no sales inventory location is configured.`,
+            );
+          }
+
+          if (lineIntent === "RETURN") {
+            if (!line.source_line_id) {
+              throw new Error(
+                `${line.product_name_snapshot} requires its source receipt line before its batch can be restored.`,
+              );
+            }
+
+            batchAllocations = this.allocateReturnedInventoryBatches(
+              line.source_line_id,
+              line.product_name_snapshot,
+              quantity,
+            );
+            this.restoreInventoryBatchAllocations(
+              batchAllocations,
+              "POS_RETURN",
+              refreshedBasket.id,
+              transactionNo,
+              timestamp,
+            );
+          } else {
+            batchAllocations = this.allocateInventoryBatches(
+              salesLocationCode,
+              line.product_code_snapshot,
+              line.product_name_snapshot,
+              quantity,
+              readInventoryBatchAllocations(line.batch_allocations_json)[0]
+                ?.batchId ?? null,
+            );
+            this.consumeInventoryBatchAllocations(
+              batchAllocations,
+              "POS_TRANSACTION",
+              refreshedBasket.id,
+              transactionNo,
+              timestamp,
+            );
+          }
+        }
+
         this.db
           .prepare(
-            "UPDATE pos_transaction_line SET inventory_location_code = ? WHERE id = ?",
+            "UPDATE pos_transaction_line SET inventory_location_code = ?, batch_allocations_json = ? WHERE id = ?",
           )
-          .run(salesLocationCode, line.id);
+          .run(
+            salesLocationCode,
+            writeInventoryBatchAllocations(batchAllocations),
+            line.id,
+          );
 
         salePayloadLines.push({
           lineId: line.id,
@@ -15462,6 +16095,7 @@ export class LocalStoreService {
           variantAttributesSnapshot: line.variant_attributes_snapshot,
           lineNote: line.line_note,
           serialNumbers: selectedSerialNumbers,
+          batchAllocations,
           quantity,
           unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
           discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
@@ -15537,6 +16171,7 @@ export class LocalStoreService {
             ...(selectedSerialNumbers.length > 0
               ? { serialNumbers: selectedSerialNumbers }
               : {}),
+            ...(batchAllocations.length > 0 ? { batchAllocations } : {}),
             unitCost: null,
             referenceType: "POS_TRANSACTION",
             referenceId: refreshedBasket.id,
@@ -15805,6 +16440,7 @@ export class LocalStoreService {
       tax_rate_percent: number | string | null;
       tax_inclusive: number | string;
       track_inventory: number | string;
+      track_expiry: number | string;
       is_serialized: number | string;
       track_size: number | string;
       track_color: number | string;
@@ -15895,6 +16531,21 @@ export class LocalStoreService {
       const nodeCode =
         this.metadata("node_code") ?? defaultStoreConfig.nodeCode;
       const shouldQueueEnterprise = !this.isStandaloneDeployment();
+      const batchAllocations =
+        tracksInventoryForSale(match) && asBooleanFlag(match.track_expiry)
+          ? match.sales_location_code
+            ? this.allocateInventoryBatches(
+                match.sales_location_code,
+                match.product_code,
+                match.product_name,
+                quantity,
+              )
+            : (() => {
+                throw new Error(
+                  `${match.product_name} is expiry-controlled, but no sales inventory location is configured.`,
+                );
+              })()
+          : [];
       const salePayload: StorePosTransactionCompletedPayload = {
         transactionId,
         transactionNo,
@@ -15931,6 +16582,7 @@ export class LocalStoreService {
             variantSize,
             variantColor,
             serialNumbers: input.serialNumbers,
+            batchAllocations,
             quantity,
             unitPrice,
             discountAmount: linePricing.discountAmount,
@@ -15968,6 +16620,7 @@ export class LocalStoreService {
         ...(input.serialNumbers.length > 0
           ? { serialNumbers: input.serialNumbers }
           : {}),
+        ...(batchAllocations.length > 0 ? { batchAllocations } : {}),
         unitCost: null,
         referenceType: "POS_TRANSACTION",
         referenceId: transactionId,
@@ -15996,7 +16649,7 @@ export class LocalStoreService {
         );
       this.db
         .prepare(
-          "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_name_snapshot, variant_size, variant_color, serial_numbers_json, quantity, unit_price, discount_amount, tax_amount, line_total) VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_name_snapshot, variant_size, variant_color, serial_numbers_json, batch_allocations_json, quantity, unit_price, discount_amount, tax_amount, line_total) VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           lineId,
@@ -16009,6 +16662,7 @@ export class LocalStoreService {
           variantSize,
           variantColor,
           writeSerializedLineNumbers(input.serialNumbers),
+          writeInventoryBatchAllocations(batchAllocations),
           quantity,
           unitPrice,
           linePricing.discountAmount,
@@ -16033,10 +16687,14 @@ export class LocalStoreService {
           saleCashierCode,
           timestamp,
         );
-      if (
-        asBooleanFlag(match.track_inventory) &&
-        !isServiceProductType(match.product_type)
-      ) {
+      if (tracksInventoryForSale(match)) {
+        this.consumeInventoryBatchAllocations(
+          batchAllocations,
+          "POS_TRANSACTION",
+          transactionId,
+          transactionNo,
+          timestamp,
+        );
         if (
           match.sales_location_code &&
           !this.hasLocationBalance(
@@ -16147,6 +16805,10 @@ export class LocalStoreService {
         purchaseOrderLineId: line.purchaseOrderLineId?.trim(),
         quantity: Number(line.quantity),
         serialNumbers: normalizeSerialNumbers(line.serialNumbers),
+        batchAllocations: [] as StoreInventoryBatchAllocation[],
+        batchNo: line.batchNo?.trim() || null,
+        manufacturedAt: line.manufacturedAt?.trim() || null,
+        expiryDate: line.expiryDate?.trim() || null,
       })) ?? [];
     const requestedExceptionLines =
       input.exceptionLines?.map((line) => ({
@@ -16277,6 +16939,7 @@ export class LocalStoreService {
           category.category_name AS category_name,
           line.subcategory AS subcategory,
           line.is_serialized AS is_serialized,
+          line.track_expiry AS track_expiry,
           line.ordered_quantity AS ordered_quantity,
           line.received_quantity AS received_quantity,
           line.exception_quantity AS exception_quantity,
@@ -16373,6 +17036,20 @@ export class LocalStoreService {
       }
 
       productRowsByCode.set(line.product_code, product);
+
+      if (requestedLine) {
+        const batch = validateInventoryBatchReceipt({
+          productName: line.product_name,
+          trackExpiry: asBooleanFlag(product.track_expiry),
+          batchNo: requestedLine.batchNo,
+          manufacturedAt: requestedLine.manufacturedAt,
+          expiryDate: requestedLine.expiryDate,
+          receivedAt: timestamp,
+        });
+        requestedLine.batchNo = batch.batchNo;
+        requestedLine.manufacturedAt = batch.manufacturedAt;
+        requestedLine.expiryDate = batch.expiryDate;
+      }
 
       if (requestedLine && asBooleanFlag(line.is_serialized)) {
         if (!Number.isInteger(quantity)) {
@@ -16529,7 +17206,7 @@ export class LocalStoreService {
 
           this.db
             .prepare(
-              "INSERT INTO local_goods_receipt_line (id, local_goods_receipt_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              "INSERT INTO local_goods_receipt_line (id, local_goods_receipt_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, batch_no, manufactured_at, expiry_date, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .run(
               goodsReceiptLineId,
@@ -16541,8 +17218,25 @@ export class LocalStoreService {
               receivedQuantity,
               asNullableNumber(line.unit_cost),
               writeSerializedLineNumbers(requestedLine.serialNumbers),
+              requestedLine.batchNo,
+              requestedLine.manufacturedAt,
+              requestedLine.expiryDate,
               timestamp,
             );
+
+          this.receiveInventoryBatch({
+            locationCode: purchaseOrder.inventory_location_code,
+            productCode: line.product_code,
+            productName: line.product_name,
+            quantity: receivedQuantity,
+            batchNo: requestedLine.batchNo,
+            manufacturedAt: requestedLine.manufacturedAt,
+            expiryDate: requestedLine.expiryDate,
+            sourceReferenceType: "GOODS_RECEIPT",
+            sourceReferenceId: goodsReceiptId,
+            sourceReferenceLabel: goodsReceiptNo,
+            updatedAt: timestamp,
+          });
 
           this.db
             .prepare(
@@ -16594,6 +17288,9 @@ export class LocalStoreService {
             quantity: receivedQuantity,
             unitCost: asNullableNumber(line.unit_cost),
             serialNumbers: requestedLine.serialNumbers,
+            batchNo: requestedLine.batchNo,
+            manufacturedAt: requestedLine.manufacturedAt,
+            expiryDate: requestedLine.expiryDate,
           });
         }
 
@@ -16759,6 +17456,7 @@ export class LocalStoreService {
         goodsReceiptLineId: line.goodsReceiptLineId?.trim(),
         quantity: Number(line.quantity),
         serialNumbers: normalizeSerialNumbers(line.serialNumbers),
+        batchAllocations: [] as StoreInventoryBatchAllocation[],
       })) ?? [];
     const allowedReasons = new Set([
       "DAMAGED",
@@ -16867,7 +17565,10 @@ export class LocalStoreService {
           product_name,
           quantity,
           unit_cost,
-          serial_numbers_json
+          serial_numbers_json,
+          batch_no,
+          manufactured_at,
+          expiry_date
         FROM local_goods_receipt_line
         WHERE local_goods_receipt_id = ?
         ORDER BY line_no ASC`,
@@ -16979,6 +17680,41 @@ export class LocalStoreService {
       }
 
       productRowsByCode.set(goodsReceiptLine.product_code, product);
+
+      if (asBooleanFlag(product.track_expiry)) {
+        if (!goodsReceiptLine.batch_no || !goodsReceiptLine.expiry_date) {
+          throw new Error(
+            `${goodsReceiptLine.product_name} is expiry-controlled, but ${goodsReceipt.goods_receipt_no} has no batch history for this line.`,
+          );
+        }
+
+        const batchRow = this.db
+          .prepare(
+            `SELECT id, quantity_on_hand
+             FROM inventory_batch_registry
+             WHERE inventory_location_code = ? AND product_code = ? AND batch_no = ?
+             LIMIT 1`,
+          )
+          .get(
+            goodsReceipt.inventory_location_code,
+            goodsReceiptLine.product_code,
+            goodsReceiptLine.batch_no,
+          ) as { id: string; quantity_on_hand: number | string } | undefined;
+
+        if (!batchRow || asNumber(batchRow.quantity_on_hand) < quantity) {
+          throw new Error(
+            `${goodsReceiptLine.product_name} batch ${goodsReceiptLine.batch_no} does not have ${quantity.toFixed(3)} unit(s) available for return to supplier.`,
+          );
+        }
+
+        requestedLine.batchAllocations = [{
+          batchId: batchRow.id,
+          batchNo: goodsReceiptLine.batch_no,
+          manufacturedAt: goodsReceiptLine.manufactured_at,
+          expiryDate: goodsReceiptLine.expiry_date,
+          quantity: Number(quantity.toFixed(3)),
+        }];
+      }
 
       const currentLocationQuantity = this.getLocationQuantity(
         goodsReceipt.inventory_location_code,
@@ -17141,7 +17877,7 @@ export class LocalStoreService {
 
         this.db
           .prepare(
-            "INSERT INTO local_supplier_return_line (id, local_supplier_return_id, goods_receipt_line_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO local_supplier_return_line (id, local_supplier_return_id, goods_receipt_line_id, purchase_order_line_id, line_no, product_code, product_name, quantity, unit_cost, serial_numbers_json, batch_allocations_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             supplierReturnLineId,
@@ -17154,8 +17890,17 @@ export class LocalStoreService {
             quantity,
             asNullableNumber(goodsReceiptLine.unit_cost),
             writeSerializedLineNumbers(requestedLine.serialNumbers),
+            writeInventoryBatchAllocations(requestedLine.batchAllocations),
             timestamp,
           );
+
+        this.consumeInventoryBatchAllocations(
+          requestedLine.batchAllocations,
+          "SUPPLIER_RETURN",
+          supplierReturnId,
+          supplierReturnNo,
+          timestamp,
+        );
 
         this.db
           .prepare(
@@ -17208,6 +17953,7 @@ export class LocalStoreService {
           quantity,
           unitCost: asNullableNumber(goodsReceiptLine.unit_cost),
           serialNumbers: requestedLine.serialNumbers,
+          batchAllocations: requestedLine.batchAllocations,
         });
       }
 
@@ -17436,11 +18182,14 @@ export class LocalStoreService {
             product_code,
             product_name,
             is_serialized,
+            track_expiry,
             requested_quantity,
             issued_quantity,
             received_quantity,
             outstanding_issue_quantity,
             issued_serial_numbers_json,
+            issued_batch_allocations_json,
+            received_batch_allocations_json,
             closed_at
           FROM inter_store_transfer_snapshot
           WHERE id = ?
@@ -17545,6 +18294,22 @@ export class LocalStoreService {
         );
       }
 
+      const batchAllocations = asBooleanFlag(product.track_expiry)
+        ? this.allocateInventoryBatches(
+            transfer.source_location_code,
+            transfer.product_code,
+            transfer.product_name,
+            quantity,
+          )
+        : [];
+      this.consumeInventoryBatchAllocations(
+        batchAllocations,
+        "INTER_STORE_TRANSFER",
+        transfer.id,
+        transfer.transfer_no,
+        timestamp,
+      );
+
       this.db
         .prepare(
           "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand - ?, updated_at = ? WHERE id = ?",
@@ -17573,6 +18338,10 @@ export class LocalStoreService {
         ...readSerializedLineNumbers(transfer.issued_serial_numbers_json),
         ...serialNumbers,
       ]);
+      const nextIssuedBatchAllocations = [
+        ...readInventoryBatchAllocations(transfer.issued_batch_allocations_json),
+        ...batchAllocations,
+      ];
       const issueNote =
         input.note?.trim() ||
         `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${transfer.source_location_code} toward ${transfer.destination_location_code}.`;
@@ -17586,6 +18355,7 @@ export class LocalStoreService {
                outstanding_issue_quantity = ?,
                outstanding_receipt_quantity = ?,
                issued_serial_numbers_json = ?,
+               issued_batch_allocations_json = ?,
                issue_note = ?,
                issue_operator_name = ?,
                source_node_code = ?,
@@ -17606,6 +18376,7 @@ export class LocalStoreService {
             Math.max(0, nextIssuedQuantity - nextReceivedQuantity).toFixed(3),
           ),
           writeSerializedLineNumbers(nextIssuedSerialNumbers),
+          writeInventoryBatchAllocations(nextIssuedBatchAllocations),
           issueNote,
           operatorName,
           nodeCode,
@@ -17624,6 +18395,7 @@ export class LocalStoreService {
         productCode: transfer.product_code,
         quantity,
         ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        ...(batchAllocations.length > 0 ? { batchAllocations } : {}),
         operatorName,
         note: issueNote,
         occurredAt: timestamp,
@@ -17718,6 +18490,10 @@ export class LocalStoreService {
             outstanding_receipt_quantity,
             issued_serial_numbers_json,
             received_serial_numbers_json,
+            issued_batch_allocations_json,
+            received_batch_allocations_json,
+            issued_batch_allocations_json,
+            received_batch_allocations_json,
             closed_at
           FROM inter_store_transfer_snapshot
           WHERE id = ?
@@ -17825,6 +18601,94 @@ export class LocalStoreService {
         );
       }
 
+      let receivedBatchAllocations: StoreInventoryBatchAllocation[] = [];
+
+      if (asBooleanFlag(product.track_expiry)) {
+        const issuedAllocations = readInventoryBatchAllocations(
+          transfer.issued_batch_allocations_json,
+        );
+        const priorReceivedAllocations = readInventoryBatchAllocations(
+          transfer.received_batch_allocations_json,
+        );
+        const receivedByBatch = new Map<string, number>();
+
+        for (const allocation of priorReceivedAllocations) {
+          const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+          receivedByBatch.set(
+            key,
+            Number(
+              ((receivedByBatch.get(key) ?? 0) + allocation.quantity).toFixed(3),
+            ),
+          );
+        }
+
+        let outstandingBatchQuantity = quantity;
+        const transferAllocations: StoreInventoryBatchAllocation[] = [];
+
+        for (const allocation of issuedAllocations) {
+          if (outstandingBatchQuantity <= 0.0001) {
+            break;
+          }
+
+          const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+          const alreadyReceived = receivedByBatch.get(key) ?? 0;
+          const available = Number(
+            Math.max(
+              0,
+              allocation.quantity - alreadyReceived,
+            ).toFixed(3),
+          );
+          receivedByBatch.set(
+            key,
+            Number(Math.max(0, alreadyReceived - allocation.quantity).toFixed(3)),
+          );
+          const receivedQuantity = Number(
+            Math.min(available, outstandingBatchQuantity).toFixed(3),
+          );
+
+          if (receivedQuantity > 0) {
+            transferAllocations.push({ ...allocation, quantity: receivedQuantity });
+            outstandingBatchQuantity = Number(
+              (outstandingBatchQuantity - receivedQuantity).toFixed(3),
+            );
+          }
+        }
+
+        if (outstandingBatchQuantity > 0.0001) {
+          throw new Error(
+            `${transfer.transfer_no} does not contain enough outstanding batch quantity for ${transfer.product_name}. Sync the source issue before receiving.`,
+          );
+        }
+
+        receivedBatchAllocations = transferAllocations.map((allocation) => {
+          const destinationBatch = this.receiveInventoryBatch({
+            locationCode: transfer.destination_location_code,
+            productCode: transfer.product_code,
+            productName: transfer.product_name,
+            quantity: allocation.quantity,
+            batchNo: allocation.batchNo,
+            manufacturedAt: allocation.manufacturedAt ?? null,
+            expiryDate: allocation.expiryDate,
+            sourceReferenceType: "INTER_STORE_TRANSFER",
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transfer_no,
+            updatedAt: timestamp,
+            status:
+              inventoryBatchDaysUntilExpiry(allocation.expiryDate, timestamp) < 0
+                ? "EXPIRED"
+                : "ACTIVE",
+          });
+
+          if (!destinationBatch) {
+            throw new Error(
+              `Flash ERP could not register batch ${allocation.batchNo} at the destination.`,
+            );
+          }
+
+          return destinationBatch;
+        });
+      }
+
       this.db
         .prepare(
           "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + ?, updated_at = ? WHERE id = ?",
@@ -17853,6 +18717,10 @@ export class LocalStoreService {
         ...readSerializedLineNumbers(transfer.received_serial_numbers_json),
         ...serialNumbers,
       ]);
+      const nextReceivedBatchAllocations = [
+        ...readInventoryBatchAllocations(transfer.received_batch_allocations_json),
+        ...receivedBatchAllocations,
+      ];
       const receiptNote =
         input.note?.trim() ||
         `Received ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} into ${transfer.destination_location_code}.`;
@@ -17865,6 +18733,7 @@ export class LocalStoreService {
                received_quantity = ?,
                outstanding_receipt_quantity = ?,
                received_serial_numbers_json = ?,
+               received_batch_allocations_json = ?,
                receipt_note = ?,
                receipt_operator_name = ?,
                destination_node_code = ?,
@@ -17879,6 +18748,7 @@ export class LocalStoreService {
             Math.max(0, nextIssuedQuantity - nextReceivedQuantity).toFixed(3),
           ),
           writeSerializedLineNumbers(nextReceivedSerialNumbers),
+          writeInventoryBatchAllocations(nextReceivedBatchAllocations),
           receiptNote,
           operatorName,
           nodeCode,
@@ -17897,6 +18767,9 @@ export class LocalStoreService {
         productCode: transfer.product_code,
         quantity,
         ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        ...(receivedBatchAllocations.length > 0
+          ? { batchAllocations: receivedBatchAllocations }
+          : {}),
         operatorName,
         note: receiptNote,
         occurredAt: timestamp,
@@ -18146,6 +19019,7 @@ export class LocalStoreService {
       return {
         message: actionMessage,
         snapshot: this.getSyncActionSnapshot(snapshotMode),
+        succeeded: false,
       };
     } finally {
       if (this.syncCycleInFlight === syncCycle) {
@@ -18624,7 +19498,7 @@ export class LocalStoreService {
       upstreamRequeued = Number(
         this.db
           .prepare(
-            "UPDATE sync_outbox SET status = 'PENDING', attempt_count = 0, updated_at = ?, last_attempt_at = NULL, next_retry_at = NULL, failure_kind = NULL, last_http_status = NULL, sync_run_id = NULL, error_message = NULL WHERE status IN ('FAILED', 'DEAD_LETTER')",
+            "UPDATE sync_outbox SET status = 'PENDING', attempt_count = 0, updated_at = ?, last_attempt_at = NULL, next_retry_at = NULL, failure_kind = NULL, last_http_status = NULL, sync_run_id = NULL, error_message = NULL WHERE status IN ('FAILED', 'DEAD_LETTER') AND COALESCE(failure_kind, '') NOT IN ('STALE_VERSION', 'UNKNOWN_AGGREGATE', 'INVALID_PAYLOAD', 'POLICY_REJECTED')",
           )
           .run(finishedAt).changes,
       );
@@ -18642,9 +19516,9 @@ export class LocalStoreService {
         summary:
           upstreamRequeued > 0 || downstreamRequeued > 0
             ? shouldQueueEnterprise
-              ? `Requeued ${upstreamRequeued + downstreamRequeued} dead-letter item(s) for another enterprise pass.`
-              : `Requeued ${upstreamRequeued + downstreamRequeued} standalone recovery item(s) for local review.`
-            : "No dead-letter items were waiting for requeue.",
+              ? `Requeued ${upstreamRequeued + downstreamRequeued} eligible failed item(s) for another enterprise pass.`
+              : `Requeued ${upstreamRequeued + downstreamRequeued} eligible standalone recovery item(s) for local review. Permanent conflicts remained unchanged.`
+            : "No eligible failed items were waiting for retry. Permanent conflicts remain available for support review.",
         upstreamProcessed: upstreamRequeued,
         downstreamApplied: downstreamRequeued,
         startedAt,
@@ -18656,9 +19530,9 @@ export class LocalStoreService {
       message:
         upstreamRequeued > 0 || downstreamRequeued > 0
           ? shouldQueueEnterprise
-            ? "Failed items were moved back into active queues."
-            : "Standalone recovery items were moved back into local review queues."
-          : "There were no dead-letter items to requeue.",
+            ? "Eligible failed items were moved back into active queues. Permanent conflicts were left unchanged."
+            : "Eligible standalone recovery items were moved back into local review queues. Permanent conflicts were left unchanged."
+          : "There were no eligible failed items to retry. Permanent conflicts were left unchanged.",
       snapshot: this.getSyncSnapshot(),
     };
   }
@@ -19840,6 +20714,12 @@ export class LocalStoreService {
           typeof storePayload.shiftFloatPromptAmount !== "number") ||
         (storePayload.showCriticalStocksOnStartup !== undefined &&
           typeof storePayload.showCriticalStocksOnStartup !== "boolean") ||
+        (storePayload.showExpiringBatchesOnStartup !== undefined &&
+          typeof storePayload.showExpiringBatchesOnStartup !== "boolean") ||
+        (storePayload.expiryAlertLeadDays !== undefined &&
+          typeof storePayload.expiryAlertLeadDays !== "number") ||
+        (storePayload.expiryCriticalDays !== undefined &&
+          typeof storePayload.expiryCriticalDays !== "number") ||
         typeof storePayload.loyaltyProgramEnabled !== "boolean" ||
         typeof storePayload.loyaltyPointsPerCurrencyUnit !== "number" ||
         typeof storePayload.loyaltyRedemptionEnabled !== "boolean" ||
@@ -19907,6 +20787,28 @@ export class LocalStoreService {
       this.setMetadata(
         "show_critical_stocks_on_startup",
         storePayload.showCriticalStocksOnStartup ? "1" : "0",
+      );
+      this.setMetadata(
+        "show_expiring_batches_on_startup",
+        storePayload.showExpiringBatchesOnStartup === false ? "0" : "1",
+      );
+      const expiryAlertLeadDays = normalizePolicyInteger(
+        storePayload.expiryAlertLeadDays,
+        30,
+        1,
+        3650,
+      );
+      this.setMetadata("expiry_alert_lead_days", String(expiryAlertLeadDays));
+      this.setMetadata(
+        "expiry_critical_days",
+        String(
+          normalizePolicyInteger(
+            storePayload.expiryCriticalDays,
+            7,
+            0,
+            expiryAlertLeadDays,
+          ),
+        ),
       );
       this.setMetadata(
         "loyalty_program_enabled",
@@ -20310,7 +21212,7 @@ export class LocalStoreService {
 
       this.db
         .prepare(
-          "INSERT INTO product_snapshot (id, product_code, product_name, product_type, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, is_serialized, track_size, track_color, must_enter_price_at_pos, min_stock_level, reorder_point, safety_stock_level, catalog_membership_active, catalog_sort_order, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(product_code) DO UPDATE SET product_name = excluded.product_name, product_type = excluded.product_type, short_name = excluded.short_name, description = excluded.description, primary_image_url = excluded.primary_image_url, department_code = excluded.department_code, category_code = excluded.category_code, subcategory = excluded.subcategory, unit_of_measure = excluded.unit_of_measure, taxable = excluded.taxable, tax_profile_code = excluded.tax_profile_code, tax_profile_name = excluded.tax_profile_name, tax_rate_percent = excluded.tax_rate_percent, tax_inclusive = excluded.tax_inclusive, track_inventory = excluded.track_inventory, is_serialized = excluded.is_serialized, track_size = excluded.track_size, track_color = excluded.track_color, must_enter_price_at_pos = excluded.must_enter_price_at_pos, min_stock_level = excluded.min_stock_level, reorder_point = excluded.reorder_point, safety_stock_level = excluded.safety_stock_level, catalog_membership_active = excluded.catalog_membership_active, catalog_sort_order = excluded.catalog_sort_order, unit_price = excluded.unit_price, quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
+          "INSERT INTO product_snapshot (id, product_code, product_name, product_type, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, track_expiry, shelf_life_days, is_serialized, track_size, track_color, must_enter_price_at_pos, min_stock_level, reorder_point, safety_stock_level, catalog_membership_active, catalog_sort_order, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(product_code) DO UPDATE SET product_name = excluded.product_name, product_type = excluded.product_type, short_name = excluded.short_name, description = excluded.description, primary_image_url = excluded.primary_image_url, department_code = excluded.department_code, category_code = excluded.category_code, subcategory = excluded.subcategory, unit_of_measure = excluded.unit_of_measure, taxable = excluded.taxable, tax_profile_code = excluded.tax_profile_code, tax_profile_name = excluded.tax_profile_name, tax_rate_percent = excluded.tax_rate_percent, tax_inclusive = excluded.tax_inclusive, track_inventory = excluded.track_inventory, track_expiry = excluded.track_expiry, shelf_life_days = excluded.shelf_life_days, is_serialized = excluded.is_serialized, track_size = excluded.track_size, track_color = excluded.track_color, must_enter_price_at_pos = excluded.must_enter_price_at_pos, min_stock_level = excluded.min_stock_level, reorder_point = excluded.reorder_point, safety_stock_level = excluded.safety_stock_level, catalog_membership_active = excluded.catalog_membership_active, catalog_sort_order = excluded.catalog_sort_order, unit_price = excluded.unit_price, quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
         )
         .run(
           event.aggregateId,
@@ -20352,6 +21254,10 @@ export class LocalStoreService {
             : null,
           productPayload.taxInclusive ? 1 : 0,
           productPayload.trackInventory === false ? 0 : 1,
+          productPayload.trackExpiry ? 1 : 0,
+          typeof productPayload.shelfLifeDays === "number"
+            ? Math.trunc(productPayload.shelfLifeDays)
+            : null,
           productPayload.isSerialized ? 1 : 0,
           productPayload.trackSize ? 1 : 0,
           productPayload.trackColor ? 1 : 0,
@@ -21101,7 +22007,7 @@ export class LocalStoreService {
 
         this.db
           .prepare(
-            "INSERT INTO purchase_order_line_snapshot (id, purchase_order_id, line_no, product_code, product_name, department_code, category_code, subcategory, is_serialized, ordered_quantity, received_quantity, exception_quantity, outstanding_quantity, unit_cost, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO purchase_order_line_snapshot (id, purchase_order_id, line_no, product_code, product_name, department_code, category_code, subcategory, is_serialized, track_expiry, ordered_quantity, received_quantity, exception_quantity, outstanding_quantity, unit_cost, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             rawLine.purchaseOrderLineId,
@@ -21119,6 +22025,7 @@ export class LocalStoreService {
               ? rawLine.subcategory
               : null,
             rawLine.isSerialized ? 1 : 0,
+            rawLine.trackExpiry ? 1 : 0,
             rawLine.orderedQuantity,
             rawLine.receivedQuantity,
             rawLine.exceptionQuantity,
@@ -21218,7 +22125,7 @@ export class LocalStoreService {
             received_at,
             closed_at,
             updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             transfer_no = excluded.transfer_no,
             transfer_batch_no = excluded.transfer_batch_no,
@@ -21241,6 +22148,7 @@ export class LocalStoreService {
             category_code = excluded.category_code,
             subcategory = excluded.subcategory,
             is_serialized = excluded.is_serialized,
+            track_expiry = excluded.track_expiry,
             requested_quantity = excluded.requested_quantity,
             issued_quantity = excluded.issued_quantity,
             received_quantity = excluded.received_quantity,
@@ -21249,6 +22157,8 @@ export class LocalStoreService {
             unit_cost = excluded.unit_cost,
             issued_serial_numbers_json = excluded.issued_serial_numbers_json,
             received_serial_numbers_json = excluded.received_serial_numbers_json,
+            issued_batch_allocations_json = excluded.issued_batch_allocations_json,
+            received_batch_allocations_json = excluded.received_batch_allocations_json,
             request_note = excluded.request_note,
             issue_note = excluded.issue_note,
             receipt_note = excluded.receipt_note,
@@ -21300,6 +22210,7 @@ export class LocalStoreService {
             ? transferPayload.subcategory
             : null,
           transferPayload.isSerialized ? 1 : 0,
+          transferPayload.trackExpiry ? 1 : 0,
           transferPayload.requestedQuantity,
           transferPayload.issuedQuantity,
           transferPayload.receivedQuantity,
@@ -21311,6 +22222,12 @@ export class LocalStoreService {
           writeSerializedLineNumbers(transferPayload.issuedSerialNumbers ?? []),
           writeSerializedLineNumbers(
             transferPayload.receivedSerialNumbers ?? [],
+          ),
+          writeInventoryBatchAllocations(
+            transferPayload.issuedBatchAllocations ?? [],
+          ),
+          writeInventoryBatchAllocations(
+            transferPayload.receivedBatchAllocations ?? [],
           ),
           typeof transferPayload.requestNote === "string"
             ? transferPayload.requestNote
@@ -23240,16 +24157,65 @@ export class LocalStoreService {
       "CREATE TABLE IF NOT EXISTS serial_registry (id TEXT PRIMARY KEY, product_code TEXT NOT NULL, serial_number TEXT NOT NULL, inventory_location_code TEXT, status TEXT NOT NULL DEFAULT 'AVAILABLE', source_transaction_id TEXT, source_transaction_no TEXT, updated_at TEXT NOT NULL)",
     );
     this.db.exec(
+      "CREATE TABLE IF NOT EXISTS inventory_batch_registry (id TEXT PRIMARY KEY, product_code TEXT NOT NULL, inventory_location_code TEXT NOT NULL, batch_no TEXT NOT NULL, manufactured_at TEXT, expiry_date TEXT NOT NULL, quantity_on_hand NUMERIC NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ACTIVE', source_reference_type TEXT, source_reference_id TEXT, source_reference_label TEXT, updated_at TEXT NOT NULL, UNIQUE (inventory_location_code, product_code, batch_no))",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "track_expiry",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn("product_snapshot", "shelf_life_days", "INTEGER");
+    this.ensureColumn("local_goods_receipt_line", "batch_no", "TEXT");
+    this.ensureColumn("local_goods_receipt_line", "manufactured_at", "TEXT");
+    this.ensureColumn("local_goods_receipt_line", "expiry_date", "TEXT");
+    this.ensureColumn(
+      "local_supplier_return_line",
+      "batch_allocations_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "inter_store_transfer_snapshot",
+      "track_expiry",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "inter_store_transfer_snapshot",
+      "issued_batch_allocations_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "inter_store_transfer_snapshot",
+      "received_batch_allocations_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "stock_count_session",
+      "previous_batch_quantities_json",
+      "TEXT",
+    );
+    this.ensureColumn(
+      "stock_count_session",
+      "counted_batch_quantities_json",
+      "TEXT",
+    );
+    this.ensureColumn("pos_transaction_line", "batch_allocations_json", "TEXT");
+    this.db.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS idx_serial_registry_product_serial ON serial_registry(product_code, serial_number COLLATE NOCASE)",
     );
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_serial_registry_status ON serial_registry(product_code, status, inventory_location_code, updated_at DESC)",
     );
     this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_inventory_batch_registry_fefo ON inventory_batch_registry(inventory_location_code, product_code, status, expiry_date, batch_no)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_inventory_batch_registry_expiry ON inventory_batch_registry(expiry_date, status, quantity_on_hand)",
+    );
+    this.db.exec(
       "CREATE TABLE IF NOT EXISTS purchase_order_snapshot (id TEXT PRIMARY KEY, purchase_order_no TEXT NOT NULL UNIQUE, status TEXT NOT NULL, inventory_location_code TEXT NOT NULL, inventory_location_name TEXT NOT NULL, supplier_no TEXT, supplier_name TEXT, external_reference TEXT, note TEXT, operator_name TEXT, ordered_quantity NUMERIC NOT NULL DEFAULT 0, received_quantity NUMERIC NOT NULL DEFAULT 0, exception_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_quantity NUMERIC NOT NULL DEFAULT 0, committed_at TEXT, closed_at TEXT, updated_at TEXT NOT NULL)",
     );
     this.db.exec(
-      "CREATE TABLE IF NOT EXISTS purchase_order_line_snapshot (id TEXT PRIMARY KEY, purchase_order_id TEXT NOT NULL, line_no INTEGER NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, department_code TEXT, category_code TEXT, subcategory TEXT, is_serialized INTEGER NOT NULL DEFAULT 0, ordered_quantity NUMERIC NOT NULL, received_quantity NUMERIC NOT NULL DEFAULT 0, exception_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_quantity NUMERIC NOT NULL DEFAULT 0, unit_cost NUMERIC, updated_at TEXT NOT NULL, UNIQUE (purchase_order_id, line_no))",
+      "CREATE TABLE IF NOT EXISTS purchase_order_line_snapshot (id TEXT PRIMARY KEY, purchase_order_id TEXT NOT NULL, line_no INTEGER NOT NULL, product_code TEXT NOT NULL, product_name TEXT NOT NULL, department_code TEXT, category_code TEXT, subcategory TEXT, is_serialized INTEGER NOT NULL DEFAULT 0, track_expiry INTEGER NOT NULL DEFAULT 0, ordered_quantity NUMERIC NOT NULL, received_quantity NUMERIC NOT NULL DEFAULT 0, exception_quantity NUMERIC NOT NULL DEFAULT 0, outstanding_quantity NUMERIC NOT NULL DEFAULT 0, unit_cost NUMERIC, updated_at TEXT NOT NULL, UNIQUE (purchase_order_id, line_no))",
     );
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS local_goods_receipt (id TEXT PRIMARY KEY, goods_receipt_no TEXT NOT NULL UNIQUE, purchase_order_id TEXT, purchase_order_no TEXT, inventory_location_code TEXT NOT NULL, supplier_no TEXT, supplier_name TEXT, external_reference TEXT, note TEXT, operator_name TEXT NOT NULL, total_quantity NUMERIC NOT NULL, exception_quantity NUMERIC NOT NULL DEFAULT 0, synced_at TEXT, received_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -23432,6 +24398,11 @@ export class LocalStoreService {
       "purchase_order_line_snapshot",
       "exception_quantity",
       "NUMERIC NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "purchase_order_line_snapshot",
+      "track_expiry",
+      "INTEGER NOT NULL DEFAULT 0",
     );
     this.ensureColumn(
       "local_goods_receipt",
@@ -24232,7 +25203,10 @@ export class LocalStoreService {
                 COALESCE(po_line.ordered_quantity, line.quantity) AS ordered_quantity,
                 line.quantity AS quantity,
                 line.unit_cost AS unit_cost,
-                line.serial_numbers_json AS serial_numbers_json
+                line.serial_numbers_json AS serial_numbers_json,
+                line.batch_no AS batch_no,
+                line.manufactured_at AS manufactured_at,
+                line.expiry_date AS expiry_date
               FROM local_goods_receipt_line AS line
               LEFT JOIN purchase_order_line_snapshot AS po_line
                 ON po_line.id = line.purchase_order_line_id
@@ -24286,6 +25260,9 @@ export class LocalStoreService {
         quantity: Number(asNumber(row.quantity).toFixed(3)),
         unitCost: asNullableNumber(row.unit_cost),
         serialNumbers: readSerializedLineNumbers(row.serial_numbers_json),
+        batchNo: row.batch_no,
+        manufacturedAt: row.manufactured_at,
+        expiryDate: row.expiry_date,
       });
       linesByReceiptId.set(row.local_goods_receipt_id, currentLines);
     }
@@ -24417,7 +25394,8 @@ export class LocalStoreService {
                 line.product_name AS product_name,
                 line.quantity AS quantity,
                 line.unit_cost AS unit_cost,
-                line.serial_numbers_json AS serial_numbers_json
+                line.serial_numbers_json AS serial_numbers_json,
+                line.batch_allocations_json AS batch_allocations_json
               FROM local_supplier_return_line AS line
               WHERE line.local_supplier_return_id IN (${supplierReturnIds.map(() => "?").join(", ")})
               ORDER BY line.local_supplier_return_id ASC, line.line_no ASC`,
@@ -24442,6 +25420,9 @@ export class LocalStoreService {
         quantity: Number(asNumber(row.quantity).toFixed(3)),
         unitCost: asNullableNumber(row.unit_cost),
         serialNumbers: readSerializedLineNumbers(row.serial_numbers_json),
+        batchAllocations: readInventoryBatchAllocations(
+          row.batch_allocations_json,
+        ),
       });
       linesBySupplierReturnId.set(row.local_supplier_return_id, currentLines);
     }
@@ -24843,9 +25824,11 @@ export class LocalStoreService {
           session.previous_quantity,
           session.counted_quantity,
           session.variance_quantity,
-          session.previous_serial_numbers_json,
-          session.counted_serial_numbers_json,
-          session.note,
+            session.previous_serial_numbers_json,
+            session.counted_serial_numbers_json,
+            session.previous_batch_quantities_json,
+            session.counted_batch_quantities_json,
+            session.note,
           session.operator_name,
           session.submitted_at,
           session.committed_at,
@@ -24887,6 +25870,12 @@ export class LocalStoreService {
       ),
       countedSerialNumbers: readSerializedLineNumbers(
         row.counted_serial_numbers_json,
+      ),
+      previousBatchQuantities: readInventoryBatchAllocations(
+        row.previous_batch_quantities_json,
+      ),
+      countedBatchQuantities: readInventoryBatchAllocations(
+        row.counted_batch_quantities_json,
       ),
       note: row.note,
       operatorName: row.operator_name,
@@ -25290,13 +26279,45 @@ export class LocalStoreService {
     metadata: Record<string, string>,
   ): StoreOptionSettingsSummary {
     return {
+      allowNegativeInventory: metadata.allow_negative_inventory === "1",
+      allowOfflineSales: metadata.allow_offline_sales !== "0",
+      autoPrintReceipts: metadata.auto_print_receipts !== "0",
+      enforceSerializedScanAtPos:
+        metadata.enforce_serialized_scan_at_pos !== "0",
+      requireCustomerForCreditSales:
+        metadata.require_customer_for_credit_sales !== "0",
+      requireSupervisorForReceiptlessReturn:
+        metadata.require_supervisor_for_receiptless_return !== "0",
+      defaultReceiptSearchDays: normalizePolicyInteger(
+        metadata.default_receipt_search_days,
+        30,
+        1,
+        365,
+      ),
       shiftFloatPromptAmount: Number(
         Math.max(0, asNumber(metadata.shift_float_prompt_amount)).toFixed(2),
       ),
       showCriticalStocksOnStartup:
-        metadata.show_critical_stocks_on_startup === "1",
+        metadata.show_critical_stocks_on_startup !== "0",
+      showExpiringBatchesOnStartup:
+        metadata.show_expiring_batches_on_startup !== "0",
+      expiryAlertLeadDays: normalizePolicyInteger(
+        metadata.expiry_alert_lead_days,
+        30,
+        1,
+        3650,
+      ),
+      expiryCriticalDays: normalizePolicyInteger(
+        metadata.expiry_critical_days,
+        7,
+        0,
+        normalizePolicyInteger(metadata.expiry_alert_lead_days, 30, 1, 3650),
+      ),
       productSizes: readProductSizesMetadata(metadata.product_sizes_json),
       posDiscountRates: readPosDiscountRatesMetadata(metadata.pos_discount_rates_json),
+      posExpressChargeRates: readPosDiscountRatesMetadata(
+        metadata.pos_express_charge_rates_json,
+      ),
     };
   }
 
@@ -25827,6 +26848,268 @@ export class LocalStoreService {
       )
       .run(locationCode, productCode, Number(quantity.toFixed(3)), updatedAt);
     this.touchLocation(locationCode, updatedAt);
+  }
+
+  private getInventoryBatchRows(locationCode: string, productCode: string) {
+    return this.db
+      .prepare(
+        `SELECT id, batch_no, manufactured_at, expiry_date, quantity_on_hand, status
+         FROM inventory_batch_registry
+         WHERE inventory_location_code = ? AND product_code = ? AND quantity_on_hand > 0
+         ORDER BY expiry_date ASC, manufactured_at ASC, batch_no ASC`,
+      )
+      .all(locationCode, productCode) as Array<{
+        id: string;
+        batch_no: string;
+        manufactured_at: string | null;
+        expiry_date: string;
+        quantity_on_hand: number | string;
+        status: string;
+      }>;
+  }
+
+  private allocateInventoryBatches(
+    locationCode: string,
+    productCode: string,
+    productName: string,
+    quantity: number,
+    preferredBatchId?: string | null,
+  ): StoreInventoryBatchAllocation[] {
+    return allocateInventoryBatchesFefo({
+      productName,
+      quantity,
+      preferredBatchId,
+      batches: this.getInventoryBatchRows(locationCode, productCode).map(
+        (batch) => ({
+          batchId: batch.id,
+          batchNo: batch.batch_no,
+          manufacturedAt: batch.manufactured_at,
+          expiryDate: batch.expiry_date,
+          quantityOnHand: asNumber(batch.quantity_on_hand),
+          status: batch.status,
+        }),
+      ),
+    });
+  }
+
+  private receiveInventoryBatch(input: {
+    locationCode: string;
+    productCode: string;
+    productName: string;
+    quantity: number;
+    batchNo: string | null;
+    manufacturedAt: string | null;
+    expiryDate: string | null;
+    sourceReferenceType: string;
+    sourceReferenceId: string;
+    sourceReferenceLabel: string;
+    updatedAt: string;
+    status?: "ACTIVE" | "EXPIRED";
+  }) {
+    if (!input.batchNo || !input.expiryDate) {
+      return null;
+    }
+
+    const existing = this.db
+      .prepare(
+        `SELECT id, expiry_date
+         FROM inventory_batch_registry
+         WHERE inventory_location_code = ? AND product_code = ? AND batch_no = ?
+         LIMIT 1`,
+      )
+      .get(input.locationCode, input.productCode, input.batchNo) as
+      | { id: string; expiry_date: string }
+      | undefined;
+
+    if (
+      existing &&
+      existing.expiry_date.slice(0, 10) !== input.expiryDate.slice(0, 10)
+    ) {
+      throw new Error(
+        `${input.productName} batch ${input.batchNo} is already registered with expiry ${existing.expiry_date.slice(0, 10)}.`,
+      );
+    }
+
+    const batchId = existing?.id ?? randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO inventory_batch_registry (
+           id, product_code, inventory_location_code, batch_no, manufactured_at,
+           expiry_date, quantity_on_hand, status, source_reference_type,
+           source_reference_id, source_reference_label, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(inventory_location_code, product_code, batch_no) DO UPDATE SET
+           manufactured_at = COALESCE(excluded.manufactured_at, inventory_batch_registry.manufactured_at),
+           quantity_on_hand = inventory_batch_registry.quantity_on_hand + excluded.quantity_on_hand,
+           status = excluded.status,
+           source_reference_type = excluded.source_reference_type,
+           source_reference_id = excluded.source_reference_id,
+           source_reference_label = excluded.source_reference_label,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        batchId,
+        input.productCode,
+        input.locationCode,
+        input.batchNo,
+        input.manufacturedAt,
+        input.expiryDate,
+        Number(input.quantity.toFixed(3)),
+        input.status ?? "ACTIVE",
+        input.sourceReferenceType,
+        input.sourceReferenceId,
+        input.sourceReferenceLabel,
+        input.updatedAt,
+      );
+
+    return {
+      batchId,
+      batchNo: input.batchNo,
+      manufacturedAt: input.manufacturedAt,
+      expiryDate: input.expiryDate,
+      quantity: Number(input.quantity.toFixed(3)),
+    } satisfies StoreInventoryBatchAllocation;
+  }
+
+  private consumeInventoryBatchAllocations(
+    allocations: StoreInventoryBatchAllocation[],
+    sourceReferenceType: string,
+    sourceReferenceId: string,
+    sourceReferenceLabel: string,
+    updatedAt: string,
+  ) {
+    for (const allocation of allocations) {
+      const result = this.db
+        .prepare(
+          `UPDATE inventory_batch_registry
+           SET quantity_on_hand = quantity_on_hand - ?,
+               status = CASE WHEN quantity_on_hand - ? <= 0 THEN 'DEPLETED' ELSE 'ACTIVE' END,
+               source_reference_type = ?, source_reference_id = ?,
+               source_reference_label = ?, updated_at = ?
+           WHERE id = ? AND status <> 'DEPLETED' AND quantity_on_hand >= ?`,
+        )
+        .run(
+          allocation.quantity,
+          allocation.quantity,
+          sourceReferenceType,
+          sourceReferenceId,
+          sourceReferenceLabel,
+          updatedAt,
+          allocation.batchId ?? null,
+          allocation.quantity,
+        );
+
+      if (result.changes !== 1) {
+        throw new Error(
+          `${allocation.batchNo} changed while stock was being posted. Refresh and retry.`,
+        );
+      }
+    }
+  }
+
+  private allocateReturnedInventoryBatches(
+    sourceLineId: string,
+    productName: string,
+    quantity: number,
+  ) {
+    const sourceRow = this.db
+      .prepare(
+        "SELECT batch_allocations_json FROM pos_transaction_line WHERE id = ? LIMIT 1",
+      )
+      .get(sourceLineId) as { batch_allocations_json: string | null } | undefined;
+    const originalAllocations = readInventoryBatchAllocations(
+      sourceRow?.batch_allocations_json,
+    );
+
+    if (originalAllocations.length === 0) {
+      throw new Error(
+        `${productName} has no recorded batch allocation on the source receipt. A supervisor must correct its lot history before returning it to saleable stock.`,
+      );
+    }
+
+    const returnedRows = this.db
+      .prepare(
+        `SELECT batch_allocations_json
+         FROM pos_transaction_line
+         WHERE source_line_id = ? AND line_intent = 'RETURN'`,
+      )
+      .all(sourceLineId) as Array<{ batch_allocations_json: string | null }>;
+    const returnedByBatchNo = new Map<string, number>();
+
+    for (const row of returnedRows) {
+      for (const allocation of readInventoryBatchAllocations(row.batch_allocations_json)) {
+        returnedByBatchNo.set(
+          allocation.batchNo,
+          Number(
+            ((returnedByBatchNo.get(allocation.batchNo) ?? 0) + allocation.quantity).toFixed(3),
+          ),
+        );
+      }
+    }
+
+    let outstanding = Number(quantity.toFixed(3));
+    const allocations: StoreInventoryBatchAllocation[] = [];
+
+    for (const original of originalAllocations) {
+      if (outstanding <= 0.0001) {
+        break;
+      }
+
+      const available = Number(
+        Math.max(0, original.quantity - (returnedByBatchNo.get(original.batchNo) ?? 0)).toFixed(3),
+      );
+      const returnedQuantity = Number(Math.min(available, outstanding).toFixed(3));
+
+      if (returnedQuantity > 0) {
+        allocations.push({ ...original, quantity: returnedQuantity });
+        outstanding = Number((outstanding - returnedQuantity).toFixed(3));
+      }
+    }
+
+    if (outstanding > 0.0001) {
+      throw new Error(
+        `${productName} does not have enough unreturned batch quantity on the source receipt.`,
+      );
+    }
+
+    return allocations;
+  }
+
+  private restoreInventoryBatchAllocations(
+    allocations: StoreInventoryBatchAllocation[],
+    sourceReferenceType: string,
+    sourceReferenceId: string,
+    sourceReferenceLabel: string,
+    updatedAt: string,
+  ) {
+    for (const allocation of allocations) {
+      const status = inventoryBatchDaysUntilExpiry(allocation.expiryDate, updatedAt) < 0
+        ? "EXPIRED"
+        : "ACTIVE";
+      const result = this.db
+        .prepare(
+          `UPDATE inventory_batch_registry
+           SET quantity_on_hand = quantity_on_hand + ?, status = ?,
+               source_reference_type = ?, source_reference_id = ?,
+               source_reference_label = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          allocation.quantity,
+          status,
+          sourceReferenceType,
+          sourceReferenceId,
+          sourceReferenceLabel,
+          updatedAt,
+          allocation.batchId ?? null,
+        );
+
+      if (result.changes !== 1) {
+        throw new Error(
+          `Flash ERP could not restore batch ${allocation.batchNo}. Refresh the source receipt and retry.`,
+        );
+      }
+    }
   }
 
   private scalar(sql: string, ...params: SQLInputValue[]) {

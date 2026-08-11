@@ -345,8 +345,11 @@ export type EnterpriseStoreSettingsPublishedPayload = {
   salesEnabled: boolean;
   warehouseEnabled: boolean;
   shiftFloatPromptAmount: number;
-  showCriticalStocksOnStartup: boolean;
-  loyaltyProgramEnabled: boolean;
+    showCriticalStocksOnStartup: boolean;
+    showExpiringBatchesOnStartup: boolean;
+    expiryAlertLeadDays: number;
+    expiryCriticalDays: number;
+    loyaltyProgramEnabled: boolean;
   loyaltyPointsPerCurrencyUnit: number;
   loyaltyRedemptionEnabled: boolean;
   loyaltyRedemptionPointsStep: number;

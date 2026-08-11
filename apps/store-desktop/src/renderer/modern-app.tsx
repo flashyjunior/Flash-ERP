@@ -7,6 +7,7 @@ import type {
   ReactNode,
   SetStateAction,
 } from "react";
+import type { SheetData } from "write-excel-file/browser";
 
 import retailLoginBackgroundUrl from "../assets/retail-login-bg.jpg";
 import { buildGoodsReceiptPrintWindowHtml } from "../shared/receipt-printing";
@@ -17,12 +18,14 @@ import type {
   StoreBasketLineSummary,
   StoreBasketSummary,
   StoreCatalogBrowseItem,
+  StoreCatalogBatchAvailability,
   StoreCatalogMatrixVariant,
   StoreCustomerSummary,
   StoreDesktopConnectionConfig,
   StoreDesktopConnectionConfigResult,
   StoreDesktopUpdateStatus,
   StoreDesktopWindowStatus,
+  StoreInventoryBatchAllocation,
   StoreInventoryBrowseItem,
   StoreInterStoreTransferRequestDraftSummary,
   StoreInterStoreTransferSummary,
@@ -58,6 +61,7 @@ type OperationalWorkspace =
   | "manager"
   | "reversals"
   | "reports"
+  | "settings"
   | "sync";
 type StandaloneSetupSection =
   | "shop"
@@ -87,6 +91,7 @@ type SidebarIconName =
   | "manager"
   | "reversals"
   | "reports"
+  | "settings"
   | "sync"
   | "shop"
   | "operations"
@@ -132,15 +137,20 @@ type OpenPriceDraft = {
   unitPrice: string;
   mustEnterPriceAtPos: boolean;
   isSerialized: boolean;
+  trackExpiry: boolean;
   trackSize: boolean;
   trackColor: boolean;
   variantSize: string;
   variantColor: string;
   variantSearch: string;
   variantAttributesSnapshot: string | null;
+  expressChargeSelected: boolean;
+  expressChargeRate: string;
   lineNote: string;
   matrixVariants: StoreCatalogMatrixVariant[];
   availableSerialNumbers: string[];
+  availableBatches: StoreCatalogBatchAvailability[];
+  preferredBatchId: string;
   serialNumbers: string;
   serialEntry: string;
   serialRangeStart: string;
@@ -201,9 +211,25 @@ type InventorySerialDraft = {
 type StockCountUploadRow = {
   productCode: string;
   productName: string;
+  batchId: string | null;
+  batchNo: string | null;
+  manufacturedAt: string | null;
+  expiryDate: string | null;
   systemQuantity: number;
   countedQuantity: number | null;
   varianceQuantity: number | null;
+};
+
+type ExpiringBatchAlertRow = {
+  locationCode: string;
+  locationName: string;
+  productCode: string;
+  productName: string;
+  batchId: string | null;
+  batchNo: string;
+  expiryDate: string;
+  quantity: number;
+  daysUntilExpiry: number;
 };
 
 type PostgresConnectionDraft = {
@@ -299,6 +325,12 @@ const workspaceItems: Array<{
     label: "Reports",
     detail: "Sales, stock, banking",
     icon: "reports",
+  },
+  {
+    id: "settings",
+    label: "Settings",
+    detail: "Store POS configuration",
+    icon: "settings",
   },
   { id: "sync", label: "Sync", detail: "Queues, recovery", icon: "sync" },
 ];
@@ -692,19 +724,21 @@ function describeWindowWatchdog(status: StoreDesktopWindowStatus | null) {
 
 function parseStockCountCsv(
   text: string,
-): Array<{ productCode: string; countedQuantity: number | null }> {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(1)
-    .map((line) => {
-      const [productCode = "", , countedQuantity = ""] = line
-        .split(",")
-        .map((value) => value.trim().replace(/^"|"$/g, ""));
-
+): Array<{
+  productCode: string;
+  batchNo: string | null;
+  manufacturedAt: string | null;
+  expiryDate: string | null;
+  countedQuantity: number | null;
+}> {
+  return parseCsvRecords(text)
+    .map((record) => {
+      const countedQuantity = record.countedquantity?.trim() ?? "";
       return {
-        productCode: productCode.toUpperCase(),
+        productCode: (record.productcode ?? "").trim().toUpperCase(),
+        batchNo: record.batchno?.trim().toUpperCase() || null,
+        manufacturedAt: record.manufacturedat?.trim() || null,
+        expiryDate: record.expirydate?.trim() || null,
         countedQuantity:
           countedQuantity === "" || !Number.isFinite(Number(countedQuantity))
             ? null
@@ -1003,6 +1037,8 @@ const defaultStandaloneProductDraft = {
   taxable: true,
   taxProfileCode: "",
   trackInventory: true,
+  trackExpiry: false,
+  shelfLifeDays: "",
   isSerialized: false,
   mustEnterPriceAtPos: false,
   unitPrice: "0",
@@ -1175,6 +1211,8 @@ function createStandaloneProductInput(
     taxable: draft.taxable,
     taxProfileCode: draft.taxProfileCode,
     trackInventory: draft.trackInventory,
+    trackExpiry: draft.trackExpiry,
+    shelfLifeDays: nullableNumberDraft(draft.shelfLifeDays),
     isSerialized: draft.isSerialized,
     mustEnterPriceAtPos: draft.mustEnterPriceAtPos,
     unitPrice: numberDraft(draft.unitPrice),
@@ -1203,6 +1241,8 @@ function createStandaloneProductDraftFromCatalogItem(
     taxable: row.taxable !== false,
     taxProfileCode: row.taxProfileCode ?? "",
     trackInventory: row.trackInventory !== false,
+    trackExpiry: row.trackExpiry,
+    shelfLifeDays: row.shelfLifeDays == null ? "" : String(row.shelfLifeDays),
     isSerialized: row.isSerialized,
     mustEnterPriceAtPos: row.mustEnterPriceAtPos,
     unitPrice: String(row.unitPrice),
@@ -1662,8 +1702,25 @@ function getCapabilities(snapshot: StoreSyncSnapshot | null) {
   return snapshot?.activeOperatorSession?.capabilities ?? null;
 }
 
-function isStandaloneDeployment(snapshot: StoreSyncSnapshot | null) {
-  return snapshot?.deploymentMode === "STANDALONE";
+function getKnownDeploymentMode(
+  snapshot: StoreSyncSnapshot | null,
+  runtimeStatus?: StoreRuntimeStatus | null,
+) {
+  return snapshot?.deploymentMode ?? runtimeStatus?.deploymentMode ?? null;
+}
+
+function isStandaloneDeployment(
+  snapshot: StoreSyncSnapshot | null,
+  runtimeStatus?: StoreRuntimeStatus | null,
+) {
+  return getKnownDeploymentMode(snapshot, runtimeStatus) === "STANDALONE";
+}
+
+function isEnterpriseManagedDeployment(
+  snapshot: StoreSyncSnapshot | null,
+  runtimeStatus?: StoreRuntimeStatus | null,
+) {
+  return getKnownDeploymentMode(snapshot, runtimeStatus) === "ENTERPRISE_MANAGED";
 }
 
 function isActiveShiftOwnedByOperator(snapshot: StoreSyncSnapshot | null) {
@@ -1717,6 +1774,8 @@ function getVisibleWorkspaces(snapshot: StoreSyncSnapshot | null) {
         );
       case "reports":
         return getVisibleReportWorkspaces(snapshot).length > 0;
+      case "settings":
+        return capabilities.supervisorEligible;
       case "sync":
         return !standalone && capabilities.canOperateStoreSync;
       default:
@@ -2180,17 +2239,29 @@ function CompanyLogo({
   return <span className={`rms-logo ${className}`}>RMS</span>;
 }
 
-function getLoginBackgroundStyle(
-  snapshot: StoreSyncSnapshot | null,
-): CSSProperties {
-  const configuredBackgroundUrl = resolveProductImageUrl(
-    snapshot?.loginBackgroundImageUrl,
-    snapshot,
-  );
+function LoginBackgroundImage({
+  snapshot,
+}: {
+  snapshot: StoreSyncSnapshot | null;
+}) {
+  const configuredBackgroundUrl =
+    resolveProductImageUrl(snapshot?.loginBackgroundImageUrl, snapshot) ??
+    retailLoginBackgroundUrl;
+  const [imageUrl, setImageUrl] = useState(configuredBackgroundUrl);
 
-  return {
-    "--rms-login-background-image": `url(${configuredBackgroundUrl ?? retailLoginBackgroundUrl})`,
-  } as CSSProperties;
+  useEffect(() => {
+    setImageUrl(configuredBackgroundUrl);
+  }, [configuredBackgroundUrl]);
+
+  return (
+    <img
+      alt=""
+      aria-hidden="true"
+      className="rms-login-background-image"
+      onError={() => setImageUrl(retailLoginBackgroundUrl)}
+      src={imageUrl}
+    />
+  );
 }
 
 function matchesText(query: string, values: Array<string | null | undefined>) {
@@ -2384,6 +2455,7 @@ function StandaloneRecordsGrid<T>({
   filters = [],
   primaryAction,
   rows,
+  secondaryActions,
   searchPlaceholder = "Search records"
 }: {
   actions?: (row: T) => ReactNode;
@@ -2393,10 +2465,13 @@ function StandaloneRecordsGrid<T>({
   filters?: StandaloneGridFilter<T>[];
   primaryAction?: ReactNode;
   rows: T[];
+  secondaryActions?: ReactNode;
   searchPlaceholder?: string;
 }) {
   const [query, setQuery] = useState("");
   const [filterValue, setFilterValue] = useState("ALL");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
   const selectedFilter = filters.find((filter) => filter.value === filterValue);
   const visibleRows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -2417,9 +2492,24 @@ function StandaloneRecordsGrid<T>({
       );
     });
   }, [columns, query, rows, selectedFilter]);
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / pageSize));
+  const pageStart = (page - 1) * pageSize;
+  const pageRows = visibleRows.slice(pageStart, pageStart + pageSize);
+  const firstVisibleRow = visibleRows.length === 0 ? 0 : pageStart + 1;
+  const lastVisibleRow = Math.min(pageStart + pageSize, visibleRows.length);
   const gridTemplateColumns = `${columns
-    .map((column) => column.width ?? "minmax(0, 1fr)")
+    .map((column) => column.width ?? "minmax(150px, 1fr)")
     .join(" ")}${actions ? " minmax(86px, auto)" : ""}`;
+
+  useEffect(() => {
+    setPage(1);
+  }, [filterValue, pageSize, query]);
+
+  useEffect(() => {
+    if (page > pageCount) {
+      setPage(pageCount);
+    }
+  }, [page, pageCount]);
 
   function exportRows() {
     const csvRows = [
@@ -2468,6 +2558,7 @@ function StandaloneRecordsGrid<T>({
             ))}
           </select>
         ) : null}
+        {secondaryActions}
         <button className="rms-button" onClick={exportRows} type="button">
           Export
         </button>
@@ -2479,11 +2570,11 @@ function StandaloneRecordsGrid<T>({
           ))}
           {actions ? <span>Action</span> : null}
         </div>
-        {visibleRows.length ? (
-          visibleRows.map((row, index) => (
+        {pageRows.length ? (
+          pageRows.map((row, index) => (
             <div
               className="rms-table-row"
-              key={index}
+              key={pageStart + index}
               style={{ gridTemplateColumns }}
             >
               {columns.map((column) => (
@@ -2495,6 +2586,48 @@ function StandaloneRecordsGrid<T>({
         ) : (
           <EmptyState title={emptyLabel} />
         )}
+      </div>
+      <div className="rms-standalone-grid-footer">
+        <span>{`${formatNumber(firstVisibleRow)}-${formatNumber(lastVisibleRow)} of ${formatNumber(visibleRows.length)}`}</span>
+        <div className="rms-standalone-grid-pagination">
+          <label>
+            <span>Rows</span>
+            <select
+              aria-label="Rows per page"
+              onChange={(event) => setPageSize(Number(event.target.value))}
+              value={pageSize}
+            >
+              {[10, 25, 50, 100].map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span>{`Page ${formatNumber(page)} of ${formatNumber(pageCount)}`}</span>
+          <button
+            aria-label="Previous page"
+            className="rms-icon-page-button"
+            disabled={page <= 1}
+            onClick={() => setPage((current) => Math.max(1, current - 1))}
+            title="Previous page"
+            type="button"
+          >
+            {"<"}
+          </button>
+          <button
+            aria-label="Next page"
+            className="rms-icon-page-button"
+            disabled={page >= pageCount}
+            onClick={() =>
+              setPage((current) => Math.min(pageCount, current + 1))
+            }
+            title="Next page"
+            type="button"
+          >
+            {">"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -2562,6 +2695,12 @@ function SidebarIcon({ name }: { name: SidebarIconName }) {
         <path d="M14 3v4h4" />
         <path d="M9 15h6" />
         <path d="M9 11h4" />
+      </>
+    ),
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
       </>
     ),
     sync: (
@@ -2645,6 +2784,18 @@ function PrintIcon() {
       <path d="M7 8V3h10v5" />
       <path d="M7 17H5a2 2 0 0 1-2-2v-3.5A2.5 2.5 0 0 1 5.5 9h13A2.5 2.5 0 0 1 21 11.5V15a2 2 0 0 1-2 2h-2" />
       <path d="M7 14h10v7H7z" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg aria-hidden="true" className="rms-trash-svg" viewBox="0 0 24 24">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M6 6l1 15h10l1-15" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
     </svg>
   );
 }
@@ -2946,11 +3097,6 @@ export function ModernDesktopApp() {
   const [paymentDrafts, setPaymentDrafts] = useState<PaymentDraft[]>(() => [
     defaultPaymentDraft(null, null),
   ]);
-  const [salesOrderDepositAmount, setSalesOrderDepositAmount] = useState("0");
-  const [salesOrderDepositTenderCode, setSalesOrderDepositTenderCode] =
-    useState("");
-  const [salesOrderDepositReference, setSalesOrderDepositReference] =
-    useState("");
   const [voidModeTransactionNo, setVoidModeTransactionNo] = useState<
     string | null
   >(null);
@@ -2996,6 +3142,9 @@ export function ModernDesktopApp() {
   >([]);
   const [criticalStockRows, setCriticalStockRows] = useState<
     StoreInventoryBrowseItem[]
+  >([]);
+  const [expiringBatchRows, setExpiringBatchRows] = useState<
+    ExpiringBatchAlertRow[]
   >([]);
   const [criticalStockDialogOpen, setCriticalStockDialogOpen] = useState(false);
   const [purchaseOrders, setPurchaseOrders] = useState<
@@ -4088,17 +4237,16 @@ export function ModernDesktopApp() {
     const sessionId = snapshot?.activeOperatorSession?.sessionId ?? null;
     const showStartupCriticalStockAlert =
       snapshot?.optionSettings.showCriticalStocksOnStartup === true;
+    const showStartupExpiringBatchAlert =
+      snapshot?.optionSettings.showExpiringBatchesOnStartup === true;
+    const expiryAlertLeadDays =
+      snapshot?.optionSettings.expiryAlertLeadDays ?? 30;
 
     if (!sessionId) {
       criticalStockStartupAlertKeyRef.current = null;
       setCriticalStockDialogOpen(false);
       setCriticalStockRows([]);
-      return undefined;
-    }
-
-    if (!showStartupCriticalStockAlert) {
-      setCriticalStockDialogOpen(false);
-      setCriticalStockRows([]);
+      setExpiringBatchRows([]);
       return undefined;
     }
 
@@ -4109,13 +4257,23 @@ export function ModernDesktopApp() {
     criticalStockStartupAlertKeyRef.current = sessionId;
     let cancelled = false;
 
-    void runtime
-      .browseInventoryPositions({
-        criticalOnly: true,
-        forStartupAlert: true,
-        limit: 30,
-      })
-      .then((rows) => {
+    void Promise.all([
+      showStartupCriticalStockAlert
+        ? runtime.browseInventoryPositions({
+            criticalOnly: true,
+            forStartupAlert: true,
+            limit: 100,
+          })
+        : Promise.resolve([] as StoreInventoryBrowseItem[]),
+      showStartupExpiringBatchAlert
+        ? runtime.browseInventoryPositions({
+            expiringOnly: true,
+            forStartupAlert: true,
+            limit: 100,
+          })
+        : Promise.resolve([] as StoreInventoryBrowseItem[]),
+    ])
+      .then(([rows, expiryRows]) => {
         if (cancelled) {
           return;
         }
@@ -4137,17 +4295,58 @@ export function ModernDesktopApp() {
           )
           .slice(0, 12);
 
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const todayTime = Date.parse(`${todayKey}T00:00:00Z`);
+        const expiringRows = expiryRows
+          .flatMap((row) =>
+            row.batchQuantities.map((batch) => {
+              const expiryKey = batch.expiryDate.slice(0, 10);
+              const daysUntilExpiry = Math.round(
+                (Date.parse(`${expiryKey}T00:00:00Z`) - todayTime) /
+                  86_400_000,
+              );
+
+              return {
+                locationCode: row.locationCode,
+                locationName: row.locationName,
+                productCode: row.productCode,
+                productName: row.productName,
+                batchId: batch.batchId ?? null,
+                batchNo: batch.batchNo,
+                expiryDate: expiryKey,
+                quantity: batch.quantity,
+                daysUntilExpiry,
+              } satisfies ExpiringBatchAlertRow;
+            }),
+          )
+          .filter(
+            (row) =>
+              row.quantity > 0 &&
+              row.daysUntilExpiry >= 0 &&
+              row.daysUntilExpiry <= expiryAlertLeadDays,
+          )
+          .sort(
+            (left, right) =>
+              left.daysUntilExpiry - right.daysUntilExpiry ||
+              left.productName.localeCompare(right.productName),
+          )
+          .slice(0, 24);
+
         setCriticalStockRows(criticalRows);
-        setCriticalStockDialogOpen(criticalRows.length > 0);
+        setExpiringBatchRows(expiringRows);
+        setCriticalStockDialogOpen(
+          criticalRows.length > 0 || expiringRows.length > 0,
+        );
       })
       .catch((nextError) => {
         console.warn(
-          "Flash ERP critical stock startup alert could not be loaded.",
+          "Flash ERP inventory startup alerts could not be loaded.",
           nextError,
         );
 
         if (!cancelled) {
           setCriticalStockRows([]);
+          setExpiringBatchRows([]);
           setCriticalStockDialogOpen(false);
         }
       });
@@ -4159,6 +4358,8 @@ export function ModernDesktopApp() {
     runtime,
     snapshot?.activeOperatorSession?.sessionId,
     snapshot?.optionSettings.showCriticalStocksOnStartup,
+    snapshot?.optionSettings.showExpiringBatchesOnStartup,
+    snapshot?.optionSettings.expiryAlertLeadDays,
   ]);
 
   useEffect(() => {
@@ -4519,8 +4720,18 @@ export function ModernDesktopApp() {
 
   useEffect(() => {
     if (!signedIn && !desktopConfigOpen && !isScreenLocked) {
-      window.setTimeout(() => loginIdInputRef.current?.focus(), 50);
+      const focusTimer = window.setTimeout(() => {
+        const activeElement = document.activeElement;
+
+        if (!activeElement || activeElement === document.body) {
+          loginIdInputRef.current?.focus();
+        }
+      }, 50);
+
+      return () => window.clearTimeout(focusTimer);
     }
+
+    return undefined;
   }, [desktopConfigOpen, isScreenLocked, signedIn]);
 
   useEffect(() => {
@@ -5052,12 +5263,13 @@ export function ModernDesktopApp() {
     return true;
   }
 
-  async function addScannedItem() {
+  async function addScannedItem(inputValue = scanQuery) {
     if (!runtime) {
       return;
     }
 
     const quantity = Number(scanQuantity);
+    const lookupValue = inputValue.trim();
     const blockMessage = getPosLaneBlockMessage(snapshot);
 
     if (blockMessage) {
@@ -5065,15 +5277,15 @@ export function ModernDesktopApp() {
       return;
     }
 
-    if (!scanQuery.trim() || !Number.isFinite(quantity) || quantity <= 0) {
+    if (!lookupValue || !Number.isFinite(quantity) || quantity <= 0) {
       setError("Enter a valid product or barcode and quantity.");
       return;
     }
 
-    const lookup = await runtime.lookupCatalogItem(scanQuery.trim());
+    const lookup = await runtime.lookupCatalogItem(lookupValue);
 
     if (!lookup) {
-      setError(`No product or barcode matched "${scanQuery.trim()}".`);
+      setError(`No product or barcode matched "${lookupValue}".`);
       return;
     }
 
@@ -5096,11 +5308,12 @@ export function ModernDesktopApp() {
     if (
       lookup?.mustEnterPriceAtPos ||
       (lookup?.isSerialized && saleMode !== "SALES_ORDER") ||
+      (lookup?.trackExpiry && saleMode !== "SALES_ORDER") ||
       needsMatrixChoice ||
       needsTrackedOptionChoice
     ) {
       setOpenPriceDraft({
-        lookupValue: scanQuery.trim(),
+        lookupValue,
         productCode: lookup.productCode,
         productVariantCode:
           selectedMatrixVariant?.variantCode ??
@@ -5113,6 +5326,7 @@ export function ModernDesktopApp() {
           : (selectedMatrixVariant?.unitPrice ?? lookup.unitPrice).toFixed(2),
         mustEnterPriceAtPos: lookup.mustEnterPriceAtPos,
         isSerialized: lookup.isSerialized,
+        trackExpiry: lookup.trackExpiry,
         trackSize: lookup.trackSize,
         trackColor: lookup.trackColor,
         variantSize: "",
@@ -5121,9 +5335,13 @@ export function ModernDesktopApp() {
         variantAttributesSnapshot: selectedMatrixVariant
           ? formatMatrixVariantLabel(selectedMatrixVariant)
           : null,
+        expressChargeSelected: false,
+        expressChargeRate: "",
         lineNote: "",
         matrixVariants,
         availableSerialNumbers: lookup.availableSerialNumbers,
+        availableBatches: lookup.availableBatches,
+        preferredBatchId: "",
         serialNumbers: "",
         serialEntry: "",
         serialRangeStart: "",
@@ -5135,7 +5353,7 @@ export function ModernDesktopApp() {
 
     const result = await runAction((desktopRuntime) =>
       desktopRuntime.addItemToBasket({
-        lookupValue: scanQuery.trim(),
+        lookupValue,
         quantity,
         deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         lineIntent: getCatalogLineIntent(snapshot),
@@ -5175,6 +5393,7 @@ export function ModernDesktopApp() {
     if (
       item.mustEnterPriceAtPos ||
       (item.isSerialized && saleMode !== "SALES_ORDER") ||
+      (item.trackExpiry && saleMode !== "SALES_ORDER") ||
       needsMatrixChoice ||
       needsTrackedOptionChoice
     ) {
@@ -5203,6 +5422,7 @@ export function ModernDesktopApp() {
           : (selectedMatrixVariant?.unitPrice ?? lookup.unitPrice).toFixed(2),
         mustEnterPriceAtPos: lookup.mustEnterPriceAtPos,
         isSerialized: lookup.isSerialized,
+        trackExpiry: lookup.trackExpiry,
         trackSize: lookup.trackSize,
         trackColor: lookup.trackColor,
         variantSize: "",
@@ -5211,9 +5431,13 @@ export function ModernDesktopApp() {
         variantAttributesSnapshot: selectedMatrixVariant
           ? formatMatrixVariantLabel(selectedMatrixVariant)
           : null,
+        expressChargeSelected: false,
+        expressChargeRate: "",
         lineNote: "",
         matrixVariants,
         availableSerialNumbers: lookup.availableSerialNumbers,
+        availableBatches: lookup.availableBatches,
+        preferredBatchId: "",
         serialNumbers: "",
         serialEntry: "",
         serialRangeStart: "",
@@ -5300,6 +5524,31 @@ export function ModernDesktopApp() {
     const variantColor =
       !isMatrixDraft && draft.trackColor ? draft.variantColor.trim() || null : null;
 
+    const expressChargeEligible =
+      draft.trackSize === true && draft.trackColor === true;
+    const configuredExpressRate =
+      expressChargeEligible && draft.expressChargeSelected
+        ? resolveConfiguredPosExpressChargeRate(draft.expressChargeRate)
+        : null;
+
+    if (draft.expressChargeSelected && configuredExpressRate === null) {
+      setError("Choose a configured express charge rate before adding the item.");
+      return;
+    }
+
+    const effectiveUnitPrice =
+      configuredExpressRate === null || unitPrice === null
+        ? unitPrice
+        : Number((unitPrice * (1 + configuredExpressRate / 100)).toFixed(2));
+    const expressChargeNote =
+      configuredExpressRate === null
+        ? null
+        : `Express charge ${formatDiscountRate(configuredExpressRate)}%`;
+    const lineNote =
+      [draft.lineNote.trim(), expressChargeNote]
+        .filter((value): value is string => Boolean(value))
+        .join(" | ") || null;
+
     const result = await runAction((desktopRuntime) =>
       desktopRuntime.addItemToBasket({
         lookupValue: draft.lookupValue,
@@ -5307,7 +5556,8 @@ export function ModernDesktopApp() {
         deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
         lineIntent: getCatalogLineIntent(snapshot),
         serialNumbers,
-        unitPrice,
+        preferredBatchId: draft.preferredBatchId || null,
+        unitPrice: effectiveUnitPrice,
         productVariantCode: selectedMatrixVariant?.variantCode ?? null,
         variantSize,
         variantColor,
@@ -5315,7 +5565,7 @@ export function ModernDesktopApp() {
           selectedMatrixVariant !== null
             ? formatMatrixVariantLabel(selectedMatrixVariant)
             : draft.variantAttributesSnapshot,
-        lineNote: draft.lineNote.trim() || null,
+        lineNote,
       }),
     );
 
@@ -5478,22 +5728,21 @@ export function ModernDesktopApp() {
   }
 
   async function saveSalesOrderBasket() {
-    const depositAmount = Math.max(0, Number(salesOrderDepositAmount) || 0);
-    const depositTenderMethodCode =
-      salesOrderDepositTenderCode ||
-      snapshot?.availableTenderMethods.find(
-        (method) => method.paymentMethod === "CASH",
-      )?.tenderMethodCode ||
-      snapshot?.availableTenderMethods[0]?.tenderMethodCode ||
-      null;
+    const payments = buildCheckoutPayments();
+    const depositAmount = Number(
+      payments.reduce((sum, payment) => sum + payment.amount, 0).toFixed(2),
+    );
+    const firstPayment = payments[0] ?? null;
     const result = await runAction((desktopRuntime) =>
       desktopRuntime.createSalesOrderFromActiveBasket({
         operatorName: getOperatorName(snapshot),
         headerReference: transactionReference.trim() || null,
         additionalDetails: transactionDetails.trim() || null,
+        payments,
         depositAmount,
-        depositTenderMethodCode: depositAmount > 0 ? depositTenderMethodCode : null,
-        depositReference: salesOrderDepositReference.trim() || null,
+        depositTenderMethodCode:
+          depositAmount > 0 ? firstPayment?.tenderMethodCode ?? null : null,
+        depositReference: depositAmount > 0 ? firstPayment?.reference ?? null : null,
         note:
           [transactionReference.trim(), transactionDetails.trim()]
             .filter(Boolean)
@@ -5507,9 +5756,6 @@ export function ModernDesktopApp() {
       setTransactionDetails("");
       setTransactionReferenceMatches([]);
       setTransactionReferenceSearchDismissed(false);
-      setSalesOrderDepositAmount("0");
-      setSalesOrderDepositTenderCode("");
-      setSalesOrderDepositReference("");
       setTransactionDetailsOpen(false);
       setHeldSalePanelOpen(false);
       setReceiptPanelOpen(false);
@@ -5611,6 +5857,23 @@ export function ModernDesktopApp() {
   ) {
     const rate = Number(value);
     const configuredRates = snapshot?.optionSettings.posDiscountRates ?? [];
+
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return null;
+    }
+
+    return configuredRates.some(
+      (configuredRate) => configuredRate.toFixed(2) === rate.toFixed(2),
+    )
+      ? Number(rate.toFixed(2))
+      : null;
+  }
+
+  function resolveConfiguredPosExpressChargeRate(
+    value: string | number | null | undefined,
+  ) {
+    const rate = Number(value);
+    const configuredRates = snapshot?.optionSettings.posExpressChargeRates ?? [];
 
     if (!Number.isFinite(rate) || rate <= 0) {
       return null;
@@ -6383,12 +6646,14 @@ export function ModernDesktopApp() {
   async function saveStockCount(input?: {
     productCode?: string;
     countedQuantity?: number;
+    batchQuantities?: StoreInventoryBatchAllocation[];
   }) {
     await runAction((desktopRuntime) =>
       desktopRuntime.saveStockCountSessionDraft({
         inventoryLocationCode: inventoryLocation,
         productCode: (input?.productCode ?? stockCountProductCode).trim(),
         countedQuantity: input?.countedQuantity ?? Number(stockCountQuantity),
+        batchQuantities: input?.batchQuantities,
         note: stockCountNote.trim() || null,
         operatorName: operatorName ?? undefined,
       }),
@@ -6459,16 +6724,19 @@ export function ModernDesktopApp() {
     order: StorePurchaseOrderSummary,
     line?: StorePurchaseOrderSummary["lines"][number],
     quantity?: number,
+    batch?: { batchNo: string; manufacturedAt: string; expiryDate: string },
   ) {
     const targetLines = line ? [line] : order.lines;
     const receivableLines = targetLines.filter(
       (candidate) =>
-        candidate.outstandingQuantity > 0 && !candidate.isSerialized,
+        candidate.outstandingQuantity > 0 &&
+        !candidate.isSerialized &&
+        (!candidate.trackExpiry || Boolean(line && batch)),
     );
 
     if (receivableLines.length === 0) {
       setError(
-        "This purchase order has no non-serialized outstanding lines for quick receipt.",
+        "This purchase order has no standard outstanding lines for quick receipt. Serialized and expiry-controlled lines must be received individually.",
       );
       return;
     }
@@ -6483,6 +6751,9 @@ export function ModernDesktopApp() {
             line.outstandingQuantity,
             Math.max(0, quantity ?? line.outstandingQuantity),
           ),
+          batchNo: line.trackExpiry ? batch?.batchNo ?? "" : null,
+          manufacturedAt: line.trackExpiry ? batch?.manufacturedAt || null : null,
+          expiryDate: line.trackExpiry ? batch?.expiryDate ?? "" : null,
         })),
       }),
     );
@@ -6532,6 +6803,7 @@ export function ModernDesktopApp() {
     order: StorePurchaseOrderSummary,
     line: StorePurchaseOrderSummary["lines"][number],
     serialNumbers: string[],
+    batch?: { batchNo: string; manufacturedAt: string; expiryDate: string },
   ) {
     await runAction((desktopRuntime) =>
       desktopRuntime.receivePurchaseOrder({
@@ -6542,6 +6814,9 @@ export function ModernDesktopApp() {
             purchaseOrderLineId: line.purchaseOrderLineId,
             quantity: serialNumbers.length,
             serialNumbers,
+            batchNo: line.trackExpiry ? batch?.batchNo ?? "" : null,
+            manufacturedAt: line.trackExpiry ? batch?.manufacturedAt || null : null,
+            expiryDate: line.trackExpiry ? batch?.expiryDate ?? "" : null,
           },
         ],
       }),
@@ -7135,6 +7410,22 @@ export function ModernDesktopApp() {
               <span>Config file</span>
               <strong>{desktopConfigResult?.configPath ?? "Not loaded"}</strong>
             </div>
+            <div className="rms-config-path">
+              <span>Support log file</span>
+              <div className="rms-config-path-row">
+                <strong>
+                  {desktopConfigResult?.supportLogPath ?? "Not loaded"}
+                </strong>
+                <button
+                  className="rms-button"
+                  disabled={!desktopConfigResult?.supportLogPath || !runtime}
+                  onClick={() => void runtime?.openDesktopSupportFolder()}
+                  type="button"
+                >
+                  Open folder
+                </button>
+              </div>
+            </div>
             <p className="rms-helper-text">
               Provision the selected store database first. In HQ managed mode,
               restart, sync sign-in data, sign in, then sync the remaining HQ
@@ -7189,10 +7480,8 @@ export function ModernDesktopApp() {
 
   if (!runtime) {
     return (
-      <main
-        className="rms-lock-screen"
-        style={getLoginBackgroundStyle(snapshot)}
-      >
+      <main className="rms-lock-screen">
+        <LoginBackgroundImage snapshot={snapshot} />
         <section className="rms-login-card">
           <button
             aria-label="Configure terminal"
@@ -7212,10 +7501,8 @@ export function ModernDesktopApp() {
 
   if (licenseBlockMessage) {
     return (
-      <main
-        className="rms-lock-screen"
-        style={getLoginBackgroundStyle(snapshot)}
-      >
+      <main className="rms-lock-screen">
+        <LoginBackgroundImage snapshot={snapshot} />
         <section className="rms-login-brand">
           <strong className="rms-login-title">
             {snapshot?.retailOrgName?.trim() || "Flash ERP"}
@@ -7267,10 +7554,8 @@ export function ModernDesktopApp() {
 
   if (!signedIn) {
     return (
-      <main
-        className="rms-lock-screen"
-        style={getLoginBackgroundStyle(snapshot)}
-      >
+      <main className="rms-lock-screen">
+        <LoginBackgroundImage snapshot={snapshot} />
         <section className="rms-login-brand">
           <strong className="rms-login-title">
             {snapshot?.retailOrgName?.trim() || "Flash ERP"}
@@ -7331,14 +7616,16 @@ export function ModernDesktopApp() {
             <label>
               <div className="rms-login-label-row">
                 <span>Password</span>
-                <button
-                  className="rms-login-link-button"
-                  disabled={isBusy}
-                  onClick={openEnterprisePasswordRecovery}
-                  type="button"
-                >
-                  Change password
-                </button>
+                {isEnterpriseManagedDeployment(snapshot, runtimeStatus) ? (
+                  <button
+                    className="rms-login-link-button"
+                    disabled={isBusy}
+                    onClick={openEnterprisePasswordRecovery}
+                    type="button"
+                  >
+                    Change password
+                  </button>
+                ) : null}
               </div>
               <div className="rms-login-field">
                 <input
@@ -7623,6 +7910,12 @@ export function ModernDesktopApp() {
             </svg>
             <span>Log out</span>
           </button>
+          <small
+            aria-label="Application version"
+            className="rms-sidebar-version"
+          >
+            Version {desktopUpdateStatus?.currentVersion ?? "-"}
+          </small>
         </div>
       </aside>
 
@@ -7734,9 +8027,6 @@ export function ModernDesktopApp() {
             lineQuantityDrafts={lineQuantityDrafts}
             openPriceDraft={openPriceDraft}
             paymentDrafts={paymentDrafts}
-            salesOrderDepositAmount={salesOrderDepositAmount}
-            salesOrderDepositReference={salesOrderDepositReference}
-            salesOrderDepositTenderCode={salesOrderDepositTenderCode}
             saleMode={saleMode}
             cashierReport={cashierReport}
             reportPanelOpen={reportPanelOpen}
@@ -7779,9 +8069,6 @@ export function ModernDesktopApp() {
             setCatalogQuery={setCatalogQuery}
             setCustomerQuery={setCustomerQuery}
             setSaleMode={setSaleMode}
-            setSalesOrderDepositAmount={setSalesOrderDepositAmount}
-            setSalesOrderDepositReference={setSalesOrderDepositReference}
-            setSalesOrderDepositTenderCode={setSalesOrderDepositTenderCode}
             setSelectedAccountCustomer={setSelectedAccountCustomer}
             setLineQuantityDrafts={setLineQuantityDrafts}
             setOpenPriceDraft={setOpenPriceDraft}
@@ -8006,6 +8293,13 @@ export function ModernDesktopApp() {
           />
         ) : null}
 
+        {renderedWorkspace === "settings" ? (
+          <StorePosSettingsWorkspace
+            isBusy={isBusy}
+            runAction={runAction}
+            snapshot={snapshot}
+          />
+        ) : null}
         {isReportWorkspace(renderedWorkspace) ? (
           <ReportWorkspaceView
             canFilterCashier={
@@ -8042,6 +8336,29 @@ export function ModernDesktopApp() {
             installDesktopUpdate={installDesktopUpdate}
             isBusy={isBusy}
             isSyncRunning={isSyncRunning}
+            openDesktopSupportFolder={async () => {
+              try {
+                await runtime.openDesktopSupportFolder();
+              } catch (nextError) {
+                setError(formatDesktopActionError(nextError));
+              }
+            }}
+            saveSyncDiagnostics={async (fileName, diagnostic) => {
+              setIsBusy(true);
+              setError(null);
+
+              try {
+                const outputPath = await runtime.exportSyncDiagnostics({
+                  fileName,
+                  diagnostic,
+                });
+                setNotice(`Sync diagnostics saved to ${outputPath}.`);
+              } catch (nextError) {
+                setError(formatDesktopActionError(nextError));
+              } finally {
+                setIsBusy(false);
+              }
+            }}
             recoverDesktopWindow={recoverDesktopWindow}
             refreshDesktopWindowStatus={refreshDesktopWindowStatus}
             refreshRuntimeStatus={async () => {
@@ -8067,13 +8384,16 @@ export function ModernDesktopApp() {
         />
       ) : null}
       {criticalStockDialogOpen ? (
-        <CriticalStockDialog
+        <InventoryStartupAlertsDialog
+          expiryAlertLeadDays={snapshot?.optionSettings.expiryAlertLeadDays ?? 30}
+          expiryCriticalDays={snapshot?.optionSettings.expiryCriticalDays ?? 7}
+          expiringRows={expiringBatchRows}
+          lowStockRows={criticalStockRows}
           onClose={() => setCriticalStockDialogOpen(false)}
           openInventory={() => {
             setCriticalStockDialogOpen(false);
             switchWorkspace("inventory");
           }}
-          rows={criticalStockRows}
         />
       ) : null}
       {isScreenLocked ? (
@@ -8120,14 +8440,16 @@ export function ModernDesktopApp() {
                 >
                   Unlock
                 </button>
-                <button
-                  className="rms-button"
-                  disabled={isBusy}
-                  onClick={openEnterprisePasswordRecovery}
-                  type="button"
-                >
-                  Change password
-                </button>
+                {isEnterpriseManagedDeployment(snapshot, runtimeStatus) ? (
+                  <button
+                    className="rms-button"
+                    disabled={isBusy}
+                    onClick={openEnterprisePasswordRecovery}
+                    type="button"
+                  >
+                    Change password
+                  </button>
+                ) : null}
               </div>
             </form>
           </section>
@@ -8561,6 +8883,21 @@ function StandaloneProductEditorForm(props: {
               value={props.productDraft.safetyStockLevel}
             />
           </label>
+          <label>
+            <span>Shelf life days</span>
+            <input
+              min="1"
+              onChange={(event) =>
+                props.setProductDraft((draft) => ({
+                  ...draft,
+                  shelfLifeDays: event.target.value,
+                }))
+              }
+              step="1"
+              type="number"
+              value={props.productDraft.shelfLifeDays}
+            />
+          </label>
           <div className="rms-form-switch-strip is-compact">
             <label className="rms-check-field">
               <input
@@ -8569,11 +8906,26 @@ function StandaloneProductEditorForm(props: {
                   props.setProductDraft((draft) => ({
                     ...draft,
                     trackInventory: event.target.checked,
+                    trackExpiry: event.target.checked ? draft.trackExpiry : false,
                   }))
                 }
                 type="checkbox"
               />
               <span>Track stock</span>
+            </label>
+            <label className="rms-check-field">
+              <input
+                checked={props.productDraft.trackExpiry}
+                onChange={(event) =>
+                  props.setProductDraft((draft) => ({
+                    ...draft,
+                    trackExpiry: event.target.checked,
+                    trackInventory: true,
+                  }))
+                }
+                type="checkbox"
+              />
+              <span>Batch and expiry</span>
             </label>
             <label className="rms-check-field">
               <input
@@ -8615,7 +8967,10 @@ function StandaloneSetupWorkspace(props: {
     touchModeEnabled: props.snapshot?.touchModeEnabled ?? true,
     showCriticalStocksOnStartup:
       props.snapshot?.optionSettings.showCriticalStocksOnStartup ?? true,
+    showExpiringBatchesOnStartup:
+      props.snapshot?.optionSettings.showExpiringBatchesOnStartup ?? true,
     companyLogoUrl: props.snapshot?.companyLogoUrl ?? "",
+    loginBackgroundImageUrl: props.snapshot?.loginBackgroundImageUrl ?? "",
     receiptHeader: props.snapshot?.receiptSettings.receiptHeader ?? "",
     receiptFooter: props.snapshot?.receiptSettings.receiptFooter ?? "",
   });
@@ -8772,6 +9127,7 @@ function StandaloneSetupWorkspace(props: {
     return [
       "rms-form-grid",
       "rms-entry-dialog-form",
+      `rms-entry-dialog-${key}`,
       entryDialog === key ? "is-open" : "",
       extraClassName,
     ]
@@ -8791,8 +9147,15 @@ function StandaloneSetupWorkspace(props: {
       showCriticalStocksOnStartup:
         props.snapshot?.optionSettings.showCriticalStocksOnStartup ??
         current.showCriticalStocksOnStartup,
+      showExpiringBatchesOnStartup:
+        props.snapshot?.optionSettings.showExpiringBatchesOnStartup ??
+        current.showExpiringBatchesOnStartup,
       companyLogoUrl:
         current.companyLogoUrl || props.snapshot?.companyLogoUrl || "",
+      loginBackgroundImageUrl:
+        current.loginBackgroundImageUrl ||
+        props.snapshot?.loginBackgroundImageUrl ||
+        "",
       receiptHeader:
         current.receiptHeader || props.snapshot?.receiptSettings.receiptHeader || "",
       receiptFooter:
@@ -8812,9 +9175,11 @@ function StandaloneSetupWorkspace(props: {
     props.snapshot?.storeName,
     props.snapshot?.touchModeEnabled,
     props.snapshot?.companyLogoUrl,
+    props.snapshot?.loginBackgroundImageUrl,
     props.snapshot?.receiptSettings.currencyCode,
     props.snapshot?.receiptSettings.timezone,
     props.snapshot?.optionSettings.showCriticalStocksOnStartup,
+    props.snapshot?.optionSettings.showExpiringBatchesOnStartup,
     props.snapshot?.receiptSettings.receiptHeader,
     props.snapshot?.receiptSettings.receiptFooter,
   ]);
@@ -8967,6 +9332,28 @@ function StandaloneSetupWorkspace(props: {
     reader.readAsDataURL(file);
   }
 
+  function selectLoginBackground(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const imageDataUrl = typeof reader.result === "string" ? reader.result : "";
+
+      if (imageDataUrl) {
+        setSettingsDraft((draft) => ({
+          ...draft,
+          loginBackgroundImageUrl: imageDataUrl,
+        }));
+      }
+    });
+    reader.readAsDataURL(file);
+  }
+
   async function saveStoreLogoOverride() {
     const result = await props.runAction((runtime) =>
       runtime.saveLocalReceiptLogo({
@@ -9052,7 +9439,11 @@ function StandaloneSetupWorkspace(props: {
   }
 
   return (
-    <div className="rms-workspace rms-tabbed-workspace rms-standalone-setup-workspace">
+    <div
+      className={`rms-workspace rms-tabbed-workspace rms-standalone-setup-workspace${
+        entryDialog ? ` is-entry-dialog-${entryDialog}` : ""
+      }`}
+    >
       <div className="rms-tab-panel-stack">
         {props.activeSection === "shop" ? (
           <div className="rms-tab-grid rms-setup-tab-grid" role="tabpanel">
@@ -9077,9 +9468,13 @@ function StandaloneSetupWorkspace(props: {
                     touchModeEnabled: settingsDraft.touchModeEnabled,
                     showCriticalStocksOnStartup:
                       settingsDraft.showCriticalStocksOnStartup,
+                    showExpiringBatchesOnStartup:
+                      settingsDraft.showExpiringBatchesOnStartup,
                     ...(storeLogoDraftChanged
                       ? { companyLogoUrl: settingsDraft.companyLogoUrl }
                       : {}),
+                    loginBackgroundImageUrl:
+                      settingsDraft.loginBackgroundImageUrl,
                     receiptHeader: settingsDraft.receiptHeader,
                     receiptFooter: settingsDraft.receiptFooter,
                   }),
@@ -9161,6 +9556,66 @@ function StandaloneSetupWorkspace(props: {
               />
               <span>Critical stock popup</span>
             </label>
+            <label className="rms-check-field">
+              <input
+                checked={settingsDraft.showExpiringBatchesOnStartup}
+                onChange={(event) =>
+                  setSettingsDraft((draft) => ({
+                    ...draft,
+                    showExpiringBatchesOnStartup: event.target.checked,
+                  }))
+                }
+                type="checkbox"
+              />
+              <span>Expiring batch popup</span>
+            </label>
+            <div className="rms-form-span-2">
+              <span>Login page background</span>
+              {settingsDraft.loginBackgroundImageUrl ? (
+                <img
+                  alt="Login page background preview"
+                  src={
+                    resolveProductImageUrl(
+                      settingsDraft.loginBackgroundImageUrl,
+                      props.snapshot,
+                    ) ?? ""
+                  }
+                  style={{
+                    display: "block",
+                    width: "min(100%, 520px)",
+                    aspectRatio: "16 / 6",
+                    objectFit: "cover",
+                    margin: "8px 0",
+                    borderRadius: 6,
+                  }}
+                />
+              ) : null}
+              <div className="rms-editor-actions-bar">
+                <label className="rms-button is-compact">
+                  Upload background
+                  <input
+                    accept="image/*"
+                    hidden
+                    onChange={selectLoginBackground}
+                    type="file"
+                  />
+                </label>
+                {settingsDraft.loginBackgroundImageUrl ? (
+                  <button
+                    className="rms-button is-compact"
+                    onClick={() =>
+                      setSettingsDraft((draft) => ({
+                        ...draft,
+                        loginBackgroundImageUrl: "",
+                      }))
+                    }
+                    type="button"
+                  >
+                    Clear background
+                  </button>
+                ) : null}
+              </div>
+            </div>
             <label className="rms-form-span-2">
               <span>Receipt header</span>
               <input
@@ -10392,35 +10847,6 @@ function StandaloneSetupWorkspace(props: {
                 </div>
                 <StatusPill>{`${formatNumber(props.catalogItems.length)} item`}</StatusPill>
               </div>
-              <div className="rms-export-buttons">
-                <button
-                  className="rms-button"
-                  disabled={props.isBusy}
-                  onClick={() => void props.browseCatalog()}
-                  type="button"
-                >
-                  Refresh
-                </button>
-                <button
-                  className="rms-button"
-                  disabled={props.isBusy}
-                  onClick={exportProducts}
-                  type="button"
-                >
-                  Export CSV
-                </button>
-                <label className="rms-file-button">
-                  Import CSV
-                  <input
-                    accept=".csv,.txt"
-                    onChange={(event) => {
-                      void importProducts(event.currentTarget.files?.[0] ?? null);
-                      event.currentTarget.value = "";
-                    }}
-                    type="file"
-                  />
-                </label>
-              </div>
               <StandaloneProductEditorForm
                 categories={categories}
                 departments={departments}
@@ -10565,6 +10991,31 @@ function StandaloneSetupWorkspace(props: {
                   </button>
                 }
                 rows={props.catalogItems}
+                secondaryActions={
+                  <>
+                    <button
+                      className="rms-button"
+                      disabled={props.isBusy}
+                      onClick={() => void props.browseCatalog()}
+                      type="button"
+                    >
+                      Refresh
+                    </button>
+                    <label className="rms-file-button">
+                      Import CSV
+                      <input
+                        accept=".csv,.txt"
+                        onChange={(event) => {
+                          void importProducts(
+                            event.currentTarget.files?.[0] ?? null,
+                          );
+                          event.currentTarget.value = "";
+                        }}
+                        type="file"
+                      />
+                    </label>
+                  </>
+                }
                 searchPlaceholder="Search products"
               />
             </section>
@@ -13056,6 +13507,7 @@ function StandaloneSecurityWorkspace(props: {
     displayName: "",
     email: "",
     password: "",
+    confirmPassword: "",
     roleName: "Standalone cashier",
     cashierEligible: true,
     supervisorEligible: false,
@@ -13159,6 +13611,14 @@ function StandaloneSecurityWorkspace(props: {
     })),
   ];
   const isStandalone = isStandaloneDeployment(props.snapshot);
+  const userPasswordHasInput = Boolean(
+    userDraft.password || userDraft.confirmPassword,
+  );
+  const userPasswordMismatch =
+    userPasswordHasInput && userDraft.password !== userDraft.confirmPassword;
+  const userPasswordCanSubmit = editingUserLogin
+    ? !userPasswordHasInput || !userPasswordMismatch
+    : Boolean(userDraft.password) && !userPasswordMismatch;
 
   useEffect(() => {
     setPasswordPolicyDraft(
@@ -13178,6 +13638,7 @@ function StandaloneSecurityWorkspace(props: {
     return [
       "rms-form-grid",
       "rms-entry-dialog-form",
+      `rms-entry-dialog-${key}`,
       securityDialog === key ? "is-open" : "",
       extraClassName,
     ]
@@ -13192,6 +13653,7 @@ function StandaloneSecurityWorkspace(props: {
       displayName: "",
       email: "",
       password: "",
+      confirmPassword: "",
       roleName: "Standalone cashier",
       cashierEligible: true,
       supervisorEligible: false,
@@ -13265,6 +13727,7 @@ function StandaloneSecurityWorkspace(props: {
       displayName: row.displayName,
       email: row.email ?? "",
       password: "",
+      confirmPassword: "",
       roleName: row.roleNames[0] ?? "Standalone cashier",
       cashierEligible: row.cashierEligible,
       supervisorEligible: row.supervisorEligible,
@@ -13314,7 +13777,11 @@ function StandaloneSecurityWorkspace(props: {
   }
 
   return (
-    <div className="rms-workspace rms-tabbed-workspace rms-standalone-setup-workspace">
+    <div
+      className={`rms-workspace rms-tabbed-workspace rms-standalone-setup-workspace${
+        securityDialog ? ` is-entry-dialog-${securityDialog}` : ""
+      }`}
+    >
       <div className="rms-tab-panel-stack">
         {props.activeSection === "roles" ? (
           <section className="rms-panel">
@@ -13393,6 +13860,10 @@ function StandaloneSecurityWorkspace(props: {
                 );
               }}
             >
+              <div className="rms-entry-dialog-heading rms-form-span-all">
+                <span>Security role</span>
+                <h2>{editingRoleCode ? "Edit role" : "New role"}</h2>
+              </div>
               <label>
                 <span>Role code</span>
                 <input
@@ -13448,6 +13919,10 @@ function StandaloneSecurityWorkspace(props: {
                 />
               </label>
               <div className="rms-form-span-all rms-permission-picker">
+                <div className="rms-permission-picker-heading">
+                  <strong>Permissions</strong>
+                  <span>{`${formatNumber(roleDraft.permissionCodes.length)} selected`}</span>
+                </div>
                 {permissionRows.map((permission) => (
                   <label className="rms-check-field" key={permission.permissionCode}>
                     <input
@@ -13466,26 +13941,28 @@ function StandaloneSecurityWorkspace(props: {
                   </label>
                 ))}
               </div>
-              <button
-                className="rms-button is-primary is-compact"
-                disabled={
-                  props.isBusy ||
-                  !roleDraft.roleName.trim() ||
-                  roleDraft.permissionCodes.length === 0
-                }
-                type="submit"
-              >
-                {editingRoleCode ? "Update role" : "Save role"}
-              </button>
-              {editingRoleCode ? (
+              <div className="rms-form-actions rms-form-span-all">
                 <button
-                  className="rms-button is-compact"
-                  onClick={resetRoleDraft}
-                  type="button"
+                  className="rms-button is-primary"
+                  disabled={
+                    props.isBusy ||
+                    !roleDraft.roleName.trim() ||
+                    roleDraft.permissionCodes.length === 0
+                  }
+                  type="submit"
                 >
-                  New role
+                  {editingRoleCode ? "Update role" : "Save role"}
                 </button>
-              ) : null}
+                {editingRoleCode ? (
+                  <button
+                    className="rms-button"
+                    onClick={resetRoleDraft}
+                    type="button"
+                  >
+                    New role
+                  </button>
+                ) : null}
+              </div>
             </form>
           </section>
         ) : null}
@@ -13537,23 +14014,46 @@ function StandaloneSecurityWorkspace(props: {
               searchPlaceholder="Search users"
             />
             <form
-              className={securityFormClass("user")}
+              className={securityFormClass("user", "rms-security-user-form")}
               onSubmit={(event) => {
                 event.preventDefault();
+
+                if (!userPasswordCanSubmit) {
+                  return;
+                }
+
                 const roleProfile = rolePermissionProfile(userDraft.roleName);
+                const permissionCodes = userDraft.supervisorEligible
+                  ? Array.from(
+                      new Set([
+                        ...roleProfile.permissionCodes,
+                        ...standaloneSupervisorPermissionCodes,
+                      ]),
+                    )
+                  : roleProfile.permissionCodes.filter((permissionCode) =>
+                      standaloneCashierPermissionCodeSet.has(permissionCode),
+                    );
                 closeSecurityDialog();
                 void props.runAction((runtime) =>
                   runtime.saveStandaloneUser({
-                    ...userDraft,
+                    loginId: userDraft.loginId,
+                    displayName: userDraft.displayName,
+                    email: userDraft.email,
+                    password: userDraft.password,
+                    roleName: userDraft.roleName,
+                    cashierEligible: userDraft.cashierEligible,
+                    supervisorEligible: userDraft.supervisorEligible,
                     roleCode: roleProfile.roleCode,
                     permissionCodes:
-                      roleProfile.permissionCodes.length > 0
-                        ? roleProfile.permissionCodes
-                        : null,
+                      permissionCodes.length > 0 ? permissionCodes : null,
                   }),
                 );
               }}
             >
+              <div className="rms-entry-dialog-heading rms-form-span-all">
+                <span>User account</span>
+                <h2>{editingUserLogin ? "Edit user" : "New user"}</h2>
+              </div>
               <label>
                 <span>Login ID</span>
                 <input
@@ -13579,17 +14079,8 @@ function StandaloneSecurityWorkspace(props: {
                   onChange={(event) =>
                     setUserDraft((draft) => ({ ...draft, email: event.target.value }))
                   }
+                  type="email"
                   value={userDraft.email}
-                />
-              </label>
-              <label>
-                <span>Password</span>
-                <input
-                  onChange={(event) =>
-                    setUserDraft((draft) => ({ ...draft, password: event.target.value }))
-                  }
-                  type="password"
-                  value={userDraft.password}
                 />
               </label>
               <label>
@@ -13605,8 +14096,54 @@ function StandaloneSecurityWorkspace(props: {
                   ))}
                 </select>
               </label>
-              <label className="rms-check-field">
+              <label>
+                <span>{editingUserLogin ? "New password" : "Password"}</span>
                 <input
+                  aria-invalid={userPasswordMismatch}
+                  aria-label={editingUserLogin ? "New password" : "Password"}
+                  autoComplete="new-password"
+                  minLength={props.snapshot?.passwordPolicy?.minimumLength ?? 8}
+                  onChange={(event) =>
+                    setUserDraft((draft) => ({ ...draft, password: event.target.value }))
+                  }
+                  required={!editingUserLogin}
+                  type="password"
+                  value={userDraft.password}
+                />
+                <small className="rms-field-help">
+                  {editingUserLogin
+                    ? "Leave both password fields blank to keep the current password."
+                    : "Required for a new standalone user."}
+                </small>
+              </label>
+              <label>
+                <span>Confirm password</span>
+                <input
+                  aria-invalid={userPasswordMismatch}
+                  aria-label="Confirm password"
+                  autoComplete="new-password"
+                  minLength={props.snapshot?.passwordPolicy?.minimumLength ?? 8}
+                  onChange={(event) =>
+                    setUserDraft((draft) => ({
+                      ...draft,
+                      confirmPassword: event.target.value,
+                    }))
+                  }
+                  required={!editingUserLogin || Boolean(userDraft.password)}
+                  type="password"
+                  value={userDraft.confirmPassword}
+                />
+                <small
+                  className={`rms-field-help${userPasswordMismatch ? " is-error" : ""}`}
+                >
+                  {userPasswordMismatch
+                    ? "Password confirmation does not match."
+                    : "Enter the same password again."}
+                </small>
+              </label>
+              <label className="rms-check-field rms-user-supervisor-field">
+                <input
+                  aria-label="Supervisor access"
                   checked={userDraft.supervisorEligible}
                   onChange={(event) =>
                     setUserDraft((draft) => ({
@@ -13617,28 +14154,37 @@ function StandaloneSecurityWorkspace(props: {
                   }
                   type="checkbox"
                 />
-                <span>Supervisor</span>
+                <span className="rms-user-supervisor-copy">
+                  <strong>Supervisor access</strong>
+                  <small>
+                    Allows local setup administration, controlled POS overrides,
+                    inventory operations, sync, and shift closure.
+                  </small>
+                </span>
               </label>
-              <button
-                className="rms-button is-primary is-compact"
-                disabled={
-                  props.isBusy ||
-                  !userDraft.loginId.trim() ||
-                  !userDraft.displayName.trim()
-                }
-                type="submit"
-              >
-                {editingUserLogin ? "Update user" : "Save user"}
-              </button>
-              {editingUserLogin ? (
+              <div className="rms-form-actions rms-form-span-all">
                 <button
-                  className="rms-button is-compact"
-                  onClick={resetUserDraft}
-                  type="button"
+                  className="rms-button is-primary"
+                  disabled={
+                    props.isBusy ||
+                    !userDraft.loginId.trim() ||
+                    !userDraft.displayName.trim() ||
+                    !userPasswordCanSubmit
+                  }
+                  type="submit"
                 >
-                  New user
+                  {editingUserLogin ? "Update user" : "Save user"}
                 </button>
-              ) : null}
+                {editingUserLogin ? (
+                  <button
+                    className="rms-button"
+                    onClick={resetUserDraft}
+                    type="button"
+                  >
+                    New user
+                  </button>
+                ) : null}
+              </div>
             </form>
           </section>
         ) : null}
@@ -14512,9 +15058,6 @@ function POSWorkspace(props: {
   isVoidReviewBasket: boolean;
   openPriceDraft: OpenPriceDraft | null;
   saleMode: SaleMode;
-  salesOrderDepositAmount: string;
-  salesOrderDepositReference: string;
-  salesOrderDepositTenderCode: string;
   scanQuery: string;
   scanQuantity: string;
   catalogQuery: string;
@@ -14565,9 +15108,6 @@ function POSWorkspace(props: {
   setCatalogCategory: (value: string) => void;
   setCustomerQuery: (value: string) => void;
   setSaleMode: (value: SaleMode) => void;
-  setSalesOrderDepositAmount: (value: string) => void;
-  setSalesOrderDepositReference: (value: string) => void;
-  setSalesOrderDepositTenderCode: (value: string) => void;
   setAccountCustomerQuery: (value: string) => void;
   setAccountPanelOpen: (value: boolean) => void;
   setSelectedAccountCustomer: (customer: StoreCustomerSummary | null) => void;
@@ -14606,7 +15146,7 @@ function POSWorkspace(props: {
   addReceiptLineToBasket: (
     line: StoreReceiptLookupResult["lines"][number],
   ) => Promise<boolean>;
-  addScannedItem: () => Promise<void>;
+  addScannedItem: (inputValue?: string) => Promise<void>;
   addCatalogItem: (item: StoreCatalogBrowseItem) => Promise<void>;
   checkoutBasket: () => Promise<void>;
   applyPosDiscountRate: (lineId: string, value: string) => Promise<void>;
@@ -14690,6 +15230,13 @@ function POSWorkspace(props: {
   const canCollectAccountPayment =
     capabilities?.canCollectAccountPayment === true;
   const canRedeemLoyalty = capabilities?.canRedeemLoyalty === true;
+  const showPromotionSummary = Boolean(
+    props.activeBasket?.appliedPromotions.length,
+  );
+  const showLoyaltySummary = Boolean(
+    props.activeBasket?.customerLoyaltyEnrolled &&
+      props.snapshot?.loyaltySettings.loyaltyRedemptionEnabled,
+  );
   const canReprintReceipt = capabilities?.canReprintReceipt === true;
   const selectedAccountTender = props.accountTenderMethods.find(
     (method) =>
@@ -14728,8 +15275,42 @@ function POSWorkspace(props: {
       (method) => method.tenderMethodCode === draft.tenderMethodCode,
     );
 
-    return tenderRequiresBankAccount(tender) && !draft.bankAccountId;
+    return (
+      (Number(draft.amount) || 0) > 0 &&
+      tenderRequiresBankAccount(tender) &&
+      !draft.bankAccountId
+    );
   });
+  const missingReferenceTender = props.paymentDrafts.some((draft) => {
+    const tender = props.tenderMethods.find(
+      (method) => method.tenderMethodCode === draft.tenderMethodCode,
+    );
+
+    return (
+      (Number(draft.amount) || 0) > 0 &&
+      tender?.requiresReference === true &&
+      !draft.reference.trim()
+    );
+  });
+  const missingTenderSelection = props.paymentDrafts.some((draft) => {
+    const amount = Number(draft.amount) || 0;
+
+    return (
+      amount > 0 &&
+      !props.tenderMethods.some(
+        (method) => method.tenderMethodCode === draft.tenderMethodCode,
+      )
+    );
+  });
+  const salesOrderDepositAmount =
+    props.saleMode === "SALES_ORDER" ? paymentTotal : 0;
+  const salesOrderDepositOver =
+    props.saleMode === "SALES_ORDER" &&
+    salesOrderDepositAmount - basketTotal > 0.005;
+  const salesOrderBalanceDue = Math.max(
+    0,
+    basketTotal - salesOrderDepositAmount,
+  );
   const visibleAccountEntries = props.selectedAccountCustomer
     ? (props.snapshot?.recentCustomerAccountEntries ?? []).filter(
         (entry) =>
@@ -14741,6 +15322,12 @@ function POSWorkspace(props: {
     props.activeBasket?.transactionType === "SALE" &&
     Boolean(props.activeBasket.customerId) &&
     Boolean(props.activeBasket.lines.length);
+  const canSaveSalesOrder =
+    canCreateSalesOrder &&
+    !salesOrderDepositOver &&
+    !missingTenderSelection &&
+    !missingBankAccountTender &&
+    !missingReferenceTender;
   const canOpenShift = capabilities?.canOpenShift === true;
   const canCloseShift = capabilities?.canCloseShift === true;
   const canPrintXReport =
@@ -14785,8 +15372,13 @@ function POSWorkspace(props: {
   const openPriceQuantity = Number(props.openPriceDraft?.quantity ?? 0);
   const openPriceSerialMismatch =
     Boolean(props.openPriceDraft?.isSerialized) &&
+    props.saleMode !== "SALES_ORDER" &&
     (!Number.isFinite(openPriceQuantity) ||
       selectedSerialNumbers.length !== openPriceQuantity);
+  const openPriceBatchUnavailable =
+    Boolean(props.openPriceDraft?.trackExpiry) &&
+    props.saleMode !== "SALES_ORDER" &&
+    props.openPriceDraft?.availableBatches.length === 0;
   const openPriceMatrixVariants = props.openPriceDraft
     ? filterMatrixVariants(
         props.openPriceDraft.matrixVariants,
@@ -14798,7 +15390,12 @@ function POSWorkspace(props: {
     Boolean(props.openPriceDraft) &&
     props.openPriceDraft?.productType === "MATRIX" &&
     props.openPriceDraft.matrixVariants.length > 0;
+  const openPriceExpressEligible = Boolean(
+    props.openPriceDraft?.trackSize && props.openPriceDraft?.trackColor,
+  );
   const openPriceSizeOptions = props.snapshot?.optionSettings.productSizes ?? [];
+  const configuredPosExpressChargeRates =
+    props.snapshot?.optionSettings.posExpressChargeRates ?? [];
   const openPriceSelectedColour = normalizeProductColour(
     props.openPriceDraft?.variantColor,
   );
@@ -15053,7 +15650,7 @@ function POSWorkspace(props: {
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  void props.addScannedItem();
+                  void props.addScannedItem(event.currentTarget.value);
                 }
               }}
               placeholder="Scan barcode or type product code"
@@ -15124,8 +15721,8 @@ function POSWorkspace(props: {
 
               return (
               <div className="rms-table-row" key={line.lineId}>
-                <strong>{index + 1}</strong>
-                <div>
+                <strong className="rms-cart-index">{index + 1}</strong>
+                <div className="rms-cart-item">
                   <strong>{line.productName}</strong>
                   <small>
                     {[
@@ -15137,6 +15734,9 @@ function POSWorkspace(props: {
                       line.variantColor ? `Colour ${line.variantColor}` : null,
                       line.serialNumbers.length
                         ? `Serial ${line.serialNumbers.join(", ")}`
+                        : null,
+                      line.batchAllocations.length
+                        ? `Batch ${line.batchAllocations.map((batch) => batch.batchNo).join(", ")}`
                         : null,
                       line.lineNote ? `Note ${line.lineNote}` : null,
                       line.appliedPromotionName ?? line.productCode,
@@ -15196,8 +15796,8 @@ function POSWorkspace(props: {
                     String(line.quantity)
                   }
                 />
-                <span>{formatMoney(line.unitPrice)}</span>
-                <strong>{formatMoney(line.lineTotal)}</strong>
+                <span className="rms-cart-price">{formatMoney(line.unitPrice)}</span>
+                <strong className="rms-cart-total">{formatMoney(line.lineTotal)}</strong>
                 <button
                   aria-label={`Remove ${line.productName}`}
                   className="rms-icon-button is-danger"
@@ -15209,17 +15809,7 @@ function POSWorkspace(props: {
                   }
                   type="button"
                 >
-                  <svg
-                    aria-hidden="true"
-                    className="rms-trash-svg"
-                    viewBox="0 0 24 24"
-                  >
-                    <path d="M3 6h18" />
-                    <path d="M8 6V4h8v2" />
-                    <path d="M6 6l1 15h10l1-15" />
-                    <path d="M10 11v6" />
-                    <path d="M14 11v6" />
-                  </svg>
+                  <TrashIcon />
                 </button>
               </div>
               );
@@ -15229,6 +15819,7 @@ function POSWorkspace(props: {
           )}
         </div>
 
+        <div className="rms-checkout-dock">
         <div className="rms-total-strip">
           <Stat
             label="Subtotal"
@@ -15249,135 +15840,237 @@ function POSWorkspace(props: {
           />
         </div>
 
-        {props.activeBasket ? (
-          <div className="rms-loyalty-strip">
-            <div>
+        {props.activeBasket && (showPromotionSummary || showLoyaltySummary) ? (
+          <div
+            className={`rms-loyalty-strip${
+              showPromotionSummary && !showLoyaltySummary
+                ? " is-promotions-only"
+                : !showPromotionSummary && showLoyaltySummary
+                  ? " is-loyalty-only"
+                  : ""
+            }`}
+          >
+            {showPromotionSummary ? (
+              <div>
               <span>Promotions</span>
               <strong>
-                {props.activeBasket.appliedPromotions.length
-                  ? props.activeBasket.appliedPromotions
-                      .map(
-                        (promotion) =>
-                          `${promotion.promotionName} (${formatMoney(promotion.discountAmount)})`,
-                      )
-                      .join(", ")
-                  : (props.activeBasket.promotionStatusMessage ??
-                    "No promotion applied")}
+                {props.activeBasket.appliedPromotions
+                  .map(
+                    (promotion) =>
+                      `${promotion.promotionName} (${formatMoney(promotion.discountAmount)})`,
+                  )
+                  .join(", ")}
               </strong>
-            </div>
-            <div>
-              <span>Loyalty</span>
-              <strong>
-                {props.activeBasket.customerLoyaltyEnrolled
-                  ? `${formatNumber(props.activeBasket.customerLoyaltyPointsBalance)} pts · redeemable ${formatMoney(props.activeBasket.maxLoyaltyRedemptionAmount)}`
-                  : (props.activeBasket.loyaltyRedemptionMessage ??
-                    "No loyalty account")}
-              </strong>
-            </div>
-            <button
-              className="rms-row-button"
-              disabled={
-                props.isBusy ||
-                !canEditBasket ||
-                !canRedeemLoyalty ||
-                !props.activeBasket.loyaltyRedemptionAllowed
-              }
-              onClick={() =>
-                void props.runAction((desktopRuntime) =>
-                  desktopRuntime.setActiveBasketLoyaltyRedemption({
-                    pointsToRedeem:
-                      props.activeBasket?.maxLoyaltyRedemptionPoints ?? 0,
-                  }),
-                )
-              }
-              type="button"
-            >
-              Redeem
-            </button>
-            <button
-              className="rms-row-button"
-              disabled={
-                props.isBusy ||
-                !canEditBasket ||
-                props.activeBasket.loyaltyRedemptionPoints <= 0
-              }
-              onClick={() =>
-                void props.runAction((desktopRuntime) =>
-                  desktopRuntime.setActiveBasketLoyaltyRedemption({
-                    pointsToRedeem: 0,
-                  }),
-                )
-              }
-              type="button"
-            >
-              Clear
-            </button>
+              </div>
+            ) : null}
+            {showLoyaltySummary ? (
+              <>
+                <div>
+                  <span>Loyalty</span>
+                  <strong>
+                    {formatNumber(props.activeBasket.customerLoyaltyPointsBalance)} pts · redeemable {formatMoney(props.activeBasket.maxLoyaltyRedemptionAmount)}
+                  </strong>
+                </div>
+                <button
+                  className="rms-row-button"
+                  disabled={
+                    props.isBusy ||
+                    !canEditBasket ||
+                    !canRedeemLoyalty ||
+                    !props.activeBasket.loyaltyRedemptionAllowed
+                  }
+                  onClick={() =>
+                    void props.runAction((desktopRuntime) =>
+                      desktopRuntime.setActiveBasketLoyaltyRedemption({
+                        pointsToRedeem:
+                          props.activeBasket?.maxLoyaltyRedemptionPoints ?? 0,
+                      }),
+                    )
+                  }
+                  type="button"
+                >
+                  Redeem
+                </button>
+                <button
+                  className="rms-row-button"
+                  disabled={
+                    props.isBusy ||
+                    !canEditBasket ||
+                    props.activeBasket.loyaltyRedemptionPoints <= 0
+                  }
+                  onClick={() =>
+                    void props.runAction((desktopRuntime) =>
+                      desktopRuntime.setActiveBasketLoyaltyRedemption({
+                        pointsToRedeem: 0,
+                      }),
+                    )
+                  }
+                  type="button"
+                >
+                  Clear
+                </button>
+              </>
+            ) : null}
           </div>
         ) : null}
 
         {props.saleMode === "SALES_ORDER" ? (
           <div className="rms-payment-panel is-order-mode">
             <div className="rms-payment-summary">
-              <strong>{formatMoney(basketTotal)}</strong>
+              <strong>{formatMoney(salesOrderDepositAmount)}</strong>
               <span>
-                Balance{" "}
-                {formatMoney(
-                  Math.max(
-                    0,
-                    basketTotal - (Number(props.salesOrderDepositAmount) || 0),
-                  ),
-                )}
+                Order {formatMoney(basketTotal)} · Balance{" "}
+                {formatMoney(salesOrderBalanceDue)}
               </span>
               <button
+                className="rms-row-button is-add"
+                disabled={
+                  props.isBusy ||
+                  isReadOnlyVoid ||
+                  !canSell ||
+                  !props.activeBasket
+                }
+                onClick={props.addPaymentRow}
+                type="button"
+              >
+                Add
+              </button>
+              <button
                 className="rms-button is-primary"
-                disabled={props.isBusy || !canCreateSalesOrder}
+                disabled={props.isBusy || !canSaveSalesOrder}
                 onClick={() => void props.saveSalesOrderBasket()}
                 type="button"
               >
                 Save order
               </button>
             </div>
-            <div className="rms-payment-row">
-              <select
-                onChange={(event) =>
-                  props.setSalesOrderDepositTenderCode(event.target.value)
-                }
-                value={
-                  props.salesOrderDepositTenderCode ||
-                  props.tenderMethods[0]?.tenderMethodCode ||
-                  ""
-                }
-              >
-                {props.tenderMethods.length ? (
-                  props.tenderMethods.map((method) => (
+            {props.paymentDrafts.map((payment, index) => (
+              <div className="rms-payment-row" key={payment.id}>
+                <select
+                  disabled={isReadOnlyVoid}
+                  onChange={(event) =>
+                    props.setPaymentDrafts((drafts) =>
+                      drafts.map((draft) =>
+                        draft.id === payment.id
+                          ? {
+                              ...draft,
+                              tenderMethodCode: event.target.value,
+                              bankAccountId: "",
+                            }
+                          : draft,
+                      ),
+                    )
+                  }
+                  value={payment.tenderMethodCode}
+                >
+                  {props.tenderMethods.length ? (
+                    props.tenderMethods.map((method) => (
+                      <option
+                        key={method.tenderMethodCode}
+                        value={method.tenderMethodCode}
+                      >
+                        {method.tenderMethodName}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No tenders synced</option>
+                  )}
+                </select>
+                <select
+                  disabled={
+                    isReadOnlyVoid ||
+                    !tenderRequiresBankAccount(
+                      props.tenderMethods.find(
+                        (method) =>
+                          method.tenderMethodCode === payment.tenderMethodCode,
+                      ),
+                    )
+                  }
+                  onChange={(event) =>
+                    props.setPaymentDrafts((drafts) =>
+                      drafts.map((draft) =>
+                        draft.id === payment.id
+                          ? { ...draft, bankAccountId: event.target.value }
+                          : draft,
+                      ),
+                    )
+                  }
+                  value={payment.bankAccountId}
+                >
+                  <option value="">Bank account</option>
+                  {props.snapshot?.availableBankAccounts.map((account) => (
                     <option
-                      key={method.tenderMethodCode}
-                      value={method.tenderMethodCode}
+                      key={account.bankAccountId}
+                      value={account.bankAccountId}
                     >
-                      {method.tenderMethodName}
+                      {account.bankName} · {account.branchName} ·{" "}
+                      {account.accountNumber}
                     </option>
-                  ))
-                ) : (
-                  <option value="">No tenders synced</option>
-                )}
-              </select>
-              <input
-                min="0"
-                onChange={(event) =>
-                  props.setSalesOrderDepositAmount(event.target.value)
-                }
-                step="0.01"
-                type="number"
-                value={props.salesOrderDepositAmount}
-              />
-              <input
-                onChange={(event) =>
-                  props.setSalesOrderDepositReference(event.target.value)
-                }
-                placeholder="Deposit reference"
-                value={props.salesOrderDepositReference}
-              />
-            </div>
+                  ))}
+                </select>
+                <input
+                  disabled={isReadOnlyVoid}
+                  min="0"
+                  onChange={(event) =>
+                    props.setPaymentDrafts((drafts) =>
+                      drafts.map((draft) =>
+                        draft.id === payment.id
+                          ? { ...draft, amount: event.target.value }
+                          : draft,
+                      ),
+                    )
+                  }
+                  step="0.01"
+                  type="number"
+                  value={payment.amount}
+                />
+                <input
+                  disabled={isReadOnlyVoid}
+                  onChange={(event) =>
+                    props.setPaymentDrafts((drafts) =>
+                      drafts.map((draft) =>
+                        draft.id === payment.id
+                          ? { ...draft, reference: event.target.value }
+                          : draft,
+                      ),
+                    )
+                  }
+                  placeholder="Deposit reference"
+                  value={payment.reference}
+                />
+                <button
+                  aria-label={`Remove payment ${index + 1}`}
+                  className="rms-icon-button is-danger rms-payment-remove-button"
+                  disabled={isReadOnlyVoid || props.paymentDrafts.length <= 1}
+                  onClick={() => props.removePaymentRow(payment.id)}
+                  title="Remove payment"
+                  type="button"
+                >
+                  <TrashIcon />
+                </button>
+              </div>
+            ))}
+            {salesOrderDepositOver ? (
+              <p className="rms-inline-message">
+                Sales order deposits cannot be greater than the order total.
+              </p>
+            ) : null}
+            {missingTenderSelection ? (
+              <p className="rms-inline-message">
+                Choose an active tender method for each deposit row.
+              </p>
+            ) : null}
+            {missingBankAccountTender ? (
+              <p className="rms-inline-message">
+                Select the bank, branch, and account number for bank-backed
+                tenders.
+              </p>
+            ) : null}
+            {missingReferenceTender ? (
+              <p className="rms-inline-message">
+                Enter the required deposit reference before saving the order.
+              </p>
+            ) : null}
           </div>
         ) : (
           <div className="rms-payment-panel">
@@ -15403,7 +16096,7 @@ function POSWorkspace(props: {
                 Add
               </button>
             </div>
-            {props.paymentDrafts.map((payment) => (
+            {props.paymentDrafts.map((payment, index) => (
               <div className="rms-payment-row" key={payment.id}>
                 <select
                   disabled={isReadOnlyVoid}
@@ -15496,12 +16189,14 @@ function POSWorkspace(props: {
                   value={payment.reference}
                 />
                 <button
-                  className="rms-row-button"
+                  aria-label={`Remove payment ${index + 1}`}
+                  className="rms-icon-button is-danger rms-payment-remove-button"
                   disabled={isReadOnlyVoid || props.paymentDrafts.length <= 1}
                   onClick={() => props.removePaymentRow(payment.id)}
+                  title="Remove payment"
                   type="button"
                 >
-                  Remove
+                  <TrashIcon />
                 </button>
               </div>
             ))}
@@ -15520,6 +16215,7 @@ function POSWorkspace(props: {
             </button>
           </div>
         )}
+        </div>
       </section>
 
       <section className="rms-panel rms-product-panel">
@@ -15686,14 +16382,6 @@ function POSWorkspace(props: {
           type="button"
         >
           Details
-        </button>
-        <button
-          className="rms-action-button is-save-order"
-          disabled={props.isBusy || !canCreateSalesOrder}
-          onClick={() => void props.saveSalesOrderBasket()}
-          type="button"
-        >
-          Save order
         </button>
         <button
           className="rms-action-button is-pending-orders"
@@ -16609,7 +17297,7 @@ function POSWorkspace(props: {
 
       {props.transactionDetailsOpen ? (
         <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-          <section className="rms-dialog">
+          <section className="rms-dialog rms-transaction-details-dialog">
             <div className="rms-panel-title">
               <div>
                 <span>Transaction</span>
@@ -16702,12 +17390,18 @@ function POSWorkspace(props: {
 
       {props.openPriceDraft ? (
         <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-          <section className="rms-dialog">
+          <section
+            className={`rms-dialog rms-item-dialog${
+              props.openPriceDraft.isSerialized ? " is-serialized" : ""
+            }${props.openPriceDraft.trackExpiry ? " is-batch-selection" : ""}`}
+          >
             <div className="rms-panel-title">
               <div>
                 <span>
                   {props.openPriceDraft.isSerialized
                     ? "Serialized item"
+                    : props.openPriceDraft.trackExpiry
+                      ? "Choose stock batch"
                     : "Open price"}
                 </span>
                 <h2>{props.openPriceDraft.productName}</h2>
@@ -16869,6 +17563,59 @@ function POSWorkspace(props: {
                   </label>
                 </div>
               ) : null}
+              {openPriceExpressEligible ? (
+                <div className="rms-field rms-form-span-all rms-express-charge-field">
+                  <label className="rms-express-toggle">
+                    <input
+                      checked={props.openPriceDraft.expressChargeSelected}
+                      disabled={configuredPosExpressChargeRates.length === 0}
+                      onChange={(event) =>
+                        props.setOpenPriceDraft((draft) =>
+                          draft
+                            ? {
+                                ...draft,
+                                expressChargeSelected: event.target.checked,
+                                expressChargeRate: event.target.checked
+                                  ? draft.expressChargeRate ||
+                                    configuredPosExpressChargeRates[0]?.toFixed(2) ||
+                                    ""
+                                  : "",
+                              }
+                            : draft,
+                        )
+                      }
+                      type="checkbox"
+                    />
+                    <span>Express</span>
+                  </label>
+                  {props.openPriceDraft.expressChargeSelected ? (
+                    <label className="rms-field">
+                      <span>Express rate</span>
+                      <select
+                        disabled={configuredPosExpressChargeRates.length === 0}
+                        onChange={(event) =>
+                          props.setOpenPriceDraft((draft) =>
+                            draft
+                              ? { ...draft, expressChargeRate: event.target.value }
+                              : draft,
+                          )
+                        }
+                        value={props.openPriceDraft.expressChargeRate}
+                      >
+                        <option value="">Select rate</option>
+                        {configuredPosExpressChargeRates.map((rate) => (
+                          <option key={rate.toFixed(2)} value={rate.toFixed(2)}>
+                            {formatDiscountRate(rate)}%
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {configuredPosExpressChargeRates.length === 0 ? (
+                    <small>No express charge rates are configured for this store.</small>
+                  ) : null}
+                </div>
+              ) : null}
               {props.openPriceDraft.mustEnterPriceAtPos ? (
                 <label className="rms-field">
                   <span>Unit price</span>
@@ -16919,6 +17666,82 @@ function POSWorkspace(props: {
                 />
               </label>
             </div>
+            {props.openPriceDraft.trackExpiry &&
+            props.saleMode !== "SALES_ORDER" ? (
+              <div className="rms-batch-picker">
+                <div className="rms-batch-picker-title">
+                  <div>
+                    <strong>Stock batch</strong>
+                    <span>
+                      Automatic FEFO uses the earliest valid expiry. Choose a
+                      batch to use it first.
+                    </span>
+                  </div>
+                  <small>
+                    {formatNumber(props.openPriceDraft.availableBatches.length)} batch(es)
+                  </small>
+                </div>
+                <div className="rms-batch-choice-grid">
+                  <label
+                    className={`rms-batch-choice${
+                      !props.openPriceDraft.preferredBatchId ? " is-selected" : ""
+                    }`}
+                  >
+                    <input
+                      checked={!props.openPriceDraft.preferredBatchId}
+                      name="preferred-batch"
+                      onChange={() =>
+                        props.setOpenPriceDraft((draft) =>
+                          draft ? { ...draft, preferredBatchId: "" } : draft,
+                        )
+                      }
+                      type="radio"
+                    />
+                    <div>
+                      <strong>Automatic FEFO</strong>
+                      <span>Earliest valid expiry first</span>
+                    </div>
+                  </label>
+                  {props.openPriceDraft.availableBatches.map((batch) => (
+                    <label
+                      className={`rms-batch-choice${
+                        props.openPriceDraft?.preferredBatchId === batch.batchId
+                          ? " is-selected"
+                          : ""
+                      }`}
+                      key={batch.batchId}
+                    >
+                      <input
+                        checked={
+                          props.openPriceDraft?.preferredBatchId === batch.batchId
+                        }
+                        name="preferred-batch"
+                        onChange={() =>
+                          props.setOpenPriceDraft((draft) =>
+                            draft
+                              ? { ...draft, preferredBatchId: batch.batchId }
+                              : draft,
+                          )
+                        }
+                        type="radio"
+                      />
+                      <div>
+                        <strong>{batch.batchNo}</strong>
+                        <span>
+                          Expires {new Date(batch.expiryDate).toLocaleDateString("en-GB")}
+                        </span>
+                      </div>
+                      <small>{formatNumber(batch.quantityOnHand)} available</small>
+                    </label>
+                  ))}
+                </div>
+                {openPriceBatchUnavailable ? (
+                  <small className="rms-inline-message">
+                    No active, non-expired batch is available for this item.
+                  </small>
+                ) : null}
+              </div>
+            ) : null}
             {props.openPriceDraft.isSerialized ? (
               <div className="rms-serial-picker">
                 <div className="rms-serial-entry-row">
@@ -17073,7 +17896,11 @@ function POSWorkspace(props: {
               </button>
               <button
                 className="rms-button is-primary"
-                disabled={props.isBusy || openPriceSerialMismatch}
+                disabled={
+                  props.isBusy ||
+                  openPriceSerialMismatch ||
+                  openPriceBatchUnavailable
+                }
                 onClick={() => void props.submitOpenPriceDraft()}
                 type="button"
               >
@@ -17225,46 +18052,298 @@ function getCriticalStockFloor(row: StoreInventoryBrowseItem) {
   );
 }
 
-function CriticalStockDialog({
+function InventoryStartupAlertsDialog({
+  expiryAlertLeadDays,
+  expiryCriticalDays,
+  expiringRows,
+  lowStockRows,
   onClose,
   openInventory,
-  rows,
 }: {
+  expiryAlertLeadDays: number;
+  expiryCriticalDays: number;
+  expiringRows: ExpiringBatchAlertRow[];
+  lowStockRows: StoreInventoryBrowseItem[];
   onClose: () => void;
   openInventory: () => void;
-  rows: StoreInventoryBrowseItem[];
 }) {
+  const [activeTab, setActiveTab] = useState<"expiring" | "low-stock">(
+    expiringRows.length ? "expiring" : "low-stock",
+  );
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const visibleCount =
+    activeTab === "expiring" ? expiringRows.length : lowStockRows.length;
+  const activeLabel = activeTab === "expiring" ? "Expiring batches" : "Low stock";
+
+  async function exportActiveAlerts() {
+    if (!visibleCount || isExporting) {
+      return;
+    }
+
+    setIsExporting(true);
+    setExportError(null);
+
+    try {
+      const { default: writeExcelFile } = await import("write-excel-file/browser");
+      const headerStyle = {
+        backgroundColor: "#245F84",
+        fontWeight: "bold" as const,
+        textColor: "#FFFFFF",
+        height: 24,
+      };
+      const sheetData: SheetData =
+        activeTab === "expiring"
+          ? [
+              [
+                { value: "Product code", ...headerStyle },
+                { value: "Product", ...headerStyle },
+                { value: "Location code", ...headerStyle },
+                { value: "Location", ...headerStyle },
+                { value: "Batch number", ...headerStyle },
+                { value: "Expiry date", ...headerStyle },
+                { value: "Days remaining", ...headerStyle },
+                { value: "Quantity", ...headerStyle },
+              ],
+              ...expiringRows.map((row) => [
+                row.productCode,
+                row.productName,
+                row.locationCode,
+                row.locationName,
+                row.batchNo,
+                row.expiryDate,
+                row.daysUntilExpiry,
+                row.quantity,
+              ]),
+            ]
+          : [
+              [
+                { value: "Product code", ...headerStyle },
+                { value: "Product", ...headerStyle },
+                { value: "Location code", ...headerStyle },
+                { value: "Location", ...headerStyle },
+                { value: "On hand", ...headerStyle },
+                { value: "Minimum stock", ...headerStyle },
+                { value: "Reorder point", ...headerStyle },
+                { value: "Safety stock", ...headerStyle },
+                { value: "Alert floor", ...headerStyle },
+                { value: "Shortage", ...headerStyle },
+              ],
+              ...lowStockRows.map((row) => {
+                const alertFloor = getCriticalStockFloor(row) ?? 0;
+
+                return [
+                  row.productCode,
+                  row.productName,
+                  row.locationCode,
+                  row.locationName,
+                  row.quantityOnHand,
+                  row.minStockLevel ?? 0,
+                  row.reorderPoint ?? 0,
+                  row.safetyStockLevel ?? 0,
+                  alertFloor,
+                  Math.max(0, alertFloor - row.quantityOnHand),
+                ];
+              }),
+            ];
+      const fileSlug =
+        activeTab === "expiring" ? "expiring-batches" : "low-stock";
+      const sheetName =
+        activeTab === "expiring" ? "Expiring batches" : "Low stock";
+      const columns =
+        activeTab === "expiring"
+          ? [14, 34, 14, 24, 18, 16, 16, 14]
+          : [14, 34, 14, 24, 14, 16, 16, 16, 14, 14];
+
+      await writeExcelFile(
+        sheetData,
+        {
+          columns: columns.map((width) => ({ width })),
+          sheet: sheetName,
+          stickyRowsCount: 1,
+        },
+      ).toFile(
+        `flash-rms-${fileSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`,
+      );
+    } catch (error) {
+      setExportError(
+        error instanceof Error
+          ? error.message
+          : "The Excel workbook could not be generated.",
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
   return (
     <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
       <section className="rms-dialog rms-wide-dialog rms-critical-stock-dialog">
         <div className="rms-panel-title">
           <div>
             <span>Inventory startup alert</span>
-            <h2>Critical stock</h2>
+            <h2>Stock attention required</h2>
           </div>
-          <StatusPill tone="warn">{`${formatNumber(rows.length)} item(s)`}</StatusPill>
+          <StatusPill tone="warn">{`${formatNumber(visibleCount)} item(s)`}</StatusPill>
         </div>
         <div className="rms-dialog-body">
-          <div className="rms-critical-stock-list">
-            {rows.map((row) => (
-              <div
-                className="rms-critical-stock-row"
-                key={`${row.locationCode}-${row.productCode}`}
-              >
-                <div>
-                  <strong>{row.productName}</strong>
-                  <span>
-                    {row.productCode} · {row.locationName}
-                  </span>
-                </div>
-                <div className="rms-critical-stock-qty">
-                  <strong>{formatNumber(row.quantityOnHand)}</strong>
-                  <span>
-                    Floor {formatNumber(getCriticalStockFloor(row) ?? 0)}
-                  </span>
-                </div>
-              </div>
-            ))}
+          <div
+            aria-label="Inventory alerts"
+            className="rms-workspace-tabs rms-inventory-alert-tabs"
+            role="tablist"
+          >
+            <button
+              aria-selected={activeTab === "expiring"}
+              className={`rms-tab-button${activeTab === "expiring" ? " is-active" : ""}`}
+              onClick={() => {
+                setActiveTab("expiring");
+                setExportError(null);
+              }}
+              role="tab"
+              type="button"
+            >
+              Expiring batches ({formatNumber(expiringRows.length)})
+            </button>
+            <button
+              aria-selected={activeTab === "low-stock"}
+              className={`rms-tab-button${activeTab === "low-stock" ? " is-active" : ""}`}
+              onClick={() => {
+                setActiveTab("low-stock");
+                setExportError(null);
+              }}
+              role="tab"
+              type="button"
+            >
+              Low stock ({formatNumber(lowStockRows.length)})
+            </button>
+          </div>
+
+          <div className="rms-inventory-alert-toolbar">
+            <div>
+              <strong>{activeLabel}</strong>
+              <span>{`${formatNumber(visibleCount)} row(s) requiring attention`}</span>
+            </div>
+            <button
+              className="rms-button rms-inventory-alert-export"
+              disabled={!visibleCount || isExporting}
+              onClick={() => void exportActiveAlerts()}
+              type="button"
+            >
+              {isExporting ? "Exporting..." : "Export Excel"}
+            </button>
+          </div>
+          {exportError ? (
+            <div className="rms-inventory-alert-export-error" role="alert">
+              {exportError}
+            </div>
+          ) : null}
+
+          <div className="rms-inventory-alert-grid">
+            {activeTab === "expiring" ? (
+              expiringRows.length ? (
+                <table aria-label="Expiring batches">
+                  <thead>
+                    <tr>
+                      <th>Product</th>
+                      <th>Location</th>
+                      <th>Batch</th>
+                      <th>Expiry date</th>
+                      <th>Days remaining</th>
+                      <th className="is-numeric">Quantity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expiringRows.map((row) => (
+                      <tr
+                        key={`${row.locationCode}-${row.productCode}-${row.batchId ?? row.batchNo}-${row.expiryDate}`}
+                      >
+                        <td>
+                          <strong>{row.productName}</strong>
+                          <small>{row.productCode}</small>
+                        </td>
+                        <td>
+                          <strong>{row.locationName}</strong>
+                          <small>{row.locationCode}</small>
+                        </td>
+                        <td>{row.batchNo}</td>
+                        <td>{row.expiryDate}</td>
+                        <td>
+                          <span
+                            className={`rms-inventory-alert-status${
+                              row.daysUntilExpiry <= expiryCriticalDays
+                                ? " is-critical"
+                                : ""
+                            }`}
+                          >
+                            {row.daysUntilExpiry === 0
+                              ? "Expires today"
+                              : `${formatNumber(row.daysUntilExpiry)} day(s)`}
+                          </span>
+                        </td>
+                        <td className="is-numeric">
+                          {formatNumber(row.quantity)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <EmptyState
+                  title="No batches expiring soon"
+                  detail={`No active stock batch expires within the next ${formatNumber(expiryAlertLeadDays)} days.`}
+                />
+              )
+            ) : lowStockRows.length ? (
+              <table aria-label="Low stock">
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Location</th>
+                    <th className="is-numeric">On hand</th>
+                    <th className="is-numeric">Alert floor</th>
+                    <th className="is-numeric">Shortage</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lowStockRows.map((row) => {
+                    const alertFloor = getCriticalStockFloor(row) ?? 0;
+
+                    return (
+                      <tr key={`${row.locationCode}-${row.productCode}`}>
+                        <td>
+                          <strong>{row.productName}</strong>
+                          <small>{row.productCode}</small>
+                        </td>
+                        <td>
+                          <strong>{row.locationName}</strong>
+                          <small>{row.locationCode}</small>
+                        </td>
+                        <td className="is-numeric">
+                          {formatNumber(row.quantityOnHand)}
+                        </td>
+                        <td className="is-numeric">
+                          {formatNumber(alertFloor)}
+                        </td>
+                        <td className="is-numeric">
+                          {formatNumber(Math.max(0, alertFloor - row.quantityOnHand))}
+                        </td>
+                        <td>
+                          <span className="rms-inventory-alert-status is-critical">
+                            {row.quantityOnHand <= 0 ? "Out of stock" : "Low stock"}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <EmptyState
+                title="No low-stock items"
+                detail="All configured stock thresholds are currently satisfied."
+              />
+            )}
           </div>
         </div>
         <div className="rms-dialog-actions">
@@ -17339,6 +18418,636 @@ function ReportsLandingWorkspace(props: {
             ))}
         </div>
       </section>
+    </div>
+  );
+}
+
+type PosSettingsTab = "sizes" | "discounts" | "express-charges" | "options";
+
+const posSettingsTabs: Array<{ id: PosSettingsTab; label: string }> = [
+  { id: "sizes", label: "Product sizes" },
+  { id: "discounts", label: "POS discounts" },
+  { id: "express-charges", label: "Express charges" },
+  { id: "options", label: "Options" },
+];
+
+function formatToggleSetting(value: boolean) {
+  return value ? "Enabled" : "Disabled";
+}
+
+function SettingsTokenList({
+  values,
+  emptyTitle,
+  emptyDetail,
+  formatValue,
+}: {
+  values: Array<number | string>;
+  emptyTitle: string;
+  emptyDetail?: string;
+  formatValue: (value: number | string) => string;
+}) {
+  if (!values.length) {
+    return <EmptyState title={emptyTitle} detail={emptyDetail} />;
+  }
+
+  return (
+    <div className="rms-settings-token-list">
+      {values.map((value) => (
+        <span className="rms-settings-token" key={String(value)}>
+          {formatValue(value)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ReadonlySettingRow({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "good" | "warn";
+}) {
+  return (
+    <div className="rms-list-row rms-settings-row">
+      <div>
+        <strong>{label}</strong>
+        <span>{value}</span>
+      </div>
+      <StatusPill tone={tone === "neutral" ? "neutral" : tone}>
+        {value}
+      </StatusPill>
+    </div>
+  );
+}
+
+type StandalonePosBooleanOptionKey =
+  | "allowNegativeInventory"
+  | "allowOfflineSales"
+  | "autoPrintReceipts"
+  | "enforceSerializedScanAtPos"
+  | "requireCustomerForCreditSales"
+  | "requireSupervisorForReceiptlessReturn"
+  | "showCriticalStocksOnStartup"
+  | "showExpiringBatchesOnStartup";
+
+function StorePosSettingsWorkspace({
+  isBusy,
+  runAction,
+  snapshot,
+}: {
+  isBusy: boolean;
+  runAction: (
+    action: (desktopRuntime: DesktopRuntimeApi) => Promise<StoreSyncActionResult>,
+  ) => Promise<StoreSyncActionResult | null>;
+  snapshot: StoreSyncSnapshot | null;
+}) {
+  const [activeTab, setActiveTab] = useState<PosSettingsTab>("sizes");
+  const settings = snapshot?.optionSettings ?? null;
+  const standalone = isStandaloneDeployment(snapshot);
+  const expressRates = settings?.posExpressChargeRates ?? [];
+  const discountRates = settings?.posDiscountRates ?? [];
+  const productSizes = settings?.productSizes ?? [];
+  const [sizeDraft, setSizeDraft] = useState<string[]>(productSizes);
+  const [discountDraft, setDiscountDraft] = useState<number[]>(discountRates);
+  const [expressDraft, setExpressDraft] = useState<number[]>(expressRates);
+  const [entryDraft, setEntryDraft] = useState("");
+  const [optionDraft, setOptionDraft] = useState(() => ({
+    allowNegativeInventory: settings?.allowNegativeInventory ?? false,
+    allowOfflineSales: settings?.allowOfflineSales ?? true,
+    autoPrintReceipts: settings?.autoPrintReceipts ?? true,
+    enforceSerializedScanAtPos: settings?.enforceSerializedScanAtPos ?? true,
+    requireCustomerForCreditSales:
+      settings?.requireCustomerForCreditSales ?? true,
+    requireSupervisorForReceiptlessReturn:
+      settings?.requireSupervisorForReceiptlessReturn ?? true,
+    showCriticalStocksOnStartup:
+      settings?.showCriticalStocksOnStartup ?? true,
+    showExpiringBatchesOnStartup:
+      settings?.showExpiringBatchesOnStartup ?? true,
+    expiryAlertLeadDays: String(settings?.expiryAlertLeadDays ?? 30),
+    expiryCriticalDays: String(settings?.expiryCriticalDays ?? 7),
+    defaultReceiptSearchDays: String(settings?.defaultReceiptSearchDays ?? 30),
+    shiftFloatPromptAmount: String(settings?.shiftFloatPromptAmount ?? 0),
+  }));
+
+  useEffect(() => {
+    if (!settings) {
+      return;
+    }
+
+    setSizeDraft(settings.productSizes);
+    setDiscountDraft(settings.posDiscountRates);
+    setExpressDraft(settings.posExpressChargeRates);
+    setOptionDraft({
+      allowNegativeInventory: settings.allowNegativeInventory,
+      allowOfflineSales: settings.allowOfflineSales,
+      autoPrintReceipts: settings.autoPrintReceipts,
+      enforceSerializedScanAtPos: settings.enforceSerializedScanAtPos,
+      requireCustomerForCreditSales: settings.requireCustomerForCreditSales,
+      requireSupervisorForReceiptlessReturn:
+        settings.requireSupervisorForReceiptlessReturn,
+      showCriticalStocksOnStartup: settings.showCriticalStocksOnStartup,
+      showExpiringBatchesOnStartup:
+        settings.showExpiringBatchesOnStartup,
+      expiryAlertLeadDays: String(settings.expiryAlertLeadDays),
+      expiryCriticalDays: String(settings.expiryCriticalDays),
+      defaultReceiptSearchDays: String(settings.defaultReceiptSearchDays),
+      shiftFloatPromptAmount: String(settings.shiftFloatPromptAmount),
+    });
+  }, [settings, snapshot?.generatedAt]);
+
+  useEffect(() => {
+    setEntryDraft("");
+  }, [activeTab]);
+
+  const optionRows = settings
+    ? [
+        {
+          label: "Allow negative inventory",
+          value: formatToggleSetting(settings.allowNegativeInventory),
+          tone: settings.allowNegativeInventory ? "warn" : "good",
+        },
+        {
+          label: "Allow offline sales",
+          value: formatToggleSetting(settings.allowOfflineSales),
+          tone: settings.allowOfflineSales ? "good" : "warn",
+        },
+        {
+          label: "Auto-print receipts",
+          value: formatToggleSetting(settings.autoPrintReceipts),
+          tone: settings.autoPrintReceipts ? "good" : "neutral",
+        },
+        {
+          label: "Enforce serialized scan",
+          value: formatToggleSetting(settings.enforceSerializedScanAtPos),
+          tone: settings.enforceSerializedScanAtPos ? "good" : "warn",
+        },
+        {
+          label: "Require customer for credit sales",
+          value: formatToggleSetting(settings.requireCustomerForCreditSales),
+          tone: settings.requireCustomerForCreditSales ? "good" : "warn",
+        },
+        {
+          label: "Require supervisor for receipt-less return",
+          value: formatToggleSetting(
+            settings.requireSupervisorForReceiptlessReturn,
+          ),
+          tone: settings.requireSupervisorForReceiptlessReturn
+            ? "good"
+            : "warn",
+        },
+        {
+          label: "Show critical stocks on startup",
+          value: formatToggleSetting(settings.showCriticalStocksOnStartup),
+          tone: settings.showCriticalStocksOnStartup ? "good" : "neutral",
+        },
+        {
+          label: "Show expiring batches on startup",
+          value: formatToggleSetting(settings.showExpiringBatchesOnStartup),
+          tone: settings.showExpiringBatchesOnStartup ? "good" : "neutral",
+        },
+        {
+          label: "Expiry alert lead days",
+          value: `${formatNumber(settings.expiryAlertLeadDays)} day(s)`,
+          tone: "neutral",
+        },
+        {
+          label: "Critical expiry days",
+          value: `${formatNumber(settings.expiryCriticalDays)} day(s)`,
+          tone: "neutral",
+        },
+        {
+          label: "Default receipt search days",
+          value: `${formatNumber(settings.defaultReceiptSearchDays)} day(s)`,
+          tone: "neutral",
+        },
+        {
+          label: "Shift float prompt amount",
+          value: formatMoney(settings.shiftFloatPromptAmount),
+          tone: "neutral",
+        },
+      ]
+    : [];
+  const optionToggleDefinitions: Array<{
+    key: StandalonePosBooleanOptionKey;
+    label: string;
+    detail: string;
+  }> = [
+    {
+      key: "allowNegativeInventory",
+      label: "Allow negative inventory",
+      detail: "Permit stock items to sell below zero on hand.",
+    },
+    {
+      key: "allowOfflineSales",
+      label: "Allow offline sales",
+      detail: "Keep selling when the HQ connection is unavailable.",
+    },
+    {
+      key: "autoPrintReceipts",
+      label: "Auto-print receipts",
+      detail: "Send completed receipts directly to the configured printer.",
+    },
+    {
+      key: "enforceSerializedScanAtPos",
+      label: "Enforce serialized scan",
+      detail: "Require registered serial numbers for serialized sales.",
+    },
+    {
+      key: "requireCustomerForCreditSales",
+      label: "Require customer for credit sales",
+      detail: "Block account sales until a customer is selected.",
+    },
+    {
+      key: "requireSupervisorForReceiptlessReturn",
+      label: "Supervisor for receipt-less returns",
+      detail: "Require supervisor authority when no receipt is supplied.",
+    },
+    {
+      key: "showCriticalStocksOnStartup",
+      label: "Show low stocks on login",
+      detail: "Include low-stock items in the inventory login alert.",
+    },
+    {
+      key: "showExpiringBatchesOnStartup",
+      label: "Show expiring batches on login",
+      detail: `Include batches expiring within ${formatNumber(settings?.expiryAlertLeadDays ?? 30)} days in the inventory login alert.`,
+    },
+  ];
+
+  function addListEntry() {
+    const value = entryDraft.trim();
+
+    if (!value) {
+      return;
+    }
+
+    if (activeTab === "sizes") {
+      setSizeDraft((current) =>
+        current.some((item) => item.toLowerCase() === value.toLowerCase())
+          ? current
+          : [...current, value],
+      );
+      setEntryDraft("");
+      return;
+    }
+
+    const rate = Number(value);
+
+    if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
+      return;
+    }
+
+    const normalizedRate = Number(rate.toFixed(2));
+    const update = activeTab === "discounts" ? setDiscountDraft : setExpressDraft;
+    update((current) =>
+      current.includes(normalizedRate) ? current : [...current, normalizedRate],
+    );
+    setEntryDraft("");
+  }
+
+  function saveActiveList() {
+    const input =
+      activeTab === "sizes"
+        ? { productSizes: sizeDraft }
+        : activeTab === "discounts"
+          ? { posDiscountRates: discountDraft }
+          : { posExpressChargeRates: expressDraft };
+
+    void runAction((runtime) => runtime.saveStandaloneSettings(input));
+  }
+
+  function renderEditableList(
+    values: Array<number | string>,
+    emptyTitle: string,
+    formatValue: (value: number | string) => string,
+    removeValue: (value: number | string) => void,
+  ) {
+    return (
+      <div className="rms-settings-editor">
+        <div className="rms-settings-token-entry">
+          <label>
+            <span>{activeTab === "sizes" ? "Size" : "Rate percent"}</span>
+            <input
+              max={activeTab === "sizes" ? undefined : 100}
+              min={activeTab === "sizes" ? undefined : 0.01}
+              onChange={(event) => setEntryDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addListEntry();
+                }
+              }}
+              placeholder={activeTab === "sizes" ? "Example: XL" : "Example: 10"}
+              step={activeTab === "sizes" ? undefined : 0.01}
+              type={activeTab === "sizes" ? "text" : "number"}
+              value={entryDraft}
+            />
+          </label>
+          <button className="rms-button" onClick={addListEntry} type="button">
+            Add
+          </button>
+        </div>
+        {values.length ? (
+          <div className="rms-settings-token-list rms-settings-editable-tokens">
+            {values.map((value) => (
+              <span className="rms-settings-token" key={String(value)}>
+                {formatValue(value)}
+                <button
+                  aria-label={`Remove ${formatValue(value)}`}
+                  onClick={() => removeValue(value)}
+                  title={`Remove ${formatValue(value)}`}
+                  type="button"
+                >
+                  X
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title={emptyTitle} detail="Add a value, then save the list." />
+        )}
+        <div className="rms-settings-form-actions">
+          <button
+            className="rms-button is-primary"
+            disabled={isBusy}
+            onClick={saveActiveList}
+            type="button"
+          >
+            Save settings
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rms-workspace rms-tabbed-workspace rms-settings-workspace">
+      <div
+        className="rms-workspace-tabs"
+        role="tablist"
+        aria-label={standalone ? "Standalone POS settings" : "HQ POS settings"}
+      >
+        {posSettingsTabs.map((tab) => (
+          <button
+            aria-selected={activeTab === tab.id}
+            className={`rms-tab-button${activeTab === tab.id ? " is-active" : ""}`}
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            role="tab"
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      <div className="rms-tab-panel-stack">
+        <section className="rms-panel rms-tab-panel">
+          <div className="rms-panel-title">
+            <div>
+              <span>{snapshot?.storeName ?? "Store POS"}</span>
+              <h2>
+                {posSettingsTabs.find((tab) => tab.id === activeTab)?.label ??
+                  "Settings"}
+              </h2>
+            </div>
+            <div className="rms-settings-title-pills">
+              <StatusPill tone={standalone ? "good" : "neutral"}>
+                {standalone ? "Local settings" : "HQ synced"}
+              </StatusPill>
+              <StatusPill tone={expressRates.length ? "good" : "warn"}>
+                {expressRates.length
+                  ? `${expressRates.length} express rate(s)`
+                  : "No express rates"}
+              </StatusPill>
+              <StatusPill>{`${standalone ? "Saved" : "Snapshot"} ${formatRelative(snapshot?.generatedAt)}`}</StatusPill>
+            </div>
+          </div>
+
+          {!settings && !standalone ? (
+            <EmptyState
+              title="No synced POS settings"
+              detail="Run store sync to receive the HQ POS settings snapshot."
+            />
+          ) : null}
+
+          {settings && activeTab === "sizes" && standalone
+            ? renderEditableList(
+                sizeDraft,
+                "No product sizes configured",
+                (value) => String(value),
+                (value) =>
+                  setSizeDraft((current) =>
+                    current.filter((item) => item !== String(value)),
+                  ),
+              )
+            : null}
+
+          {settings && activeTab === "sizes" && !standalone ? (
+            <SettingsTokenList
+              emptyTitle="No product sizes synced"
+              values={productSizes}
+              formatValue={(value) => String(value)}
+            />
+          ) : null}
+
+          {settings && activeTab === "discounts" && standalone
+            ? renderEditableList(
+                discountDraft,
+                "No POS discount rates configured",
+                (value) => `${formatDiscountRate(Number(value))}%`,
+                (value) =>
+                  setDiscountDraft((current) =>
+                    current.filter((item) => item !== Number(value)),
+                  ),
+              )
+            : null}
+
+          {settings && activeTab === "discounts" && !standalone ? (
+            <SettingsTokenList
+              emptyTitle="No POS discount rates synced"
+              values={discountRates}
+              formatValue={(value) => `${formatDiscountRate(Number(value))}%`}
+            />
+          ) : null}
+
+          {settings && activeTab === "express-charges" && standalone
+            ? renderEditableList(
+                expressDraft,
+                "No express charge rates configured",
+                (value) => `${formatDiscountRate(Number(value))}%`,
+                (value) =>
+                  setExpressDraft((current) =>
+                    current.filter((item) => item !== Number(value)),
+                  ),
+              )
+            : null}
+
+          {settings && activeTab === "express-charges" && !standalone ? (
+            <SettingsTokenList
+              emptyTitle="No express charge rates synced"
+              emptyDetail="The POS express checkbox stays disabled until this list has at least one HQ rate."
+              values={expressRates}
+              formatValue={(value) => `${formatDiscountRate(Number(value))}%`}
+            />
+          ) : null}
+
+          {settings && activeTab === "options" && standalone ? (
+            <div className="rms-settings-editor">
+              <div className="rms-settings-option-grid">
+                {optionToggleDefinitions.map((option) => (
+                  <label className="rms-settings-option-toggle" key={option.key}>
+                    <input
+                      checked={optionDraft[option.key]}
+                      onChange={(event) =>
+                        setOptionDraft((current) => ({
+                          ...current,
+                          [option.key]: event.target.checked,
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{option.label}</strong>
+                      <small>{option.detail}</small>
+                    </span>
+                  </label>
+                ))}
+                <label className="rms-settings-number-field">
+                  <span>Expiry alert lead days</span>
+                  <input
+                    max={3650}
+                    min={1}
+                    onChange={(event) =>
+                      setOptionDraft((current) => {
+                        const expiryAlertLeadDays = event.target.value;
+                        const numericLeadDays = Number(expiryAlertLeadDays) || 0;
+
+                        return {
+                          ...current,
+                          expiryAlertLeadDays,
+                          expiryCriticalDays: String(
+                            Math.min(
+                              Number(current.expiryCriticalDays) || 0,
+                              Math.max(0, numericLeadDays),
+                            ),
+                          ),
+                        };
+                      })
+                    }
+                    step={1}
+                    type="number"
+                    value={optionDraft.expiryAlertLeadDays}
+                  />
+                </label>
+                <label className="rms-settings-number-field">
+                  <span>Critical expiry days</span>
+                  <input
+                    max={Math.max(0, Number(optionDraft.expiryAlertLeadDays) || 0)}
+                    min={0}
+                    onChange={(event) =>
+                      setOptionDraft((current) => ({
+                        ...current,
+                        expiryCriticalDays: event.target.value,
+                      }))
+                    }
+                    step={1}
+                    type="number"
+                    value={optionDraft.expiryCriticalDays}
+                  />
+                </label>
+                <label className="rms-settings-number-field">
+                  <span>Default receipt search days</span>
+                  <input
+                    max={365}
+                    min={1}
+                    onChange={(event) =>
+                      setOptionDraft((current) => ({
+                        ...current,
+                        defaultReceiptSearchDays: event.target.value,
+                      }))
+                    }
+                    type="number"
+                    value={optionDraft.defaultReceiptSearchDays}
+                  />
+                </label>
+                <label className="rms-settings-number-field">
+                  <span>Shift float prompt amount</span>
+                  <input
+                    min={0}
+                    onChange={(event) =>
+                      setOptionDraft((current) => ({
+                        ...current,
+                        shiftFloatPromptAmount: event.target.value,
+                      }))
+                    }
+                    step={0.01}
+                    type="number"
+                    value={optionDraft.shiftFloatPromptAmount}
+                  />
+                </label>
+              </div>
+              <div className="rms-settings-form-actions">
+                <button
+                  className="rms-button is-primary"
+                  disabled={isBusy}
+                  onClick={() =>
+                    void runAction((runtime) =>
+                      runtime.saveStandaloneSettings({
+                        allowNegativeInventory:
+                          optionDraft.allowNegativeInventory,
+                        allowOfflineSales: optionDraft.allowOfflineSales,
+                        autoPrintReceipts: optionDraft.autoPrintReceipts,
+                        enforceSerializedScanAtPos:
+                          optionDraft.enforceSerializedScanAtPos,
+                        requireCustomerForCreditSales:
+                          optionDraft.requireCustomerForCreditSales,
+                        requireSupervisorForReceiptlessReturn:
+                          optionDraft.requireSupervisorForReceiptlessReturn,
+                        showCriticalStocksOnStartup:
+                          optionDraft.showCriticalStocksOnStartup,
+                        showExpiringBatchesOnStartup:
+                          optionDraft.showExpiringBatchesOnStartup,
+                        expiryAlertLeadDays: Number(
+                          optionDraft.expiryAlertLeadDays,
+                        ),
+                        expiryCriticalDays: Number(
+                          optionDraft.expiryCriticalDays,
+                        ),
+                        defaultReceiptSearchDays: Number(
+                          optionDraft.defaultReceiptSearchDays,
+                        ),
+                        shiftFloatPromptAmount: Number(
+                          optionDraft.shiftFloatPromptAmount,
+                        ),
+                      }),
+                    )
+                  }
+                  type="button"
+                >
+                  Save options
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {settings && activeTab === "options" && !standalone ? (
+            <div className="rms-list rms-settings-list">
+              {optionRows.map((row) => (
+                <ReadonlySettingRow
+                  key={row.label}
+                  label={row.label}
+                  tone={row.tone as "neutral" | "good" | "warn"}
+                  value={row.value}
+                />
+              ))}
+            </div>
+          ) : null}
+        </section>
+      </div>
     </div>
   );
 }
@@ -17578,6 +19287,7 @@ function InventoryWorkspace(props: {
   saveStockCount: (input?: {
     productCode?: string;
     countedQuantity?: number;
+    batchQuantities?: StoreInventoryBatchAllocation[];
   }) => Promise<void>;
   submitStockCount: (sessionId: string) => Promise<void>;
   commitStockCount: (sessionId: string, sessionNo: string) => Promise<void>;
@@ -17597,11 +19307,13 @@ function InventoryWorkspace(props: {
     order: StorePurchaseOrderSummary,
     line?: StorePurchaseOrderSummary["lines"][number],
     quantity?: number,
+    batch?: { batchNo: string; manufacturedAt: string; expiryDate: string },
   ) => Promise<void>;
   receiveSerializedPurchaseOrderLine: (
     order: StorePurchaseOrderSummary,
     line: StorePurchaseOrderSummary["lines"][number],
     serialNumbers: string[],
+    batch?: { batchNo: string; manufacturedAt: string; expiryDate: string },
   ) => Promise<void>;
   recordSupplierReturn: (input: {
     receipt: StoreLocalGoodsReceiptSummary;
@@ -17643,6 +19355,12 @@ function InventoryWorkspace(props: {
   const [activeInventoryTab, setActiveInventoryTab] = useState<
     "stock" | "receiving" | "transfers" | "counts"
   >("stock");
+  const [activeStockSection, setActiveStockSection] = useState<
+    "inventory-browser" | "batch-register"
+  >("inventory-browser");
+  const [activeReceivingSection, setActiveReceivingSection] = useState<
+    "purchase-orders" | "goods-receipts" | "supplier-returns"
+  >("purchase-orders");
   const [remoteLookupOpen, setRemoteLookupOpen] = useState(false);
   const [transferRequestDialogOpen, setTransferRequestDialogOpen] =
     useState(false);
@@ -17697,6 +19415,12 @@ function InventoryWorkspace(props: {
     "header" | "sheet" | "variance"
   >("header");
   const [poReceiptQuantities, setPoReceiptQuantities] = useState<
+    Record<string, string>
+  >({});
+  const [poReceiptBatchNos, setPoReceiptBatchNos] = useState<Record<string, string>>({});
+  const [poReceiptManufacturedDates, setPoReceiptManufacturedDates] = useState<Record<string, string>>({});
+  const [poReceiptExpiryDates, setPoReceiptExpiryDates] = useState<Record<string, string>>({});
+  const [stockCountBatchQuantities, setStockCountBatchQuantities] = useState<
     Record<string, string>
   >({});
   const [localPurchaseOrderDraft, setLocalPurchaseOrderDraft] = useState({
@@ -17786,6 +19510,55 @@ function InventoryWorkspace(props: {
     (item) =>
       !props.inventoryLocation || item.locationCode === props.inventoryLocation,
   );
+  const inventoryBatchRows = props.inventoryItems.flatMap((item) =>
+    item.batchQuantities.map((batch) => ({ item, batch })),
+  );
+  const selectedStockCountItem = countLocationItems.find(
+    (item) => item.productCode === props.stockCountProductCode,
+  );
+  const selectedStockCountBatchTotal = Number(
+    (selectedStockCountItem?.batchQuantities ?? [])
+      .reduce(
+        (sum, batch) =>
+          sum + Number(stockCountBatchQuantities[batch.batchNo] ?? 0),
+        0,
+      )
+      .toFixed(3),
+  );
+  useEffect(() => {
+    if (!selectedStockCountItem) {
+      setStockCountBatchQuantities({});
+      return;
+    }
+
+    if (selectedStockCountItem.trackExpiry) {
+      setStockCountBatchQuantities(
+        Object.fromEntries(
+          selectedStockCountItem.batchQuantities.map((batch) => [
+            batch.batchNo,
+            String(batch.quantity),
+          ]),
+        ),
+      );
+      props.setStockCountQuantity(
+        String(
+          Number(
+            selectedStockCountItem.batchQuantities
+              .reduce((sum, batch) => sum + batch.quantity, 0)
+              .toFixed(3),
+          ),
+        ),
+      );
+      return;
+    }
+
+    setStockCountBatchQuantities({});
+    props.setStockCountQuantity(String(selectedStockCountItem.quantityOnHand));
+  }, [
+    props.stockCountProductCode,
+    props.inventoryLocation,
+    selectedStockCountItem?.updatedAt,
+  ]);
   const requestableProducts = Array.from(
     new Map(
       props.inventoryItems.map((item) => [
@@ -17968,14 +19741,30 @@ function InventoryWorkspace(props: {
     const rows = countLocationItems.length
       ? countLocationItems
       : props.inventoryItems;
+    const countRows = rows.flatMap<{
+      item: StoreInventoryBrowseItem;
+      batch: StoreInventoryBatchAllocation | null;
+      systemQuantity: number;
+    }>((item) =>
+      item.trackExpiry
+        ? item.batchQuantities.map((batch) => ({
+            item,
+            batch,
+            systemQuantity: batch.quantity,
+          }))
+        : [{ item, batch: null, systemQuantity: item.quantityOnHand }],
+    );
     const csv = [
-      "productCode,productName,countedQuantity,systemQuantity",
-      ...rows.map((item) =>
+      "productCode,productName,batchNo,manufacturedAt,expiryDate,countedQuantity,systemQuantity",
+      ...countRows.map(({ item, batch, systemQuantity }) =>
         [
           item.productCode,
           `"${item.productName.replace(/"/g, '""')}"`,
+          batch?.batchNo ?? "",
+          batch?.manufacturedAt?.slice(0, 10) ?? "",
+          batch?.expiryDate.slice(0, 10) ?? "",
           "",
-          item.quantityOnHand,
+          systemQuantity,
         ].join(","),
       ),
     ].join("\n");
@@ -18002,7 +19791,16 @@ function InventoryWorkspace(props: {
     props.setStockCountRows(
       uploadedRows.map((row) => {
         const item = inventoryByCode.get(row.productCode);
-        const systemQuantity = item?.quantityOnHand ?? 0;
+        const batch = row.batchNo
+          ? item?.batchQuantities.find(
+              (candidate) =>
+                candidate.batchNo.toUpperCase() === row.batchNo &&
+                (!row.expiryDate ||
+                  candidate.expiryDate.slice(0, 10) ===
+                    row.expiryDate.slice(0, 10)),
+            ) ?? null
+          : null;
+        const systemQuantity = batch?.quantity ?? item?.quantityOnHand ?? 0;
         const varianceQuantity =
           row.countedQuantity === null
             ? null
@@ -18011,6 +19809,10 @@ function InventoryWorkspace(props: {
         return {
           productCode: row.productCode,
           productName: item?.productName ?? row.productCode,
+          batchId: batch?.batchId ?? null,
+          batchNo: batch?.batchNo ?? row.batchNo,
+          manufacturedAt: batch?.manufacturedAt ?? row.manufacturedAt,
+          expiryDate: batch?.expiryDate ?? row.expiryDate,
           systemQuantity,
           countedQuantity: row.countedQuantity,
           varianceQuantity,
@@ -18264,6 +20066,9 @@ function InventoryWorkspace(props: {
             orderedQuantity: line.orderedQuantity,
             receivedQuantity: line.quantity,
             serialNumbers: line.serialNumbers,
+            batchNo: line.batchNo,
+            manufacturedAt: line.manufacturedAt,
+            expiryDate: line.expiryDate,
           })),
         },
         {
@@ -18346,13 +20151,66 @@ function InventoryWorkspace(props: {
   }
 
   async function saveCalculatedCountRows() {
+    const rowsByProduct = new Map<string, StockCountUploadRow[]>();
+
     for (const row of props.stockCountRows) {
-      if (row.countedQuantity === null) {
+      rowsByProduct.set(row.productCode, [
+        ...(rowsByProduct.get(row.productCode) ?? []),
+        row,
+      ]);
+    }
+
+    for (const [productCode, rows] of rowsByProduct) {
+      const item = props.inventoryItems.find(
+        (candidate) => candidate.productCode === productCode,
+      );
+
+      if (item?.trackExpiry) {
+        const countedBatchQuantities = item.batchQuantities.map((batch) => {
+          const row = rows.find(
+            (candidate) =>
+              candidate.batchNo?.toUpperCase() ===
+                batch.batchNo.toUpperCase() &&
+              candidate.expiryDate?.slice(0, 10) ===
+                batch.expiryDate.slice(0, 10),
+          );
+
+          if (!row || row.countedQuantity === null) {
+            return null;
+          }
+
+          return { ...batch, quantity: row.countedQuantity };
+        });
+
+        if (countedBatchQuantities.some((batch) => batch === null)) {
+          props.setError(
+            `Enter a counted quantity for every batch of ${item.productName}, using zero where no units remain.`,
+          );
+          return;
+        }
+
+        const batchQuantities = countedBatchQuantities.filter(
+          (batch): batch is StoreInventoryBatchAllocation => batch !== null,
+        );
+        await props.saveStockCount({
+          productCode,
+          countedQuantity: Number(
+            batchQuantities
+              .reduce((sum, batch) => sum + batch.quantity, 0)
+              .toFixed(3),
+          ),
+          batchQuantities,
+        });
+        continue;
+      }
+
+      const row = rows.find((candidate) => candidate.countedQuantity !== null);
+      if (!row || row.countedQuantity === null) {
         continue;
       }
 
       await props.saveStockCount({
-        productCode: row.productCode,
+        productCode,
         countedQuantity: row.countedQuantity,
       });
     }
@@ -18468,6 +20326,12 @@ function InventoryWorkspace(props: {
           order,
           line,
           serialNumbers,
+          {
+            batchNo: poReceiptBatchNos[line.purchaseOrderLineId] ?? "",
+            manufacturedAt:
+              poReceiptManufacturedDates[line.purchaseOrderLineId] ?? "",
+            expiryDate: poReceiptExpiryDates[line.purchaseOrderLineId] ?? "",
+          },
         );
       },
     });
@@ -18529,12 +20393,15 @@ function InventoryWorkspace(props: {
 
   async function receiveAllPurchaseOrderLines(order: StorePurchaseOrderSummary) {
     const receivableLines = order.lines.filter(
-      (line) => line.outstandingQuantity > 0 && !line.isSerialized,
+      (line) =>
+        line.outstandingQuantity > 0 &&
+        !line.isSerialized &&
+        !line.trackExpiry,
     );
 
     if (receivableLines.length === 0) {
       props.setError(
-        "This purchase order has no non-serialized outstanding lines to receive all.",
+        "This purchase order has no standard outstanding lines to receive all. Serialized and expiry-controlled lines must be received individually.",
       );
       return;
     }
@@ -18602,7 +20469,10 @@ function InventoryWorkspace(props: {
     }
 
     const receivableLineCount = selectedPurchaseOrder.lines.filter(
-      (line) => line.outstandingQuantity > 0 && !line.isSerialized,
+      (line) =>
+        line.outstandingQuantity > 0 &&
+        !line.isSerialized &&
+        !line.trackExpiry,
     ).length;
 
     return (
@@ -18656,82 +20526,164 @@ function InventoryWorkspace(props: {
               value={formatNumber(selectedPurchaseOrder.lineCount)}
             />
           </div>
-          <div className="rms-table rms-document-line-table">
-            <div className="rms-table-head">
-              <span>Item</span>
-              <span>Ordered</span>
-              <span>Received</span>
-              <span>Outstanding</span>
-              <span>Receive</span>
-            </div>
+          <div className="rms-receiving-line-list">
             {selectedPurchaseOrder.lines.map((line) => (
-              <div className="rms-table-row" key={line.purchaseOrderLineId}>
-                <div>
-                  <strong>{line.productName}</strong>
-                  <small>
-                    {line.productCode}
-                    {line.isSerialized ? " · Serialized" : ""}
-                  </small>
+              <article
+                className="rms-receiving-line-card"
+                key={line.purchaseOrderLineId}
+              >
+                <div className="rms-receiving-line-heading">
+                  <div>
+                    <span>Product</span>
+                    <strong>{line.productName}</strong>
+                    <small>
+                      {line.productCode}
+                      {line.isSerialized ? " · Serialized" : ""}
+                      {line.trackExpiry ? " · Batch/expiry" : ""}
+                    </small>
+                  </div>
+                  <StatusPill
+                    tone={line.outstandingQuantity > 0 ? "warn" : "good"}
+                  >
+                    {line.outstandingQuantity > 0 ? "Outstanding" : "Received"}
+                  </StatusPill>
                 </div>
-                <span>{formatNumber(line.orderedQuantity)}</span>
-                <span>{formatNumber(line.receivedQuantity)}</span>
-                <strong>{formatNumber(line.outstandingQuantity)}</strong>
+                <div className="rms-receiving-line-metrics">
+                  <div>
+                    <span>Ordered</span>
+                    <strong>{formatNumber(line.orderedQuantity)}</strong>
+                  </div>
+                  <div>
+                    <span>Received</span>
+                    <strong>{formatNumber(line.receivedQuantity)}</strong>
+                  </div>
+                  <div>
+                    <span>Outstanding</span>
+                    <strong>{formatNumber(line.outstandingQuantity)}</strong>
+                  </div>
+                </div>
                 {line.outstandingQuantity > 0 && canReceiveGoods ? (
-                  line.isSerialized ? (
-                    <button
-                      className="rms-row-button"
-                      disabled={props.isBusy}
-                      onClick={() =>
-                        void openPurchaseOrderSerialReceipt(
-                          selectedPurchaseOrder,
-                          line,
-                        )
-                      }
-                      type="button"
-                    >
-                      Serials
-                    </button>
-                  ) : (
-                    <div className="rms-inline-actions">
-                      <input
-                        aria-label={`Receive quantity for ${line.productName}`}
-                        min="0.001"
-                        onChange={(event) =>
-                          setPoReceiptQuantities((current) => ({
-                            ...current,
-                            [line.purchaseOrderLineId]: event.target.value,
-                          }))
-                        }
-                        step="0.001"
-                        type="number"
-                        value={
-                          poReceiptQuantities[line.purchaseOrderLineId] ??
-                          String(line.outstandingQuantity)
-                        }
-                      />
+                  <div
+                    className={`rms-receive-entry-grid${
+                      line.trackExpiry ? " is-expiry" : ""
+                    }`}
+                  >
+                    {line.trackExpiry ? (
+                      <>
+                        <label>
+                          <span>Batch number</span>
+                          <input
+                            aria-label={`Batch number for ${line.productName}`}
+                            onChange={(event) =>
+                              setPoReceiptBatchNos((current) => ({
+                                ...current,
+                                [line.purchaseOrderLineId]: event.target.value,
+                              }))
+                            }
+                            value={poReceiptBatchNos[line.purchaseOrderLineId] ?? ""}
+                          />
+                        </label>
+                        <label>
+                          <span>Manufactured date</span>
+                          <input
+                            aria-label={`Manufactured date for ${line.productName}`}
+                            onChange={(event) =>
+                              setPoReceiptManufacturedDates((current) => ({
+                                ...current,
+                                [line.purchaseOrderLineId]: event.target.value,
+                              }))
+                            }
+                            type="date"
+                            value={poReceiptManufacturedDates[line.purchaseOrderLineId] ?? ""}
+                          />
+                        </label>
+                        <label>
+                          <span>Expiry date</span>
+                          <input
+                            aria-label={`Expiry date for ${line.productName}`}
+                            onChange={(event) =>
+                              setPoReceiptExpiryDates((current) => ({
+                                ...current,
+                                [line.purchaseOrderLineId]: event.target.value,
+                              }))
+                            }
+                            type="date"
+                            value={poReceiptExpiryDates[line.purchaseOrderLineId] ?? ""}
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                    {line.isSerialized ? (
                       <button
-                        className="rms-row-button"
+                        className="rms-button is-primary"
                         disabled={props.isBusy}
                         onClick={() =>
-                          void props.receivePurchaseOrder(
+                          void openPurchaseOrderSerialReceipt(
                             selectedPurchaseOrder,
                             line,
-                            Number(
-                              poReceiptQuantities[line.purchaseOrderLineId] ??
-                                line.outstandingQuantity,
-                            ),
                           )
                         }
                         type="button"
                       >
-                        Save
+                        Enter serials
                       </button>
-                    </div>
-                  )
+                    ) : (
+                      <>
+                        <label>
+                          <span>Quantity to receive</span>
+                          <input
+                            aria-label={`Receive quantity for ${line.productName}`}
+                            min="0.001"
+                            onChange={(event) =>
+                              setPoReceiptQuantities((current) => ({
+                                ...current,
+                                [line.purchaseOrderLineId]: event.target.value,
+                              }))
+                            }
+                            step="0.001"
+                            type="number"
+                            value={
+                              poReceiptQuantities[line.purchaseOrderLineId] ??
+                              String(line.outstandingQuantity)
+                            }
+                          />
+                        </label>
+                        <button
+                          className="rms-button is-primary"
+                          disabled={props.isBusy}
+                          onClick={() =>
+                            void props.receivePurchaseOrder(
+                              selectedPurchaseOrder,
+                              line,
+                              Number(
+                                poReceiptQuantities[line.purchaseOrderLineId] ??
+                                  line.outstandingQuantity,
+                              ),
+                              {
+                                batchNo:
+                                  poReceiptBatchNos[line.purchaseOrderLineId] ?? "",
+                                manufacturedAt:
+                                  poReceiptManufacturedDates[
+                                    line.purchaseOrderLineId
+                                  ] ?? "",
+                                expiryDate:
+                                  poReceiptExpiryDates[line.purchaseOrderLineId] ?? "",
+                              },
+                            )
+                          }
+                          type="button"
+                        >
+                          Receive line
+                        </button>
+                      </>
+                    )}
+                  </div>
                 ) : (
-                  <span>Done</span>
+                  <div className="rms-receiving-line-complete">
+                    <StatusPill tone="good">No quantity outstanding</StatusPill>
+                  </div>
                 )}
-              </div>
+              </article>
             ))}
           </div>
         </section>
@@ -19053,12 +21005,17 @@ function InventoryWorkspace(props: {
   }
 
   function renderStockPanel() {
+    const stockSectionTitle =
+      activeStockSection === "inventory-browser"
+        ? "Inventory browser"
+        : "Batch register";
+
     return (
-      <section className="rms-panel rms-tab-panel rms-inventory-browser">
+      <section className="rms-panel rms-tab-panel rms-inventory-browser rms-stock-workspace">
         <div className="rms-panel-title">
           <div>
             <span>Stock</span>
-            <h2>Inventory browser</h2>
+            <h2>{stockSectionTitle}</h2>
           </div>
           <button
             className="rms-button"
@@ -19067,6 +21024,35 @@ function InventoryWorkspace(props: {
             type="button"
           >
             Refresh
+          </button>
+        </div>
+
+        <div
+          aria-label="Stock records"
+          className="rms-workspace-tabs rms-stock-tabs"
+          role="tablist"
+        >
+          <button
+            aria-selected={activeStockSection === "inventory-browser"}
+            className={`rms-tab-button${
+              activeStockSection === "inventory-browser" ? " is-active" : ""
+            }`}
+            onClick={() => setActiveStockSection("inventory-browser")}
+            role="tab"
+            type="button"
+          >
+            Inventory browser
+          </button>
+          <button
+            aria-selected={activeStockSection === "batch-register"}
+            className={`rms-tab-button${
+              activeStockSection === "batch-register" ? " is-active" : ""
+            }`}
+            onClick={() => setActiveStockSection("batch-register")}
+            role="tab"
+            type="button"
+          >
+            Batch register
           </button>
         </div>
 
@@ -19095,11 +21081,14 @@ function InventoryWorkspace(props: {
           </select>
         </div>
 
-        <div className="rms-table rms-inventory-table">
+        <div className="rms-stock-section">
+        {activeStockSection === "inventory-browser" ? (
+          <div className="rms-table rms-inventory-table">
           <div className="rms-table-head">
             <span>Product</span>
             <span>Location</span>
             <span>On hand</span>
+            <span>Expiry</span>
             <span>Price</span>
           </div>
           {props.inventoryItems.length ? (
@@ -19110,30 +21099,143 @@ function InventoryWorkspace(props: {
               >
                 <div>
                   <strong>{item.productName}</strong>
-                  <small>{item.productCode}</small>
+                  <small>{item.productCode}{item.trackExpiry ? " · Batch controlled" : ""}</small>
                 </div>
                 <span>{item.locationName}</span>
                 <strong>{formatNumber(item.quantityOnHand)}</strong>
+                <span>
+                  {item.trackExpiry
+                    ? item.earliestExpiryDate
+                      ? `${new Date(item.earliestExpiryDate).toLocaleDateString("en-GB")}${item.expiringQuantity > 0 ? ` · ${formatNumber(item.expiringQuantity)} soon` : ""}`
+                      : "No active batch"
+                    : "-"}
+                </span>
                 <span>{formatMoney(item.unitPrice)}</span>
               </div>
             ))
           ) : (
             <EmptyState title="No stock loaded" detail="Refresh inventory." />
           )}
+          </div>
+        ) : (
+          <div className="rms-table rms-batch-register-table">
+              <div className="rms-table-head">
+                <span>Product</span>
+                <span>Batch</span>
+                <span>Manufactured</span>
+                <span>Expiry</span>
+                <span>On hand</span>
+                <span>Status</span>
+              </div>
+              {inventoryBatchRows.length ? inventoryBatchRows.map(({ item, batch }) => {
+                const expiryKey = batch.expiryDate.slice(0, 10);
+                const todayKey = new Date().toISOString().slice(0, 10);
+                const status =
+                  batch.quantity <= 0
+                    ? "DEPLETED"
+                    : expiryKey < todayKey
+                      ? "EXPIRED"
+                      : "ACTIVE";
+
+                return (
+                  <div
+                    className="rms-table-row"
+                    key={`${item.locationCode}-${item.productCode}-${batch.batchNo}-${expiryKey}`}
+                  >
+                    <div>
+                      <strong>{item.productName}</strong>
+                      <small>{item.locationName}</small>
+                    </div>
+                    <strong>{batch.batchNo}</strong>
+                    <span>
+                      {batch.manufacturedAt?.slice(0, 10) ?? "-"}
+                    </span>
+                    <span>{expiryKey}</span>
+                    <strong>{formatNumber(batch.quantity)}</strong>
+                    <StatusPill
+                      tone={
+                        status === "ACTIVE"
+                          ? "good"
+                          : status === "EXPIRED"
+                            ? "warn"
+                            : undefined
+                      }
+                    >
+                      {status}
+                    </StatusPill>
+                  </div>
+                );
+              }) : (
+                <EmptyState
+                  title="No batches loaded"
+                  detail="Refresh inventory after receiving batch-controlled stock."
+                />
+              )}
+          </div>
+        )}
         </div>
       </section>
     );
   }
 
   function renderReceivingPanel() {
+    const receivingSectionTitle =
+      activeReceivingSection === "purchase-orders"
+        ? "Purchase orders"
+        : activeReceivingSection === "goods-receipts"
+          ? "Goods receipts"
+          : "Supplier returns";
+
     return (
-      <section className="rms-panel rms-tab-panel">
+      <section className="rms-panel rms-tab-panel rms-receiving-workspace">
         <div className="rms-panel-title">
           <div>
             <span>Receiving</span>
-            <h2>Purchase orders</h2>
+            <h2>{receivingSectionTitle}</h2>
           </div>
         </div>
+        <div
+          aria-label="Receiving records"
+          className="rms-workspace-tabs rms-receiving-tabs"
+          role="tablist"
+        >
+          <button
+            aria-selected={activeReceivingSection === "purchase-orders"}
+            className={`rms-tab-button${
+              activeReceivingSection === "purchase-orders" ? " is-active" : ""
+            }`}
+            onClick={() => setActiveReceivingSection("purchase-orders")}
+            role="tab"
+            type="button"
+          >
+            Purchase orders
+          </button>
+          <button
+            aria-selected={activeReceivingSection === "goods-receipts"}
+            className={`rms-tab-button${
+              activeReceivingSection === "goods-receipts" ? " is-active" : ""
+            }`}
+            onClick={() => setActiveReceivingSection("goods-receipts")}
+            role="tab"
+            type="button"
+          >
+            Goods receipts
+          </button>
+          <button
+            aria-selected={activeReceivingSection === "supplier-returns"}
+            className={`rms-tab-button${
+              activeReceivingSection === "supplier-returns" ? " is-active" : ""
+            }`}
+            onClick={() => setActiveReceivingSection("supplier-returns")}
+            role="tab"
+            type="button"
+          >
+            Supplier returns
+          </button>
+        </div>
+        <div className="rms-receiving-section">
+        {activeReceivingSection === "purchase-orders" ? (
+          <>
         {standaloneInventory ? (
           <div className="rms-standalone-po-composer">
             <div className="rms-panel-title rms-subsection-title">
@@ -19143,7 +21245,7 @@ function InventoryWorkspace(props: {
               </div>
               <StatusPill>{`${formatNumber(localPurchaseOrderLines.length)} line(s)`}</StatusPill>
             </div>
-            <div className="rms-form-grid">
+            <div className="rms-form-grid rms-po-composer-form">
               <label>
                 <span>Supplier</span>
                 <select
@@ -19210,7 +21312,7 @@ function InventoryWorkspace(props: {
                   value={localPurchaseOrderDraft.note}
                 />
               </label>
-              <label>
+              <label className="rms-po-product-field">
                 <span>Product</span>
                 <input
                   disabled={!canCreateStandalonePurchaseOrder}
@@ -19278,31 +21380,33 @@ function InventoryWorkspace(props: {
                   value={localPurchaseOrderDraft.unitCost}
                 />
               </label>
-              <button
-                className="rms-button"
-                disabled={
-                  props.isBusy ||
-                  !canCreateStandalonePurchaseOrder ||
-                  !localPurchaseOrderDraft.productCode
-                }
-                onClick={addLocalPurchaseOrderLine}
-                type="button"
-              >
-                Add line
-              </button>
-              <button
-                className="rms-button is-primary"
-                disabled={
-                  props.isBusy ||
-                  !canCreateStandalonePurchaseOrder ||
-                  (localPurchaseOrderLines.length === 0 &&
-                    !localPurchaseOrderDraft.productCode)
-                }
-                onClick={() => void saveLocalPurchaseOrder()}
-                type="button"
-              >
-                Create PO
-              </button>
+              <div className="rms-form-actions rms-po-composer-actions">
+                <button
+                  className="rms-button"
+                  disabled={
+                    props.isBusy ||
+                    !canCreateStandalonePurchaseOrder ||
+                    !localPurchaseOrderDraft.productCode
+                  }
+                  onClick={addLocalPurchaseOrderLine}
+                  type="button"
+                >
+                  Add line
+                </button>
+                <button
+                  className="rms-button is-primary"
+                  disabled={
+                    props.isBusy ||
+                    !canCreateStandalonePurchaseOrder ||
+                    (localPurchaseOrderLines.length === 0 &&
+                      !localPurchaseOrderDraft.productCode)
+                  }
+                  onClick={() => void saveLocalPurchaseOrder()}
+                  type="button"
+                >
+                  Create PO
+                </button>
+              </div>
             </div>
             {localPurchaseOrderLines.length ? (
               <div className="rms-mini-list">
@@ -19388,6 +21492,10 @@ function InventoryWorkspace(props: {
             <EmptyState title="No purchase orders" />
           )}
         </div>
+          </>
+        ) : null}
+        {activeReceivingSection === "goods-receipts" ? (
+          <>
         <div className="rms-panel-title rms-subsection-title">
           <div>
             <span>Goods receipt</span>
@@ -19443,13 +21551,17 @@ function InventoryWorkspace(props: {
             <EmptyState title="No recent GRNs" />
           )}
         </div>
+          </>
+        ) : null}
+        {activeReceivingSection === "supplier-returns" ? (
+          <>
         <div className="rms-panel-title rms-subsection-title">
           <div>
             <span>Supplier return</span>
             <h2>Return against GRN</h2>
           </div>
         </div>
-        <div className="rms-form-grid">
+        <div className="rms-form-grid rms-supplier-return-form">
           <label>
             <span>Goods receipt</span>
             <select
@@ -19567,18 +21679,20 @@ function InventoryWorkspace(props: {
               />
             </label>
           ) : null}
-          <button
-            className="rms-button is-primary"
-            disabled={
-              props.isBusy ||
-              !canManageSupplierReturns ||
-              !selectedSupplierReturnLine
-            }
-            onClick={() => void postSupplierReturn()}
-            type="button"
-          >
-            Post supplier return
-          </button>
+          <div className="rms-form-actions rms-supplier-return-actions">
+            <button
+              className="rms-button is-primary"
+              disabled={
+                props.isBusy ||
+                !canManageSupplierReturns ||
+                !selectedSupplierReturnLine
+              }
+              onClick={() => void postSupplierReturn()}
+              type="button"
+            >
+              Post supplier return
+            </button>
+          </div>
         </div>
         <div className="rms-table rms-grn-header-table">
           <div className="rms-table-head">
@@ -19622,6 +21736,9 @@ function InventoryWorkspace(props: {
               detail="Post a return from a received GRN line."
             />
           )}
+        </div>
+          </>
+        ) : null}
         </div>
         {renderPurchaseOrderDialog()}
         {renderGoodsReceiptDialog()}
@@ -20154,14 +22271,69 @@ function InventoryWorkspace(props: {
                   ))}
                 </select>
                 <input
+                  readOnly={selectedStockCountItem?.trackExpiry === true}
                   onChange={(event) =>
                     props.setStockCountQuantity(event.target.value)
                   }
                   min="0"
                   step="0.001"
                   type="number"
-                  value={props.stockCountQuantity}
+                  value={
+                    selectedStockCountItem?.trackExpiry
+                      ? String(selectedStockCountBatchTotal)
+                      : props.stockCountQuantity
+                  }
                 />
+                {selectedStockCountItem?.trackExpiry ? (
+                  <div className="rms-form-span-2 rms-count-batch-grid">
+                    <div className="rms-count-batch-head">
+                      <span>Batch</span>
+                      <span>Expiry</span>
+                      <span>System</span>
+                      <span>Counted</span>
+                    </div>
+                    {selectedStockCountItem.batchQuantities.map((batch) => (
+                      <label
+                        className="rms-count-batch-row"
+                        key={`${batch.batchNo}-${batch.expiryDate}`}
+                      >
+                        <strong>{batch.batchNo}</strong>
+                        <span>{batch.expiryDate.slice(0, 10)}</span>
+                        <span>{formatNumber(batch.quantity)}</span>
+                        <input
+                          min="0"
+                          onChange={(event) => {
+                            const nextQuantities = {
+                              ...stockCountBatchQuantities,
+                              [batch.batchNo]: event.target.value,
+                            };
+                            setStockCountBatchQuantities(nextQuantities);
+                            props.setStockCountQuantity(
+                              String(
+                                Number(
+                                  selectedStockCountItem.batchQuantities
+                                    .reduce(
+                                      (sum, candidate) =>
+                                        sum +
+                                        Number(
+                                          nextQuantities[candidate.batchNo] ??
+                                            0,
+                                        ),
+                                      0,
+                                    )
+                                    .toFixed(3),
+                                ),
+                              ),
+                            );
+                          }}
+                          step="0.001"
+                          type="number"
+                          value={stockCountBatchQuantities[batch.batchNo] ?? "0"}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
                 <button
                   className="rms-button is-primary"
                   disabled={
@@ -20169,7 +22341,26 @@ function InventoryWorkspace(props: {
                     !props.inventoryLocation ||
                     !props.stockCountProductCode
                   }
-                  onClick={() => void props.saveStockCount()}
+                  onClick={() =>
+                    void props.saveStockCount(
+                      selectedStockCountItem?.trackExpiry
+                        ? {
+                            productCode: selectedStockCountItem.productCode,
+                            countedQuantity: selectedStockCountBatchTotal,
+                            batchQuantities:
+                              selectedStockCountItem.batchQuantities.map(
+                                (batch) => ({
+                                  ...batch,
+                                  quantity: Number(
+                                    stockCountBatchQuantities[batch.batchNo] ??
+                                      0,
+                                  ),
+                                }),
+                              ),
+                          }
+                        : undefined,
+                    )
+                  }
                   type="button"
                 >
                   Save line
@@ -20216,11 +22407,16 @@ function InventoryWorkspace(props: {
                               ? "over"
                               : "short"
                         }`}
-                        key={row.productCode}
+                        key={`${row.productCode}-${row.batchNo ?? "product"}-${row.expiryDate ?? "none"}`}
                       >
                         <div>
                           <strong>{row.productName}</strong>
-                          <small>{row.productCode}</small>
+                          <small>
+                            {row.productCode}
+                            {row.batchNo
+                              ? ` · ${row.batchNo} · ${row.expiryDate?.slice(0, 10) ?? "No expiry"}`
+                              : ""}
+                          </small>
                         </div>
                         <span>{formatNumber(row.systemQuantity)}</span>
                         <span>
@@ -20317,7 +22513,7 @@ function InventoryWorkspace(props: {
 
     return (
       <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-        <section className="rms-dialog rms-wide-dialog">
+        <section className="rms-dialog rms-wide-dialog rms-remote-inventory-dialog">
           <div className="rms-panel-title">
             <div>
               <span>HQ inventory</span>
@@ -20473,7 +22669,7 @@ function InventoryWorkspace(props: {
       {renderRemoteInventoryDialog()}
       {props.inventorySerialDraft ? (
         <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-          <section className="rms-dialog">
+          <section className="rms-dialog rms-serial-movement-dialog">
             <div className="rms-panel-title">
               <div>
                 <span>Serial movement</span>
@@ -21828,6 +24024,11 @@ function SyncWorkspace(props: {
   isSyncRunning: boolean;
   checkDesktopUpdate: () => Promise<void>;
   installDesktopUpdate: () => Promise<void>;
+  openDesktopSupportFolder: () => Promise<void>;
+  saveSyncDiagnostics: (
+    fileName: string,
+    diagnostic: Record<string, unknown>,
+  ) => Promise<void>;
   recoverDesktopWindow: () => Promise<void>;
   refreshDesktopWindowStatus: () => Promise<StoreDesktopWindowStatus | null>;
   refreshRuntimeStatus: () => Promise<void>;
@@ -21886,6 +24087,46 @@ function SyncWorkspace(props: {
 
     return () => window.clearInterval(handle);
   }, []);
+
+  async function exportSyncDiagnostics() {
+    if (!props.snapshot) {
+      return;
+    }
+
+    const diagnostic = {
+      exportedAt: new Date().toISOString(),
+      store: {
+        deploymentMode: props.snapshot.deploymentMode,
+        retailOrgName: props.snapshot.retailOrgName,
+        storeCode: props.snapshot.storeCode,
+        storeName: props.snapshot.storeName,
+        nodeCode: props.snapshot.nodeCode,
+        terminalCode: props.snapshot.terminalCode,
+        databasePath: props.snapshot.databasePath,
+        enterpriseBaseUrl: props.snapshot.enterpriseBaseUrl,
+      },
+      health: {
+        status: props.snapshot.health,
+        lastLocalWriteAt: props.snapshot.lastLocalWriteAt,
+        lastSyncAt: props.snapshot.lastSyncAt,
+        lastEnterpriseAckAt: props.snapshot.lastEnterpriseAckAt,
+        syncPolicy: props.snapshot.syncPolicy,
+        queueMetrics: props.snapshot.queueMetrics,
+      },
+      runtime: props.runtimeStatus,
+      desktopWindow: props.desktopWindowStatus,
+      desktopUpdate: props.desktopUpdateStatus,
+      recentRuns: props.snapshot.recentRuns,
+      failedSyncItems: props.snapshot.syncDeadLetters,
+      recentSyncEvents: props.snapshot.recentSyncEvents,
+    };
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const storeToken = props.snapshot.storeCode.replace(/[^A-Za-z0-9_-]/g, "-");
+    await props.saveSyncDiagnostics(
+      `flash-rms-sync-${storeToken}-${timestamp}.json`,
+      diagnostic,
+    );
+  }
 
   function renderSyncTabs() {
     return (
@@ -22073,6 +24314,14 @@ function SyncWorkspace(props: {
                 <h2>Renderer watchdog</h2>
               </div>
               <div className="rms-title-actions">
+                <button
+                  className="rms-button"
+                  disabled={props.isBusy}
+                  onClick={() => void props.openDesktopSupportFolder()}
+                  type="button"
+                >
+                  Open logs
+                </button>
                 <button
                   className="rms-button"
                   disabled={props.isBusy}
@@ -22385,23 +24634,33 @@ function SyncWorkspace(props: {
             <span>Queues</span>
             <h2>Sync status</h2>
           </div>
-          <button
-            className="rms-button is-primary"
-            disabled={props.isBusy || props.isSyncRunning}
-            onClick={() =>
-              void props.runSyncCycle(
-                {
-                  trigger: "manual",
-                  drainDownstream: true,
-                  snapshotMode: "status",
-                },
-                "Manual sync",
-              )
-            }
-            type="button"
-          >
-            {props.isSyncRunning ? "Syncing..." : "Run sync"}
-          </button>
+          <div className="rms-title-actions">
+            <button
+              className="rms-button"
+              disabled={!props.snapshot}
+              onClick={() => void exportSyncDiagnostics()}
+              type="button"
+            >
+              Export diagnostics
+            </button>
+            <button
+              className="rms-button is-primary"
+              disabled={props.isBusy || props.isSyncRunning}
+              onClick={() =>
+                void props.runSyncCycle(
+                  {
+                    trigger: "manual",
+                    drainDownstream: true,
+                    snapshotMode: "status",
+                  },
+                  "Manual sync",
+                )
+              }
+              type="button"
+            >
+              {props.isSyncRunning ? "Syncing..." : "Run sync"}
+            </button>
+          </div>
         </div>
         <div className="rms-sync-metric-grid">
           <Stat
@@ -22417,7 +24676,7 @@ function SyncWorkspace(props: {
             value={formatNumber(props.snapshot?.queueMetrics.downstreamQueued)}
           />
           <Stat
-            label="Dead letters"
+            label="Failed / dead"
             tone={props.snapshot?.queueMetrics.deadLetter ? "bad" : "good"}
             value={formatNumber(props.snapshot?.queueMetrics.deadLetter)}
           />
@@ -22430,7 +24689,11 @@ function SyncWorkspace(props: {
         <div className="rms-sync-actions">
           <button
             className="rms-button"
-            disabled={props.isBusy}
+            disabled={
+              props.isBusy ||
+              props.isSyncRunning ||
+              !props.snapshot?.syncDeadLetters.length
+            }
             onClick={() =>
               void props.runAction((desktopRuntime) =>
                 desktopRuntime.requeueDeadLetters(),
@@ -22438,7 +24701,7 @@ function SyncWorkspace(props: {
             }
             type="button"
           >
-            Requeue failed
+            Retry eligible
           </button>
         </div>
         {props.snapshot?.syncDeadLetters.length ? (
@@ -22458,6 +24721,23 @@ function SyncWorkspace(props: {
                   <small>
                     {letter.errorMessage ??
                       "No rejection message captured for this sync item."}
+                  </small>
+                  <small>
+                    {[
+                      letter.failureKind,
+                      letter.lastHttpStatus == null
+                        ? null
+                        : `HTTP ${letter.lastHttpStatus}`,
+                      letter.nextRetryAt
+                        ? `Retry ${formatRelative(letter.nextRetryAt)}`
+                        : null,
+                      letter.lastAttemptAt
+                        ? `Last attempt ${formatRelative(letter.lastAttemptAt)}`
+                        : null,
+                      letter.syncRunId ? `Run ${letter.syncRunId}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || `Updated ${formatRelative(letter.updatedAt)}`}
                   </small>
                   <details className="rms-sync-payload-detail">
                     <summary>Payload preview</summary>
@@ -22500,6 +24780,9 @@ function SyncWorkspace(props: {
                   <div>
                     <strong>{run.runKind}</strong>
                     <span>{run.summary}</span>
+                    <small>
+                      {`${formatRelative(run.startedAt)} · ${run.upstreamProcessed} upstream · ${run.downstreamApplied} downstream`}
+                    </small>
                   </div>
                   <StatusPill tone={run.result === "SUCCESS" ? "good" : "warn"}>
                     {run.result}
@@ -22537,6 +24820,22 @@ function SyncWorkspace(props: {
                       {formatRelative(event.updatedAt)}
                       {event.errorMessage ? ` · ${event.errorMessage}` : ""}
                     </small>
+                    {event.failureKind || event.nextRetryAt || event.syncRunId ? (
+                      <small>
+                        {[
+                          event.failureKind,
+                          event.lastHttpStatus == null
+                            ? null
+                            : `HTTP ${event.lastHttpStatus}`,
+                          event.nextRetryAt
+                            ? `Retry ${formatRelative(event.nextRetryAt)}`
+                            : null,
+                          event.syncRunId ? `Run ${event.syncRunId}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </small>
+                    ) : null}
                     <details className="rms-sync-payload-detail">
                       <summary>Payload preview</summary>
                       <pre>{event.payloadPreview}</pre>

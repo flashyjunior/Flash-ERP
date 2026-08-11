@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { NextResponse } from "next/server";
@@ -14,15 +17,16 @@ const supportedMimeTypes = new Map<string, string>([
   ["image/gif", ".gif"],
   ["image/avif", ".avif"]
 ]);
-const mimeTypeByExtension = new Map<string, string>([
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".png", "image/png"],
-  [".webp", "image/webp"],
-  [".gif", "image/gif"],
-  [".avif", "image/avif"]
-]);
 const supportedExtensions = new Set<string>([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]);
+
+function resolveEnterpriseWebRoot() {
+  const candidates = [process.cwd(), path.join(process.cwd(), "apps", "enterprise-web")];
+
+  return (
+    candidates.find((candidate) => existsSync(path.join(candidate, "next.config.ts"))) ??
+    candidates[0]
+  );
+}
 
 function resolveExtension(file: File) {
   const supportedExtension = supportedMimeTypes.get(file.type);
@@ -33,12 +37,6 @@ function resolveExtension(file: File) {
 
   const extension = path.extname(file.name).toLowerCase();
   return supportedExtensions.has(extension) ? extension : null;
-}
-
-function resolveMimeType(file: File, extension: string) {
-  return supportedMimeTypes.has(file.type)
-    ? file.type
-    : (mimeTypeByExtension.get(extension) ?? "application/octet-stream");
 }
 
 export async function POST(request: Request) {
@@ -65,11 +63,17 @@ export async function POST(request: Request) {
       throw new Error("Flash ERP supports PNG, JPG, WEBP, GIF, and AVIF background uploads only.");
     }
 
+    const enterpriseWebRoot = resolveEnterpriseWebRoot();
+    const uploadDir = path.join(enterpriseWebRoot, "public", "uploads", "company");
+    const fileName = `${Date.now()}-${randomUUID()}-login-background${extension}`;
+    const outputPath = path.join(uploadDir, fileName);
     const fileBuffer = Buffer.from(await file.arrayBuffer());
-    const mimeType = resolveMimeType(file, extension);
+
+    mkdirSync(uploadDir, { recursive: true });
+    await writeFile(outputPath, fileBuffer);
 
     return NextResponse.json({
-      url: `data:${mimeType};base64,${fileBuffer.toString("base64")}`,
+      url: `/uploads/company/${fileName}`,
       message: `${file.name} uploaded successfully. Flash ERP attached it to the login background.`
     });
   } catch (error) {

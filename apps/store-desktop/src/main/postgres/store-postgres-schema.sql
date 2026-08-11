@@ -304,6 +304,7 @@ CREATE TABLE IF NOT EXISTS purchase_order_line_snapshot (
   category_code TEXT,
   subcategory TEXT,
   is_serialized INTEGER NOT NULL DEFAULT 0,
+  track_expiry INTEGER NOT NULL DEFAULT 0,
   ordered_quantity NUMERIC NOT NULL,
   received_quantity NUMERIC NOT NULL DEFAULT 0,
   exception_quantity NUMERIC NOT NULL DEFAULT 0,
@@ -969,3 +970,38 @@ VALUES ('schema_version', 'flash-erp-store-postgres-v1', now()::text)
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;
+-- Expiry-controlled stock is additive so existing store databases upgrade in place.
+ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS track_expiry INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS shelf_life_days INTEGER;
+ALTER TABLE local_goods_receipt_line ADD COLUMN IF NOT EXISTS batch_no TEXT;
+ALTER TABLE local_goods_receipt_line ADD COLUMN IF NOT EXISTS manufactured_at TEXT;
+ALTER TABLE local_goods_receipt_line ADD COLUMN IF NOT EXISTS expiry_date TEXT;
+ALTER TABLE local_supplier_return_line ADD COLUMN IF NOT EXISTS batch_allocations_json TEXT;
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS track_expiry INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS issued_batch_allocations_json TEXT;
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS received_batch_allocations_json TEXT;
+ALTER TABLE stock_count_session ADD COLUMN IF NOT EXISTS previous_batch_quantities_json TEXT;
+ALTER TABLE stock_count_session ADD COLUMN IF NOT EXISTS counted_batch_quantities_json TEXT;
+ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS batch_allocations_json TEXT;
+ALTER TABLE purchase_order_line_snapshot ADD COLUMN IF NOT EXISTS track_expiry INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS inventory_batch_registry (
+  id TEXT PRIMARY KEY,
+  product_code TEXT NOT NULL,
+  inventory_location_code TEXT NOT NULL,
+  batch_no TEXT NOT NULL,
+  manufactured_at TEXT,
+  expiry_date TEXT NOT NULL,
+  quantity_on_hand NUMERIC NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  source_reference_type TEXT,
+  source_reference_id TEXT,
+  source_reference_label TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (inventory_location_code, product_code, batch_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_batch_registry_fefo
+  ON inventory_batch_registry(inventory_location_code, product_code, status, expiry_date, batch_no);
+CREATE INDEX IF NOT EXISTS idx_inventory_batch_registry_expiry
+  ON inventory_batch_registry(expiry_date, status, quantity_on_hand);

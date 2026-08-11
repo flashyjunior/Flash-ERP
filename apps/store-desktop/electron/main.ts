@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, Tray, type MessageBoxOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray, type MessageBoxOptions } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -80,6 +80,7 @@ import type {
   StoreSyncActionResult,
   StoreSyncCycleStartResult,
   StoreSyncCycleStatusEvent,
+  StoreSyncDiagnosticsExportInput,
   StoreSyncRunOptions,
   StoreSyncSnapshot,
   StoreRuntimeStatus,
@@ -105,6 +106,28 @@ import type {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function resolveDesktopAppVersion() {
+  if (app.isPackaged) {
+    return app.getVersion();
+  }
+
+  try {
+    const packageJson = JSON.parse(
+      readFileSync(path.resolve(__dirname, "..", "..", "package.json"), "utf8")
+    ) as { version?: unknown };
+
+    if (typeof packageJson.version === "string" && packageJson.version.trim()) {
+      return packageJson.version.trim();
+    }
+  } catch {
+    // Fall back to Electron's application metadata when the workspace manifest is unavailable.
+  }
+
+  return app.getVersion();
+}
+
+const desktopAppVersion = resolveDesktopAppVersion();
 const { autoUpdater } = electronUpdater;
 const { Pool } = pg;
 installDesktopSupportLogging();
@@ -214,7 +237,7 @@ const maxDetachedSyncDrainCycleLimit = 5;
 const desktopWindowStateFileName = "desktop-window-state.json";
 let desktopUpdateStatus: StoreDesktopUpdateStatus = {
   status: "idle",
-  currentVersion: app.getVersion(),
+  currentVersion: desktopAppVersion,
   availableVersion: null,
   message: "Desktop update checks are waiting for the app to finish starting.",
   feedUrl: null,
@@ -362,7 +385,7 @@ function scheduleDesktopWindowStateSave(window: BrowserWindow) {
 function setDesktopUpdateStatus(patch: Partial<StoreDesktopUpdateStatus>) {
   desktopUpdateStatus = {
     ...desktopUpdateStatus,
-    currentVersion: app.getVersion(),
+    currentVersion: desktopAppVersion,
     feedUrl: getDesktopUpdateFeedUrl(),
     ...patch
   };
@@ -589,16 +612,35 @@ function scheduleDesktopUpdateChecks() {
   }, desktopUpdateCheckIntervalMs);
 }
 
-function requireStoreClient() {
+async function requireStoreClient() {
+  if (
+    !storeClient &&
+    storeRuntimeConfig &&
+    shouldUseLocalStoreServerProcess(storeRuntimeConfig)
+  ) {
+    try {
+      await restartLocalStoreServerProcess("recover-missing-store-client");
+      startupErrorMessage = null;
+    } catch (error) {
+      startupErrorMessage =
+        error instanceof Error
+          ? error.message
+          : "Flash ERP could not recover local store services.";
+    }
+  }
+
   if (!storeClient) {
-    throw new Error("Flash ERP store services are not available.");
+    throw new Error(
+      startupErrorMessage ?? "Flash ERP store services are not available."
+    );
   }
 
   return storeClient;
 }
 
 async function callStore<T>(method: StoreServiceMethod, args: unknown[] = []) {
-  return (await requireStoreClient().call(method, args)) as T;
+  const client = await requireStoreClient();
+  return (await client.call(method, args)) as T;
 }
 
 function normalizeSyncTrigger(input?: StoreSyncRunOptions): NonNullable<StoreSyncRunOptions["trigger"]> {
@@ -670,7 +712,47 @@ function shouldRunSyncInIsolatedWorker(config: StoreRuntimeConfig) {
 function getSyncWorkerLogPath(traceId: string) {
   const logDirectory = path.join(app.getPath("userData"), "logs", "sync-workers");
   mkdirSync(logDirectory, { recursive: true });
+  pruneSyncWorkerArtifacts(logDirectory);
   return path.join(logDirectory, `${traceId}.log`);
+}
+
+function pruneSyncWorkerArtifacts(logDirectory: string) {
+  try {
+    const groups = new Map<string, { files: string[]; newestAt: number }>();
+
+    for (const entry of readdirSync(logDirectory, { withFileTypes: true })) {
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      const match = entry.name.match(
+        /^(store-detached-sync-[^.]+)\.(?:log|error\.log|pid|launcher\.log|launcher\.ps1)$/,
+      );
+
+      if (!match) {
+        continue;
+      }
+
+      const absolutePath = path.join(logDirectory, entry.name);
+      const modifiedAt = statSync(absolutePath).mtimeMs;
+      const group = groups.get(match[1]) ?? { files: [], newestAt: 0 };
+      group.files.push(absolutePath);
+      group.newestAt = Math.max(group.newestAt, modifiedAt);
+      groups.set(match[1], group);
+    }
+
+    const expiredGroups = [...groups.values()]
+      .sort((left, right) => right.newestAt - left.newestAt)
+      .slice(100);
+
+    for (const group of expiredGroups) {
+      for (const artifactPath of group.files) {
+        rmSync(artifactPath, { force: true });
+      }
+    }
+  } catch (error) {
+    console.warn("Store Desktop could not prune old sync worker logs.", error);
+  }
 }
 
 function quotePowerShellSingle(value: string) {
@@ -780,9 +862,16 @@ function readIsolatedSyncWorkerTerminalState(input: {
   }
 
   if (combinedOutput.includes("Store Desktop isolated sync worker failed.")) {
+    const failureMatch = errorOutput.match(
+      /Store Desktop isolated sync worker failed\.\s+(?:Error:\s*)?([^\r\n]+)/
+    );
+    const failureMessage = failureMatch?.[1]?.trim();
+
     return {
       status: "failed",
-      message: `Flash ERP isolated sync worker failed. Check ${input.workerLogPath} and ${input.workerErrorLogPath} for details.`
+      message:
+        failureMessage ||
+        `Flash ERP isolated sync worker failed. Check ${input.workerLogPath} and ${input.workerErrorLogPath} for details.`
     };
   }
 
@@ -922,11 +1011,18 @@ function startIsolatedDetachedSyncCycle(input: {
           launcherScriptPath
         ], {
           cwd,
+          env: {
+            ...process.env,
+            FLASH_ERP_STORE_SERVER_TOKEN: config.storeServerToken ?? ""
+          },
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true
         });
 
         attachSyncLauncherLogs(launcher, input.traceId);
+        launcher.once("close", () => {
+          rmSync(launcherScriptPath, { force: true });
+        });
 
         workerWatchdog = setTimeout(() => {
           const elapsedMs = Date.now() - startedAtMs;
@@ -1911,7 +2007,7 @@ async function waitForStoreServerReady(
   config: StoreRuntimeConfig,
   child?: ChildProcess | null
 ) {
-  const timeoutMs = Math.max(15_000, Math.min(60_000, config.storeServerTimeoutMs * 3));
+  const timeoutMs = Math.max(60_000, Math.min(120_000, config.storeServerTimeoutMs * 6));
   const requestTimeoutMs = Math.max(500, Math.min(2500, config.storeServerTimeoutMs));
   const startedAt = Date.now();
   let lastError: string | null = null;
@@ -2613,6 +2709,7 @@ function buildDesktopConnectionConfigResult(
       updateFeedUrl: getDesktopUpdateFeedUrl() ?? ""
     },
     configPath: getDesktopConnectionConfigPath(),
+    supportLogPath: getDesktopSupportLogPath(),
     restartRequired
   };
 }
@@ -4171,6 +4268,40 @@ if (!desktopSingleInstanceLock) {
   ipcMain.handle("rms:ping", async () => "pong");
   ipcMain.handle("flash-erp:get-store-runtime-status", async () => getStoreRuntimeStatus());
   ipcMain.handle("flash-erp:get-desktop-window-status", async () => getDesktopWindowStatus());
+  ipcMain.handle("flash-erp:open-desktop-support-folder", async () => {
+    const supportLogPath = getDesktopSupportLogPath();
+    shell.showItemInFolder(supportLogPath);
+    return supportLogPath;
+  });
+  ipcMain.handle(
+    "flash-erp:export-sync-diagnostics",
+    async (_event, input: StoreSyncDiagnosticsExportInput) => {
+      const requestedFileName =
+        typeof input?.fileName === "string" ? path.basename(input.fileName.trim()) : "";
+      const safeFileName = requestedFileName.replace(/[^A-Za-z0-9._-]/g, "-");
+
+      if (!safeFileName || !safeFileName.toLowerCase().endsWith(".json")) {
+        throw new Error("Flash ERP needs a valid JSON diagnostics file name.");
+      }
+
+      if (
+        !input.diagnostic ||
+        typeof input.diagnostic !== "object" ||
+        Array.isArray(input.diagnostic)
+    ) {
+        throw new Error("Flash ERP could not prepare the sync diagnostics export.");
+      }
+
+      const supportDirectory = path.dirname(getDesktopSupportLogPath());
+      const outputPath = path.join(supportDirectory, safeFileName);
+      mkdirSync(supportDirectory, { recursive: true });
+      writeFileSync(outputPath, `${JSON.stringify(input.diagnostic, null, 2)}\n`, "utf8");
+      writeDesktopSupportLog("info", "Sync diagnostics exported", {
+        outputPath
+      });
+      return outputPath;
+    }
+  );
   ipcMain.handle("flash-erp:recover-desktop-window", async (_event, reason?: string | null) =>
     recoverDesktopWindow(reason?.trim() || "renderer-requested")
   );

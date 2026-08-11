@@ -2,6 +2,14 @@ import type { RetailEntityKey } from "@flash-erp/domain";
 
 export type SyncBatchDirection = "upstream" | "downstream";
 
+export type InventoryBatchAllocationPayload = {
+  batchId?: string | null;
+  batchNo: string;
+  manufacturedAt?: string | null;
+  expiryDate: string;
+  quantity: number;
+};
+
 export type SyncEnvelope<TPayload = unknown> = {
   eventId: string;
   idempotencyKey: string;
@@ -158,6 +166,7 @@ export type StorePosTransactionLinePayload = {
   appliedPromotionCode?: string | null;
   appliedPromotionName?: string | null;
   inventoryLocationCode?: string | null;
+  batchAllocations?: InventoryBatchAllocationPayload[];
 };
 
 export type StorePosPaymentPayload = {
@@ -391,6 +400,7 @@ export type StoreInventoryLedgerRecordedPayload = {
   movementType: SyncInventoryMovementType;
   quantity: number;
   serialNumbers?: string[];
+  batchAllocations?: InventoryBatchAllocationPayload[];
   unitCost: number | null;
   referenceType: string;
   referenceId: string;
@@ -437,6 +447,7 @@ export type EnterpriseStoreSettingsPublishedPayload = {
   loginBackgroundImageUrl: string | null;
   productSizes: string[];
   posDiscountRates: number[];
+  posExpressChargeRates: number[];
   documentNumberFormats: Record<
     string,
     {
@@ -455,8 +466,18 @@ export type EnterpriseStoreSettingsPublishedPayload = {
   currencyCode: string;
   salesEnabled: boolean;
   warehouseEnabled: boolean;
+  allowNegativeInventory: boolean;
+  allowOfflineSales: boolean;
+  autoPrintReceipts: boolean;
+  enforceSerializedScanAtPos: boolean;
+  requireCustomerForCreditSales: boolean;
+  requireSupervisorForReceiptlessReturn: boolean;
+  defaultReceiptSearchDays: number;
   shiftFloatPromptAmount: number;
   showCriticalStocksOnStartup: boolean;
+  showExpiringBatchesOnStartup: boolean;
+  expiryAlertLeadDays: number;
+  expiryCriticalDays: number;
   loyaltyProgramEnabled: boolean;
   loyaltyPointsPerCurrencyUnit: number;
   loyaltyRedemptionEnabled: boolean;
@@ -654,6 +675,7 @@ export type EnterpriseCatalogProductPublishedPayload = {
   taxInclusive: boolean;
   trackInventory: boolean;
   isSerialized: boolean;
+  trackExpiry: boolean;
   trackSize: boolean;
   trackColor: boolean;
   allowPriceOverride: boolean;
@@ -806,6 +828,7 @@ export type EnterprisePurchaseOrderPublishedLinePayload = {
   categoryName: string | null;
   subcategory: string | null;
   isSerialized: boolean;
+  trackExpiry: boolean;
   orderedQuantity: number;
   receivedQuantity: number;
   exceptionQuantity: number;
@@ -925,6 +948,7 @@ export type EnterpriseInterStoreTransferPublishedPayload = {
   categoryName: string | null;
   subcategory: string | null;
   isSerialized: boolean;
+  trackExpiry: boolean;
   requestedQuantity: number;
   issuedQuantity: number;
   receivedQuantity: number;
@@ -933,6 +957,8 @@ export type EnterpriseInterStoreTransferPublishedPayload = {
   unitCost: number | null;
   issuedSerialNumbers: string[];
   receivedSerialNumbers: string[];
+  issuedBatchAllocations: InventoryBatchAllocationPayload[];
+  receivedBatchAllocations: InventoryBatchAllocationPayload[];
   requestNote: string | null;
   issueNote: string | null;
   receiptNote: string | null;
@@ -1228,6 +1254,9 @@ export type InventoryGoodsReceiptRequest = {
   note?: string | null;
   operatorName?: string;
   serialNumbers?: string[];
+  batchNo?: string | null;
+  manufacturedAt?: string | null;
+  expiryDate?: string | null;
 };
 
 export type InventoryGoodsReceiptResponse = {
@@ -1237,6 +1266,9 @@ export type InventoryGoodsReceiptResponse = {
   productCode: string;
   quantity: number;
   serialNumbers: string[];
+  batchNo: string | null;
+  manufacturedAt: string | null;
+  expiryDate: string | null;
   operatorName: string;
   note: string;
   message: string;
@@ -1437,6 +1469,9 @@ export type StoreGoodsReceiptRecordedLinePayload = {
   quantity: number;
   unitCost: number | null;
   serialNumbers: string[];
+  batchNo: string | null;
+  manufacturedAt: string | null;
+  expiryDate: string | null;
 };
 
 export type StoreGoodsReceiptRecordedExceptionPayload = {
@@ -1479,6 +1514,7 @@ export type StoreSupplierReturnRecordedLinePayload = {
   quantity: number;
   unitCost: number | null;
   serialNumbers: string[];
+  batchAllocations: InventoryBatchAllocationPayload[];
 };
 
 export type StoreSupplierReturnRecordedPayload = {
@@ -1529,6 +1565,8 @@ export type StoreStockCountSessionSubmittedPayload = {
   varianceQuantity: number;
   previousSerialNumbers?: string[];
   countedSerialNumbers?: string[];
+  previousBatchQuantities?: InventoryBatchAllocationPayload[];
+  countedBatchQuantities?: InventoryBatchAllocationPayload[];
   operatorName: string;
   note: string | null;
   submittedAt: string;
@@ -1544,6 +1582,7 @@ export type StoreInterStoreTransferIssuedPayload = {
   productCode: string;
   quantity: number;
   serialNumbers?: string[];
+  batchAllocations?: InventoryBatchAllocationPayload[];
   operatorName: string;
   note: string | null;
   occurredAt: string;
@@ -1574,6 +1613,7 @@ export type StoreInterStoreTransferReceivedPayload = {
   productCode: string;
   quantity: number;
   serialNumbers?: string[];
+  batchAllocations?: InventoryBatchAllocationPayload[];
   operatorName: string;
   note: string | null;
   occurredAt: string;

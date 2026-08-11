@@ -1336,6 +1336,7 @@ async function main() {
     connectionString: storeDatabaseUrl,
     deploymentMode: "ENTERPRISE_MANAGED",
     syncBaseUrl: enterpriseBaseUrl,
+    nodeCode: certificationEvent.nodeCode,
     terminalCode: certificationEvent.terminalCode,
     connectionTimeoutMs: 8000
   });
@@ -1351,7 +1352,11 @@ async function main() {
   const syncStartedAt = new Date().toISOString();
 
   try {
-    await service.runSyncCycle({ trigger: "startup" });
+    await service.runSyncCycle({
+      trigger: "startup",
+      drainDownstream: true,
+      snapshotMode: "status",
+    });
   } finally {
     await service.close();
   }

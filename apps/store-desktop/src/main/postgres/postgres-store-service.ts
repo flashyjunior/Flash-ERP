@@ -1,7 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { deriveRetailUserCapabilities } from "@flash-erp/domain";
+import {
+  allocateInventoryBatchesFefo,
+  deriveInventoryBatchStatus,
+  deriveRetailUserCapabilities,
+  validateInventoryBatchReceipt,
+} from "@flash-erp/domain";
 import {
   calculateLoyaltyRedemption,
   getRetryDelayMs,
@@ -102,6 +107,7 @@ import type {
   StoreEodReconciliationSummary,
   StoreInventoryBrowseItem,
   StoreInventoryBrowseRequest,
+  StoreInventoryBatchAllocation,
   StoreInventoryLocationSummary,
   StoreInterStoreTransferBrowseRequest,
   StoreInterStoreTransferIssueRequest,
@@ -290,6 +296,8 @@ type ProductRow = {
   tax_rate_percent: string | number | null;
   tax_inclusive: string | number;
   track_inventory: string | number;
+  track_expiry: string | number;
+  shelf_life_days: string | number | null;
   is_serialized: string | number;
   track_size: string | number;
   track_color: string | number;
@@ -396,6 +404,7 @@ type BasketLineRow = {
   variant_attributes_snapshot: string | null;
   line_note: string | null;
   serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
   quantity: string | number;
   unit_price: string | number;
   discount_amount: string | number;
@@ -631,6 +640,10 @@ type InventoryBrowseRow = {
   safety_stock_level: string | number | null;
   unit_price: string | number;
   is_serialized: string | number;
+  track_expiry: string | number;
+  earliest_expiry_date: string | null;
+  expiring_quantity: string | number | null;
+  batch_quantities_json: string | null;
   updated_at: string;
 };
 
@@ -697,6 +710,7 @@ type PurchaseOrderLineSnapshotRow = {
   category_name: string | null;
   subcategory: string | null;
   is_serialized: string | number;
+  track_expiry: string | number;
   ordered_quantity: string | number;
   received_quantity: string | number;
   exception_quantity: string | number;
@@ -737,6 +751,9 @@ type LocalGoodsReceiptLineRow = {
   quantity: string | number;
   unit_cost: string | number | null;
   serial_numbers_json: string | null;
+  batch_no: string | null;
+  manufactured_at: string | null;
+  expiry_date: string | null;
 };
 
 type LocalGoodsReceiptExceptionRow = {
@@ -793,6 +810,7 @@ type LocalSupplierReturnLineRow = {
   quantity: string | number;
   unit_cost: string | number | null;
   serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
 };
 
 type InterStoreTransferSnapshotRow = {
@@ -820,6 +838,7 @@ type InterStoreTransferSnapshotRow = {
   category_name: string | null;
   subcategory: string | null;
   is_serialized: string | number;
+  track_expiry: string | number;
   requested_quantity: string | number;
   issued_quantity: string | number;
   received_quantity: string | number;
@@ -828,6 +847,8 @@ type InterStoreTransferSnapshotRow = {
   unit_cost: string | number | null;
   issued_serial_numbers_json: string | null;
   received_serial_numbers_json: string | null;
+  issued_batch_allocations_json: string | null;
+  received_batch_allocations_json: string | null;
   request_note: string | null;
   issue_note: string | null;
   receipt_note: string | null;
@@ -909,6 +930,8 @@ type StockCountSessionRow = {
   variance_quantity: string | number;
   previous_serial_numbers_json: string | null;
   counted_serial_numbers_json: string | null;
+  previous_batch_quantities_json: string | null;
+  counted_batch_quantities_json: string | null;
   note: string | null;
   operator_name: string;
   submitted_at: string | null;
@@ -988,6 +1011,11 @@ type SyncDeadLetterRow = {
   event_type: string;
   node_code: string | null;
   attempt_count: string | number;
+  failure_kind: string | null;
+  last_http_status: string | number | null;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
+  sync_run_id: string | null;
   payload_json: string;
   error_message: string | null;
   created_at: string;
@@ -1335,6 +1363,16 @@ function asNullableNumber(value: string | number | null | undefined) {
 
 function asBooleanFlag(value: string | number | null | undefined) {
   return asNumber(value) > 0;
+}
+
+function tracksInventoryForSale(row: {
+  product_type?: string | null;
+  track_inventory?: string | number | null;
+}) {
+  return (
+    asBooleanFlag(row.track_inventory) &&
+    row.product_type?.trim().toUpperCase() !== "SERVICE"
+  );
 }
 
 function pushPgParam(params: unknown[], value: unknown) {
@@ -1921,6 +1959,107 @@ function readSerializedLineNumbers(value: string | null | undefined) {
   } catch {
     return [];
   }
+}
+
+function readInventoryBatchAllocations(
+  value: string | null | undefined,
+): StoreInventoryBatchAllocation[] {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.flatMap((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return [];
+          }
+
+          const candidate = entry as Record<string, unknown>;
+          const batchNo = typeof candidate.batchNo === "string" ? candidate.batchNo : "";
+          const expiryDate = typeof candidate.expiryDate === "string" ? candidate.expiryDate : "";
+          const quantity = Number(candidate.quantity);
+          return batchNo && expiryDate && Number.isFinite(quantity) && quantity >= 0
+            ? [{
+                batchId: typeof candidate.batchId === "string" ? candidate.batchId : null,
+                batchNo,
+                manufacturedAt:
+                  typeof candidate.manufacturedAt === "string"
+                    ? candidate.manufacturedAt
+                    : null,
+                expiryDate,
+                quantity: Number(quantity.toFixed(3)),
+              }]
+            : [];
+        })
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeInventoryBatchAllocations(
+  allocations: StoreInventoryBatchAllocation[] | null | undefined,
+) {
+  return allocations?.length ? JSON.stringify(allocations) : null;
+}
+
+function takeOutstandingInventoryBatchAllocations(input: {
+  productName: string;
+  quantity: number;
+  issued: StoreInventoryBatchAllocation[];
+  received: StoreInventoryBatchAllocation[];
+}) {
+  const receivedByBatch = new Map<string, number>();
+
+  for (const allocation of input.received) {
+    const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+    receivedByBatch.set(
+      key,
+      Number(
+        ((receivedByBatch.get(key) ?? 0) + allocation.quantity).toFixed(3),
+      ),
+    );
+  }
+
+  let remainingQuantity = Number(input.quantity.toFixed(3));
+  const allocations: StoreInventoryBatchAllocation[] = [];
+
+  for (const issuedAllocation of input.issued) {
+    if (remainingQuantity <= 0.0001) {
+      break;
+    }
+
+    const key = `${issuedAllocation.batchNo.toUpperCase()}\u0000${issuedAllocation.expiryDate.slice(0, 10)}`;
+    const availableQuantity = Number(
+      Math.max(
+        0,
+        issuedAllocation.quantity - (receivedByBatch.get(key) ?? 0),
+      ).toFixed(3),
+    );
+    const allocatedQuantity = Number(
+      Math.min(availableQuantity, remainingQuantity).toFixed(3),
+    );
+
+    if (allocatedQuantity > 0) {
+      allocations.push({
+        ...issuedAllocation,
+        quantity: allocatedQuantity,
+      });
+      remainingQuantity = Number(
+        (remainingQuantity - allocatedQuantity).toFixed(3),
+      );
+    }
+  }
+
+  if (remainingQuantity > 0.0001) {
+    throw new Error(
+      `The source issue does not contain enough outstanding batch quantity for ${input.productName}. Sync the source issue before receiving.`,
+    );
+  }
+
+  return allocations;
 }
 
 function writeSerializedLineNumbers(serialNumbers: string[]) {
@@ -3413,6 +3552,7 @@ export class PostgresStoreService {
     this.requireStandaloneSetupMode();
     await this.requireStandaloneSupervisor();
     const timestamp = isoNow();
+    const currentMetadata = await this.metadata();
     const client = await this.pool.connect();
 
     try {
@@ -3422,6 +3562,9 @@ export class PostgresStoreService {
       const currencyCode = optionalSetupText(input.currencyCode)?.toUpperCase();
       const timezone = optionalSetupText(input.timezone);
       const companyLogoUrl = optionalSetupText(input.companyLogoUrl);
+      const loginBackgroundImageUrl = optionalSetupText(
+        input.loginBackgroundImageUrl,
+      );
       const receiptHeader = optionalSetupText(input.receiptHeader);
       const receiptFooter = optionalSetupText(input.receiptFooter);
 
@@ -3458,11 +3601,126 @@ export class PostgresStoreService {
           client,
         );
       }
+      if (typeof input.showExpiringBatchesOnStartup === "boolean") {
+        await this.setMetadata(
+          "show_expiring_batches_on_startup",
+          input.showExpiringBatchesOnStartup ? "1" : "0",
+          client,
+        );
+      }
+      if (
+        (input.expiryAlertLeadDays !== undefined &&
+          input.expiryAlertLeadDays !== null) ||
+        (input.expiryCriticalDays !== undefined &&
+          input.expiryCriticalDays !== null)
+      ) {
+        const expiryAlertLeadDays = normalizePolicyInteger(
+          input.expiryAlertLeadDays ?? currentMetadata.expiry_alert_lead_days,
+          30,
+          1,
+          3650,
+        );
+        const expiryCriticalDays = normalizePolicyInteger(
+          input.expiryCriticalDays ?? currentMetadata.expiry_critical_days,
+          7,
+          0,
+          expiryAlertLeadDays,
+        );
+        await this.setMetadata(
+          "expiry_alert_lead_days",
+          String(expiryAlertLeadDays),
+          client,
+        );
+        await this.setMetadata(
+          "expiry_critical_days",
+          String(expiryCriticalDays),
+          client,
+        );
+      }
+
+      const booleanSettings = [
+        ["allow_negative_inventory", input.allowNegativeInventory],
+        ["allow_offline_sales", input.allowOfflineSales],
+        ["auto_print_receipts", input.autoPrintReceipts],
+        ["enforce_serialized_scan_at_pos", input.enforceSerializedScanAtPos],
+        ["require_customer_for_credit_sales", input.requireCustomerForCreditSales],
+        [
+          "require_supervisor_for_receiptless_return",
+          input.requireSupervisorForReceiptlessReturn,
+        ],
+      ] as const;
+
+      for (const [key, value] of booleanSettings) {
+        if (typeof value === "boolean") {
+          await this.setMetadata(key, value ? "1" : "0", client);
+        }
+      }
+
+      if (
+        input.defaultReceiptSearchDays !== undefined &&
+        input.defaultReceiptSearchDays !== null
+      ) {
+        await this.setMetadata(
+          "default_receipt_search_days",
+          String(
+            normalizePolicyInteger(input.defaultReceiptSearchDays, 30, 1, 365),
+          ),
+          client,
+        );
+      }
+
+      if (
+        input.shiftFloatPromptAmount !== undefined &&
+        input.shiftFloatPromptAmount !== null
+      ) {
+        await this.setMetadata(
+          "shift_float_prompt_amount",
+          Math.max(0, Number(input.shiftFloatPromptAmount) || 0).toFixed(2),
+          client,
+        );
+      }
+
+      const listSettings = [
+        [
+          "product_sizes_json",
+          Array.isArray(input.productSizes)
+            ? JSON.stringify(normalizeSetupStringList(input.productSizes) ?? [])
+            : null,
+        ],
+        [
+          "pos_discount_rates_json",
+          Array.isArray(input.posDiscountRates)
+            ? JSON.stringify(normalizeSetupNumberList(input.posDiscountRates) ?? [])
+            : null,
+        ],
+        [
+          "pos_express_charge_rates_json",
+          Array.isArray(input.posExpressChargeRates)
+            ? JSON.stringify(normalizeSetupNumberList(input.posExpressChargeRates) ?? [])
+            : null,
+        ],
+      ] as const;
+
+      for (const [key, value] of listSettings) {
+        if (value !== null) {
+          await this.setMetadata(key, value, client);
+        }
+      }
 
       if (companyLogoUrl) {
         await this.setMetadata("local_company_logo_url", companyLogoUrl, client);
       } else if (input.companyLogoUrl !== undefined) {
         await this.deleteMetadata("local_company_logo_url", client);
+      }
+
+      if (loginBackgroundImageUrl) {
+        await this.setMetadata(
+          "login_background_image_url",
+          loginBackgroundImageUrl,
+          client,
+        );
+      } else if (input.loginBackgroundImageUrl !== undefined) {
+        await this.deleteMetadata("login_background_image_url", client);
       }
 
       if (receiptHeader) {
@@ -4262,6 +4520,7 @@ export class PostgresStoreService {
           taxProfile?.rate_percent === undefined ? null : asNumber(taxProfile.rate_percent),
         taxInclusive: taxProfile ? asBooleanFlag(taxProfile.is_tax_inclusive) : false,
         trackInventory: input.trackInventory !== false,
+        trackExpiry: input.trackExpiry === true,
         isSerialized: input.isSerialized === true,
         trackSize: input.trackSize === true,
         trackColor: input.trackColor === true,
@@ -4280,7 +4539,10 @@ export class PostgresStoreService {
           input.safetyStockLevel == null
             ? null
             : normalizeSetupNumber(input.safetyStockLevel, 0, 3),
-        shelfLifeDays: null,
+        shelfLifeDays:
+          input.shelfLifeDays == null
+            ? null
+            : Math.trunc(normalizeSetupNumber(input.shelfLifeDays, 0, 0)),
         weightKg: null,
         volumeLitres: null,
         unitPrice: normalizeSetupNumber(input.unitPrice, 0, 2),
@@ -4619,7 +4881,14 @@ export class PostgresStoreService {
         transaction.transaction_type === "RETURN" ||
         (transaction.transaction_type === "EXCHANGE" && totalAmount < 0);
 
-      netSalesAmount = Number((netSalesAmount + totalAmount).toFixed(2));
+      netSalesAmount = Number(
+        (
+          netSalesAmount +
+          (transaction.transaction_type === "RETURN"
+            ? -Math.abs(totalAmount)
+            : totalAmount)
+        ).toFixed(2),
+      );
 
       if (transaction.transaction_type === "SALE") {
         salesCount += 1;
@@ -5009,6 +5278,8 @@ export class PostgresStoreService {
         tax_rate_percent,
         tax_inclusive,
         track_inventory,
+        track_expiry,
+        shelf_life_days,
         is_serialized,
         must_enter_price_at_pos,
         min_stock_level,
@@ -5149,6 +5420,8 @@ export class PostgresStoreService {
         tax_rate_percent,
         tax_inclusive,
         track_inventory,
+        track_expiry,
+        shelf_life_days,
         is_serialized,
         must_enter_price_at_pos,
         unit_price,
@@ -5332,6 +5605,8 @@ export class PostgresStoreService {
         tax_rate_percent,
         tax_inclusive,
         track_inventory,
+        track_expiry,
+        shelf_life_days,
         is_serialized,
         track_size,
         track_color,
@@ -5377,7 +5652,7 @@ export class PostgresStoreService {
     match: CatalogLookupRow,
     query: string,
   ): Promise<StoreCatalogLookupResult> {
-    const [department, category, availableSerialNumbers] = await Promise.all([
+    const [department, category, availableSerialNumbers, availableBatches] = await Promise.all([
       match.department_code
         ? this.pool.query<{ department_name: string }>(
             "SELECT department_name FROM product_department_snapshot WHERE department_code = $1 LIMIT 1",
@@ -5396,6 +5671,35 @@ export class PostgresStoreService {
             match.sales_location_code,
           )
         : Promise.resolve([] as string[]),
+      asBooleanFlag(match.track_expiry) && match.sales_location_code
+        ? this.pool.query<{
+            id: string;
+            batch_no: string;
+            manufactured_at: string | null;
+            expiry_date: string;
+            quantity_on_hand: string | number;
+            status: string;
+          }>(
+            `SELECT id, batch_no, manufactured_at, expiry_date, quantity_on_hand, status
+             FROM inventory_batch_registry
+             WHERE inventory_location_code = $1
+               AND product_code = $2
+               AND quantity_on_hand > 0
+               AND status = 'ACTIVE'
+               AND expiry_date >= CURRENT_DATE::text
+             ORDER BY expiry_date ASC, manufactured_at ASC, batch_no ASC`,
+            [match.sales_location_code, match.product_code],
+          )
+        : Promise.resolve({
+            rows: [] as Array<{
+              id: string;
+              batch_no: string;
+              manufactured_at: string | null;
+              expiry_date: string;
+              quantity_on_hand: string | number;
+              status: string;
+            }>,
+          }),
     ]);
 
     return {
@@ -5412,10 +5716,19 @@ export class PostgresStoreService {
       categoryName: category.rows[0]?.category_name ?? null,
       subcategory: match.subcategory,
       isSerialized: asBooleanFlag(match.is_serialized),
+      trackExpiry: asBooleanFlag(match.track_expiry),
       trackSize: asBooleanFlag(match.track_size),
       trackColor: asBooleanFlag(match.track_color),
       mustEnterPriceAtPos: asBooleanFlag(match.must_enter_price_at_pos),
       availableSerialNumbers,
+      availableBatches: availableBatches.rows.map((batch) => ({
+        batchId: batch.id,
+        batchNo: batch.batch_no,
+        manufacturedAt: batch.manufactured_at,
+        expiryDate: batch.expiry_date,
+        quantityOnHand: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+        status: batch.status,
+      })),
       unitPrice: Number(asNumber(match.unit_price).toFixed(2)),
       quantityOnHand: Number(asNumber(match.quantity_on_hand).toFixed(3)),
       barcode: match.barcode_code,
@@ -6480,17 +6793,38 @@ export class PostgresStoreService {
         ).length,
         netSalesAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.totalAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.totalAmount)
+                  : row.totalAmount),
+              0,
+            )
             .toFixed(2),
         ),
         discountAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.discountAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.discountAmount)
+                  : row.discountAmount),
+              0,
+            )
             .toFixed(2),
         ),
         taxAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.taxAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.taxAmount)
+                  : row.taxAmount),
+              0,
+            )
             .toFixed(2),
         ),
         tenderedAmount: Number(
@@ -6542,9 +6876,10 @@ export class PostgresStoreService {
     const normalizedCategoryCode = normalizeCatalogCode(input?.categoryCode);
     const serializedOnly = input?.serializedOnly === true;
     const criticalOnly = input?.criticalOnly === true;
+    const expiringOnly = input?.expiringOnly === true;
     const limit = Math.min(
       Math.max(input?.limit ?? 12, 1),
-      criticalOnly ? 100 : 30,
+      criticalOnly || expiringOnly || input?.forStartupAlert === true ? 100 : 30,
     );
     const getCriticalStockFloor = (row: InventoryBrowseRow) => {
       const thresholds = [
@@ -6581,6 +6916,39 @@ export class PostgresStoreService {
         product.safety_stock_level,
         product.unit_price,
         product.is_serialized,
+        product.track_expiry,
+        (
+          SELECT MIN(batch.expiry_date)
+          FROM inventory_batch_registry AS batch
+          WHERE batch.product_code = product.product_code
+            AND batch.inventory_location_code = COALESCE(location.location_code, fallback_location.location_code, 'UNASSIGNED')
+            AND batch.quantity_on_hand > 0
+        ) AS earliest_expiry_date,
+        COALESCE((
+          SELECT SUM(batch.quantity_on_hand)
+          FROM inventory_batch_registry AS batch
+          WHERE batch.product_code = product.product_code
+            AND batch.inventory_location_code = COALESCE(location.location_code, fallback_location.location_code, 'UNASSIGNED')
+            AND batch.quantity_on_hand > 0
+            AND batch.status = 'ACTIVE'
+            AND batch.expiry_date >= CURRENT_DATE::text
+            AND batch.expiry_date <= (CURRENT_DATE + INTERVAL '30 days')::date::text
+        ), 0) AS expiring_quantity,
+        COALESCE((
+          SELECT json_agg(
+            json_build_object(
+              'batchId', batch.id,
+              'batchNo', batch.batch_no,
+              'manufacturedAt', batch.manufactured_at,
+              'expiryDate', batch.expiry_date,
+              'quantity', batch.quantity_on_hand
+            )
+            ORDER BY batch.expiry_date ASC, batch.batch_no ASC
+          )::text
+          FROM inventory_batch_registry AS batch
+          WHERE batch.product_code = product.product_code
+            AND batch.inventory_location_code = COALESCE(location.location_code, fallback_location.location_code, 'UNASSIGNED')
+        ), '[]') AS batch_quantities_json,
         COALESCE(balance.updated_at, product.updated_at) AS updated_at
        FROM product_snapshot AS product
        LEFT JOIN inventory_location_balance AS balance
@@ -6659,6 +7027,13 @@ export class PostgresStoreService {
         }
       }
 
+      if (
+        expiringOnly &&
+        (!asBooleanFlag(row.track_expiry) || asNumber(row.expiring_quantity) <= 0)
+      ) {
+        return false;
+      }
+
       if (!normalizedQuery) {
         return true;
       }
@@ -6695,6 +7070,12 @@ export class PostgresStoreService {
 
         return left.product_name.localeCompare(right.product_name);
       });
+    } else if (expiringOnly) {
+      filteredRows.sort((left, right) =>
+        (left.earliest_expiry_date ?? "9999-12-31").localeCompare(
+          right.earliest_expiry_date ?? "9999-12-31",
+        ),
+      );
     }
 
     return filteredRows
@@ -6726,6 +7107,12 @@ export class PostgresStoreService {
             : Number(asNumber(row.safety_stock_level).toFixed(3)),
         unitPrice: Number(asNumber(row.unit_price).toFixed(2)),
         isSerialized: asBooleanFlag(row.is_serialized),
+        trackExpiry: asBooleanFlag(row.track_expiry),
+        earliestExpiryDate: row.earliest_expiry_date,
+        expiringQuantity: Number(asNumber(row.expiring_quantity).toFixed(3)),
+        batchQuantities: readInventoryBatchAllocations(
+          row.batch_quantities_json,
+        ),
         updatedAt: row.updated_at,
       }));
   }
@@ -7083,6 +7470,7 @@ export class PostgresStoreService {
             category_name: string | null;
             subcategory: string | null;
             is_serialized: string | number;
+            track_expiry: string | number;
           }>(
             `SELECT
               product.product_code,
@@ -7092,7 +7480,8 @@ export class PostgresStoreService {
               product.category_code,
               category.category_name,
               product.subcategory,
-              product.is_serialized
+              product.is_serialized,
+              product.track_expiry
              FROM product_snapshot AS product
              LEFT JOIN product_department_snapshot AS department
                ON department.department_code = product.department_code
@@ -7151,6 +7540,7 @@ export class PostgresStoreService {
         categoryName: line.product.category_name,
         subcategory: line.product.subcategory,
         isSerialized: asBooleanFlag(line.product.is_serialized),
+        trackExpiry: asBooleanFlag(line.product.track_expiry),
         orderedQuantity: line.orderedQuantity,
         receivedQuantity: 0,
         exceptionQuantity: 0,
@@ -7232,6 +7622,7 @@ export class PostgresStoreService {
           category.category_name,
           line.subcategory,
           line.is_serialized,
+          line.track_expiry,
           line.ordered_quantity,
           line.received_quantity,
           line.exception_quantity,
@@ -7263,6 +7654,7 @@ export class PostgresStoreService {
           categoryName: line.category_name,
           subcategory: line.subcategory,
           isSerialized: asBooleanFlag(line.is_serialized),
+          trackExpiry: asBooleanFlag(line.track_expiry),
           orderedQuantity: Number(asNumber(line.ordered_quantity).toFixed(3)),
           receivedQuantity: Number(asNumber(line.received_quantity).toFixed(3)),
           exceptionQuantity: Number(
@@ -7441,6 +7833,7 @@ export class PostgresStoreService {
         category.category_name,
         transfer.subcategory,
         transfer.is_serialized,
+        transfer.track_expiry,
         transfer.requested_quantity,
         transfer.issued_quantity,
         transfer.received_quantity,
@@ -7449,6 +7842,8 @@ export class PostgresStoreService {
         transfer.unit_cost,
         transfer.issued_serial_numbers_json,
         transfer.received_serial_numbers_json,
+        transfer.issued_batch_allocations_json,
+        transfer.received_batch_allocations_json,
         transfer.request_note,
         transfer.issue_note,
         transfer.receipt_note,
@@ -7509,6 +7904,7 @@ export class PostgresStoreService {
       categoryName: row.category_name,
       subcategory: row.subcategory,
       isSerialized: asBooleanFlag(row.is_serialized),
+      trackExpiry: asBooleanFlag(row.track_expiry),
       requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
       issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
       receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
@@ -7524,6 +7920,12 @@ export class PostgresStoreService {
       ),
       receivedSerialNumbers: readSerializedLineNumbers(
         row.received_serial_numbers_json,
+      ),
+      issuedBatchAllocations: readInventoryBatchAllocations(
+        row.issued_batch_allocations_json,
+      ),
+      receivedBatchAllocations: readInventoryBatchAllocations(
+        row.received_batch_allocations_json,
       ),
       requestNote: row.request_note,
       issueNote: row.issue_note,
@@ -7679,6 +8081,8 @@ export class PostgresStoreService {
         session.variance_quantity,
         session.previous_serial_numbers_json,
         session.counted_serial_numbers_json,
+        session.previous_batch_quantities_json,
+        session.counted_batch_quantities_json,
         session.note,
         session.operator_name,
         session.submitted_at,
@@ -7717,6 +8121,12 @@ export class PostgresStoreService {
       ),
       countedSerialNumbers: readSerializedLineNumbers(
         row.counted_serial_numbers_json,
+      ),
+      previousBatchQuantities: readInventoryBatchAllocations(
+        row.previous_batch_quantities_json,
+      ),
+      countedBatchQuantities: readInventoryBatchAllocations(
+        row.counted_batch_quantities_json,
       ),
       operatorName: row.operator_name,
       note: row.note,
@@ -7786,7 +8196,10 @@ export class PostgresStoreService {
             COALESCE(po_line.ordered_quantity, line.quantity) AS ordered_quantity,
             line.quantity,
             line.unit_cost,
-            line.serial_numbers_json
+            line.serial_numbers_json,
+            line.batch_no,
+            line.manufactured_at,
+            line.expiry_date
            FROM local_goods_receipt_line AS line
            LEFT JOIN purchase_order_line_snapshot AS po_line
              ON po_line.id = line.purchase_order_line_id
@@ -7828,6 +8241,9 @@ export class PostgresStoreService {
           quantity: Number(asNumber(line.quantity).toFixed(3)),
           unitCost: asNullableNumber(line.unit_cost),
           serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+          batchNo: line.batch_no,
+          manufacturedAt: line.manufactured_at,
+          expiryDate: line.expiry_date,
         });
         linesByReceiptId.set(line.local_goods_receipt_id, currentLines);
       }
@@ -7940,7 +8356,8 @@ export class PostgresStoreService {
           product_name,
           quantity,
           unit_cost,
-          serial_numbers_json
+          serial_numbers_json,
+          batch_allocations_json
          FROM local_supplier_return_line
          WHERE local_supplier_return_id = ANY($1::text[])
          ORDER BY local_supplier_return_id ASC, line_no ASC`,
@@ -7960,6 +8377,9 @@ export class PostgresStoreService {
           quantity: Number(asNumber(line.quantity).toFixed(3)),
           unitCost: asNullableNumber(line.unit_cost),
           serialNumbers: readSerializedLineNumbers(line.serial_numbers_json),
+          batchAllocations: readInventoryBatchAllocations(
+            line.batch_allocations_json,
+          ),
         });
         linesByReturnId.set(line.local_supplier_return_id, currentLines);
       }
@@ -8570,13 +8990,45 @@ export class PostgresStoreService {
     metadata: Record<string, string | undefined>,
   ): StoreOptionSettingsSummary {
     return {
+      allowNegativeInventory: metadata.allow_negative_inventory === "1",
+      allowOfflineSales: metadata.allow_offline_sales !== "0",
+      autoPrintReceipts: metadata.auto_print_receipts !== "0",
+      enforceSerializedScanAtPos:
+        metadata.enforce_serialized_scan_at_pos !== "0",
+      requireCustomerForCreditSales:
+        metadata.require_customer_for_credit_sales !== "0",
+      requireSupervisorForReceiptlessReturn:
+        metadata.require_supervisor_for_receiptless_return !== "0",
+      defaultReceiptSearchDays: normalizePolicyInteger(
+        metadata.default_receipt_search_days,
+        30,
+        1,
+        365,
+      ),
       shiftFloatPromptAmount: Number(
         Math.max(0, asNumber(metadata.shift_float_prompt_amount)).toFixed(2),
       ),
       showCriticalStocksOnStartup:
-        metadata.show_critical_stocks_on_startup === "1",
+        metadata.show_critical_stocks_on_startup !== "0",
+      showExpiringBatchesOnStartup:
+        metadata.show_expiring_batches_on_startup !== "0",
+      expiryAlertLeadDays: normalizePolicyInteger(
+        metadata.expiry_alert_lead_days,
+        30,
+        1,
+        3650,
+      ),
+      expiryCriticalDays: normalizePolicyInteger(
+        metadata.expiry_critical_days,
+        7,
+        0,
+        normalizePolicyInteger(metadata.expiry_alert_lead_days, 30, 1, 3650),
+      ),
       productSizes: readProductSizesMetadata(metadata.product_sizes_json),
       posDiscountRates: readPosDiscountRatesMetadata(metadata.pos_discount_rates_json),
+      posExpressChargeRates: readPosDiscountRatesMetadata(
+        metadata.pos_express_charge_rates_json,
+      ),
     };
   }
 
@@ -8741,6 +9193,7 @@ export class PostgresStoreService {
         variant_attributes_snapshot,
         line_note,
         serial_numbers_json,
+        batch_allocations_json,
         quantity,
         unit_price,
         discount_amount,
@@ -8878,6 +9331,8 @@ export class PostgresStoreService {
         tax_rate_percent,
         tax_inclusive,
         track_inventory,
+        track_expiry,
+        shelf_life_days,
         is_serialized,
         track_size,
         track_color,
@@ -8983,6 +9438,9 @@ export class PostgresStoreService {
         asBooleanFlag(product?.is_serialized) || serialNumbers.length > 0,
       serialNumbers,
       availableSerialNumbers,
+      batchAllocations: readInventoryBatchAllocations(
+        line.batch_allocations_json,
+      ),
       quantity: Number(asNumber(line.quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
       discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
@@ -10413,6 +10871,42 @@ export class PostgresStoreService {
     const variantSize = optionalSetupText(input.variantSize);
     const variantColor = optionalSetupText(input.variantColor);
     const lineNote = optionalSetupText(input.lineNote);
+    const preferredBatchAllocations =
+      !deferInventoryValidation &&
+      tracksInventoryForSale(match) &&
+      asBooleanFlag(match.track_expiry) &&
+      match.sales_location_code
+        ? allocateInventoryBatchesFefo({
+            productName: match.product_name,
+            quantity: normalizedQuantity,
+            preferredBatchId: optionalSetupText(input.preferredBatchId),
+            batches: (
+              await this.pool.query<{
+                id: string;
+                batch_no: string;
+                manufactured_at: string | null;
+                expiry_date: string;
+                quantity_on_hand: string | number;
+                status: string;
+              }>(
+                `SELECT id, batch_no, manufactured_at, expiry_date, quantity_on_hand, status
+                 FROM inventory_batch_registry
+                 WHERE inventory_location_code = $1
+                   AND product_code = $2
+                   AND quantity_on_hand > 0
+                 ORDER BY expiry_date ASC, manufactured_at ASC, batch_no ASC`,
+                [match.sales_location_code, match.product_code],
+              )
+            ).rows.map((batch) => ({
+              batchId: batch.id,
+              batchNo: batch.batch_no,
+              manufacturedAt: batch.manufactured_at,
+              expiryDate: batch.expiry_date,
+              quantityOnHand: asNumber(batch.quantity_on_hand),
+              status: batch.status,
+            })),
+          })
+        : [];
 
     await this.pool.query(
       `INSERT INTO pos_transaction_line (
@@ -10429,6 +10923,7 @@ export class PostgresStoreService {
         variant_attributes_snapshot,
         line_note,
         serial_numbers_json,
+        batch_allocations_json,
         quantity,
         unit_price,
         discount_amount,
@@ -10436,7 +10931,7 @@ export class PostgresStoreService {
         line_total,
         manual_price_override,
         manual_discount_override
-      ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 0)`,
+      ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0)`,
       [
         randomUUID(),
         basket.id,
@@ -10450,6 +10945,7 @@ export class PostgresStoreService {
         variantAttributesSnapshot,
         lineNote,
         writeSerializedLineNumbers(nextSerialNumbers),
+        writeInventoryBatchAllocations(preferredBatchAllocations),
         normalizedQuantity,
         unitPrice,
         lineAmounts.discountAmount,
@@ -11661,6 +12157,7 @@ export class PostgresStoreService {
       asNumber(refreshedBasket.record_version) + 1,
     );
     const saleQuantityByProduct = new Map<string, number>();
+    const reservedBatchQuantityById = new Map<string, number>();
     const checkoutLines: Array<{
       line: BasketLineRow;
       product: CatalogLookupRow;
@@ -11670,6 +12167,7 @@ export class PostgresStoreService {
       serialNumbers: string[];
       barcode: string | null;
       selectedVariant: ProductVariantSnapshotRow | null;
+      batchAllocations: StoreInventoryBatchAllocation[];
     }> = [];
 
     for (const line of lines) {
@@ -11759,6 +12257,65 @@ export class PostgresStoreService {
         saleQuantityByProduct.set(quantityKey, requestedProductQuantity);
       }
 
+      const batchAllocations =
+        lineIntent === "SALE" &&
+        tracksInventoryForSale(product) &&
+        asBooleanFlag(product.track_expiry) &&
+        lineLocationCode
+          ? allocateInventoryBatchesFefo({
+              productName: line.product_name_snapshot,
+              quantity,
+              preferredBatchId:
+                readInventoryBatchAllocations(line.batch_allocations_json)[0]
+                  ?.batchId ?? null,
+              batches: (
+                await this.pool.query<{
+                  id: string;
+                  batch_no: string;
+                  manufactured_at: string | null;
+                  expiry_date: string;
+                  quantity_on_hand: string | number;
+                  status: string;
+                }>(
+                  `SELECT id, batch_no, manufactured_at, expiry_date, quantity_on_hand, status
+                   FROM inventory_batch_registry
+                   WHERE inventory_location_code = $1
+                     AND product_code = $2
+                     AND quantity_on_hand > 0
+                   ORDER BY expiry_date ASC, manufactured_at ASC, batch_no ASC`,
+                  [lineLocationCode, line.product_code_snapshot],
+                )
+              ).rows.map((batch) => ({
+                batchId: batch.id,
+                batchNo: batch.batch_no,
+                manufacturedAt: batch.manufactured_at,
+                expiryDate: batch.expiry_date,
+                quantityOnHand: Number(
+                  Math.max(
+                    0,
+                    asNumber(batch.quantity_on_hand) -
+                      (reservedBatchQuantityById.get(batch.id) ?? 0),
+                  ).toFixed(3),
+                ),
+                status: batch.status,
+              })),
+            })
+          : [];
+
+      for (const allocation of batchAllocations) {
+        if (allocation.batchId) {
+          reservedBatchQuantityById.set(
+            allocation.batchId,
+            Number(
+              (
+                (reservedBatchQuantityById.get(allocation.batchId) ?? 0) +
+                allocation.quantity
+              ).toFixed(3),
+            ),
+          );
+        }
+      }
+
       checkoutLines.push({
         line,
         product,
@@ -11772,12 +12329,13 @@ export class PostgresStoreService {
             ?.barcode_code ??
           null,
         selectedVariant,
+        batchAllocations,
       });
     }
 
     const salePayloadLines: StorePosTransactionCompletedPayload["lines"] =
       checkoutLines.map(
-        ({ line, lineIntent, inventoryLocationCode, quantity, serialNumbers, barcode, selectedVariant }) => ({
+        ({ line, lineIntent, inventoryLocationCode, quantity, serialNumbers, barcode, selectedVariant, batchAllocations }) => ({
           lineId: line.id,
           lineIntent,
           sourceLineId: line.source_line_id,
@@ -11798,6 +12356,7 @@ export class PostgresStoreService {
           appliedPromotionCode: line.applied_promotion_code,
           appliedPromotionName: line.applied_promotion_name,
           inventoryLocationCode,
+          batchAllocations,
         }),
       );
     const salePayload: StorePosTransactionCompletedPayload = {
@@ -11947,6 +12506,7 @@ export class PostgresStoreService {
         quantity,
         serialNumbers,
         selectedVariant,
+        batchAllocations,
       } of checkoutLines) {
         const direction = getLineDirection(
           refreshedBasket.transaction_type,
@@ -11960,6 +12520,57 @@ export class PostgresStoreService {
           asBooleanFlag(product.track_inventory) &&
           !isServiceProductType(product.product_type)
         ) {
+          await client.query(
+            "UPDATE pos_transaction_line SET batch_allocations_json = $1 WHERE id = $2",
+            [writeInventoryBatchAllocations(batchAllocations), line.id],
+          );
+
+          for (const allocation of batchAllocations) {
+            const batchResult = await client.query<{
+              quantity_on_hand: string | number;
+              expiry_date: string;
+              status: string;
+            }>(
+              `SELECT quantity_on_hand, expiry_date, status
+               FROM inventory_batch_registry
+               WHERE id = $1
+               FOR UPDATE`,
+              [allocation.batchId],
+            );
+            const batch = batchResult.rows[0] ?? null;
+
+            if (!batch || asNumber(batch.quantity_on_hand) < allocation.quantity) {
+              throw new Error(
+                `Batch ${allocation.batchNo} no longer has enough ${line.product_name_snapshot} to complete this sale.`,
+              );
+            }
+
+            const nextBatchQuantity = Number(
+              (asNumber(batch.quantity_on_hand) - allocation.quantity).toFixed(3),
+            );
+            await client.query(
+              `UPDATE inventory_batch_registry
+               SET quantity_on_hand = $1,
+                   status = $2,
+                   source_reference_type = 'POS_TRANSACTION',
+                   source_reference_id = $3,
+                   source_reference_label = $4,
+                   updated_at = $5
+               WHERE id = $6`,
+              [
+                nextBatchQuantity,
+                deriveInventoryBatchStatus({
+                  expiryDate: batch.expiry_date,
+                  quantityOnHand: nextBatchQuantity,
+                  status: batch.status,
+                }),
+                refreshedBasket.id,
+                refreshedBasket.transaction_no,
+                timestamp,
+                allocation.batchId,
+              ],
+            );
+          }
           await client.query(
             `UPDATE product_snapshot
              SET quantity_on_hand = quantity_on_hand + $1,
@@ -12023,6 +12634,7 @@ export class PostgresStoreService {
             movementType: lineIntent === "RETURN" ? "RETURN" : "SALE",
             quantity,
             ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+            batchAllocations,
             unitCost: null,
             referenceType: "POS_TRANSACTION",
             referenceId: refreshedBasket.id,
@@ -13306,8 +13918,17 @@ export class PostgresStoreService {
     const totalAmount = Number(
       asNumber(refreshedBasket.total_amount).toFixed(2),
     );
+    const hasDepositPaymentRows =
+      Array.isArray(input.payments) && input.payments.length > 0;
     const requestedDepositAmount = Number(
-      Number(input.depositAmount ?? 0).toFixed(2),
+      (
+        hasDepositPaymentRows
+          ? input.payments!.reduce(
+              (sum, payment) => sum + Number(payment.amount ?? 0),
+              0,
+            )
+          : Number(input.depositAmount ?? 0)
+      ).toFixed(2),
     );
 
     if (
@@ -13323,17 +13944,15 @@ export class PostgresStoreService {
       );
     }
 
-    const depositAmount = requestedDepositAmount;
-    const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
     const depositReference = input.depositReference?.trim() || null;
     const depositTender =
-      depositAmount > 0
+      !hasDepositPaymentRows && requestedDepositAmount > 0
         ? await this.getTenderMethodByCode(
             input.depositTenderMethodCode?.trim().toUpperCase() ?? "",
           )
         : null;
 
-    if (depositAmount > 0 && !depositTender) {
+    if (!hasDepositPaymentRows && requestedDepositAmount > 0 && !depositTender) {
       throw new Error(
         "Choose an active tender method before taking a sales order deposit.",
       );
@@ -13345,8 +13964,37 @@ export class PostgresStoreService {
       );
     }
 
-    const depositPaymentId =
-      depositAmount > 0 && depositTender ? randomUUID() : null;
+    const depositPaymentRequest =
+      hasDepositPaymentRows && input.payments
+        ? input.payments
+        : requestedDepositAmount > 0 && depositTender
+          ? [
+              {
+                method: depositTender.paymentMethod,
+                tenderMethodCode: depositTender.tenderMethodCode,
+                tenderMethodName: depositTender.tenderMethodName,
+                amount: requestedDepositAmount,
+                reference: depositReference,
+              },
+            ]
+          : [];
+    const preparedDepositPayments =
+      requestedDepositAmount > 0
+        ? await this.normalizeCheckoutPayments(
+            { payments: depositPaymentRequest },
+            requestedDepositAmount,
+            orderNo,
+            timestamp,
+            "SALE",
+          )
+        : {
+            payments: [] as NormalizedCheckoutPayment[],
+            paidAmount: 0,
+            changeAmount: 0,
+          };
+    const depositAmount = preparedDepositPayments.paidAmount;
+    const primaryDepositPayment = preparedDepositPayments.payments[0] ?? null;
+    const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
 
     const payload: StoreSalesOrderRecordedPayload = {
       orderId,
@@ -13364,10 +14012,10 @@ export class PostgresStoreService {
       totalAmount,
       depositAmount,
       balanceAmount,
-      depositTenderMethodCode: depositTender?.tenderMethodCode ?? null,
-      depositTenderMethodName: depositTender?.tenderMethodName ?? null,
-      depositPaymentMethod: depositTender?.paymentMethod ?? null,
-      depositReference,
+      depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
+      depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
+      depositPaymentMethod: primaryDepositPayment?.method ?? null,
+      depositReference: primaryDepositPayment?.reference ?? null,
       depositPaidAt: depositAmount > 0 ? timestamp : null,
       status: "OPEN",
       operatorName,
@@ -13394,25 +14042,27 @@ export class PostgresStoreService {
         appliedPromotionCode: line.applied_promotion_code,
         appliedPromotionName: line.applied_promotion_name,
       })),
-      payments:
-        depositPaymentId && depositTender
-          ? [
-              {
-                paymentId: depositPaymentId,
-                method: depositTender.paymentMethod,
-                tenderMethodCode: depositTender.tenderMethodCode,
-                tenderMethodName: depositTender.tenderMethodName,
-                amount: depositAmount,
-                reference: depositReference ?? `DEP-${orderNo}`,
-                paymentPurpose: "SALES_ORDER_DEPOSIT",
-                receivedShiftId: openShift.id,
-                receivedShiftNo: openShift.shift_no,
-                receivedTerminalCode: terminalCode,
-                receivedCashierCode: operatorSession.loginId,
-                receivedAt: timestamp,
-              },
-            ]
-          : [],
+      payments: preparedDepositPayments.payments.map((payment) => ({
+        paymentId: payment.paymentId,
+        method: payment.method,
+        tenderMethodCode: payment.tenderMethodCode,
+        tenderMethodName: payment.tenderMethodName,
+        bankAccountId: payment.bankAccountId,
+        bankCode: payment.bankCode,
+        bankName: payment.bankName,
+        bankBranchCode: payment.bankBranchCode,
+        bankBranchName: payment.bankBranchName,
+        bankAccountNumber: payment.bankAccountNumber,
+        bankAccountName: payment.bankAccountName,
+        amount: payment.amount,
+        reference: payment.reference,
+        paymentPurpose: "SALES_ORDER_DEPOSIT",
+        receivedShiftId: openShift.id,
+        receivedShiftNo: openShift.shift_no,
+        receivedTerminalCode: terminalCode,
+        receivedCashierCode: operatorSession.loginId,
+        receivedAt: payment.receivedAt,
+      })),
     };
     const client = await this.pool.connect();
 
@@ -13457,23 +14107,30 @@ export class PostgresStoreService {
           totalAmount,
           depositAmount,
           balanceAmount,
-          depositTender?.tenderMethodCode ?? null,
-          depositTender?.tenderMethodName ?? null,
-          depositTender?.paymentMethod ?? null,
-          depositReference,
+          primaryDepositPayment?.tenderMethodCode ?? null,
+          primaryDepositPayment?.tenderMethodName ?? null,
+          primaryDepositPayment?.method ?? null,
+          primaryDepositPayment?.reference ?? null,
           depositAmount > 0 ? timestamp : null,
           operatorName,
           note,
           timestamp,
         ],
       );
-      if (depositPaymentId && depositTender) {
+      for (const payment of preparedDepositPayments.payments) {
         await client.query(
           `INSERT INTO pos_payment (
             id,
             pos_transaction_id,
             tender_method_code,
             tender_method_name,
+            bank_account_id,
+            bank_code,
+            bank_name,
+            bank_branch_code,
+            bank_branch_name,
+            bank_account_number,
+            bank_account_name,
             method,
             payment_purpose,
             amount,
@@ -13483,20 +14140,27 @@ export class PostgresStoreService {
             received_terminal_code,
             received_cashier_code,
             received_at
-          ) VALUES ($1, $2, $3, $4, $5, 'SALES_ORDER_DEPOSIT', $6, $7, $8, $9, $10, $11, $12)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'SALES_ORDER_DEPOSIT', $13, $14, $15, $16, $17, $18, $19)`,
           [
-            depositPaymentId,
+            payment.paymentId,
             refreshedBasket.id,
-            depositTender.tenderMethodCode,
-            depositTender.tenderMethodName,
-            depositTender.paymentMethod,
-            depositAmount,
-            depositReference ?? `DEP-${orderNo}`,
+            payment.tenderMethodCode,
+            payment.tenderMethodName,
+            payment.bankAccountId,
+            payment.bankCode,
+            payment.bankName,
+            payment.bankBranchCode,
+            payment.bankBranchName,
+            payment.bankAccountNumber,
+            payment.bankAccountName,
+            payment.method,
+            payment.amount,
+            payment.reference,
             openShift.id,
             openShift.shift_no,
             terminalCode,
             operatorSession.loginId,
-            timestamp,
+            payment.receivedAt,
           ],
         );
       }
@@ -14940,6 +15604,15 @@ export class PostgresStoreService {
     const requestedCountedQuantity = Number(
       Number(input.countedQuantity).toFixed(3),
     );
+    const requestedBatchQuantities = (input.batchQuantities ?? []).map(
+      (batch) => ({
+        batchId: batch.batchId ?? null,
+        batchNo: batch.batchNo?.trim().toUpperCase(),
+        manufacturedAt: batch.manufacturedAt?.trim() || null,
+        expiryDate: batch.expiryDate?.trim(),
+        quantity: Number(Number(batch.quantity).toFixed(3)),
+      }),
+    );
 
     if (!locationCode || !productCode) {
       throw new Error(
@@ -14995,9 +15668,111 @@ export class PostgresStoreService {
           location.location_code,
         )
       : [];
+    const previousBatchQuantities = asBooleanFlag(product.track_expiry)
+      ? (
+          await this.pool.query<{
+            id: string;
+            batch_no: string;
+            manufactured_at: string | null;
+            expiry_date: string;
+            quantity_on_hand: string | number;
+          }>(
+            `SELECT id, batch_no, manufactured_at, expiry_date, quantity_on_hand
+             FROM inventory_batch_registry
+             WHERE inventory_location_code = $1
+               AND product_code = $2
+             ORDER BY expiry_date ASC, batch_no ASC`,
+            [location.location_code, product.product_code],
+          )
+        ).rows.map((batch) => ({
+          batchId: batch.id,
+          batchNo: batch.batch_no,
+          manufacturedAt: batch.manufactured_at,
+          expiryDate: batch.expiry_date,
+          quantity: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+        }))
+      : [];
+    let countedBatchQuantities: StoreInventoryBatchAllocation[] = [];
+
+    if (asBooleanFlag(product.track_expiry)) {
+      const previousByBatchNo = new Map(
+        previousBatchQuantities.map((batch) => [
+          batch.batchNo.toUpperCase(),
+          batch,
+        ] as const),
+      );
+      const seenBatchNos = new Set<string>();
+
+      countedBatchQuantities = requestedBatchQuantities.map((batch) => {
+        if (
+          !batch.batchNo ||
+          !batch.expiryDate ||
+          !Number.isFinite(batch.quantity) ||
+          batch.quantity < 0
+        ) {
+          throw new Error(
+            `${product.product_name} needs a valid non-negative counted quantity for every batch.`,
+          );
+        }
+
+        if (seenBatchNos.has(batch.batchNo)) {
+          throw new Error(
+            `${batch.batchNo} was entered more than once in this stock count.`,
+          );
+        }
+        seenBatchNos.add(batch.batchNo);
+
+        const previousBatch = previousByBatchNo.get(batch.batchNo);
+        if (!previousBatch) {
+          throw new Error(
+            `Batch ${batch.batchNo} is not registered for ${product.product_name} in ${location.location_code}. Receive it before counting it into stock.`,
+          );
+        }
+
+        if (
+          previousBatch.expiryDate.slice(0, 10) !==
+          batch.expiryDate.slice(0, 10)
+        ) {
+          throw new Error(
+            `Batch ${batch.batchNo} is registered with expiry ${previousBatch.expiryDate.slice(0, 10)}.`,
+          );
+        }
+
+        return { ...previousBatch, quantity: batch.quantity };
+      });
+
+      const omittedBatch = previousBatchQuantities.find(
+        (batch) => !seenBatchNos.has(batch.batchNo.toUpperCase()),
+      );
+      if (omittedBatch) {
+        throw new Error(
+          `Include batch ${omittedBatch.batchNo} in the count, using zero if no units remain.`,
+        );
+      }
+    } else if (requestedBatchQuantities.length > 0) {
+      throw new Error(
+        `${product.product_name} is not configured for expiry batch tracking.`,
+      );
+    }
+
     const countedQuantity = asBooleanFlag(product.is_serialized)
       ? countedSerialNumbers.length
-      : requestedCountedQuantity;
+      : asBooleanFlag(product.track_expiry)
+        ? Number(
+            countedBatchQuantities
+              .reduce((sum, batch) => sum + batch.quantity, 0)
+              .toFixed(3),
+          )
+        : requestedCountedQuantity;
+
+    if (
+      asBooleanFlag(product.track_expiry) &&
+      Math.abs(countedQuantity - requestedCountedQuantity) > 0.0001
+    ) {
+      throw new Error(
+        `The batch count totals ${countedQuantity.toFixed(3)}, but the entered product count is ${requestedCountedQuantity.toFixed(3)}.`,
+      );
+    }
 
     if (asBooleanFlag(product.is_serialized)) {
       validateSerializedLineInput({
@@ -15046,12 +15821,14 @@ export class PostgresStoreService {
         variance_quantity,
         previous_serial_numbers_json,
         counted_serial_numbers_json,
+        previous_batch_quantities_json,
+        counted_batch_quantities_json,
         note,
         operator_name,
         submitted_at,
         committed_at,
         updated_at
-      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NULL, NULL, $18)`,
+      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20)`,
       [
         sessionId,
         sessionNo,
@@ -15068,6 +15845,8 @@ export class PostgresStoreService {
         varianceQuantity,
         writeSerializedLineNumbers(previousSerialNumbers),
         writeSerializedLineNumbers(countedSerialNumbers),
+        writeInventoryBatchAllocations(previousBatchQuantities),
+        writeInventoryBatchAllocations(countedBatchQuantities),
         note,
         operatorName,
         timestamp,
@@ -15121,6 +15900,8 @@ export class PostgresStoreService {
         session.variance_quantity,
         session.previous_serial_numbers_json,
         session.counted_serial_numbers_json,
+        session.previous_batch_quantities_json,
+        session.counted_batch_quantities_json,
         session.note,
         session.operator_name,
         session.submitted_at,
@@ -15170,6 +15951,12 @@ export class PostgresStoreService {
       ),
       countedSerialNumbers: readSerializedLineNumbers(
         session.counted_serial_numbers_json,
+      ),
+      previousBatchQuantities: readInventoryBatchAllocations(
+        session.previous_batch_quantities_json,
+      ),
+      countedBatchQuantities: readInventoryBatchAllocations(
+        session.counted_batch_quantities_json,
       ),
       operatorName: session.operator_name,
       note: session.note,
@@ -15282,6 +16069,8 @@ export class PostgresStoreService {
           session.variance_quantity,
           session.previous_serial_numbers_json,
           session.counted_serial_numbers_json,
+          session.previous_batch_quantities_json,
+          session.counted_batch_quantities_json,
           session.note,
           session.operator_name,
           session.submitted_at,
@@ -15353,6 +16142,56 @@ export class PostgresStoreService {
         }
       }
 
+      const previousBatchQuantities = readInventoryBatchAllocations(
+        session.previous_batch_quantities_json,
+      );
+      const countedBatchQuantities = readInventoryBatchAllocations(
+        session.counted_batch_quantities_json,
+      );
+
+      if (
+        previousBatchQuantities.length > 0 ||
+        countedBatchQuantities.length > 0
+      ) {
+        const currentBatches = (
+          await client.query<{
+            id: string;
+            batch_no: string;
+            expiry_date: string;
+            quantity_on_hand: string | number;
+          }>(
+            `SELECT id, batch_no, expiry_date, quantity_on_hand
+             FROM inventory_batch_registry
+             WHERE inventory_location_code = $1
+               AND product_code = $2
+             FOR UPDATE`,
+            [session.inventory_location_code, session.product_code],
+          )
+        ).rows;
+        const currentByBatchNo = new Map(
+          currentBatches.map((batch) => [
+            batch.batch_no.toUpperCase(),
+            batch,
+          ] as const),
+        );
+        const changedBatch = previousBatchQuantities.find((batch) => {
+          const current = currentByBatchNo.get(batch.batchNo.toUpperCase());
+          return (
+            !current ||
+            current.expiry_date.slice(0, 10) !==
+              batch.expiryDate.slice(0, 10) ||
+            Math.abs(asNumber(current.quantity_on_hand) - batch.quantity) >
+              0.0001
+          );
+        });
+
+        if (changedBatch) {
+          throw new Error(
+            `${session.session_no} can no longer be committed because batch ${changedBatch.batchNo} changed after the count was saved. Start a new count from the latest posture.`,
+          );
+        }
+      }
+
       const timestamp = isoNow();
       const metadata = await this.metadata();
       const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
@@ -15371,6 +16210,36 @@ export class PostgresStoreService {
         updatedAt: timestamp,
         runner: client,
       });
+
+      for (const batch of countedBatchQuantities) {
+        const result = await client.query(
+          `UPDATE inventory_batch_registry
+           SET quantity_on_hand = $1,
+               status = $2,
+               source_reference_type = 'STOCK_COUNT_SESSION',
+               source_reference_id = $3,
+               source_reference_label = $4,
+               updated_at = $5
+           WHERE id = $6`,
+          [
+            batch.quantity,
+            deriveInventoryBatchStatus({
+              expiryDate: batch.expiryDate,
+              quantityOnHand: batch.quantity,
+            }),
+            session.id,
+            session.session_no,
+            timestamp,
+            batch.batchId,
+          ],
+        );
+
+        if (result.rowCount !== 1) {
+          throw new Error(
+            `Flash ERP could not update batch ${batch.batchNo} during ${session.session_no}.`,
+          );
+        }
+      }
       const ledgerEntryId = `inventory-count-session-${session.id}`;
       const payload: StoreInventoryLedgerRecordedPayload = {
         ledgerEntryId,
@@ -15466,6 +16335,9 @@ export class PostgresStoreService {
       purchaseOrderLineId: line.purchaseOrderLineId.trim(),
       quantity: Number(Number(line.quantity).toFixed(3)),
       serialNumbers: normalizeSerialNumbers(line.serialNumbers),
+      batchNo: line.batchNo?.trim() || null,
+      manufacturedAt: line.manufacturedAt?.trim() || null,
+      expiryDate: line.expiryDate?.trim() || null,
     }));
     const requestedExceptionLines = (input.exceptionLines ?? []).map(
       (line) => ({
@@ -15590,6 +16462,7 @@ export class PostgresStoreService {
         category.category_name,
         line.subcategory,
         line.is_serialized,
+        line.track_expiry,
         line.ordered_quantity,
         line.received_quantity,
         line.exception_quantity,
@@ -15691,6 +16564,19 @@ export class PostgresStoreService {
         throw new Error(
           `${line.product_name} is not serialized, so this receipt line cannot include serial numbers.`,
         );
+      }
+
+      if (requestedLine) {
+        const batch = validateInventoryBatchReceipt({
+          productName: line.product_name,
+          trackExpiry: asBooleanFlag(product.track_expiry),
+          batchNo: requestedLine.batchNo,
+          manufacturedAt: requestedLine.manufacturedAt,
+          expiryDate: requestedLine.expiryDate,
+        });
+        requestedLine.batchNo = batch.batchNo;
+        requestedLine.manufacturedAt = batch.manufacturedAt;
+        requestedLine.expiryDate = batch.expiryDate;
       }
 
       totalQuantity = Number((totalQuantity + quantity).toFixed(3));
@@ -15812,8 +16698,11 @@ export class PostgresStoreService {
               quantity,
               unit_cost,
               serial_numbers_json,
+              batch_no,
+              manufactured_at,
+              expiry_date,
               updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
             [
               goodsReceiptLineId,
               goodsReceiptId,
@@ -15824,9 +16713,89 @@ export class PostgresStoreService {
               receivedQuantity,
               asNullableNumber(line.unit_cost),
               writeSerializedLineNumbers(requestedLine.serialNumbers),
+              requestedLine.batchNo,
+              requestedLine.manufacturedAt,
+              requestedLine.expiryDate,
               timestamp,
             ],
           );
+
+          if (requestedLine.batchNo && requestedLine.expiryDate) {
+            const existingBatch = (
+              await client.query<{
+                id: string;
+                expiry_date: string;
+                quantity_on_hand: string | number;
+                status: string;
+              }>(
+                `SELECT id, expiry_date, quantity_on_hand, status
+                 FROM inventory_batch_registry
+                 WHERE inventory_location_code = $1
+                   AND product_code = $2
+                   AND batch_no = $3
+                 LIMIT 1`,
+                [
+                  purchaseOrder.inventory_location_code,
+                  line.product_code,
+                  requestedLine.batchNo,
+                ],
+              )
+            ).rows[0] ?? null;
+
+            if (
+              existingBatch &&
+              existingBatch.expiry_date.slice(0, 10) !==
+                requestedLine.expiryDate.slice(0, 10)
+            ) {
+              throw new Error(
+                `Batch ${requestedLine.batchNo} already exists for ${line.product_name} with a different expiry date.`,
+              );
+            }
+
+            const nextBatchQuantity = Number(
+              (
+                asNumber(existingBatch?.quantity_on_hand ?? 0) +
+                receivedQuantity
+              ).toFixed(3),
+            );
+            const batchId = existingBatch?.id ?? randomUUID();
+
+            await client.query(
+              `INSERT INTO inventory_batch_registry (
+                id, product_code, inventory_location_code, batch_no,
+                manufactured_at, expiry_date, quantity_on_hand, status,
+                source_reference_type, source_reference_id,
+                source_reference_label, updated_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'GOODS_RECEIPT', $9, $10, $11)
+              ON CONFLICT (inventory_location_code, product_code, batch_no)
+              DO UPDATE SET
+                manufactured_at = COALESCE(EXCLUDED.manufactured_at, inventory_batch_registry.manufactured_at),
+                expiry_date = EXCLUDED.expiry_date,
+                quantity_on_hand = EXCLUDED.quantity_on_hand,
+                status = EXCLUDED.status,
+                source_reference_type = EXCLUDED.source_reference_type,
+                source_reference_id = EXCLUDED.source_reference_id,
+                source_reference_label = EXCLUDED.source_reference_label,
+                updated_at = EXCLUDED.updated_at`,
+              [
+                batchId,
+                line.product_code,
+                purchaseOrder.inventory_location_code,
+                requestedLine.batchNo,
+                requestedLine.manufacturedAt,
+                requestedLine.expiryDate,
+                nextBatchQuantity,
+                deriveInventoryBatchStatus({
+                  expiryDate: requestedLine.expiryDate,
+                  quantityOnHand: nextBatchQuantity,
+                  status: existingBatch?.status,
+                }),
+                goodsReceiptId,
+                goodsReceiptNo,
+                timestamp,
+              ],
+            );
+          }
           await client.query(
             "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand + $1, updated_at = $2 WHERE id = $3",
             [receivedQuantity, timestamp, product.id],
@@ -15878,6 +16847,9 @@ export class PostgresStoreService {
             quantity: receivedQuantity,
             unitCost: asNullableNumber(line.unit_cost),
             serialNumbers: requestedLine.serialNumbers,
+            batchNo: requestedLine.batchNo ?? null,
+            manufacturedAt: requestedLine.manufacturedAt ?? null,
+            expiryDate: requestedLine.expiryDate ?? null,
           });
         }
 
@@ -16194,7 +17166,10 @@ export class PostgresStoreService {
         product_name,
         quantity,
         unit_cost,
-        serial_numbers_json
+        serial_numbers_json,
+        batch_no,
+        manufactured_at,
+        expiry_date
        FROM local_goods_receipt_line
        WHERE local_goods_receipt_id = $1
        ORDER BY line_no ASC`,
@@ -16461,8 +17436,9 @@ export class PostgresStoreService {
             quantity,
             unit_cost,
             serial_numbers_json,
+            batch_allocations_json,
             updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
           [
             supplierReturnLineId,
             supplierReturnId,
@@ -16474,9 +17450,85 @@ export class PostgresStoreService {
             requestedLine.quantity,
             asNullableNumber(goodsReceiptLine.unit_cost),
             writeSerializedLineNumbers(requestedLine.serialNumbers),
+            writeInventoryBatchAllocations(
+              goodsReceiptLine.batch_no && goodsReceiptLine.expiry_date
+                ? [{
+                    batchId: null,
+                    batchNo: goodsReceiptLine.batch_no,
+                    expiryDate: goodsReceiptLine.expiry_date,
+                    quantity: requestedLine.quantity,
+                  }]
+                : [],
+            ),
             timestamp,
           ],
         );
+
+        const batchAllocations: StoreInventoryBatchAllocation[] = [];
+
+        if (goodsReceiptLine.batch_no && goodsReceiptLine.expiry_date) {
+          const batchResult = await client.query<{
+            id: string;
+            quantity_on_hand: string | number;
+            expiry_date: string;
+            status: string;
+          }>(
+            `SELECT id, quantity_on_hand, expiry_date, status
+             FROM inventory_batch_registry
+             WHERE inventory_location_code = $1
+               AND product_code = $2
+               AND batch_no = $3
+             FOR UPDATE`,
+            [
+              goodsReceipt.inventory_location_code,
+              goodsReceiptLine.product_code,
+              goodsReceiptLine.batch_no,
+            ],
+          );
+          const batch = batchResult.rows[0] ?? null;
+
+          if (!batch || asNumber(batch.quantity_on_hand) < requestedLine.quantity) {
+            throw new Error(
+              `Batch ${goodsReceiptLine.batch_no} does not have enough ${goodsReceiptLine.product_name} for this supplier return.`,
+            );
+          }
+
+          const nextBatchQuantity = Number(
+            (asNumber(batch.quantity_on_hand) - requestedLine.quantity).toFixed(3),
+          );
+          await client.query(
+            `UPDATE inventory_batch_registry
+             SET quantity_on_hand = $1,
+                 status = $2,
+                 source_reference_type = 'SUPPLIER_RETURN',
+                 source_reference_id = $3,
+                 source_reference_label = $4,
+                 updated_at = $5
+             WHERE id = $6`,
+            [
+              nextBatchQuantity,
+              deriveInventoryBatchStatus({
+                expiryDate: batch.expiry_date,
+                quantityOnHand: nextBatchQuantity,
+                status: batch.status,
+              }),
+              supplierReturnId,
+              supplierReturnNo,
+              timestamp,
+              batch.id,
+            ],
+          );
+          batchAllocations.push({
+            batchId: batch.id,
+            batchNo: goodsReceiptLine.batch_no,
+            expiryDate: goodsReceiptLine.expiry_date,
+            quantity: requestedLine.quantity,
+          });
+          await client.query(
+            "UPDATE local_supplier_return_line SET batch_allocations_json = $1 WHERE id = $2",
+            [writeInventoryBatchAllocations(batchAllocations), supplierReturnLineId],
+          );
+        }
         await client.query(
           "UPDATE product_snapshot SET quantity_on_hand = quantity_on_hand - $1, updated_at = $2 WHERE id = $3",
           [requestedLine.quantity, timestamp, product.id],
@@ -16529,6 +17581,7 @@ export class PostgresStoreService {
           quantity: requestedLine.quantity,
           unitCost: asNullableNumber(goodsReceiptLine.unit_cost),
           serialNumbers: requestedLine.serialNumbers,
+          batchAllocations,
         });
       }
 
@@ -16809,6 +17862,7 @@ export class PostgresStoreService {
           category.category_name,
           transfer.subcategory,
           transfer.is_serialized,
+          transfer.track_expiry,
           transfer.requested_quantity,
           transfer.issued_quantity,
           transfer.received_quantity,
@@ -16817,6 +17871,8 @@ export class PostgresStoreService {
           transfer.unit_cost,
           transfer.issued_serial_numbers_json,
           transfer.received_serial_numbers_json,
+          transfer.issued_batch_allocations_json,
+          transfer.received_batch_allocations_json,
           transfer.request_note,
           transfer.issue_note,
           transfer.receipt_note,
@@ -16936,6 +17992,76 @@ export class PostgresStoreService {
       }
 
       const timestamp = isoNow();
+      const batchAllocations = asBooleanFlag(product.track_expiry)
+        ? allocateInventoryBatchesFefo({
+            productName: transfer.product_name,
+            quantity,
+            batches: (
+              await client.query<{
+                id: string;
+                batch_no: string;
+                manufactured_at: string | null;
+                expiry_date: string;
+                quantity_on_hand: string | number;
+                status: string;
+              }>(
+                `SELECT id, batch_no, manufactured_at, expiry_date, quantity_on_hand, status
+                 FROM inventory_batch_registry
+                 WHERE inventory_location_code = $1
+                   AND product_code = $2
+                   AND quantity_on_hand > 0
+                 ORDER BY expiry_date ASC, manufactured_at ASC, batch_no ASC
+                 FOR UPDATE`,
+                [transfer.source_location_code, transfer.product_code],
+              )
+            ).rows.map((batch) => ({
+              batchId: batch.id,
+              batchNo: batch.batch_no,
+              manufacturedAt: batch.manufactured_at,
+              expiryDate: batch.expiry_date,
+              quantityOnHand: asNumber(batch.quantity_on_hand),
+              status: batch.status,
+            })),
+          })
+        : [];
+
+      for (const allocation of batchAllocations) {
+        const nextBatchQuantity = Number(
+          (
+            asNumber(
+              (
+                await client.query<{ quantity_on_hand: string | number }>(
+                  `SELECT quantity_on_hand
+                   FROM inventory_batch_registry
+                   WHERE id = $1`,
+                  [allocation.batchId],
+                )
+              ).rows[0]?.quantity_on_hand,
+            ) - allocation.quantity
+          ).toFixed(3),
+        );
+        await client.query(
+          `UPDATE inventory_batch_registry
+           SET quantity_on_hand = $1,
+               status = $2,
+               source_reference_type = 'INTER_STORE_TRANSFER',
+               source_reference_id = $3,
+               source_reference_label = $4,
+               updated_at = $5
+           WHERE id = $6`,
+          [
+            nextBatchQuantity,
+            deriveInventoryBatchStatus({
+              expiryDate: allocation.expiryDate,
+              quantityOnHand: nextBatchQuantity,
+            }),
+            transfer.id,
+            transfer.transfer_no,
+            timestamp,
+            allocation.batchId,
+          ],
+        );
+      }
       const metadata = await this.metadata();
       const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
       const terminalCode = this.getTerminalCode();
@@ -16957,6 +18083,12 @@ export class PostgresStoreService {
         ...readSerializedLineNumbers(transfer.issued_serial_numbers_json),
         ...serialNumbers,
       ]);
+      const nextIssuedBatchAllocations = [
+        ...readInventoryBatchAllocations(
+          transfer.issued_batch_allocations_json,
+        ),
+        ...batchAllocations,
+      ];
       const issueNote =
         input.note?.trim() ||
         `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${transfer.source_location_code}.`;
@@ -16981,12 +18113,13 @@ export class PostgresStoreService {
              outstanding_issue_quantity = $3,
              outstanding_receipt_quantity = $4,
              issued_serial_numbers_json = $5,
-             issue_note = $6,
-             issue_operator_name = $7,
-             source_node_code = $8,
-             issued_at = $9,
-             updated_at = $9
-         WHERE id = $10`,
+             issued_batch_allocations_json = $6,
+             issue_note = $7,
+             issue_operator_name = $8,
+             source_node_code = $9,
+             issued_at = $10,
+             updated_at = $10
+         WHERE id = $11`,
         [
           nextStatus,
           nextIssuedQuantity,
@@ -17000,6 +18133,7 @@ export class PostgresStoreService {
             Math.max(0, nextIssuedQuantity - nextReceivedQuantity).toFixed(3),
           ),
           writeSerializedLineNumbers(nextIssuedSerialNumbers),
+          writeInventoryBatchAllocations(nextIssuedBatchAllocations),
           issueNote,
           operatorName,
           nodeCode,
@@ -17018,6 +18152,7 @@ export class PostgresStoreService {
         productCode: transfer.product_code,
         quantity,
         ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        ...(batchAllocations.length > 0 ? { batchAllocations } : {}),
         operatorName,
         note: issueNote,
         occurredAt: timestamp,
@@ -17135,6 +18270,7 @@ export class PostgresStoreService {
           category.category_name,
           transfer.subcategory,
           transfer.is_serialized,
+          transfer.track_expiry,
           transfer.requested_quantity,
           transfer.issued_quantity,
           transfer.received_quantity,
@@ -17143,6 +18279,8 @@ export class PostgresStoreService {
           transfer.unit_cost,
           transfer.issued_serial_numbers_json,
           transfer.received_serial_numbers_json,
+          transfer.issued_batch_allocations_json,
+          transfer.received_batch_allocations_json,
           transfer.request_note,
           transfer.issue_note,
           transfer.receipt_note,
@@ -17263,6 +18401,98 @@ export class PostgresStoreService {
       }
 
       const timestamp = isoNow();
+      const receivedBatchAllocations = asBooleanFlag(product.track_expiry)
+        ? takeOutstandingInventoryBatchAllocations({
+            productName: transfer.product_name,
+            quantity,
+            issued: readInventoryBatchAllocations(
+              transfer.issued_batch_allocations_json,
+            ),
+            received: readInventoryBatchAllocations(
+              transfer.received_batch_allocations_json,
+            ),
+          })
+        : [];
+
+      for (const allocation of receivedBatchAllocations) {
+        const existingBatch = (
+          await client.query<{
+            id: string;
+            expiry_date: string;
+            quantity_on_hand: string | number;
+            status: string;
+          }>(
+            `SELECT id, expiry_date, quantity_on_hand, status
+             FROM inventory_batch_registry
+             WHERE inventory_location_code = $1
+               AND product_code = $2
+               AND batch_no = $3
+             LIMIT 1
+             FOR UPDATE`,
+            [
+              transfer.destination_location_code,
+              transfer.product_code,
+              allocation.batchNo,
+            ],
+          )
+        ).rows[0] ?? null;
+
+        if (
+          existingBatch &&
+          existingBatch.expiry_date.slice(0, 10) !==
+            allocation.expiryDate.slice(0, 10)
+        ) {
+          throw new Error(
+            `Batch ${allocation.batchNo} already exists for ${transfer.product_name} at the destination with a different expiry date.`,
+          );
+        }
+
+        const nextBatchQuantity = Number(
+          (
+            asNumber(existingBatch?.quantity_on_hand ?? 0) +
+            allocation.quantity
+          ).toFixed(3),
+        );
+        const destinationBatchId = existingBatch?.id ?? randomUUID();
+
+        await client.query(
+          `INSERT INTO inventory_batch_registry (
+            id, product_code, inventory_location_code, batch_no,
+            manufactured_at, expiry_date, quantity_on_hand, status,
+            source_reference_type, source_reference_id,
+            source_reference_label, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'INTER_STORE_TRANSFER', $9, $10, $11)
+          ON CONFLICT (inventory_location_code, product_code, batch_no)
+          DO UPDATE SET
+            manufactured_at = COALESCE(EXCLUDED.manufactured_at, inventory_batch_registry.manufactured_at),
+            expiry_date = EXCLUDED.expiry_date,
+            quantity_on_hand = EXCLUDED.quantity_on_hand,
+            status = EXCLUDED.status,
+            source_reference_type = EXCLUDED.source_reference_type,
+            source_reference_id = EXCLUDED.source_reference_id,
+            source_reference_label = EXCLUDED.source_reference_label,
+            updated_at = EXCLUDED.updated_at`,
+          [
+            destinationBatchId,
+            transfer.product_code,
+            transfer.destination_location_code,
+            allocation.batchNo,
+            allocation.manufacturedAt ?? null,
+            allocation.expiryDate,
+            nextBatchQuantity,
+            deriveInventoryBatchStatus({
+              expiryDate: allocation.expiryDate,
+              quantityOnHand: nextBatchQuantity,
+              status: existingBatch?.status,
+            }),
+            transfer.id,
+            transfer.transfer_no,
+            timestamp,
+          ],
+        );
+
+        allocation.batchId = destinationBatchId;
+      }
       const metadata = await this.metadata();
       const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
       const terminalCode = this.getTerminalCode();
@@ -17284,6 +18514,12 @@ export class PostgresStoreService {
         ...readSerializedLineNumbers(transfer.received_serial_numbers_json),
         ...serialNumbers,
       ]);
+      const nextReceivedBatchAllocations = [
+        ...readInventoryBatchAllocations(
+          transfer.received_batch_allocations_json,
+        ),
+        ...receivedBatchAllocations,
+      ];
       const receiptNote =
         input.note?.trim() ||
         `Received ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} into ${transfer.destination_location_code}.`;
@@ -17307,12 +18543,13 @@ export class PostgresStoreService {
              received_quantity = $2,
              outstanding_receipt_quantity = $3,
              received_serial_numbers_json = $4,
-             receipt_note = $5,
-             receipt_operator_name = $6,
-             destination_node_code = $7,
-             received_at = $8,
-             updated_at = $8
-         WHERE id = $9`,
+             received_batch_allocations_json = $5,
+             receipt_note = $6,
+             receipt_operator_name = $7,
+             destination_node_code = $8,
+             received_at = $9,
+             updated_at = $9
+         WHERE id = $10`,
         [
           nextStatus,
           nextReceivedQuantity,
@@ -17320,6 +18557,7 @@ export class PostgresStoreService {
             Math.max(0, nextIssuedQuantity - nextReceivedQuantity).toFixed(3),
           ),
           writeSerializedLineNumbers(nextReceivedSerialNumbers),
+          writeInventoryBatchAllocations(nextReceivedBatchAllocations),
           receiptNote,
           operatorName,
           nodeCode,
@@ -17338,6 +18576,9 @@ export class PostgresStoreService {
         productCode: transfer.product_code,
         quantity,
         ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        ...(receivedBatchAllocations.length > 0
+          ? { batchAllocations: receivedBatchAllocations }
+          : {}),
         operatorName,
         note: receiptNote,
         occurredAt: timestamp,
@@ -17761,6 +19002,7 @@ export class PostgresStoreService {
       return {
         message: actionMessage,
         snapshot: await this.getSyncSnapshot(),
+        succeeded: false,
       };
     } finally {
       if (this.syncCycleInFlight === syncCycle) {
@@ -18835,6 +20077,12 @@ export class PostgresStoreService {
           typeof storePayload.shiftFloatPromptAmount !== "number") ||
         (storePayload.showCriticalStocksOnStartup !== undefined &&
           typeof storePayload.showCriticalStocksOnStartup !== "boolean") ||
+        (storePayload.showExpiringBatchesOnStartup !== undefined &&
+          typeof storePayload.showExpiringBatchesOnStartup !== "boolean") ||
+        (storePayload.expiryAlertLeadDays !== undefined &&
+          typeof storePayload.expiryAlertLeadDays !== "number") ||
+        (storePayload.expiryCriticalDays !== undefined &&
+          typeof storePayload.expiryCriticalDays !== "number") ||
         typeof storePayload.loyaltyProgramEnabled !== "boolean" ||
         typeof storePayload.loyaltyPointsPerCurrencyUnit !== "number" ||
         typeof storePayload.loyaltyRedemptionEnabled !== "boolean" ||
@@ -18927,6 +20175,34 @@ export class PostgresStoreService {
       await this.setMetadata(
         "show_critical_stocks_on_startup",
         storePayload.showCriticalStocksOnStartup ? "1" : "0",
+        runner,
+      );
+      await this.setMetadata(
+        "show_expiring_batches_on_startup",
+        storePayload.showExpiringBatchesOnStartup === false ? "0" : "1",
+        runner,
+      );
+      const expiryAlertLeadDays = normalizePolicyInteger(
+        storePayload.expiryAlertLeadDays,
+        30,
+        1,
+        3650,
+      );
+      await this.setMetadata(
+        "expiry_alert_lead_days",
+        String(expiryAlertLeadDays),
+        runner,
+      );
+      await this.setMetadata(
+        "expiry_critical_days",
+        String(
+          normalizePolicyInteger(
+            storePayload.expiryCriticalDays,
+            7,
+            0,
+            expiryAlertLeadDays,
+          ),
+        ),
         runner,
       );
       await this.setMetadata(
@@ -19897,13 +21173,14 @@ export class PostgresStoreService {
             category_code,
             subcategory,
             is_serialized,
+            track_expiry,
             ordered_quantity,
             received_quantity,
             exception_quantity,
             outstanding_quantity,
             unit_cost,
             updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
           [
             line.purchaseOrderLineId,
             payload.purchaseOrderId,
@@ -19916,6 +21193,7 @@ export class PostgresStoreService {
             typeof line.categoryCode === "string" ? line.categoryCode : null,
             typeof line.subcategory === "string" ? line.subcategory : null,
             line.isSerialized === true ? 1 : 0,
+            line.trackExpiry === true ? 1 : 0,
             typeof line.orderedQuantity === "number" ? line.orderedQuantity : 0,
             typeof line.receivedQuantity === "number"
               ? line.receivedQuantity
@@ -20698,6 +21976,8 @@ export class PostgresStoreService {
           tax_rate_percent,
           tax_inclusive,
           track_inventory,
+          track_expiry,
+          shelf_life_days,
           is_serialized,
           track_size,
           track_color,
@@ -20710,7 +21990,7 @@ export class PostgresStoreService {
           unit_price,
           quantity_on_hand,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
         ON CONFLICT (product_code) DO UPDATE SET
           product_name = excluded.product_name,
           product_type = excluded.product_type,
@@ -20727,6 +22007,8 @@ export class PostgresStoreService {
           tax_rate_percent = excluded.tax_rate_percent,
           tax_inclusive = excluded.tax_inclusive,
           track_inventory = excluded.track_inventory,
+          track_expiry = excluded.track_expiry,
+          shelf_life_days = excluded.shelf_life_days,
           is_serialized = excluded.is_serialized,
           track_size = excluded.track_size,
           track_color = excluded.track_color,
@@ -20769,6 +22051,10 @@ export class PostgresStoreService {
             : null,
           payload.taxInclusive === true ? 1 : 0,
           payload.trackInventory === false ? 0 : 1,
+          payload.trackExpiry === true ? 1 : 0,
+          typeof payload.shelfLifeDays === "number"
+            ? Math.trunc(payload.shelfLifeDays)
+            : null,
           payload.isSerialized === true ? 1 : 0,
           payload.trackSize === true ? 1 : 0,
           payload.trackColor === true ? 1 : 0,
@@ -21517,7 +22803,8 @@ export class PostgresStoreService {
              last_http_status = NULL,
              sync_run_id = NULL,
              error_message = NULL
-         WHERE status IN ('FAILED', 'DEAD_LETTER')`,
+         WHERE status IN ('FAILED', 'DEAD_LETTER')
+           AND COALESCE(failure_kind, '') NOT IN ('STALE_VERSION', 'UNKNOWN_AGGREGATE', 'INVALID_PAYLOAD', 'POLICY_REJECTED')`,
         [finishedAt],
       ),
       this.pool.query(
@@ -21535,9 +22822,9 @@ export class PostgresStoreService {
       summary:
         upstreamRequeued > 0 || downstreamRequeued > 0
           ? shouldQueueEnterprise
-            ? `Requeued ${upstreamRequeued + downstreamRequeued} PostgreSQL dead-letter item(s) for another enterprise pass.`
-            : `Requeued ${upstreamRequeued + downstreamRequeued} PostgreSQL standalone recovery item(s) for local review.`
-          : "No PostgreSQL dead-letter items were waiting for requeue.",
+            ? `Requeued ${upstreamRequeued + downstreamRequeued} eligible PostgreSQL failed item(s) for another enterprise pass.`
+            : `Requeued ${upstreamRequeued + downstreamRequeued} eligible PostgreSQL standalone recovery item(s) for local review. Permanent conflicts remained unchanged.`
+          : "No eligible PostgreSQL failed items were waiting for retry. Permanent conflicts remain available for support review.",
       startedAt,
     });
 
@@ -21545,9 +22832,9 @@ export class PostgresStoreService {
       message:
         upstreamRequeued > 0 || downstreamRequeued > 0
           ? shouldQueueEnterprise
-            ? "Failed items were moved back into active PostgreSQL queues."
-            : "Standalone recovery items were moved back into PostgreSQL local review queues."
-          : "There were no dead-letter items to requeue.",
+            ? "Eligible failed items were moved back into active PostgreSQL queues. Permanent conflicts were left unchanged."
+            : "Eligible standalone recovery items were moved back into PostgreSQL local review queues. Permanent conflicts were left unchanged."
+          : "There were no eligible failed items to retry. Permanent conflicts were left unchanged.",
       snapshot: await this.getSyncSnapshot(),
     };
   }
@@ -22314,6 +23601,11 @@ export class PostgresStoreService {
         event_type,
         target_node_code AS node_code,
         attempt_count,
+        failure_kind,
+        last_http_status,
+        last_attempt_at,
+        next_retry_at,
+        sync_run_id,
         payload_json,
         error_message,
         created_at,
@@ -22330,6 +23622,11 @@ export class PostgresStoreService {
         event_type,
         source_node_code AS node_code,
         0 AS attempt_count,
+        NULL AS failure_kind,
+        NULL AS last_http_status,
+        NULL AS last_attempt_at,
+        NULL AS next_retry_at,
+        NULL AS sync_run_id,
         payload_json,
         error_message,
         received_at AS created_at,
@@ -22349,6 +23646,14 @@ export class PostgresStoreService {
       eventType: row.event_type,
       nodeCode: row.node_code,
       attemptCount: Math.trunc(asNumber(row.attempt_count)),
+      failureKind: row.failure_kind,
+      lastHttpStatus:
+        row.last_http_status == null
+          ? null
+          : Math.trunc(asNumber(row.last_http_status)),
+      lastAttemptAt: row.last_attempt_at,
+      nextRetryAt: row.next_retry_at,
+      syncRunId: row.sync_run_id,
       errorMessage: row.error_message,
       diagnosticSummary: describeSyncEventPayload(
         row.aggregate_type,
@@ -22372,6 +23677,11 @@ export class PostgresStoreService {
         event_type,
         target_node_code AS node_code,
         attempt_count,
+        failure_kind,
+        last_http_status,
+        last_attempt_at,
+        next_retry_at,
+        sync_run_id,
         payload_json,
         error_message,
         created_at,
@@ -22389,6 +23699,11 @@ export class PostgresStoreService {
         event_type,
         source_node_code AS node_code,
         0 AS attempt_count,
+        NULL AS failure_kind,
+        NULL AS last_http_status,
+        NULL AS last_attempt_at,
+        NULL AS next_retry_at,
+        NULL AS sync_run_id,
         payload_json,
         error_message,
         received_at AS created_at,
@@ -22409,6 +23724,14 @@ export class PostgresStoreService {
       eventType: row.event_type,
       nodeCode: row.node_code,
       attemptCount: Math.trunc(asNumber(row.attempt_count)),
+      failureKind: row.failure_kind,
+      lastHttpStatus:
+        row.last_http_status == null
+          ? null
+          : Math.trunc(asNumber(row.last_http_status)),
+      lastAttemptAt: row.last_attempt_at,
+      nextRetryAt: row.next_retry_at,
+      syncRunId: row.sync_run_id,
       summary: describeSyncEventPayload(
         row.aggregate_type,
         row.event_type,

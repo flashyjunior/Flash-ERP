@@ -10,7 +10,7 @@ function requireFile(relativePath: string) {
     throw new Error(`Online-store desktop parity gate is missing ${relativePath}.`);
   }
 
-  return readFileSync(absolutePath, "utf8");
+  return readFileSync(absolutePath, "utf8").replace(/\r\n/g, "\n");
 }
 
 function requireIncludes(source: string, needle: string, label: string) {
@@ -39,6 +39,23 @@ const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.
 const desktopSqliteService = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
 const desktopPostgresService = requireFile("apps/store-desktop/src/main/postgres/postgres-store-service.ts");
 const desktopMssqlService = requireFile("apps/store-desktop/src/main/mssql/mssql-store-service.ts");
+
+for (const [provider, source] of [
+  ["SQLite", desktopSqliteService],
+  ["PostgreSQL", desktopPostgresService],
+  ["SQL Server", desktopMssqlService],
+] as const) {
+  requireIncludes(
+    source,
+    "const hasDepositPaymentRows =",
+    `${provider} sales orders must accept multiple deposit payments.`,
+  );
+  requireIncludes(
+    source,
+    "payments: preparedDepositPayments.payments.map",
+    `${provider} sales-order sync payloads must preserve each deposit payment.`,
+  );
+}
 const onlineRepository = requireFile("apps/enterprise-web/src/server/repositories/online-store.repository.ts");
 const enterprisePosRepository = requireFile(
   "apps/enterprise-web/src/server/repositories/enterprise-pos.repository.ts"

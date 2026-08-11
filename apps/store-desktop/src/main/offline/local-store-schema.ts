@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS product_snapshot (
   tax_rate_percent NUMERIC,
   tax_inclusive INTEGER NOT NULL DEFAULT 0,
   track_inventory INTEGER NOT NULL DEFAULT 1,
+  track_expiry INTEGER NOT NULL DEFAULT 0,
+  shelf_life_days INTEGER,
   is_serialized INTEGER NOT NULL DEFAULT 0,
   track_size INTEGER NOT NULL DEFAULT 0,
   track_color INTEGER NOT NULL DEFAULT 0,
@@ -209,6 +211,22 @@ CREATE TABLE IF NOT EXISTS inventory_location_balance (
   PRIMARY KEY (location_code, product_code)
 );
 
+CREATE TABLE IF NOT EXISTS inventory_batch_registry (
+  id TEXT PRIMARY KEY,
+  product_code TEXT NOT NULL,
+  inventory_location_code TEXT NOT NULL,
+  batch_no TEXT NOT NULL,
+  manufactured_at TEXT,
+  expiry_date TEXT NOT NULL,
+  quantity_on_hand NUMERIC NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  source_reference_type TEXT,
+  source_reference_id TEXT,
+  source_reference_label TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (inventory_location_code, product_code, batch_no)
+);
+
 CREATE TABLE IF NOT EXISTS serial_registry (
   id TEXT PRIMARY KEY,
   product_code TEXT NOT NULL,
@@ -253,6 +271,7 @@ CREATE TABLE IF NOT EXISTS purchase_order_line_snapshot (
   category_code TEXT,
   subcategory TEXT,
   is_serialized INTEGER NOT NULL DEFAULT 0,
+  track_expiry INTEGER NOT NULL DEFAULT 0,
   ordered_quantity NUMERIC NOT NULL,
   received_quantity NUMERIC NOT NULL DEFAULT 0,
   exception_quantity NUMERIC NOT NULL DEFAULT 0,
@@ -290,6 +309,9 @@ CREATE TABLE IF NOT EXISTS local_goods_receipt_line (
   quantity NUMERIC NOT NULL,
   unit_cost NUMERIC,
   serial_numbers_json TEXT,
+  batch_no TEXT,
+  manufactured_at TEXT,
+  expiry_date TEXT,
   updated_at TEXT NOT NULL,
   UNIQUE (local_goods_receipt_id, line_no)
 );
@@ -348,6 +370,7 @@ CREATE TABLE IF NOT EXISTS local_supplier_return_line (
   quantity NUMERIC NOT NULL,
   unit_cost NUMERIC,
   serial_numbers_json TEXT,
+  batch_allocations_json TEXT,
   updated_at TEXT NOT NULL,
   UNIQUE (local_supplier_return_id, line_no)
 );
@@ -375,6 +398,7 @@ CREATE TABLE IF NOT EXISTS inter_store_transfer_snapshot (
   category_code TEXT,
   subcategory TEXT,
   is_serialized INTEGER NOT NULL DEFAULT 0,
+  track_expiry INTEGER NOT NULL DEFAULT 0,
   requested_quantity NUMERIC NOT NULL DEFAULT 0,
   issued_quantity NUMERIC NOT NULL DEFAULT 0,
   received_quantity NUMERIC NOT NULL DEFAULT 0,
@@ -383,6 +407,8 @@ CREATE TABLE IF NOT EXISTS inter_store_transfer_snapshot (
   unit_cost NUMERIC,
   issued_serial_numbers_json TEXT,
   received_serial_numbers_json TEXT,
+  issued_batch_allocations_json TEXT,
+  received_batch_allocations_json TEXT,
   request_note TEXT,
   issue_note TEXT,
   receipt_note TEXT,
@@ -460,6 +486,8 @@ CREATE TABLE IF NOT EXISTS stock_count_session (
   variance_quantity NUMERIC NOT NULL,
   previous_serial_numbers_json TEXT,
   counted_serial_numbers_json TEXT,
+  previous_batch_quantities_json TEXT,
+  counted_batch_quantities_json TEXT,
   note TEXT,
   operator_name TEXT NOT NULL,
   submitted_at TEXT,
@@ -718,6 +746,7 @@ CREATE TABLE IF NOT EXISTS pos_transaction_line (
   variant_attributes_snapshot TEXT,
   line_note TEXT,
   serial_numbers_json TEXT,
+  batch_allocations_json TEXT,
   quantity NUMERIC NOT NULL,
   unit_price NUMERIC NOT NULL,
   discount_amount NUMERIC NOT NULL,
@@ -887,6 +916,8 @@ CREATE INDEX IF NOT EXISTS idx_inventory_location_snapshot_updated_at ON invento
 CREATE INDEX IF NOT EXISTS idx_inventory_location_balance_updated_at ON inventory_location_balance(updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_serial_registry_product_serial ON serial_registry(product_code, serial_number COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_serial_registry_status ON serial_registry(product_code, status, inventory_location_code, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inventory_batch_registry_fefo ON inventory_batch_registry(inventory_location_code, product_code, status, expiry_date, batch_no);
+CREATE INDEX IF NOT EXISTS idx_inventory_batch_registry_expiry ON inventory_batch_registry(expiry_date, status, quantity_on_hand);
 CREATE INDEX IF NOT EXISTS idx_purchase_order_snapshot_status ON purchase_order_snapshot(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_purchase_order_line_snapshot_order ON purchase_order_line_snapshot(purchase_order_id, line_no);
 CREATE INDEX IF NOT EXISTS idx_local_goods_receipt_received_at ON local_goods_receipt(received_at DESC);

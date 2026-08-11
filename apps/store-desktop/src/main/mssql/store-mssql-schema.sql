@@ -439,6 +439,7 @@ BEGIN
     [category_code] nvarchar(100) NULL,
     [subcategory] nvarchar(150) NULL,
     [is_serialized] int NOT NULL CONSTRAINT [DF_purchase_order_line_serialized] DEFAULT 0,
+    [track_expiry] int NOT NULL CONSTRAINT [DF_purchase_order_line_track_expiry] DEFAULT 0,
     [ordered_quantity] decimal(18, 3) NOT NULL,
     [received_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_purchase_order_line_received] DEFAULT 0,
     [exception_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_purchase_order_line_exception] DEFAULT 0,
@@ -1230,6 +1231,16 @@ BEGIN
   );
 END;
 
+IF NOT EXISTS (
+  SELECT 1 FROM sys.indexes
+  WHERE name = N'idx_sync_outbox_retry'
+    AND object_id = OBJECT_ID(N'[dbo].[sync_outbox]')
+)
+BEGIN
+  CREATE INDEX [idx_sync_outbox_retry]
+    ON [dbo].[sync_outbox] ([status], [next_retry_at], [created_at]);
+END;
+
 IF OBJECT_ID(N'[dbo].[sync_inbox]', N'U') IS NULL
 BEGIN
   CREATE TABLE [dbo].[sync_inbox] (
@@ -1327,3 +1338,51 @@ BEGIN
       [updated_at] = CONVERT(nvarchar(40), SYSUTCDATETIME(), 127)
   WHERE [key] = N'schema_version';
 END;
+IF COL_LENGTH(N'[dbo].[product_snapshot]', N'track_expiry') IS NULL
+  ALTER TABLE [dbo].[product_snapshot] ADD [track_expiry] int NOT NULL CONSTRAINT [DF_product_snapshot_track_expiry] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[product_snapshot]', N'shelf_life_days') IS NULL
+  ALTER TABLE [dbo].[product_snapshot] ADD [shelf_life_days] int NULL;
+IF COL_LENGTH(N'[dbo].[local_goods_receipt_line]', N'batch_no') IS NULL
+  ALTER TABLE [dbo].[local_goods_receipt_line] ADD [batch_no] nvarchar(200) NULL;
+IF COL_LENGTH(N'[dbo].[local_goods_receipt_line]', N'manufactured_at') IS NULL
+  ALTER TABLE [dbo].[local_goods_receipt_line] ADD [manufactured_at] nvarchar(40) NULL;
+IF COL_LENGTH(N'[dbo].[local_goods_receipt_line]', N'expiry_date') IS NULL
+  ALTER TABLE [dbo].[local_goods_receipt_line] ADD [expiry_date] nvarchar(40) NULL;
+IF COL_LENGTH(N'[dbo].[local_supplier_return_line]', N'batch_allocations_json') IS NULL
+  ALTER TABLE [dbo].[local_supplier_return_line] ADD [batch_allocations_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'track_expiry') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [track_expiry] int NOT NULL CONSTRAINT [DF_transfer_snapshot_track_expiry] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'issued_batch_allocations_json') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [issued_batch_allocations_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'received_batch_allocations_json') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [received_batch_allocations_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[stock_count_session]', N'previous_batch_quantities_json') IS NULL
+  ALTER TABLE [dbo].[stock_count_session] ADD [previous_batch_quantities_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[stock_count_session]', N'counted_batch_quantities_json') IS NULL
+  ALTER TABLE [dbo].[stock_count_session] ADD [counted_batch_quantities_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'batch_allocations_json') IS NULL
+  ALTER TABLE [dbo].[pos_transaction_line] ADD [batch_allocations_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[purchase_order_line_snapshot]', N'track_expiry') IS NULL
+  ALTER TABLE [dbo].[purchase_order_line_snapshot] ADD [track_expiry] int NOT NULL CONSTRAINT [DF_purchase_order_line_track_expiry_upgrade] DEFAULT 0;
+
+IF OBJECT_ID(N'[dbo].[inventory_batch_registry]', N'U') IS NULL
+BEGIN
+  CREATE TABLE [dbo].[inventory_batch_registry] (
+    [id] nvarchar(100) NOT NULL CONSTRAINT [PK_inventory_batch_registry] PRIMARY KEY,
+    [product_code] nvarchar(100) NOT NULL,
+    [inventory_location_code] nvarchar(100) NOT NULL,
+    [batch_no] nvarchar(200) NOT NULL,
+    [manufactured_at] nvarchar(40) NULL,
+    [expiry_date] nvarchar(40) NOT NULL,
+    [quantity_on_hand] decimal(18, 3) NOT NULL CONSTRAINT [DF_inventory_batch_qty] DEFAULT 0,
+    [status] nvarchar(30) NOT NULL CONSTRAINT [DF_inventory_batch_status] DEFAULT N'ACTIVE',
+    [source_reference_type] nvarchar(100) NULL,
+    [source_reference_id] nvarchar(100) NULL,
+    [source_reference_label] nvarchar(200) NULL,
+    [updated_at] nvarchar(40) NOT NULL,
+    CONSTRAINT [UQ_inventory_batch_position] UNIQUE ([inventory_location_code], [product_code], [batch_no])
+  );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_inventory_batch_registry_fefo' AND object_id = OBJECT_ID(N'[dbo].[inventory_batch_registry]'))
+  CREATE INDEX [IX_inventory_batch_registry_fefo] ON [dbo].[inventory_batch_registry] ([inventory_location_code], [product_code], [status], [expiry_date], [batch_no]);
