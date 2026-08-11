@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ChangeEvent, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { useRouter } from "next/navigation";
 import { applyAutomaticPromotions, calculateLoyaltyRedemption } from "@flash-erp/sync-core";
+import { FileSpreadsheet, Trash2 } from "lucide-react";
+import type { SheetData } from "write-excel-file/browser";
 
 import {
   FuelOperationsWorkspace,
@@ -48,10 +50,12 @@ type TenderMethod = OnlineStoreWorkspaceData["tenderMethods"][number];
 type Receipt = CreateOnlineStoreSaleResponse["receipt"];
 type AccountPaymentReceipt = RecordOnlineStoreAccountPaymentResponse["receipt"];
 type OnlineShift = NonNullable<OnlineStoreWorkspaceData["shift"]>;
-type WorkspaceId = "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "fuel";
+type WorkspaceId = "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
 type ManagerTab = "shift" | "eod" | "banking" | "summary";
 type ReportId = "sales" | "products" | "orders" | "tenders" | "inventory" | "banking" | "shifts";
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
+type InventoryStockSection = "inventory-browser" | "batch-register";
+type InventoryReceivingSection = "purchase-orders" | "goods-receipts" | "supplier-returns";
 type TransferEntryTab = "header" | "details";
 type CountEntryTab = "header" | "sheet" | "variance";
 type PosDrawer = "details" | "held" | "orders" | "account" | "receipts" | "report" | null;
@@ -142,6 +146,18 @@ type ExpenseConfirmation = {
   amount: number;
   description: string;
 };
+type OnlineInventoryAlertRow = {
+  productId: string;
+  productCode: string;
+  productName: string;
+  locationId: string;
+  locationCode: string;
+  locationName: string;
+  quantityOnHand: number;
+  minStockLevel: number | null;
+  reorderPoint: number | null;
+  safetyStockLevel: number | null;
+};
 type InventorySerialDraft = {
   title: string;
   productName: string;
@@ -166,6 +182,7 @@ type BasketLine = {
   variantSize: string | null;
   variantColor: string | null;
   lineNote: string | null;
+  preferredBatchId: string | null;
 };
 
 const supplierReturnReasonOptions: SupplierReturnReason[] = [
@@ -190,7 +207,10 @@ type OpenPriceDraft = {
   variantSize: string;
   variantColor: string;
   variantSearch: string;
+  expressChargeSelected: boolean;
+  expressChargeRate: string;
   lineNote: string;
+  preferredBatchId: string;
 };
 type PaymentDraft = {
   id: string;
@@ -208,7 +228,7 @@ const workspaceNav: Array<{
   id: WorkspaceId;
   label: string;
   detail: string;
-  icon: "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "fuel";
+  icon: "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
   requiresFuelOperationsVisibility?: boolean;
 }> = [
   { id: "dashboard", label: "Dashboard", detail: "Shop pulse, sales, stock", icon: "dashboard" },
@@ -224,7 +244,8 @@ const workspaceNav: Array<{
   },
   { id: "manager", label: "Manager", detail: "EOD, banking, reports", icon: "manager" },
   { id: "reversals", label: "Reversals", detail: "Returns, exchanges", icon: "reversals" },
-  { id: "reports", label: "Reports", detail: "Sales, stock, banking", icon: "reports" }
+  { id: "reports", label: "Reports", detail: "Sales, stock, banking", icon: "reports" },
+  { id: "settings", label: "Settings", detail: "HQ POS configuration", icon: "settings" }
 ];
 
 const formatNumber = new Intl.NumberFormat("en-US");
@@ -255,13 +276,14 @@ function paymentDraftId() {
   return `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "variantSize" | "variantColor" | "lineNote">) {
+function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId">) {
   return [
     line.product.productId,
     line.productVariantCode ?? "",
     line.variantSize ?? "",
     line.variantColor ?? "",
-    line.lineNote ?? ""
+    line.lineNote ?? "",
+    line.preferredBatchId ?? ""
   ].join(":");
 }
 
@@ -674,6 +696,12 @@ function SidebarIcon({ name }: { name: (typeof workspaceNav)[number]["icon"] }) 
         <path d="M9 17h6" />
       </>
     ),
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z" />
+      </>
+    ),
     fuel: (
       <>
         <path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0C6 9.5 12 3 12 3z" />
@@ -708,15 +736,7 @@ function formatLineMoney(amount: number) {
 }
 
 function TrashIcon() {
-  return (
-    <svg aria-hidden="true" className="rms-trash-svg" viewBox="0 0 24 24">
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="M6 6l1 15h10l1-15" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
-    </svg>
-  );
+  return <Trash2 aria-hidden="true" className="rms-trash-svg" />;
 }
 
 function roundMoney(amount: number) {
@@ -1648,6 +1668,212 @@ function EmptyState({ title, detail }: { title: string; detail?: string }) {
   );
 }
 
+type OnlinePosSettingsTab = "sizes" | "discounts" | "express-charges" | "options";
+
+const onlinePosSettingsTabs: Array<{ id: OnlinePosSettingsTab; label: string }> = [
+  { id: "sizes", label: "Product sizes" },
+  { id: "discounts", label: "POS discounts" },
+  { id: "express-charges", label: "Express charges" },
+  { id: "options", label: "Options" }
+];
+
+function formatToggleSetting(value: boolean) {
+  return value ? "Enabled" : "Disabled";
+}
+
+function SettingsTokenList({
+  values,
+  emptyTitle,
+  emptyDetail,
+  formatValue
+}: {
+  values: Array<number | string>;
+  emptyTitle: string;
+  emptyDetail?: string;
+  formatValue: (value: number | string) => string;
+}) {
+  if (!values.length) {
+    return <EmptyState title={emptyTitle} detail={emptyDetail} />;
+  }
+
+  return (
+    <div className="rms-settings-token-list">
+      {values.map((value) => (
+        <span className="rms-settings-token" key={String(value)}>
+          {formatValue(value)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ReadonlySettingRow({
+  label,
+  value,
+  tone = "neutral"
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "good" | "warning";
+}) {
+  return (
+    <div className="rms-list-row rms-settings-row">
+      <div>
+        <strong>{label}</strong>
+        <span>{value}</span>
+      </div>
+      <StatusPill tone={tone}>{value}</StatusPill>
+    </div>
+  );
+}
+
+function OnlineStorePosSettingsWorkspace({
+  workspace,
+  currencyCode
+}: {
+  workspace: OnlineStoreWorkspaceData;
+  currencyCode: string;
+}) {
+  const [activeTab, setActiveTab] = useState<OnlinePosSettingsTab>("sizes");
+  const settings = workspace.optionSettings;
+  const expressRates = settings.posExpressChargeRates ?? [];
+  const discountRates = settings.posDiscountRates ?? [];
+  const productSizes = settings.productSizes ?? [];
+  const optionRows = [
+    {
+      label: "Allow negative inventory",
+      value: formatToggleSetting(settings.allowNegativeInventory),
+      tone: settings.allowNegativeInventory ? "warning" : "good"
+    },
+    {
+      label: "Allow offline sales",
+      value: formatToggleSetting(settings.allowOfflineSales),
+      tone: settings.allowOfflineSales ? "good" : "warning"
+    },
+    {
+      label: "Auto-print receipts",
+      value: formatToggleSetting(settings.autoPrintReceipts),
+      tone: settings.autoPrintReceipts ? "good" : "neutral"
+    },
+    {
+      label: "Enforce serialized scan",
+      value: formatToggleSetting(settings.enforceSerializedScanAtPos),
+      tone: settings.enforceSerializedScanAtPos ? "good" : "warning"
+    },
+    {
+      label: "Require customer for credit sales",
+      value: formatToggleSetting(settings.requireCustomerForCreditSales),
+      tone: settings.requireCustomerForCreditSales ? "good" : "warning"
+    },
+    {
+      label: "Require supervisor for receipt-less return",
+      value: formatToggleSetting(settings.requireSupervisorForReceiptlessReturn),
+      tone: settings.requireSupervisorForReceiptlessReturn ? "good" : "warning"
+    },
+    {
+      label: "Show critical stocks on startup",
+      value: formatToggleSetting(settings.showCriticalStocksOnStartup),
+      tone: settings.showCriticalStocksOnStartup ? "good" : "neutral"
+    },
+    {
+      label: "Show expiring batches on startup",
+      value: formatToggleSetting(settings.showExpiringBatchesOnStartup),
+      tone: settings.showExpiringBatchesOnStartup ? "good" : "neutral"
+    },
+    {
+      label: "Expiry alert lead days",
+      value: `${formatNumber.format(settings.expiryAlertLeadDays)} day(s)`,
+      tone: "neutral"
+    },
+    {
+      label: "Critical expiry days",
+      value: `${formatNumber.format(settings.expiryCriticalDays)} day(s)`,
+      tone: "neutral"
+    },
+    {
+      label: "Default receipt search days",
+      value: `${formatNumber.format(settings.defaultReceiptSearchDays)} day(s)`,
+      tone: "neutral"
+    },
+    {
+      label: "Shift float prompt amount",
+      value: formatMoney(settings.shiftFloatPromptAmount, currencyCode),
+      tone: "neutral"
+    }
+  ];
+
+  return (
+    <div className="rms-workspace rms-tabbed-workspace rms-settings-workspace">
+      <div className="rms-workspace-tabs" role="tablist" aria-label="HQ POS settings">
+        {onlinePosSettingsTabs.map((tab) => (
+          <button
+            aria-selected={activeTab === tab.id}
+            className={activeTab === tab.id ? "is-active" : ""}
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            role="tab"
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      <section className="rms-panel rms-tab-panel">
+        <div className="rms-panel-title">
+          <div>
+            <span>{workspace.store?.name ?? "Online store"}</span>
+            <h2>{onlinePosSettingsTabs.find((tab) => tab.id === activeTab)?.label ?? "Settings"}</h2>
+          </div>
+          <div className="rms-settings-title-pills">
+            <StatusPill tone={expressRates.length ? "good" : "warning"}>
+              {expressRates.length ? `${expressRates.length} express rate(s)` : "No express rates"}
+            </StatusPill>
+            <StatusPill>{`Loaded ${formatRelative(workspace.refreshedAt)}`}</StatusPill>
+          </div>
+        </div>
+
+        {activeTab === "sizes" ? (
+          <SettingsTokenList
+            emptyTitle="No product sizes configured"
+            values={productSizes}
+            formatValue={(value) => String(value)}
+          />
+        ) : null}
+
+        {activeTab === "discounts" ? (
+          <SettingsTokenList
+            emptyTitle="No POS discount rates configured"
+            values={discountRates}
+            formatValue={(value) => `${formatDiscountRate(Number(value))}%`}
+          />
+        ) : null}
+
+        {activeTab === "express-charges" ? (
+          <SettingsTokenList
+            emptyTitle="No express charge rates configured"
+            emptyDetail="The POS express checkbox stays disabled until this list has at least one HQ rate."
+            values={expressRates}
+            formatValue={(value) => `${formatDiscountRate(Number(value))}%`}
+          />
+        ) : null}
+
+        {activeTab === "options" ? (
+          <div className="rms-list rms-settings-list">
+            {optionRows.map((row) => (
+              <ReadonlySettingRow
+                key={row.label}
+                label={row.label}
+                tone={row.tone as "neutral" | "good" | "warning"}
+                value={row.value}
+              />
+            ))}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 function DocumentStat({
   label,
   value,
@@ -1740,6 +1966,233 @@ function MoneyTile({
   );
 }
 
+function getOnlineCriticalStockFloor(row: OnlineInventoryAlertRow) {
+  return (
+    [row.minStockLevel, row.reorderPoint, row.safetyStockLevel].find(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value) && value > 0
+    ) ?? null
+  );
+}
+
+function OnlineInventoryStartupAlertsDialog({
+  expiryAlertLeadDays,
+  expiryCriticalDays,
+  expiringRows,
+  lowStockRows,
+  onClose,
+  openInventory
+}: {
+  expiryAlertLeadDays: number;
+  expiryCriticalDays: number;
+  expiringRows: OnlineStoreWorkspaceData["inventoryBatches"];
+  lowStockRows: OnlineInventoryAlertRow[];
+  onClose: () => void;
+  openInventory: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState<"expiring" | "low-stock">(
+    expiringRows.length ? "expiring" : "low-stock"
+  );
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const visibleCount = activeTab === "expiring" ? expiringRows.length : lowStockRows.length;
+  const activeLabel = activeTab === "expiring" ? "Expiring batches" : "Low stock";
+
+  async function exportActiveAlerts() {
+    if (!visibleCount || isExporting) {
+      return;
+    }
+
+    setIsExporting(true);
+    setExportError(null);
+
+    try {
+      const { default: writeExcelFile } = await import("write-excel-file/browser");
+      const headerStyle = {
+        backgroundColor: "#245F84",
+        fontWeight: "bold" as const,
+        textColor: "#FFFFFF",
+        height: 24
+      };
+      const sheetData: SheetData =
+        activeTab === "expiring"
+          ? [
+              [
+                { value: "Product code", ...headerStyle },
+                { value: "Product", ...headerStyle },
+                { value: "Location code", ...headerStyle },
+                { value: "Location", ...headerStyle },
+                { value: "Batch number", ...headerStyle },
+                { value: "Expiry date", ...headerStyle },
+                { value: "Days remaining", ...headerStyle },
+                { value: "Quantity", ...headerStyle }
+              ],
+              ...expiringRows.map((row) => [
+                row.productCode,
+                row.productName,
+                row.locationCode,
+                row.locationName,
+                row.batchNo,
+                row.expiryDate.slice(0, 10),
+                row.daysUntilExpiry,
+                row.quantityOnHand
+              ])
+            ]
+          : [
+              [
+                { value: "Product code", ...headerStyle },
+                { value: "Product", ...headerStyle },
+                { value: "Location code", ...headerStyle },
+                { value: "Location", ...headerStyle },
+                { value: "On hand", ...headerStyle },
+                { value: "Minimum stock", ...headerStyle },
+                { value: "Reorder point", ...headerStyle },
+                { value: "Safety stock", ...headerStyle },
+                { value: "Alert floor", ...headerStyle },
+                { value: "Shortage", ...headerStyle }
+              ],
+              ...lowStockRows.map((row) => {
+                const alertFloor = getOnlineCriticalStockFloor(row) ?? 0;
+
+                return [
+                  row.productCode,
+                  row.productName,
+                  row.locationCode,
+                  row.locationName,
+                  row.quantityOnHand,
+                  row.minStockLevel ?? 0,
+                  row.reorderPoint ?? 0,
+                  row.safetyStockLevel ?? 0,
+                  alertFloor,
+                  Math.max(0, alertFloor - row.quantityOnHand)
+                ];
+              })
+            ];
+      const fileSlug = activeTab === "expiring" ? "expiring-batches" : "low-stock";
+      const sheetName = activeTab === "expiring" ? "Expiring batches" : "Low stock";
+      const columns =
+        activeTab === "expiring"
+          ? [14, 34, 14, 24, 18, 16, 16, 14]
+          : [14, 34, 14, 24, 14, 16, 16, 16, 14, 14];
+
+      await writeExcelFile(sheetData, {
+        columns: columns.map((width) => ({ width })),
+        sheet: sheetName,
+        stickyRowsCount: 1
+      }).toFile(`flash-erp-${fileSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } catch (error) {
+      setExportError(
+        error instanceof Error ? error.message : "The Excel workbook could not be generated."
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  return (
+    <div className="rms-modal-backdrop rms-inventory-alert-backdrop" role="dialog" aria-modal="true">
+      <section className="rms-dialog rms-wide-dialog rms-online-inventory-alert-dialog">
+        <div className="rms-panel-title">
+          <div>
+            <span>Inventory startup alert</span>
+            <h2>Stock attention required</h2>
+          </div>
+          <StatusPill tone="warning">{`${formatNumber.format(visibleCount)} item(s)`}</StatusPill>
+        </div>
+        <div className="rms-inventory-alert-body">
+          <div aria-label="Inventory alerts" className="rms-inventory-alert-tabs" role="tablist">
+            <button
+              aria-selected={activeTab === "expiring"}
+              className={activeTab === "expiring" ? "is-active" : ""}
+              onClick={() => {
+                setActiveTab("expiring");
+                setExportError(null);
+              }}
+              role="tab"
+              type="button"
+            >
+              Expiring batches ({formatNumber.format(expiringRows.length)})
+            </button>
+            <button
+              aria-selected={activeTab === "low-stock"}
+              className={activeTab === "low-stock" ? "is-active" : ""}
+              onClick={() => {
+                setActiveTab("low-stock");
+                setExportError(null);
+              }}
+              role="tab"
+              type="button"
+            >
+              Low stock ({formatNumber.format(lowStockRows.length)})
+            </button>
+          </div>
+          <div className="rms-inventory-alert-toolbar">
+            <div>
+              <strong>{activeLabel}</strong>
+              <span>{`${formatNumber.format(visibleCount)} row(s) requiring attention`}</span>
+            </div>
+            <button
+              className="rms-button rms-inventory-alert-export"
+              disabled={!visibleCount || isExporting}
+              onClick={() => void exportActiveAlerts()}
+              type="button"
+            >
+              <FileSpreadsheet aria-hidden="true" />
+              {isExporting ? "Exporting..." : "Export Excel"}
+            </button>
+          </div>
+          {exportError ? <div className="rms-inventory-alert-export-error" role="alert">{exportError}</div> : null}
+          <div className="rms-inventory-alert-grid">
+            {activeTab === "expiring" ? (
+              expiringRows.length ? (
+                <table aria-label="Expiring batches">
+                  <thead><tr><th>Product</th><th>Location</th><th>Batch</th><th>Expiry date</th><th>Days remaining</th><th className="is-numeric">Quantity</th></tr></thead>
+                  <tbody>
+                    {expiringRows.map((row) => (
+                      <tr key={row.batchId}>
+                        <td><strong>{row.productName}</strong><small>{row.productCode}</small></td>
+                        <td><strong>{row.locationName}</strong><small>{row.locationCode}</small></td>
+                        <td>{row.batchNo}</td>
+                        <td>{new Date(row.expiryDate).toLocaleDateString("en-GB")}</td>
+                        <td><span className={`rms-inventory-alert-status${row.daysUntilExpiry <= expiryCriticalDays ? " is-critical" : ""}`}>{row.daysUntilExpiry === 0 ? "Expires today" : `${formatNumber.format(row.daysUntilExpiry)} day(s)`}</span></td>
+                        <td className="is-numeric">{formatNumber.format(row.quantityOnHand)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : <EmptyState title="No batches expiring soon" detail={`No active stock batch expires within the next ${formatNumber.format(expiryAlertLeadDays)} days.`} />
+            ) : lowStockRows.length ? (
+              <table aria-label="Low stock">
+                <thead><tr><th>Product</th><th>Location</th><th className="is-numeric">On hand</th><th className="is-numeric">Alert floor</th><th className="is-numeric">Shortage</th><th>Status</th></tr></thead>
+                <tbody>
+                  {lowStockRows.map((row) => {
+                    const alertFloor = getOnlineCriticalStockFloor(row) ?? 0;
+
+                    return (
+                      <tr key={`${row.locationId}-${row.productId}`}>
+                        <td><strong>{row.productName}</strong><small>{row.productCode}</small></td>
+                        <td><strong>{row.locationName}</strong><small>{row.locationCode}</small></td>
+                        <td className="is-numeric">{formatNumber.format(row.quantityOnHand)}</td>
+                        <td className="is-numeric">{formatNumber.format(alertFloor)}</td>
+                        <td className="is-numeric">{formatNumber.format(Math.max(0, alertFloor - row.quantityOnHand))}</td>
+                        <td><span className="rms-inventory-alert-status is-critical">{row.quantityOnHand <= 0 ? "Out of stock" : "Low stock"}</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : <EmptyState title="No low-stock items" detail="All configured stock thresholds are currently satisfied." />}
+          </div>
+        </div>
+        <div className="rms-dialog-actions">
+          <button className="rms-button" onClick={onClose} type="button">Dismiss</button>
+          <button className="rms-button is-primary" onClick={openInventory} type="button">Open inventory</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWorkspaceData }) {
   const router = useRouter();
   const currencyCode = workspace.store?.currencyCode ?? "GHS";
@@ -1762,6 +2215,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [managerTab, setManagerTab] = useState<ManagerTab>("shift");
   const [activeReport, setActiveReport] = useState<ReportId>("sales");
   const [inventoryTab, setInventoryTab] = useState<InventoryTab>("stock");
+  const [activeStockSection, setActiveStockSection] = useState<InventoryStockSection>("inventory-browser");
+  const [activeReceivingSection, setActiveReceivingSection] = useState<InventoryReceivingSection>("purchase-orders");
+  const [inventoryStartupAlertOpen, setInventoryStartupAlertOpen] = useState(false);
+  const inventoryStartupAlertCheckedRef = useRef(false);
   const [dashboardDateFrom, setDashboardDateFrom] = useState(activeDate);
   const [dashboardDateTo, setDashboardDateTo] = useState(activeDate);
   const [reportDateFrom, setReportDateFrom] = useState(initialReportCriteria.dateFrom ?? activeDate);
@@ -1824,9 +2281,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   >([]);
   const [transactionReferenceSearchDismissed, setTransactionReferenceSearchDismissed] =
     useState(false);
-  const [salesOrderDepositAmount, setSalesOrderDepositAmount] = useState("0.00");
-  const [salesOrderDepositTenderCode, setSalesOrderDepositTenderCode] = useState(defaultTenderCode);
-  const [salesOrderDepositReference, setSalesOrderDepositReference] = useState("");
   const [loyaltyPointsToRedeem, setLoyaltyPointsToRedeem] = useState("0");
   const [isPostingPosAction, setIsPostingPosAction] = useState(false);
   const [checkoutMessage, setCheckoutMessage] = useState("");
@@ -1909,6 +2363,9 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [purchaseOrderDialogMode, setPurchaseOrderDialogMode] = useState<PurchaseOrderDialogMode>(null);
   const [dialogPurchaseOrderId, setDialogPurchaseOrderId] = useState("");
   const [purchaseOrderReceiptQuantities, setPurchaseOrderReceiptQuantities] = useState<Record<string, string>>({});
+  const [purchaseOrderReceiptBatchNos, setPurchaseOrderReceiptBatchNos] = useState<Record<string, string>>({});
+  const [purchaseOrderReceiptManufacturedDates, setPurchaseOrderReceiptManufacturedDates] = useState<Record<string, string>>({});
+  const [purchaseOrderReceiptExpiryDates, setPurchaseOrderReceiptExpiryDates] = useState<Record<string, string>>({});
   const [selectedGoodsReceiptId, setSelectedGoodsReceiptId] = useState("");
   const [supplierReturnGoodsReceiptId, setSupplierReturnGoodsReceiptId] = useState(workspace.recentGoodsReceipts[0]?.receiptId ?? "");
   const [supplierReturnGoodsReceiptLineId, setSupplierReturnGoodsReceiptLineId] = useState(workspace.recentGoodsReceipts[0]?.lines[0]?.goodsReceiptLineId ?? "");
@@ -1920,6 +2377,9 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [inventorySerialDraft, setInventorySerialDraft] = useState<InventorySerialDraft | null>(null);
   const [receiptQuantity, setReceiptQuantity] = useState("1");
   const [receiptUnitCost, setReceiptUnitCost] = useState("");
+  const [receiptBatchNo, setReceiptBatchNo] = useState("");
+  const [receiptManufacturedAt, setReceiptManufacturedAt] = useState("");
+  const [receiptExpiryDate, setReceiptExpiryDate] = useState("");
   const [receiptNote, setReceiptNote] = useState("");
   const [transferSourceStoreId, setTransferSourceStoreId] = useState(workspace.transferStores[0]?.storeId ?? "");
   const [transferSourceLocationId, setTransferSourceLocationId] = useState(workspace.transferStores[0]?.defaultLocationId ?? "");
@@ -1967,6 +2427,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [pendingExpenseConfirmation, setPendingExpenseConfirmation] =
     useState<ExpenseConfirmation | null>(null);
   const [countedQuantity, setCountedQuantity] = useState("0");
+  const [countedBatchQuantities, setCountedBatchQuantities] = useState<Record<string, string>>({});
   const [countNote, setCountNote] = useState("");
   const [activeCountEntryTab, setActiveCountEntryTab] = useState<CountEntryTab>("header");
   const [stockCountUploadRows, setStockCountUploadRows] = useState<StockCountUploadRow[]>([]);
@@ -2187,8 +2648,34 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       openPriceDraft.product.productType === "MATRIX" &&
       openPriceDraft.product.matrixVariants.length > 0
   );
+  const openPriceExpressEligible = Boolean(
+    openPriceDraft &&
+      openPriceDraft.product.trackSize &&
+      openPriceDraft.product.trackColor
+  );
+  const openPriceAvailableBatches = openPriceDraft?.product.trackExpiry
+    ? workspace.inventoryBatches
+        .filter(
+          (batch) =>
+            batch.productId === openPriceDraft.product.productId &&
+            (!defaultSalesLocationId || batch.locationId === defaultSalesLocationId) &&
+            batch.quantityOnHand > 0 &&
+            batch.daysUntilExpiry >= 0 &&
+            batch.status.toUpperCase() === "ACTIVE"
+        )
+        .sort(
+          (left, right) =>
+            left.expiryDate.localeCompare(right.expiryDate) ||
+            left.batchNo.localeCompare(right.batchNo)
+        )
+    : [];
+  const openPriceBatchUnavailable =
+    Boolean(openPriceDraft?.product.trackExpiry) &&
+    saleMode !== "SALES_ORDER" &&
+    openPriceAvailableBatches.length === 0;
   const configuredProductSizes = workspace.optionSettings?.productSizes ?? [];
   const configuredPosDiscountRates = workspace.optionSettings?.posDiscountRates ?? [];
+  const configuredPosExpressChargeRates = workspace.optionSettings?.posExpressChargeRates ?? [];
   function resolveConfiguredPosDiscountRate(value: string | number | null | undefined) {
     const rate = Number(value);
 
@@ -2197,6 +2684,20 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     }
 
     const matchedRate = configuredPosDiscountRates.find(
+      (configuredRate) => configuredRate.toFixed(2) === rate.toFixed(2)
+    );
+
+    return matchedRate === undefined ? null : Number(matchedRate.toFixed(2));
+  }
+
+  function resolveConfiguredPosExpressChargeRate(value: string | number | null | undefined) {
+    const rate = Number(value);
+
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return null;
+    }
+
+    const matchedRate = configuredPosExpressChargeRates.find(
       (configuredRate) => configuredRate.toFixed(2) === rate.toFixed(2)
     );
 
@@ -2379,16 +2880,18 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         (row) => row.productId === selectedInventoryProduct.productId && (!inventoryLocationId || row.locationId === inventoryLocationId)
       ) ?? null
     : null;
-  const inventoryLocationsForBrowser = inventoryLocationId
-    ? workspace.inventoryLocations.filter((location) => location.locationId === inventoryLocationId)
-    : workspace.inventoryLocations;
+  const selectedCountBatches = workspace.inventoryBatches.filter(
+    (batch) =>
+      batch.productId === inventoryProductId &&
+      (!inventoryLocationId || batch.locationId === inventoryLocationId),
+  );
   const inventoryLedgerByProductLocation = new Map(
     workspace.inventoryRows.map((row) => [`${row.productId}:${row.locationId}`, row] as const)
   );
-  const inventoryBrowserRows = workspace.inventoryProducts
+  const allInventoryBrowserRows = workspace.inventoryProducts
     .flatMap((product) =>
-      inventoryLocationsForBrowser.length
-        ? inventoryLocationsForBrowser.map((location) => {
+      workspace.inventoryLocations.length
+        ? workspace.inventoryLocations.map((location) => {
             const ledgerRow = inventoryLedgerByProductLocation.get(`${product.productId}:${location.locationId}`);
 
             return {
@@ -2396,6 +2899,30 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               productCode: product.productCode,
               productName: product.productName,
               isSerialized: product.isSerialized,
+              trackExpiry: product.trackExpiry,
+              minStockLevel: product.minStockLevel,
+              reorderPoint: product.reorderPoint,
+              safetyStockLevel: product.safetyStockLevel,
+              earliestExpiryDate:
+                workspace.inventoryBatches
+                  .filter(
+                    (batch) =>
+                      batch.productId === product.productId &&
+                      batch.locationId === location.locationId &&
+                      batch.quantityOnHand > 0,
+                  )
+                  .sort((left, right) => left.expiryDate.localeCompare(right.expiryDate))[0]
+                  ?.expiryDate ?? null,
+              expiringQuantity: workspace.inventoryBatches
+                .filter(
+                  (batch) =>
+                    batch.productId === product.productId &&
+                    batch.locationId === location.locationId &&
+                    batch.daysUntilExpiry >= 0 &&
+                    batch.daysUntilExpiry <=
+                      workspace.optionSettings.expiryAlertLeadDays,
+                )
+                .reduce((sum, batch) => sum + batch.quantityOnHand, 0),
               department: product.department,
               category: product.category,
               locationId: location.locationId,
@@ -2411,6 +2938,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               productCode: product.productCode,
               productName: product.productName,
               isSerialized: product.isSerialized,
+              trackExpiry: product.trackExpiry,
+              minStockLevel: product.minStockLevel,
+              reorderPoint: product.reorderPoint,
+              safetyStockLevel: product.safetyStockLevel,
+              earliestExpiryDate: product.earliestExpiryDate,
+              expiringQuantity: product.expiringQuantity,
               department: product.department,
               category: product.category,
               locationId: "",
@@ -2420,8 +2953,13 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               price: product.price
             }
           ]
-    )
+    );
+  const inventoryBrowserRows = allInventoryBrowserRows
     .filter((row) => {
+      if (inventoryLocationId && row.locationId !== inventoryLocationId) {
+        return false;
+      }
+
       const query = inventoryQuery.trim().toLowerCase();
 
       if (!query) {
@@ -2432,7 +2970,34 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         .toLowerCase()
         .includes(query);
     });
-  const stockAlertRows = inventoryBrowserRows.filter((row) => row.quantityOnHand <= 0);
+  const visibleInventoryBatchRows = workspace.inventoryBatches
+    .filter((batch) => !inventoryLocationId || batch.locationId === inventoryLocationId)
+    .filter((batch) => {
+      const query = inventoryQuery.trim().toLowerCase();
+
+      return !query || `${batch.productName} ${batch.productCode} ${batch.batchNo} ${batch.locationName}`.toLowerCase().includes(query);
+    })
+    .sort((left, right) => left.expiryDate.localeCompare(right.expiryDate));
+  const stockAlertRows = allInventoryBrowserRows
+    .filter((row) => {
+      const alertFloor = getOnlineCriticalStockFloor(row);
+
+      return alertFloor !== null && row.quantityOnHand <= alertFloor;
+    })
+    .sort((left, right) => {
+      const leftShortage = (getOnlineCriticalStockFloor(left) ?? 0) - left.quantityOnHand;
+      const rightShortage = (getOnlineCriticalStockFloor(right) ?? 0) - right.quantityOnHand;
+
+      return rightShortage - leftShortage || left.productName.localeCompare(right.productName);
+    });
+  const startupExpiringBatchRows = workspace.inventoryBatches
+    .filter(
+      (batch) =>
+        batch.quantityOnHand > 0 &&
+        batch.daysUntilExpiry >= 0 &&
+        batch.daysUntilExpiry <= workspace.optionSettings.expiryAlertLeadDays
+    )
+    .sort((left, right) => left.daysUntilExpiry - right.daysUntilExpiry || left.productName.localeCompare(right.productName));
   const openPurchaseOrderCount = workspace.purchaseOrders.filter((order) => order.outstandingQuantity > 0).length;
   const openTransferCount = workspace.transferRequests.filter((transfer) => !["CANCELLED", "RECEIVED", "COMPLETED"].includes(transfer.status)).length;
   const inventoryDocumentSearch = inventoryDocumentQuery.trim().toLowerCase();
@@ -2739,6 +3304,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     basket.length > 0 &&
     loyaltyRedemption.canRedeem &&
     loyaltyRedemption.maxRedeemablePoints > 0;
+  const showPromotionSummary = promotionDiscountAmount > 0;
+  const showLoyaltySummary = Boolean(
+    selectedCustomer?.loyaltyEnrolled &&
+      workspace.loyaltyPolicy.loyaltyRedemptionEnabled,
+  );
   const total = Math.max(0, grossTotal - loyaltyRedemptionAmount);
   const summarySubtotal = calculateReceiptSummarySubtotal({
     totalAmount: total,
@@ -2778,6 +3348,20 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
     return parseAmount(draft.amount) > 0 && Boolean(tender?.requiresReference) && !draft.reference.trim();
   });
+  const isCreatingSalesOrder = saleMode === "SALES_ORDER" && !activeSalesOrder;
+  const salesOrderDepositOver = isCreatingSalesOrder && paymentTotal - total > 0.005;
+  const salesOrderHasInvalidTender =
+    isCreatingSalesOrder &&
+    paymentDrafts.some((draft) => {
+      const amount = parseAmount(draft.amount);
+
+      return (
+        amount > 0 &&
+        !nonCreditTenderMethods.some(
+          (method) => method.tenderMethodCode === draft.tenderMethodCode
+        )
+      );
+    });
   const isTenderShort = amountDue > 0.005;
   const isTenderOverWithoutChange = changeDue > 0.005 && !hasChangeTender;
   const hasOpenShift = activeShift?.status === "OPEN";
@@ -2791,6 +3375,16 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           : storeCreditLimitExceededBy > 0.005
             ? `Store Credit exceeds ${selectedCustomer.fullName}'s remaining limit by ${formatMoney(storeCreditLimitExceededBy, currencyCode)}.`
             : "";
+  const canSaveSalesOrder =
+    isCreatingSalesOrder &&
+    basket.length > 0 &&
+    Boolean(selectedCustomer) &&
+    hasOpenShift &&
+    !isPostingPosAction &&
+    !salesOrderDepositOver &&
+    !salesOrderHasInvalidTender &&
+    !missingBankAccountTender &&
+    !missingReferenceTender;
   const canCheckout =
     basket.length > 0 &&
     hasOpenShift &&
@@ -2833,6 +3427,26 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    if (inventoryStartupAlertCheckedRef.current) {
+      return;
+    }
+
+    inventoryStartupAlertCheckedRef.current = true;
+    const hasLowStockAlerts =
+      workspace.optionSettings.showCriticalStocksOnStartup && stockAlertRows.length > 0;
+    const hasExpiringBatchAlerts =
+      workspace.optionSettings.showExpiringBatchesOnStartup &&
+      startupExpiringBatchRows.length > 0;
+
+    setInventoryStartupAlertOpen(hasLowStockAlerts || hasExpiringBatchAlerts);
+  }, [
+    startupExpiringBatchRows.length,
+    stockAlertRows.length,
+    workspace.optionSettings.showCriticalStocksOnStartup,
+    workspace.optionSettings.showExpiringBatchesOnStartup
+  ]);
 
   useEffect(() => {
     setLocalReceiptLogoUrl(readStoredOnlineReceiptLogoUrl(workspace.store?.code));
@@ -3240,9 +3854,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setSourceTransactionId(null);
     setFulfillingSalesOrderId(null);
     resetTransactionDetails();
-    setSalesOrderDepositAmount("0.00");
-    setSalesOrderDepositTenderCode(defaultTenderCode);
-    setSalesOrderDepositReference("");
     setLoyaltyPointsToRedeem("0");
     setSaleMode("SALE");
     setPaymentDrafts([createPaymentDraft(defaultTenderCode, "0.00")]);
@@ -3320,7 +3931,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       productVariantCode: line.productVariantCode,
       variantSize: line.variantSize,
       variantColor: line.variantColor,
-      lineNote: line.lineNote
+      lineNote: line.lineNote,
+      preferredBatchId: line.preferredBatchId
     }));
   }
 
@@ -3371,7 +3983,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           productVariantLabel: matrixVariant?.displayName ?? matrixVariant?.code ?? null,
           variantSize: line.variantSize ?? null,
           variantColor: line.variantColor ?? null,
-          lineNote: line.lineNote ?? null
+          lineNote: line.lineNote ?? null,
+          preferredBatchId: null
         }
       ];
     });
@@ -3437,10 +4050,43 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       return;
     }
 
+    if (!hasOpenShift) {
+      setCheckoutMessage("Open a shift before saving a sales order.");
+      return;
+    }
+
+    if (paymentTotal > 0.005 && nonCreditTenderMethods.length === 0) {
+      setCheckoutMessage("Configure at least one non-credit tender before taking a sales order deposit.");
+      return;
+    }
+
+    if (salesOrderHasInvalidTender) {
+      setCheckoutMessage("Choose an active non-credit tender for each sales order deposit row.");
+      return;
+    }
+
+    if (salesOrderDepositOver) {
+      setCheckoutMessage("A sales order deposit cannot be greater than the order total.");
+      return;
+    }
+
+    if (missingBankAccountTender) {
+      setCheckoutMessage("Select the bank, branch, and account number for bank-backed deposit tenders.");
+      return;
+    }
+
+    if (missingReferenceTender) {
+      setCheckoutMessage("Enter the required deposit reference before saving the order.");
+      return;
+    }
+
     setIsPostingPosAction(true);
     setCheckoutMessage("Saving sales order...");
 
     try {
+      const payments = paymentPayload(paymentDrafts);
+      const depositAmount = payments.reduce((sum, payment) => sum + payment.amount, 0);
+      const firstPayment = payments[0] ?? null;
       const response = await fetch("/api/online-store/sales-orders", {
         method: "POST",
         headers: {
@@ -3449,9 +4095,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         body: JSON.stringify({
           customerId: selectedCustomer.customerId,
           lines: basketPayload(),
-          depositAmount: parseAmount(salesOrderDepositAmount),
-          depositTenderMethodCode: parseAmount(salesOrderDepositAmount) > 0 ? salesOrderDepositTenderCode : null,
-          depositReference: salesOrderDepositReference.trim() || null,
+          payments,
+          depositAmount,
+          depositTenderMethodCode: depositAmount > 0 ? firstPayment?.tenderMethodCode ?? null : null,
+          depositReference: depositAmount > 0 ? firstPayment?.reference ?? null : null,
           serviceType: transactionServiceType,
           note: transactionNotePayload()
         })
@@ -4258,7 +4905,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     productVariantCode?: string | null,
     variantSize?: string | null,
     variantColor?: string | null,
-    lineNote?: string | null
+    lineNote?: string | null,
+    preferredBatchId?: string | null
   ) {
     if (isRecalledBasket) {
       setCheckoutMessage("Complete or clear the recalled basket before adding new items.");
@@ -4273,9 +4921,14 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         : null;
     const requiresMatrixSelection = product.productType === "MATRIX" && product.matrixVariants.length > 0;
     const requiresTrackedOptionSelection = !requiresMatrixSelection && (product.trackSize || product.trackColor);
-    const requiresLineOptions = product.mustEnterPriceAtPos || requiresMatrixSelection || requiresTrackedOptionSelection;
+    const requiresBatchSelection = product.trackExpiry && saleMode !== "SALES_ORDER";
+    const requiresLineOptions = product.mustEnterPriceAtPos || requiresMatrixSelection || requiresTrackedOptionSelection || requiresBatchSelection;
 
-    if (requiresLineOptions && unitPrice === undefined && !productVariantCode) {
+    if (
+      requiresLineOptions &&
+      unitPrice === undefined &&
+      (!productVariantCode || requiresBatchSelection)
+    ) {
       setOpenPriceDraft({
         product,
         quantity: normalizedQuantity.toFixed(3).replace(/\.?0+$/, ""),
@@ -4284,7 +4937,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         variantSize: "",
         variantColor: "#111827",
         variantSearch: "",
-        lineNote: ""
+        expressChargeSelected: false,
+        expressChargeRate: "",
+        lineNote: "",
+        preferredBatchId: ""
       });
       return;
     }
@@ -4310,6 +4966,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     const normalizedVariantSize = variantSize?.trim() ?? "";
     const normalizedVariantColor = variantColor?.trim() ?? "";
     const normalizedLineNote = lineNote?.trim() ?? "";
+    const normalizedPreferredBatchId = preferredBatchId?.trim() ?? "";
     const matrixVariantLabel = matrixVariant
       ? (matrixVariant.displayName ??
           matrixVariant.attributes.map((attribute) => attribute.valueLabel).join(" / ")) ||
@@ -4328,7 +4985,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           line.productVariantCode === (matrixVariant?.code ?? null) &&
           line.variantSize === (normalizedVariantSize || null) &&
           line.variantColor === (normalizedVariantColor || null) &&
-          line.lineNote === (normalizedLineNote || null)
+          line.lineNote === (normalizedLineNote || null) &&
+          line.preferredBatchId === (normalizedPreferredBatchId || null)
       );
 
       if (currentLine) {
@@ -4337,7 +4995,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           line.productVariantCode === (matrixVariant?.code ?? null) &&
           line.variantSize === (normalizedVariantSize || null) &&
           line.variantColor === (normalizedVariantColor || null) &&
-          line.lineNote === (normalizedLineNote || null)
+          line.lineNote === (normalizedLineNote || null) &&
+          line.preferredBatchId === (normalizedPreferredBatchId || null)
             ? { ...line, quantity: line.quantity + normalizedQuantity, unitPrice: normalizedUnitPrice }
             : line
         );
@@ -4354,10 +5013,13 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
           productVariantLabel: matrixVariantLabel,
           variantSize: normalizedVariantSize || null,
           variantColor: normalizedVariantColor || null,
-          lineNote: normalizedLineNote || null
+          lineNote: normalizedLineNote || null,
+          preferredBatchId: normalizedPreferredBatchId || null
         }
       ];
     });
+    setSearchQuery("");
+    setScanQuantity("1");
   }
 
   function addScannedItem() {
@@ -4402,21 +5064,61 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       return;
     }
 
+    if (openPriceBatchUnavailable) {
+      setCheckoutMessage(
+        `No active, non-expired batch is available for ${openPriceDraft.product.productName}.`
+      );
+      return;
+    }
+
+    if (
+      openPriceDraft.preferredBatchId &&
+      !openPriceAvailableBatches.some(
+        (batch) => batch.batchId === openPriceDraft.preferredBatchId
+      )
+    ) {
+      setCheckoutMessage("The selected batch is no longer available. Choose another batch.");
+      return;
+    }
+
     const draft = openPriceDraft;
     const isMatrixDraft = draft.product.productType === "MATRIX" && draft.product.matrixVariants.length > 0;
     const variantSize = !isMatrixDraft && draft.product.trackSize ? draft.variantSize.trim() || null : null;
     const variantColor = !isMatrixDraft && draft.product.trackColor ? draft.variantColor.trim() || null : null;
-    const lineNote = draft.lineNote.trim() || null;
+    const expressChargeEligible = draft.product.trackSize && draft.product.trackColor;
+    const configuredExpressRate =
+      expressChargeEligible && draft.expressChargeSelected
+        ? resolveConfiguredPosExpressChargeRate(draft.expressChargeRate)
+        : null;
+
+    if (draft.expressChargeSelected && configuredExpressRate === null) {
+      setCheckoutMessage("Choose a configured express charge rate before adding the item.");
+      return;
+    }
+
+    const effectiveUnitPrice =
+      configuredExpressRate === null
+        ? unitPrice
+        : roundMoney(unitPrice * (1 + configuredExpressRate / 100));
+    const expressChargeNote =
+      configuredExpressRate === null
+        ? null
+        : `Express charge ${formatDiscountRate(configuredExpressRate)}%`;
+    const lineNote =
+      [draft.lineNote.trim(), expressChargeNote]
+        .filter((value): value is string => Boolean(value))
+        .join(" | ") || null;
 
     setOpenPriceDraft(null);
     addProduct(
       draft.product,
       quantity,
-      unitPrice,
+      effectiveUnitPrice,
       draft.productVariantCode || null,
       variantSize,
       variantColor,
-      lineNote
+      lineNote,
+      draft.preferredBatchId || null
     );
   }
 
@@ -4776,7 +5478,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             {
               productId: inventoryProductId,
               quantity: Number(receiptQuantity),
-              unitCost: receiptUnitCost ? Number(receiptUnitCost) : null
+              unitCost: receiptUnitCost ? Number(receiptUnitCost) : null,
+              batchNo: selectedInventoryProduct?.trackExpiry ? receiptBatchNo : null,
+              manufacturedAt: selectedInventoryProduct?.trackExpiry ? receiptManufacturedAt || null : null,
+              expiryDate: selectedInventoryProduct?.trackExpiry ? receiptExpiryDate : null
             }
           ]
         })
@@ -4792,6 +5497,9 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       setInventoryMessage(payload.message ?? `Posted ${payload.receiptNo}.`);
       setReceiptQuantity("1");
       setReceiptUnitCost("");
+      setReceiptBatchNo("");
+      setReceiptManufacturedAt("");
+      setReceiptExpiryDate("");
       setReceiptNote("");
       router.refresh();
     } catch (error) {
@@ -4932,7 +5640,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               purchaseOrderLineId: line.purchaseOrderLineId,
               quantity,
               unitCost: line.unitCost,
-              serialNumbers: line.isSerialized ? serialNumbers : []
+              serialNumbers: line.isSerialized ? serialNumbers : [],
+              batchNo: line.trackExpiry ? purchaseOrderReceiptBatchNos[line.purchaseOrderLineId] ?? "" : null,
+              manufacturedAt: line.trackExpiry
+                ? purchaseOrderReceiptManufacturedDates[line.purchaseOrderLineId] || null
+                : null,
+              expiryDate: line.trackExpiry ? purchaseOrderReceiptExpiryDates[line.purchaseOrderLineId] ?? "" : null
             }
           ]
         })
@@ -4950,6 +5663,21 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         [line.purchaseOrderLineId]: Math.max(0, line.outstandingQuantity - quantity).toString()
       }));
       setReceiptNote("");
+      setPurchaseOrderReceiptBatchNos((current) => {
+        const next = { ...current };
+        delete next[line.purchaseOrderLineId];
+        return next;
+      });
+      setPurchaseOrderReceiptManufacturedDates((current) => {
+        const next = { ...current };
+        delete next[line.purchaseOrderLineId];
+        return next;
+      });
+      setPurchaseOrderReceiptExpiryDates((current) => {
+        const next = { ...current };
+        delete next[line.purchaseOrderLineId];
+        return next;
+      });
       setInventoryMessage(payload.message ?? `Posted ${payload.receiptNo}.`);
       setInventorySerialDraft(null);
       router.refresh();
@@ -4962,11 +5690,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
   async function postPurchaseOrderReceiptAll(order: PurchaseOrderSummary) {
     const receivableLines = order.lines.filter(
-      (line) => line.outstandingQuantity > 0 && !line.isSerialized
+      (line) => line.outstandingQuantity > 0 && !line.isSerialized && !line.trackExpiry
     );
 
     if (!receivableLines.length) {
-      setInventoryMessage("This purchase order has no non-serialized outstanding lines to receive all.");
+      setInventoryMessage("This purchase order has no standard outstanding lines to receive all. Serialized and expiry-controlled lines must be received individually.");
       return;
     }
 
@@ -5954,6 +6682,15 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
     try {
       const countLocationId = inventoryLocationId || defaultSalesLocationId || null;
+      const batchCounts = selectedInventoryProduct?.trackExpiry
+        ? selectedCountBatches.map((batch) => ({
+            batchId: batch.batchId,
+            countedQuantity: Number(countedBatchQuantities[batch.batchId] ?? batch.quantityOnHand)
+          }))
+        : [];
+      const effectiveCountedQuantity = selectedInventoryProduct?.trackExpiry
+        ? batchCounts.reduce((sum, batch) => sum + batch.countedQuantity, 0)
+        : Number(countedQuantity);
       const response = await fetch("/api/online-store/stock-counts", {
         method: "POST",
         headers: {
@@ -5962,7 +6699,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         body: JSON.stringify({
           inventoryLocationId: countLocationId,
           productId: inventoryProductId,
-          countedQuantity: Number(countedQuantity),
+          countedQuantity: effectiveCountedQuantity,
+          batchCounts,
           commitNow: false,
           note: countNote
         })
@@ -5978,6 +6716,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       setInventoryMessage(payload.message ?? `Saved ${payload.sessionNo}.`);
       setCountNote("");
       setCountedQuantity("0");
+      setCountedBatchQuantities({});
       router.refresh();
     } catch (error) {
       setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not save the stock count.");
@@ -6159,7 +6898,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
     const isReceiveMode = purchaseOrderDialogMode === "receive";
     const receivableLineCount = order.lines.filter(
-      (line) => line.outstandingQuantity > 0 && !line.isSerialized
+      (line) => line.outstandingQuantity > 0 && !line.isSerialized && !line.trackExpiry
     ).length;
 
     return (
@@ -6191,31 +6930,66 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             <div className="rms-table-head"><span>Item</span><span>Ordered</span><span>Received</span><span>Outstanding</span><span>Receive</span></div>
             {order.lines.map((line) => (
               <div className="rms-table-row" key={line.purchaseOrderLineId}>
-                <div><strong>{line.productName}</strong><small>{line.productCode}{line.isSerialized ? " · Serialized" : ""}</small></div>
+                <div><strong>{line.productName}</strong><small>{line.productCode}{line.isSerialized ? " · Serialized" : ""}{line.trackExpiry ? " · Batch/expiry" : ""}</small></div>
                 <span>{formatNumber.format(line.orderedQuantity)}</span>
                 <span>{formatNumber.format(line.receivedQuantity)}</span>
                 <strong>{formatNumber.format(line.outstandingQuantity)}</strong>
                 {isReceiveMode && line.outstandingQuantity > 0 ? (
-                  line.isSerialized ? (
-                    <button className="rms-row-button" disabled={isPostingInventory} onClick={() => openPurchaseOrderSerialReceipt(order, line)} type="button">Serials</button>
-                  ) : (
-                    <div className="rms-receive-cell">
-                      <input
-                        aria-label={`Receive quantity for ${line.productName}`}
-                        min="0.001"
-                        onChange={(event) =>
-                          setPurchaseOrderReceiptQuantities((current) => ({
-                            ...current,
-                            [line.purchaseOrderLineId]: event.target.value
-                          }))
-                        }
-                        step="0.001"
-                        type="number"
-                        value={purchaseOrderReceiptQuantities[line.purchaseOrderLineId] ?? String(line.outstandingQuantity)}
-                      />
-                      <button className="rms-row-button" disabled={isPostingInventory} onClick={() => void postPurchaseOrderReceipt(order, line)} type="button">Save</button>
-                    </div>
-                  )
+                  <div className={line.trackExpiry ? "rms-expiry-receive-cell" : "rms-receive-cell"}>
+                    {line.trackExpiry ? (
+                      <>
+                        <label className="rms-receive-field">
+                          <span>Batch number</span>
+                          <input
+                            aria-label={`Batch number for ${line.productName}`}
+                            onChange={(event) => setPurchaseOrderReceiptBatchNos((current) => ({ ...current, [line.purchaseOrderLineId]: event.target.value }))}
+                            value={purchaseOrderReceiptBatchNos[line.purchaseOrderLineId] ?? ""}
+                          />
+                        </label>
+                        <label className="rms-receive-field">
+                          <span>Manufactured date</span>
+                          <input
+                            aria-label={`Manufactured date for ${line.productName}`}
+                            onChange={(event) => setPurchaseOrderReceiptManufacturedDates((current) => ({ ...current, [line.purchaseOrderLineId]: event.target.value }))}
+                            type="date"
+                            value={purchaseOrderReceiptManufacturedDates[line.purchaseOrderLineId] ?? ""}
+                          />
+                        </label>
+                        <label className="rms-receive-field">
+                          <span>Expiry date</span>
+                          <input
+                            aria-label={`Expiry date for ${line.productName}`}
+                            onChange={(event) => setPurchaseOrderReceiptExpiryDates((current) => ({ ...current, [line.purchaseOrderLineId]: event.target.value }))}
+                            type="date"
+                            value={purchaseOrderReceiptExpiryDates[line.purchaseOrderLineId] ?? ""}
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                    {line.isSerialized ? (
+                      <button className="rms-row-button" disabled={isPostingInventory} onClick={() => openPurchaseOrderSerialReceipt(order, line)} type="button">Serials</button>
+                    ) : (
+                      <>
+                      <label className="rms-receive-field">
+                        <span>Quantity to receive</span>
+                        <input
+                          aria-label={`Receive quantity for ${line.productName}`}
+                          min="0.001"
+                          onChange={(event) =>
+                            setPurchaseOrderReceiptQuantities((current) => ({
+                              ...current,
+                              [line.purchaseOrderLineId]: event.target.value
+                            }))
+                          }
+                          step="0.001"
+                          type="number"
+                          value={purchaseOrderReceiptQuantities[line.purchaseOrderLineId] ?? String(line.outstandingQuantity)}
+                        />
+                      </label>
+                      <button className="rms-row-button rms-receive-action" disabled={isPostingInventory} onClick={() => void postPurchaseOrderReceipt(order, line)} type="button">Receive</button>
+                      </>
+                    )}
+                  </div>
                 ) : (
                   <span>{line.outstandingQuantity > 0 ? `${formatNumber.format(line.outstandingQuantity)} pending` : "Done"}</span>
                 )}
@@ -6249,13 +7023,13 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             <DocumentStat label="Lines" value={formatNumber.format(selectedGoodsReceipt.lineCount)} />
           </div>
           <div className="rms-table rms-document-line-table rms-grn-document-line-table">
-            <div className="rms-table-head"><span>Item</span><span>Qty</span><span>Unit cost</span><span>Serials</span><span>Status</span></div>
+            <div className="rms-table-head"><span>Item</span><span>Qty</span><span>Unit cost</span><span>Traceability</span><span>Status</span></div>
             {selectedGoodsReceipt.lines.map((line) => (
               <div className="rms-table-row" key={line.goodsReceiptLineId}>
                 <div><strong>{line.productName}</strong><small>{line.productCode}</small></div>
                 <strong>{formatNumber.format(line.quantity)}</strong>
                 <span>{line.unitCost === null ? "-" : formatMoney(line.unitCost, currencyCode)}</span>
-                <span>{line.serialNumbers.length ? `${formatNumber.format(line.serialNumbers.length)} serial(s)` : "None"}</span>
+                <span>{line.batchNo ? `${line.batchNo} · exp ${new Date(line.expiryDate ?? "").toLocaleDateString("en-GB")}` : line.serialNumbers.length ? `${formatNumber.format(line.serialNumbers.length)} serial(s)` : "None"}</span>
                 <StatusPill tone="good">Posted</StatusPill>
               </div>
             ))}
@@ -6376,7 +7150,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
               return (
                 <div className="rms-table-row" key={transfer.transferId}>
-                  <div><strong>{transfer.productName}</strong><small>{transfer.productCode}</small></div>
+                  <div><strong>{transfer.productName}</strong><small>{transfer.productCode}{transfer.trackExpiry ? ` · ${transfer.issuedBatchAllocations.length} batch allocation(s)` : ""}</small></div>
                   <div><strong>{transfer.sourceLocationName}</strong><small>{transfer.destinationLocationName}</small></div>
                   <strong>{formatNumber.format(transfer.requestedQuantity)}</strong>
                   <span>{formatNumber.format(transfer.issuedQuantity)}</span>
@@ -7162,13 +7936,16 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   const variantLabel = [line.productVariantLabel, line.variantSize, line.variantColor, line.lineNote ? `Note ${line.lineNote}` : null].filter(Boolean).join(" · ");
                   const lineKey = basketLineKey(line);
                   const configuredDiscountRate = resolveConfiguredPosDiscountRate(line.configuredDiscountRate);
+                  const preferredBatch = line.preferredBatchId
+                    ? workspace.inventoryBatches.find((batch) => batch.batchId === line.preferredBatchId) ?? null
+                    : null;
 
                   return (
                     <div className="rms-table-row" key={lineKey}>
-                      <strong>{index + 1}</strong>
-                      <div>
+                      <strong className="rms-cart-index">{index + 1}</strong>
+                      <div className="rms-cart-item">
                         <strong>{line.product.productName}</strong>
-                        <small>{line.product.productCode}{variantLabel ? ` · ${variantLabel}` : ""}{promotionLabel ? ` · ${promotionLabel}` : ""}</small>
+                        <small>{line.product.productCode}{variantLabel ? ` · ${variantLabel}` : ""}{preferredBatch ? ` · Batch ${preferredBatch.batchNo}` : line.product.trackExpiry ? " · Batch FEFO" : ""}{promotionLabel ? ` · ${promotionLabel}` : ""}</small>
                         <label className="rms-pos-discount-select is-line">
                           <span>Disc</span>
                           <select
@@ -7210,8 +7987,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                         type="number"
                         value={line.quantity}
                       />
-                      <span>{formatMoney(line.unitPrice, currencyCode)}</span>
-                      <strong>{formatMoney(lineTotal, currencyCode)}</strong>
+                      <span className="rms-cart-price">{formatMoney(line.unitPrice, currencyCode)}</span>
+                      <strong className="rms-cart-total">{formatMoney(lineTotal, currencyCode)}</strong>
                       <button
                         aria-label={`Remove ${line.product.productName}`}
                         className="rms-icon-button is-danger"
@@ -7225,58 +8002,126 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   );
                 })}
               </div>
+              <div className="rms-checkout-dock">
               <div className="rms-total-strip is-sale-totals">
                 <div className="rms-stat"><span>Subtotal</span><strong>{formatMoney(summarySubtotal, currencyCode)}</strong></div>
                 <div className="rms-stat"><span>Discount</span><strong>{promotionDiscountAmount > 0 ? `-${formatMoney(promotionDiscountAmount, currencyCode)}` : formatMoney(0, currencyCode)}</strong></div>
                 <div className="rms-stat"><span>Tax</span><strong>{formatMoney(taxAmount, currencyCode)}</strong></div>
                 <div className="rms-stat is-good"><span>Total</span><strong>{formatMoney(total, currencyCode)}</strong></div>
               </div>
-              <div className="rms-loyalty-strip">
-                <div>
-                  <span>Promotions</span>
-                  {promotionDiscountAmount > 0 ? <strong>-{formatMoney(promotionDiscountAmount, currencyCode)}</strong> : null}
+              {showPromotionSummary || showLoyaltySummary ? (
+                <div className={`rms-loyalty-strip${showPromotionSummary && !showLoyaltySummary ? " is-promotions-only" : !showPromotionSummary && showLoyaltySummary ? " is-loyalty-only" : ""}`}>
+                  {showPromotionSummary ? (
+                    <div>
+                      <span>Promotions</span>
+                      <strong>-{formatMoney(promotionDiscountAmount, currencyCode)}</strong>
+                    </div>
+                  ) : null}
+                  {showLoyaltySummary ? (
+                    <>
+                      <div>
+                        <span>Loyalty</span>
+                        <strong>{formatNumber.format(selectedCustomer?.loyaltyPointsBalance ?? 0)} pts{loyaltyRedemptionAmount > 0 ? ` · -${formatMoney(loyaltyRedemptionAmount, currencyCode)}` : ""}</strong>
+                      </div>
+                      <input
+                        aria-label="Loyalty points to redeem"
+                        disabled={isRecalledBasket || !basket.length}
+                        min="0"
+                        onChange={(event) => setLoyaltyPointsToRedeem(event.target.value)}
+                        step={workspace.loyaltyPolicy.loyaltyRedemptionPointsStep}
+                        type="number"
+                        value={loyaltyPointsToRedeem}
+                      />
+                      <button
+                        className="rms-row-button"
+                        disabled={isRecalledBasket || !canApplyMaxLoyaltyRedemption}
+                        onClick={() => setLoyaltyPointsToRedeem(String(loyaltyRedemption.maxRedeemablePoints))}
+                        type="button"
+                      >
+                        Redeem
+                      </button>
+                      <button className="rms-row-button" disabled={isRecalledBasket || requestedLoyaltyPoints <= 0} onClick={() => setLoyaltyPointsToRedeem("0")} type="button">Clear</button>
+                    </>
+                  ) : null}
                 </div>
-                <div>
-                  <span>Loyalty</span>
-                  {loyaltyRedemptionAmount > 0 ? <strong>-{formatMoney(loyaltyRedemptionAmount, currencyCode)}</strong> : null}
-                </div>
-                <input
-                  aria-label="Loyalty points to redeem"
-                  disabled={isRecalledBasket || !selectedCustomer || !basket.length}
-                  min="0"
-                  onChange={(event) => setLoyaltyPointsToRedeem(event.target.value)}
-                  step={workspace.loyaltyPolicy.loyaltyRedemptionPointsStep}
-                  type="number"
-                  value={loyaltyPointsToRedeem}
-                />
-                <button
-                  className="rms-row-button"
-                  disabled={isRecalledBasket || !canApplyMaxLoyaltyRedemption}
-                  onClick={() => setLoyaltyPointsToRedeem(String(loyaltyRedemption.maxRedeemablePoints))}
-                  type="button"
-                >
-                  Redeem
-                </button>
-                <button className="rms-row-button" disabled={isRecalledBasket || requestedLoyaltyPoints <= 0} onClick={() => setLoyaltyPointsToRedeem("0")} type="button">Clear</button>
-              </div>
+              ) : null}
               {saleMode === "SALES_ORDER" && !activeSalesOrder ? (
                 <div className="rms-payment-panel is-order-mode">
+                  <div className="rms-payment-toolbar">
+                    <div>
+                      <strong>Deposit payments</strong>
+                      <span>
+                        {nonCreditTenderMethods.length
+                          ? "Add one or more payment methods for this sales order."
+                          : "No non-credit tender methods have synced for deposits."}
+                      </span>
+                    </div>
+                    <button
+                      className="rms-row-button is-add"
+                      disabled={isPostingPosAction || nonCreditTenderMethods.length === 0}
+                      onClick={() => addPaymentDraft(setPaymentDrafts)}
+                      type="button"
+                    >
+                      Add payment
+                    </button>
+                  </div>
                   <div className="rms-payment-summary">
-                    <strong>{formatMoney(total, currencyCode)}</strong>
+                    <strong>{formatMoney(paymentTotal, currencyCode)}</strong>
                     <span>
                       {selectedCustomer ? `Order customer ${selectedCustomer.fullName}` : "Attach a customer before saving the order"}
                       {" · "}
-                      Balance {formatMoney(Math.max(0, total - parseAmount(salesOrderDepositAmount)), currencyCode)}
+                      Balance {formatMoney(Math.max(0, total - paymentTotal), currencyCode)}
                     </span>
-                    <button className="rms-button is-primary" disabled={isPostingPosAction || !basket.length || !selectedCustomer} onClick={() => void saveSalesOrder()} type="button">Save order</button>
+                    <button className="rms-button is-primary" disabled={!canSaveSalesOrder} onClick={() => void saveSalesOrder()} type="button">Save order</button>
                   </div>
-                  <div className="rms-payment-row">
-                    <select onChange={(event) => setSalesOrderDepositTenderCode(event.target.value)} value={salesOrderDepositTenderCode}>
-                      {nonCreditTenderMethods.map((method) => <option key={method.tenderMethodCode} value={method.tenderMethodCode}>{method.tenderMethodName}</option>)}
-                    </select>
-                    <input min="0" onChange={(event) => setSalesOrderDepositAmount(event.target.value)} step="0.01" type="number" value={salesOrderDepositAmount} />
-                    <input onChange={(event) => setSalesOrderDepositReference(event.target.value)} placeholder="Deposit reference" value={salesOrderDepositReference} />
-                  </div>
+                  {paymentDrafts.map((draft, index) => {
+                    const tender = tenderForDraft(draft);
+                    return (
+                      <div className="rms-payment-row" key={draft.id}>
+                        <select
+                          onChange={(event) => updatePaymentDraft(setPaymentDrafts, draft.id, { tenderMethodCode: event.target.value, bankAccountId: "" })}
+                          value={draft.tenderMethodCode}
+                        >
+                          {nonCreditTenderMethods.length ? (
+                            nonCreditTenderMethods.map((method) => (
+                              <option key={method.tenderMethodCode} value={method.tenderMethodCode}>{method.tenderMethodName}</option>
+                            ))
+                          ) : (
+                            <option value="">No non-credit tenders</option>
+                          )}
+                        </select>
+                        <select
+                          disabled={!tender?.requiresBankAccount}
+                          onChange={(event) => updatePaymentDraft(setPaymentDrafts, draft.id, { bankAccountId: event.target.value })}
+                          value={draft.bankAccountId}
+                        >
+                          <option value="">Bank account</option>
+                          {workspace.bankAccounts.map((account) => (
+                            <option key={account.bankAccountId} value={account.bankAccountId}>{account.bankName} · {account.accountNumber}</option>
+                          ))}
+                        </select>
+                        <input
+                          min="0"
+                          onChange={(event) => updatePaymentDraft(setPaymentDrafts, draft.id, { amount: event.target.value })}
+                          step="0.01"
+                          type="number"
+                          value={draft.amount}
+                        />
+                        <input
+                          onChange={(event) => updatePaymentDraft(setPaymentDrafts, draft.id, { reference: event.target.value })}
+                          placeholder={tender?.requiresReference ? "Deposit reference required" : "Deposit reference"}
+                          value={draft.reference}
+                        />
+                        <button aria-label={`Remove payment ${index + 1}`} className="rms-icon-button is-danger rms-payment-remove-button" onClick={() => removePaymentDraft(setPaymentDrafts, draft.id)} title="Remove payment" type="button"><TrashIcon /></button>
+                      </div>
+                    );
+                  })}
+                  {salesOrderDepositOver ? <p className="rms-inline-message">Sales order deposits cannot be greater than the order total.</p> : null}
+                  {!nonCreditTenderMethods.length ? <p className="rms-inline-message">Sync at least one active non-credit tender from HQ before adding sales order deposits.</p> : null}
+                  {salesOrderHasInvalidTender ? <p className="rms-inline-message">Choose an active non-credit tender for each deposit row.</p> : null}
+                  {missingBankAccountTender ? <p className="rms-inline-message">Select the bank, branch, and account number for bank-backed deposit tenders.</p> : null}
+                  {missingReferenceTender ? <p className="rms-inline-message">Enter the required deposit reference before saving the order.</p> : null}
+                  {!hasOpenShift ? <p className="rms-inline-message">Open a shift before saving sales orders.</p> : null}
                 </div>
               ) : (
               <div className="rms-payment-panel">
@@ -7285,7 +8130,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                   <span>{activeSalesOrder ? `Deposit ${formatMoney(activeSalesOrder.depositAmount, currencyCode)} · ` : ""}Due {formatMoney(amountDue, currencyCode)} · Change {formatMoney(changeDue, currencyCode)}</span>
                   <button className="rms-row-button is-add" onClick={() => addPaymentDraft(setPaymentDrafts)} type="button">Add</button>
                 </div>
-                {paymentDrafts.map((draft) => {
+                {paymentDrafts.map((draft, index) => {
                   const tender = tenderForDraft(draft);
                   return (
                     <div className="rms-payment-row" key={draft.id}>
@@ -7325,7 +8170,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                         placeholder={tender?.requiresReference ? "Reference required" : "Reference"}
                         value={draft.reference}
                       />
-                      <button className="rms-row-button" onClick={() => removePaymentDraft(setPaymentDrafts, draft.id)} type="button">Remove</button>
+                      <button aria-label={`Remove payment ${index + 1}`} className="rms-icon-button is-danger rms-payment-remove-button" onClick={() => removePaymentDraft(setPaymentDrafts, draft.id)} title="Remove payment" type="button"><TrashIcon /></button>
                     </div>
                   );
                 })}
@@ -7345,6 +8190,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               </div>
               )}
               {checkoutMessage ? <p className="rms-inline-message">{checkoutMessage}</p> : null}
+              </div>
             </section>
             <section className="rms-panel rms-product-panel">
               <div className="rms-panel-title"><span>Products</span><h2>Catalog</h2><button className="rms-button" onClick={() => router.refresh()} type="button">Refresh</button></div>
@@ -7384,7 +8230,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               <button className="rms-action-button is-clear" disabled={!hasSaleScreenState} onClick={clearSaleScreen} type="button">{activeSalesOrder ? "Exit fulfilment" : "Clear screen"}</button>
               <button className="rms-action-button is-hold" disabled={isPostingPosAction || isRecalledBasket || !hasOpenShift || !basket.length} onClick={() => void holdSale()} type="button">Hold sale</button>
               <button className="rms-action-button is-details" disabled={isRecalledBasket} onClick={() => setActiveDrawer("details")} type="button">Details</button>
-              <button className="rms-action-button is-save-order" disabled={isPostingPosAction || isRecalledBasket || !hasOpenShift || !basket.length || !selectedCustomer} onClick={() => void saveSalesOrder()} type="button">Save order</button>
               <button className="rms-action-button is-pending-orders" onClick={() => setActiveDrawer("orders")} type="button">Pending orders</button>
               <button className="rms-action-button is-account-pay" disabled={!hasOpenShift || !workspace.tenderMethods.length} onClick={() => setActiveDrawer("account")} type="button">Account pay</button>
               <button className="rms-action-button is-recall" disabled={!heldSales.length} onClick={() => setActiveDrawer("held")} type="button">Recall held</button>
@@ -7765,9 +8610,9 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
         {openPriceDraft ? (
           <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-            <section className="rms-dialog">
+            <section className={`rms-dialog rms-item-dialog${openPriceDraft.product.trackExpiry ? " is-batch-selection" : ""}`}>
               <div className="rms-panel-title">
-                <div><span>Open price</span><h2>{openPriceDraft.product.productName}</h2></div>
+                <div><span>{openPriceDraft.product.trackExpiry ? "Choose stock batch" : "Item details"}</span><h2>{openPriceDraft.product.productName}</h2></div>
                 <button className="rms-button" onClick={() => setOpenPriceDraft(null)} type="button">Close</button>
               </div>
               <div className="rms-manager-form">
@@ -7800,6 +8645,57 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 {!openPriceIsMatrix && openPriceDraft.product.trackColor ? (
                   <label><span>Colour</span><input aria-label="Colour" onChange={(event) => setOpenPriceDraft((draft) => draft ? { ...draft, variantColor: event.target.value } : draft)} type="color" value={openPriceDraft.variantColor || "#111827"} /></label>
                 ) : null}
+                {openPriceExpressEligible ? (
+                  <div className="rms-field-wide rms-express-charge-field">
+                    <label className="rms-express-toggle">
+                      <input
+                        checked={openPriceDraft.expressChargeSelected}
+                        disabled={configuredPosExpressChargeRates.length === 0}
+                        onChange={(event) =>
+                          setOpenPriceDraft((draft) =>
+                            draft
+                              ? {
+                                  ...draft,
+                                  expressChargeSelected: event.target.checked,
+                                  expressChargeRate: event.target.checked
+                                    ? draft.expressChargeRate ||
+                                      configuredPosExpressChargeRates[0]?.toFixed(2) ||
+                                      ""
+                                    : ""
+                                }
+                              : draft
+                          )
+                        }
+                        type="checkbox"
+                      />
+                      <span>Express</span>
+                    </label>
+                    {openPriceDraft.expressChargeSelected ? (
+                      <label>
+                        <span>Express rate</span>
+                        <select
+                          disabled={configuredPosExpressChargeRates.length === 0}
+                          onChange={(event) =>
+                            setOpenPriceDraft((draft) =>
+                              draft ? { ...draft, expressChargeRate: event.target.value } : draft
+                            )
+                          }
+                          value={openPriceDraft.expressChargeRate}
+                        >
+                          <option value="">Select rate</option>
+                          {configuredPosExpressChargeRates.map((rate) => (
+                            <option key={rate.toFixed(2)} value={rate.toFixed(2)}>
+                              {formatDiscountRate(rate)}%
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {configuredPosExpressChargeRates.length === 0 ? (
+                      <small>No express charge rates are configured in HQ.</small>
+                    ) : null}
+                  </div>
+                ) : null}
                 <label><span>Unit price</span><input autoFocus min="0.01" onChange={(event) => setOpenPriceDraft((draft) => draft ? { ...draft, unitPrice: event.target.value } : draft)} onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
@@ -7808,9 +8704,31 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                 }} placeholder="0.00" step="0.01" type="number" value={openPriceDraft.unitPrice} /></label>
                 <label className="rms-field-wide"><span>Item note</span><textarea onChange={(event) => setOpenPriceDraft((draft) => draft ? { ...draft, lineNote: event.target.value } : draft)} placeholder="Alteration, pickup note, serial remark" rows={3} value={openPriceDraft.lineNote} /></label>
               </div>
+              {openPriceDraft.product.trackExpiry && saleMode !== "SALES_ORDER" ? (
+                <div className="rms-batch-picker">
+                  <div className="rms-batch-picker-title">
+                    <div><strong>Stock batch</strong><span>Automatic FEFO uses the earliest valid expiry. Choose a batch to use it first.</span></div>
+                    <small>{formatNumber.format(openPriceAvailableBatches.length)} batch(es)</small>
+                  </div>
+                  <div className="rms-batch-choice-grid">
+                    <label className={`rms-batch-choice${!openPriceDraft.preferredBatchId ? " is-selected" : ""}`}>
+                      <input checked={!openPriceDraft.preferredBatchId} name="online-preferred-batch" onChange={() => setOpenPriceDraft((draft) => draft ? { ...draft, preferredBatchId: "" } : draft)} type="radio" />
+                      <div><strong>Automatic FEFO</strong><span>Earliest valid expiry first</span></div>
+                    </label>
+                    {openPriceAvailableBatches.map((batch) => (
+                      <label className={`rms-batch-choice${openPriceDraft.preferredBatchId === batch.batchId ? " is-selected" : ""}`} key={batch.batchId}>
+                        <input checked={openPriceDraft.preferredBatchId === batch.batchId} name="online-preferred-batch" onChange={() => setOpenPriceDraft((draft) => draft ? { ...draft, preferredBatchId: batch.batchId } : draft)} type="radio" />
+                        <div><strong>{batch.batchNo}</strong><span>Expires {new Date(batch.expiryDate).toLocaleDateString("en-GB")}</span></div>
+                        <small>{formatNumber.format(batch.quantityOnHand)} available</small>
+                      </label>
+                    ))}
+                  </div>
+                  {openPriceBatchUnavailable ? <small className="rms-inline-message">No active, non-expired batch is available for this item.</small> : null}
+                </div>
+              ) : null}
               <div className="rms-dialog-actions">
                 <button className="rms-button" onClick={() => setOpenPriceDraft(null)} type="button">Cancel</button>
-                <button className="rms-button is-primary" onClick={submitOpenPriceDraft} type="button">Add item</button>
+                <button className="rms-button is-primary" disabled={openPriceBatchUnavailable} onClick={submitOpenPriceDraft} type="button">Add item</button>
               </div>
             </section>
           </div>
@@ -7870,6 +8788,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               )}
               {inventoryTab === "stock" ? (
                 <>
+                  <div className="rms-workspace-tabs rms-inventory-subtabs" role="tablist" aria-label="Stock views">
+                    <button className={activeStockSection === "inventory-browser" ? "is-active" : ""} onClick={() => setActiveStockSection("inventory-browser")} role="tab" type="button">Inventory browser</button>
+                    <button className={activeStockSection === "batch-register" ? "is-active" : ""} onClick={() => setActiveStockSection("batch-register")} role="tab" type="button">Batch register</button>
+                  </div>
                   <div className="rms-filter-row">
                     <input onChange={(event) => setInventoryQuery(event.target.value)} placeholder="Product, barcode, category" value={inventoryQuery} />
                     <select onChange={(event) => setInventoryLocationId(event.target.value)} value={inventoryLocationId}>
@@ -7879,22 +8801,56 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                       ))}
                     </select>
                   </div>
-                  <div className="rms-table rms-inventory-table">
-                    <div className="rms-table-head"><span>Product</span><span>Location</span><span>On hand</span><span>Price</span></div>
+                  {activeStockSection === "inventory-browser" ? (
+                  <div className="rms-table rms-inventory-table rms-stock-section-grid">
+                    <div className="rms-table-head"><span>Product</span><span>Location</span><span>On hand</span><span>Expiry</span><span>Price</span></div>
                     {inventoryBrowserRows.map((row) => (
                       <div className="rms-table-row" key={`${row.productId}:${row.locationId}`}>
-                        <strong>{row.productName}<small>{row.productCode}</small></strong>
+                        <strong>{row.productName}<small>{row.productCode}{row.trackExpiry ? " · Batch controlled" : ""}</small></strong>
                         <span>{row.locationName}</span>
                         <b className={row.quantityOnHand <= 0 ? "is-empty-stock" : ""}>{formatNumber.format(row.quantityOnHand)}</b>
+                        <span>{row.trackExpiry ? row.earliestExpiryDate ? `${new Date(row.earliestExpiryDate).toLocaleDateString("en-GB")}${row.expiringQuantity > 0 ? ` · ${formatNumber.format(row.expiringQuantity)} soon` : ""}` : "No active batch" : "-"}</span>
                         <span>{formatMoney(row.price, currencyCode)}</span>
                       </div>
                     ))}
                     {!inventoryBrowserRows.length ? <div className="rms-empty-catalog">No inventory-managed items match the current filters.</div> : null}
                   </div>
+                  ) : null}
+                  {activeStockSection === "batch-register" ? (
+                      <div className="rms-table rms-inventory-batch-table rms-stock-section-grid">
+                        <div className="rms-table-head"><span>Product</span><span>Batch</span><span>Location</span><span>Expiry</span><span>Qty</span><span>Status</span></div>
+                        {visibleInventoryBatchRows.map((batch) => (
+                            <div className="rms-table-row" key={batch.batchId}>
+                              <div><strong>{batch.productName}</strong><small>{batch.productCode}</small></div>
+                              <strong>{batch.batchNo}</strong>
+                              <span>{batch.locationName}</span>
+                              <span>{new Date(batch.expiryDate).toLocaleDateString("en-GB")}</span>
+                              <strong>{formatNumber.format(batch.quantityOnHand)}</strong>
+                              <StatusPill tone={batch.daysUntilExpiry <= workspace.optionSettings.expiryAlertLeadDays ? "warning" : "good"}>{batch.daysUntilExpiry < 0 ? "Expired" : batch.daysUntilExpiry === 0 ? "Expires today" : `${batch.daysUntilExpiry} days`}</StatusPill>
+                            </div>
+                          ))}
+                        {!visibleInventoryBatchRows.length ? <EmptyState title="No active batches" detail="No batch or expiry records match the current filters." /> : null}
+                      </div>
+                  ) : null}
                 </>
               ) : null}
               {inventoryTab === "receiving" ? (
                 <div className="rms-inventory-execution">
+                  <div className="rms-panel-title">
+                    <div><span>Inventory execution</span><h2>Receiving</h2></div>
+                    <button className="rms-button" onClick={() => router.refresh()} type="button">Refresh</button>
+                  </div>
+                  <div className="rms-workspace-tabs rms-inventory-subtabs rms-receiving-subtabs" role="tablist" aria-label="Receiving views">
+                    <button className={activeReceivingSection === "purchase-orders" ? "is-active" : ""} onClick={() => setActiveReceivingSection("purchase-orders")} role="tab" type="button">Purchase orders</button>
+                    <button className={activeReceivingSection === "goods-receipts" ? "is-active" : ""} onClick={() => setActiveReceivingSection("goods-receipts")} role="tab" type="button">Goods receipts</button>
+                    <button className={activeReceivingSection === "supplier-returns" ? "is-active" : ""} onClick={() => setActiveReceivingSection("supplier-returns")} role="tab" type="button">Supplier returns</button>
+                  </div>
+                  <div className="rms-filter-row rms-receiving-filter">
+                    <input onChange={(event) => setInventoryDocumentQuery(event.target.value)} placeholder="PO, GRN, supplier, location, product" value={inventoryDocumentQuery} />
+                    <StatusPill>{`${purchaseOrderRows.length} PO · ${goodsReceiptRows.length} GRN · ${supplierReturnRows.length} return(s)`}</StatusPill>
+                  </div>
+                  {activeReceivingSection === "purchase-orders" ? (
+                  <div className="rms-receiving-section">
                   <div className="rms-panel-title">
                     <div><span>Receiving</span><h2>Purchase orders</h2></div>
                     <div className="rms-dialog-button-row">
@@ -7906,7 +8862,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                       >
                         Create PO
                       </button>
-                      <button className="rms-button" onClick={() => router.refresh()} type="button">Refresh</button>
                     </div>
                   </div>
                   {purchaseOrderCreateDialogOpen ? (
@@ -7982,10 +8937,6 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                       </section>
                     </div>
                   ) : null}
-                  <div className="rms-filter-row">
-                    <input onChange={(event) => setInventoryDocumentQuery(event.target.value)} placeholder="PO, GRN, supplier, location, product" value={inventoryDocumentQuery} />
-                    <StatusPill>{`${purchaseOrderRows.length} PO · ${goodsReceiptRows.length} GRN`}</StatusPill>
-                  </div>
                   <div className="rms-table rms-receiving-header-table">
                     <div className="rms-table-head"><span>Purchase order</span><span>Supplier</span><span>Location</span><span>Outstanding</span><span>Status</span><span>View</span><span>Receive</span></div>
                     {purchaseOrderRows.map((order) => (
@@ -8010,6 +8961,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                     ))}
                     {!purchaseOrderRows.length ? <EmptyState title="No purchase orders" detail="No purchase orders match the current receiving filter." /> : null}
                   </div>
+                  </div>
+                  ) : null}
+                  {activeReceivingSection === "goods-receipts" ? (
+                  <div className="rms-receiving-section">
                   <div className="rms-panel-title rms-subsection-title">
                     <div><span>Goods receipt</span><h2>Recent GRNs</h2></div>
                   </div>
@@ -8031,6 +8986,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                     ))}
                     {!goodsReceiptRows.length ? <EmptyState title="No recent GRNs" detail="Posted browser GRNs will appear here." /> : null}
                   </div>
+                  </div>
+                  ) : null}
+                  {activeReceivingSection === "supplier-returns" ? (
+                  <div className="rms-receiving-section">
                   <div className="rms-panel-title rms-subsection-title">
                     <div><span>Supplier return</span><h2>Return against GRN</h2></div>
                   </div>
@@ -8059,6 +9018,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                     ))}
                     {!supplierReturnRows.length ? <EmptyState title="No supplier returns" detail="Post a return from a received GRN line." /> : null}
                   </div>
+                  </div>
+                  ) : null}
                 </div>
               ) : null}
               {inventoryTab === "transfers" ? (
@@ -8235,7 +9196,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                         <div className="rms-form-grid rms-count-line-entry">
                           <label><span>Product</span><select onChange={(event) => setInventoryProductId(event.target.value)} value={inventoryProductId}><option value="">Select item</option>{workspace.inventoryProducts.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {product.productCode}</option>)}</select></label>
                           <label><span>System qty</span><input readOnly value={selectedInventoryRow?.quantityOnHand.toFixed(3) ?? selectedInventoryProduct?.quantityOnHand.toFixed(3) ?? "0.000"} /></label>
-                          <label><span>Counted qty</span><input min="0" onChange={(event) => setCountedQuantity(event.target.value)} step="0.001" type="number" value={countedQuantity} /></label>
+                          <label><span>Counted qty</span><input min="0" onChange={(event) => setCountedQuantity(event.target.value)} readOnly={selectedInventoryProduct?.trackExpiry} step="0.001" type="number" value={selectedInventoryProduct?.trackExpiry ? selectedCountBatches.reduce((sum, batch) => sum + Number(countedBatchQuantities[batch.batchId] ?? batch.quantityOnHand), 0).toFixed(3) : countedQuantity} /></label>
                           <button className="rms-button is-primary" disabled={isPostingInventory} onClick={() => void postStockCount()} type="button">{isPostingInventory ? "Saving..." : "Save line"}</button>
                           <button className="rms-button" onClick={exportCountSheet} type="button">Export sheet</button>
                           <label className="rms-row-button rms-file-button">
@@ -8243,6 +9204,29 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                             <input accept=".csv,text/csv" onChange={(event) => void importCountSheet(event.currentTarget.files?.[0] ?? null)} type="file" />
                           </label>
                         </div>
+                        {selectedInventoryProduct?.trackExpiry ? (
+                          <div className="rms-table rms-inventory-batch-table">
+                            <div className="rms-table-head"><span>Product</span><span>Batch</span><span>Location</span><span>Expiry</span><span>System</span><span>Counted</span></div>
+                            {selectedCountBatches.map((batch) => (
+                              <div className="rms-table-row" key={batch.batchId}>
+                                <div><strong>{batch.productName}</strong><small>{batch.productCode}</small></div>
+                                <strong>{batch.batchNo}</strong>
+                                <span>{batch.locationName}</span>
+                                <span>{new Date(batch.expiryDate).toLocaleDateString("en-GB")}</span>
+                                <strong>{formatNumber.format(batch.quantityOnHand)}</strong>
+                                <input
+                                  aria-label={`Counted quantity for batch ${batch.batchNo}`}
+                                  min="0"
+                                  onChange={(event) => setCountedBatchQuantities((current) => ({ ...current, [batch.batchId]: event.target.value }))}
+                                  step="0.001"
+                                  type="number"
+                                  value={countedBatchQuantities[batch.batchId] ?? String(batch.quantityOnHand)}
+                                />
+                              </div>
+                            ))}
+                            {!selectedCountBatches.length ? <EmptyState title="No batch stock" detail="Receive a valid batch before counting positive stock." /> : null}
+                          </div>
+                        ) : null}
                         <div className="rms-table rms-count-sheet-table">
                           <div className="rms-table-head"><span>Item</span><span>Location</span><span>System qty</span><span>Price</span></div>
                           {countLocationItems.map((row) => (
@@ -8508,7 +9492,12 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               ) : null}
               {managerTab === "banking" ? (
                 <div className="rms-manager-form">
-                  <label><span>EOD</span><select onChange={(event) => setBankingReconciliationId(event.target.value)} value={bankingReconciliationId}><option value="">Select EOD</option>{workspace.eodReconciliations.map((eod) => <option key={eod.reconciliationId} value={eod.reconciliationId}>{eod.reconciliationNo} · remaining {formatMoney(eod.remainingCashAmount, currencyCode)}</option>)}</select></label>
+                  <label><span>EOD</span><select onChange={(event) => {
+                    const reconciliationId = event.target.value;
+                    const reconciliation = workspace.eodReconciliations.find((eod) => eod.reconciliationId === reconciliationId);
+                    setBankingReconciliationId(reconciliationId);
+                    setBankingAmount((reconciliation?.remainingCashAmount ?? 0).toFixed(2));
+                  }} value={bankingReconciliationId}><option value="">Select EOD</option>{workspace.eodReconciliations.map((eod) => <option key={eod.reconciliationId} value={eod.reconciliationId}>{eod.reconciliationNo} · remaining {formatMoney(eod.remainingCashAmount, currencyCode)}</option>)}</select></label>
                   <label><span>Amount</span><input onChange={(event) => setBankingAmount(event.target.value)} type="number" value={bankingAmount} /></label>
                   <label><span>Bank account</span><select onChange={(event) => setBankingBankAccountId(event.target.value)} value={bankingBankAccountId}><option value="">Bank account</option>{workspace.bankAccounts.map((account) => <option key={account.bankAccountId} value={account.bankAccountId}>{account.bankName} · {account.accountNumber}</option>)}</select></label>
                   <label><span>Bank name</span><input onChange={(event) => setBankingBankName(event.target.value)} value={bankingBankName} /></label>
@@ -8623,7 +9612,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                       <span>{correctionSettlementTotal < 0 || correctionSelection?.correctionType === "RETURN" ? "Refund tender" : "Payment tender"}</span>
                       <button className="rms-row-button is-add" onClick={() => addPaymentDraft(setCorrectionPayments)} type="button">Add</button>
                     </div>
-                    {correctionPayments.map((draft) => {
+                    {correctionPayments.map((draft, index) => {
                       const tender = tenderForDraft(draft);
                       return (
                         <div className="rms-payment-row" key={draft.id}>
@@ -8636,7 +9625,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                           </select>
                           <input onChange={(event) => updatePaymentDraft(setCorrectionPayments, draft.id, { amount: event.target.value })} type="number" value={draft.amount} />
                           <input onChange={(event) => updatePaymentDraft(setCorrectionPayments, draft.id, { reference: event.target.value })} placeholder={tender?.requiresReference ? "Reference required" : "Reference"} value={draft.reference} />
-                          <button className="rms-row-button" onClick={() => removePaymentDraft(setCorrectionPayments, draft.id)} type="button">Remove</button>
+                          <button aria-label={`Remove payment ${index + 1}`} className="rms-icon-button is-danger rms-payment-remove-button" onClick={() => removePaymentDraft(setCorrectionPayments, draft.id)} title="Remove payment" type="button"><TrashIcon /></button>
                         </div>
                       );
                     })}
@@ -8754,6 +9743,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
             </section>
           </div>
         ) : null}
+
+        {activeWorkspace === "settings" ? (
+          <OnlineStorePosSettingsWorkspace currencyCode={currencyCode} workspace={workspace} />
+        ) : null}
       </section>
       <ConfirmationDialog
         confirmLabel={
@@ -8813,6 +9806,27 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         title="Confirm store expense"
         tone="warning"
       />
+      {inventoryStartupAlertOpen ? (
+        <OnlineInventoryStartupAlertsDialog
+          expiryAlertLeadDays={workspace.optionSettings.expiryAlertLeadDays}
+          expiryCriticalDays={workspace.optionSettings.expiryCriticalDays}
+          expiringRows={
+            workspace.optionSettings.showExpiringBatchesOnStartup
+              ? startupExpiringBatchRows
+              : []
+          }
+          lowStockRows={
+            workspace.optionSettings.showCriticalStocksOnStartup ? stockAlertRows : []
+          }
+          onClose={() => setInventoryStartupAlertOpen(false)}
+          openInventory={() => {
+            setInventoryStartupAlertOpen(false);
+            setActiveWorkspace("inventory");
+            setInventoryTab("stock");
+            setActiveStockSection("inventory-browser");
+          }}
+        />
+      ) : null}
       {isScreenLocked ? (
         <div className="rms-lock-overlay" role="dialog" aria-modal="true">
           <section className="rms-login-card rms-lock-card">

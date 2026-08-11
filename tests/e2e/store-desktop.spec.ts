@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -34,18 +34,43 @@ type DesktopRuntime = {
     activeOperatorSession: { loginId: string; displayName: string } | null;
     activeBasket: {
       transactionId: string;
+      transactionNo: string;
+      totalAmount: number;
       lines: Array<{ lineId: string; productCode: string }>;
     } | null;
-    activeShift: { expectedCashAmount: number } | null;
+    activeShift: {
+      shiftId: string;
+      expectedCashAmount: number;
+      netSalesAmount: number;
+      cashTenderedAmount: number;
+      transactionCount: number;
+      salesCount: number;
+      returnCount: number;
+    } | null;
     recentClosedShifts: Array<{ shiftNo: string }>;
+    recentTransactions: Array<{
+      transactionNo: string;
+      sourceTransactionNo: string | null;
+      transactionType: "SALE" | "RETURN" | "EXCHANGE";
+      status: string;
+      totalAmount: number;
+    }>;
     salesOrders: Array<{
       orderId: string;
       orderNo: string;
       sourceTransactionId: string;
       itemCount: number;
+      status: string;
+      totalAmount: number;
       depositAmount: number;
       balanceAmount: number;
-      status: string;
+      fulfilledTransactionNo: string | null;
+    }>;
+    recentGoodsReceipts: Array<{
+      goodsReceiptNo: string;
+      purchaseOrderNo: string | null;
+      totalQuantity: number;
+      lineCount: number;
     }>;
   }>;
   bootstrapStandaloneAdmin: (input: {
@@ -67,16 +92,78 @@ type DesktopRuntime = {
     tenderMethodName: string;
     paymentMethod: "CASH";
     allowChange: boolean;
+    allowRefund?: boolean;
   }) => Promise<{ message: string }>;
   saveStandaloneCustomer: (input: {
     customerNo: string;
     fullName: string;
     customerType: string;
   }) => Promise<{ message: string }>;
+  saveStandalonePurchaseOrder: (input: {
+    purchaseOrderNo: string;
+    externalReference?: string | null;
+    lines: Array<{
+      productCode: string;
+      orderedQuantity: number;
+      unitCost: number;
+    }>;
+  }) => Promise<{ message: string }>;
+  browsePurchaseOrders: (input: {
+    query: string;
+    limit: number;
+  }) => Promise<Array<{
+    purchaseOrderId: string;
+    purchaseOrderNo: string;
+    status: string;
+    receivedQuantity: number;
+    outstandingQuantity: number;
+    lines: Array<{
+      purchaseOrderLineId: string;
+      productCode: string;
+    }>;
+  }>>;
+  receivePurchaseOrder: (input: {
+    purchaseOrderId: string;
+    externalReference?: string | null;
+    lines: Array<{
+      purchaseOrderLineId: string;
+      quantity: number;
+    }>;
+  }) => Promise<{
+    message: string;
+    snapshot: {
+      recentGoodsReceipts: Array<{
+        goodsReceiptNo: string;
+        purchaseOrderNo: string | null;
+        totalQuantity: number;
+        lineCount: number;
+      }>;
+    };
+  }>;
   browseCatalogItems: (input: {
     query: string;
     sellableOnly: boolean;
   }) => Promise<Array<{ productCode: string; quantityOnHand: number }>>;
+  searchCustomers: (input: {
+    query: string;
+  }) => Promise<Array<{ customerId: string; customerNo: string }>>;
+  attachCustomerToActiveBasket: (input: {
+    customerId: string;
+  }) => Promise<{ message: string }>;
+  createSalesOrderFromActiveBasket: (input?: {
+    payments?: Array<{
+      method: "CASH";
+      tenderMethodCode: string;
+      tenderMethodName: string;
+      amount: number;
+      reference: null;
+    }>;
+    headerReference?: string | null;
+  }) => Promise<{
+    message: string;
+    salesOrderNo?: string;
+  }>;
+  resumeSalesOrder: (orderId: string) => Promise<{ message: string }>;
   openShift: (input: { cashierCode: string; openingFloatAmount: number }) => Promise<{ message: string }>;
   addItemToBasket: (input: {
     lookupValue: string;
@@ -106,6 +193,34 @@ type DesktopRuntime = {
       reference: null;
     }>;
   }) => Promise<{ message: string }>;
+  lookupReceiptForCorrection: (transactionNo: string) => Promise<{
+    sourceTransactionId: string;
+    sourceTransactionNo: string;
+    canStartReturn: boolean;
+    lines: Array<{
+      sourceLineId: string;
+      productCode: string;
+      quantityAvailableToReturn: number;
+    }>;
+  } | null>;
+  startReturnFromReceipt: (transactionNo: string) => Promise<{ message: string }>;
+  addReceiptLineToBasket: (input: {
+    sourceTransactionId: string;
+    sourceLineId: string;
+    quantity: number;
+  }) => Promise<{ message: string }>;
+  browseStoreReports: (input: {
+    scope: "CASHIER" | "STORE";
+    shiftId?: string;
+    limit: number;
+  }) => Promise<{
+    summary: {
+      salesCount: number;
+      returnCount: number;
+      netSalesAmount: number;
+      tenderedAmount: number;
+    };
+  }>;
   captureScannedSale: (input: { lookupValue: string; quantity: number }) => Promise<{ message: string }>;
   closeActiveShift: (input: { declaredCashAmount: number }) => Promise<{ message: string }>;
   startSyncCycle?: (input: {
@@ -548,6 +663,25 @@ test("manual and scheduled sync preserve the signed-in desktop operator", async 
     const navigation = page.getByRole("navigation", { name: "Desktop workspaces" });
     await navigation.getByRole("button", { name: "Sync", exact: true }).click();
     await page.getByRole("tab", { name: "Queues", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Retry eligible", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "Export diagnostics", exact: true }).click();
+    await expect(page.getByText(/Sync diagnostics saved to .*\.json\./)).toBeVisible();
+    const windowStatus = await page.evaluate(async () =>
+      window.desktopRuntime?.getDesktopWindowStatus()
+    );
+    const diagnosticsDirectory = path.dirname(windowStatus?.supportLogPath ?? "");
+    const diagnosticFileName = readdirSync(diagnosticsDirectory).find((fileName) =>
+      /^flash-rms-sync-.*\.json$/.test(fileName)
+    );
+    expect(diagnosticFileName).toBeTruthy();
+    const diagnostic = JSON.parse(
+      readFileSync(path.join(diagnosticsDirectory, diagnosticFileName!), "utf8")
+    ) as {
+      health?: { queueMetrics?: unknown };
+      store?: { nodeCode?: string };
+    };
+    expect(diagnostic.health?.queueMetrics).toBeDefined();
+    expect(diagnostic.store?.nodeCode).toBeTruthy();
     await page.getByRole("button", { name: "Run sync", exact: true }).click();
     await expect(page.locator(".rms-sync-toast").last()).toContainText(
       "reached enterprise successfully",
@@ -806,6 +940,358 @@ test("zero-stock sales orders retain their lines and remain locked until fulfilm
     expect(checkoutError).toMatch(
       /requires 1\.000 available unit\(s\).*only 0\.000 unit\(s\) are available/i
     );
+  } finally {
+    await app.close().catch(() => undefined);
+  }
+});
+
+test("standalone sale, reversal, sales-order fulfilment, and GRN remain balanced", async () => {
+  test.setTimeout(240_000);
+  test.skip(
+    !existsSync(desktopEntry),
+    "Run npm --workspace @flash-erp/store-desktop run build before Electron transaction certification."
+  );
+
+  const proofRoot = path.resolve(
+    ".e2e",
+    "store-desktop-transaction-certification",
+    String(Date.now())
+  );
+  const electronUserDataPath = path.join(proofRoot, "electron-profile");
+  const storeDataPath = path.join(proofRoot, "store-data");
+  const databasePath = path.join(storeDataPath, "transaction-certification.sqlite");
+  const storePort = await findFreePort();
+  const loginId = "transaction.admin";
+  const password = "TransactionGate123!";
+  const productCode = "TXN-CERT-001";
+  const purchaseOrderNo = "PO-TXN-CERT-001";
+  mkdirSync(electronUserDataPath, { recursive: true });
+  mkdirSync(storeDataPath, { recursive: true });
+
+  const app = await electron.launch({
+    args: [desktopEntry, `--user-data-dir=${electronUserDataPath}`],
+    env: createElectronLaunchEnv({
+      FLASH_ERP_DESKTOP_USE_DIST: "1",
+      FLASH_ERP_STORE_DEPLOYMENT_MODE: "STANDALONE",
+      FLASH_ERP_STORE_RUNTIME_ROLE: "embedded",
+      FLASH_ERP_STORE_DATABASE_PROVIDER: "sqlite",
+      FLASH_ERP_STORE_DATABASE_URL: "",
+      FLASH_ERP_STORE_DB_PATH: databasePath,
+      FLASH_ERP_STORE_USER_DATA_PATH: storeDataPath,
+      FLASH_ERP_STORE_TERMINAL_CODE: "transaction-cert-01",
+      FLASH_ERP_STORE_TERMINAL_NAME: "Transaction Certification Terminal",
+      FLASH_ERP_STORE_SERVER_ENABLED: "1",
+      FLASH_ERP_STORE_SERVER_HOST: "127.0.0.1",
+      FLASH_ERP_STORE_SERVER_PORT: String(storePort),
+      FLASH_ERP_STORE_SERVER_TIMEOUT_MS: "2500",
+      FLASH_ERP_STORE_SERVER_URL: "",
+      FLASH_ERP_STORE_SYNC_BASE_URL: ""
+    })
+  });
+
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+    await page.waitForFunction(
+      () => Boolean(window.desktopRuntime?.bootstrapStandaloneAdmin),
+      undefined,
+      { timeout: 30_000 }
+    );
+
+    const proof = await page.evaluate(
+      async ({ loginId: nextLoginId, password: nextPassword, productCode: nextProductCode, purchaseOrderNo: nextPurchaseOrderNo }) => {
+        const runtime = window.desktopRuntime;
+
+        if (!runtime) {
+          throw new Error("Desktop runtime was unavailable during transaction certification.");
+        }
+
+        await runtime.bootstrapStandaloneAdmin({
+          loginId: nextLoginId,
+          displayName: "Transaction Admin",
+          password: nextPassword
+        });
+        await runtime.signInOperator({ loginId: nextLoginId, password: nextPassword });
+        await runtime.saveStandaloneTenderMethod({
+          tenderMethodCode: "CASH",
+          tenderMethodName: "Cash",
+          paymentMethod: "CASH",
+          allowChange: true,
+          allowRefund: true
+        });
+        await runtime.saveStandaloneProduct({
+          productCode: nextProductCode,
+          productName: "Transaction Certification Stock Item",
+          unitPrice: 100,
+          quantityOnHand: 0,
+          trackInventory: true
+        });
+        await runtime.saveStandaloneCustomer({
+          customerNo: "TXN-CUSTOMER-001",
+          fullName: "Transaction Certification Customer",
+          status: "ACTIVE"
+        });
+
+        await runtime.saveStandalonePurchaseOrder({
+          purchaseOrderNo: nextPurchaseOrderNo,
+          externalReference: "TXN-GRN-CERT",
+          lines: [
+            {
+              productCode: nextProductCode,
+              orderedQuantity: 20,
+              unitCost: 60
+            }
+          ]
+        });
+        const purchaseOrder = (
+          await runtime.browsePurchaseOrders({
+            query: nextPurchaseOrderNo,
+            limit: 10
+          })
+        ).find((row) => row.purchaseOrderNo === nextPurchaseOrderNo);
+        const purchaseOrderLine = purchaseOrder?.lines[0];
+
+        if (!purchaseOrder || !purchaseOrderLine) {
+          throw new Error("The certification purchase order could not be reopened for receipt.");
+        }
+
+        const receiptResult = await runtime.receivePurchaseOrder({
+          purchaseOrderId: purchaseOrder.purchaseOrderId,
+          externalReference: "TXN-GRN-CERT",
+          lines: [
+            {
+              purchaseOrderLineId: purchaseOrderLine.purchaseOrderLineId,
+              quantity: 20
+            }
+          ]
+        });
+        const goodsReceipt = receiptResult.snapshot.recentGoodsReceipts.find(
+          (receipt) => receipt.purchaseOrderNo === nextPurchaseOrderNo
+        );
+        const receivedPurchaseOrder = (
+          await runtime.browsePurchaseOrders({
+            query: nextPurchaseOrderNo,
+            limit: 10
+          })
+        ).find((row) => row.purchaseOrderNo === nextPurchaseOrderNo);
+        const quantityAfterReceipt = (
+          await runtime.browseCatalogItems({
+            query: nextProductCode,
+            sellableOnly: false
+          })
+        ).find((product) => product.productCode === nextProductCode)?.quantityOnHand;
+
+        await runtime.openShift({
+          cashierCode: nextLoginId,
+          openingFloatAmount: 0
+        });
+
+        await runtime.addItemToBasket({
+          lookupValue: nextProductCode,
+          quantity: 2
+        });
+        const saleBasket = (await runtime.getSyncSnapshot()).activeBasket;
+
+        if (!saleBasket) {
+          throw new Error("The certification sale basket was not created.");
+        }
+
+        await runtime.checkoutActiveBasket({
+          payments: [
+            {
+              method: "CASH",
+              tenderMethodCode: "CASH",
+              tenderMethodName: "Cash",
+              amount: 200,
+              reference: null
+            }
+          ]
+        });
+        const completedSale = (await runtime.getSyncSnapshot()).recentTransactions.find(
+          (transaction) => transaction.transactionNo === saleBasket.transactionNo
+        );
+        const correctionReceipt = await runtime.lookupReceiptForCorrection(
+          saleBasket.transactionNo
+        );
+        const correctionLine = correctionReceipt?.lines.find(
+          (line) => line.productCode === nextProductCode
+        );
+
+        if (!correctionReceipt?.canStartReturn || !correctionLine) {
+          throw new Error("The completed sale was not eligible for a linked reversal.");
+        }
+
+        await runtime.startReturnFromReceipt(saleBasket.transactionNo);
+        await runtime.addReceiptLineToBasket({
+          sourceTransactionId: correctionReceipt.sourceTransactionId,
+          sourceLineId: correctionLine.sourceLineId,
+          quantity: correctionLine.quantityAvailableToReturn
+        });
+        const reversalBasket = (await runtime.getSyncSnapshot()).activeBasket;
+
+        if (!reversalBasket) {
+          throw new Error("The linked reversal basket was not created.");
+        }
+
+        await runtime.checkoutActiveBasket({
+          payments: [
+            {
+              method: "CASH",
+              tenderMethodCode: "CASH",
+              tenderMethodName: "Cash",
+              amount: 200,
+              reference: null
+            }
+          ]
+        });
+        const completedReversal = (
+          await runtime.getSyncSnapshot()
+        ).recentTransactions.find(
+          (transaction) => transaction.transactionNo === reversalBasket.transactionNo
+        );
+
+        await runtime.addItemToBasket({
+          lookupValue: nextProductCode,
+          quantity: 3,
+          deferInventoryValidationForSalesOrder: true
+        });
+        const customer = (
+          await runtime.searchCustomers({ query: "TXN-CUSTOMER-001" })
+        )[0];
+
+        if (!customer) {
+          throw new Error("The certification sales-order customer was not available.");
+        }
+
+        await runtime.attachCustomerToActiveBasket({ customerId: customer.customerId });
+        const orderBasket = (await runtime.getSyncSnapshot()).activeBasket;
+
+        if (!orderBasket || orderBasket.totalAmount !== 300) {
+          throw new Error("The certification sales-order basket was not ready to save.");
+        }
+
+        const savedOrderResult = await runtime.createSalesOrderFromActiveBasket({
+          payments: [
+            {
+              method: "CASH",
+              tenderMethodCode: "CASH",
+              tenderMethodName: "Cash",
+              amount: 100,
+              reference: null
+            }
+          ],
+          headerReference: "TXN-ORDER-CERT"
+        });
+        const openOrder = (await runtime.getSyncSnapshot()).salesOrders.find(
+          (order) => order.orderNo === savedOrderResult.salesOrderNo
+        );
+
+        if (!openOrder) {
+          throw new Error("The certification sales order was not saved.");
+        }
+
+        await runtime.resumeSalesOrder(openOrder.orderId);
+        const fulfilmentBasket = (await runtime.getSyncSnapshot()).activeBasket;
+
+        if (
+          !fulfilmentBasket ||
+          fulfilmentBasket.transactionNo !== orderBasket.transactionNo ||
+          fulfilmentBasket.totalAmount !== 300
+        ) {
+          throw new Error("The certification sales order did not reopen with its original lines and total.");
+        }
+
+        await runtime.checkoutActiveBasket({
+          payments: [
+            {
+              method: "CASH",
+              tenderMethodCode: "CASH",
+              tenderMethodName: "Cash",
+              amount: 200,
+              reference: null
+            }
+          ]
+        });
+        const finalSnapshot = await runtime.getSyncSnapshot();
+        const fulfilledOrder = finalSnapshot.salesOrders.find(
+          (order) => order.orderId === openOrder.orderId
+        );
+        const finalQuantity = (
+          await runtime.browseCatalogItems({
+            query: nextProductCode,
+            sellableOnly: false
+          })
+        ).find((product) => product.productCode === nextProductCode)?.quantityOnHand;
+        const storeReport = await runtime.browseStoreReports({
+          scope: "CASHIER",
+          shiftId: finalSnapshot.activeShift?.shiftId,
+          limit: 100
+        });
+
+        return {
+          goodsReceipt,
+          receivedPurchaseOrder,
+          quantityAfterReceipt,
+          completedSale,
+          completedReversal,
+          openOrder,
+          fulfilledOrder,
+          finalQuantity,
+          activeShift: finalSnapshot.activeShift,
+          storeReportSummary: storeReport.summary
+        };
+      },
+      { loginId, password, productCode, purchaseOrderNo }
+    );
+
+    expect(proof.goodsReceipt?.goodsReceiptNo).toMatch(/^GRN-/);
+    expect(proof.goodsReceipt?.totalQuantity).toBe(20);
+    expect(proof.goodsReceipt?.lineCount).toBe(1);
+    expect(proof.receivedPurchaseOrder?.status).toBe("RECEIVED");
+    expect(proof.receivedPurchaseOrder?.receivedQuantity).toBe(20);
+    expect(proof.receivedPurchaseOrder?.outstandingQuantity).toBe(0);
+    expect(proof.quantityAfterReceipt).toBe(20);
+    expect(proof.completedSale).toMatchObject({
+      transactionType: "SALE",
+      status: "COMPLETED",
+      totalAmount: 200
+    });
+    expect(proof.completedReversal).toMatchObject({
+      transactionType: "RETURN",
+      status: "COMPLETED",
+      totalAmount: 200
+    });
+    expect(proof.completedReversal?.sourceTransactionNo).toBe(
+      proof.completedSale?.transactionNo
+    );
+    expect(proof.openOrder).toMatchObject({
+      status: "OPEN",
+      totalAmount: 300,
+      depositAmount: 100,
+      balanceAmount: 200
+    });
+    expect(proof.fulfilledOrder).toMatchObject({
+      status: "FULFILLED",
+      totalAmount: 300,
+      depositAmount: 100,
+      balanceAmount: 0
+    });
+    expect(proof.fulfilledOrder?.fulfilledTransactionNo).toBeTruthy();
+    expect(proof.finalQuantity).toBe(17);
+    expect(proof.activeShift).toMatchObject({
+      expectedCashAmount: 300,
+      netSalesAmount: 300,
+      cashTenderedAmount: 300,
+      transactionCount: 3,
+      salesCount: 2,
+      returnCount: 1
+    });
+    expect(proof.storeReportSummary).toMatchObject({
+      salesCount: 2,
+      returnCount: 1,
+      netSalesAmount: 300,
+      tenderedAmount: 300
+    });
   } finally {
     await app.close().catch(() => undefined);
   }

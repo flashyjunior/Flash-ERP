@@ -44,6 +44,10 @@ const desktopRuntime: DesktopRuntimeApi = {
   ping: () => ipcRenderer.invoke("rms:ping").catch(() => "unavailable"),
   getStoreRuntimeStatus: () => ipcRenderer.invoke("flash-erp:get-store-runtime-status"),
   getDesktopWindowStatus: () => ipcRenderer.invoke("flash-erp:get-desktop-window-status"),
+  openDesktopSupportFolder: () =>
+    ipcRenderer.invoke("flash-erp:open-desktop-support-folder"),
+  exportSyncDiagnostics: (input) =>
+    ipcRenderer.invoke("flash-erp:export-sync-diagnostics", input),
   recoverDesktopWindow: (reason?: string | null) =>
     ipcRenderer.invoke("flash-erp:recover-desktop-window", reason ?? "renderer-requested"),
   notifyRendererReady: () => {

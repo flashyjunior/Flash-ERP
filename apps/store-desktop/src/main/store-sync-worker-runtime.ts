@@ -188,6 +188,10 @@ async function main() {
       workerTimeoutMs,
     );
 
+    if (result.succeeded === false) {
+      throw new Error(result.message);
+    }
+
     console.info("Store Desktop isolated sync worker completed.", {
       elapsedMs: Date.now() - startedAtMs,
       message: result.message,

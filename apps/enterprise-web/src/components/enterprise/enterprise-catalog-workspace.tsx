@@ -253,6 +253,7 @@ export function EnterpriseCatalogWorkspace({
   const [taxable, setTaxable] = useState(true);
   const [taxProfileCode, setTaxProfileCode] = useState("");
   const [trackInventory, setTrackInventory] = useState(true);
+  const [trackExpiry, setTrackExpiry] = useState(false);
   const [isSerialized, setIsSerialized] = useState(false);
   const [trackSize, setTrackSize] = useState(false);
   const [trackColor, setTrackColor] = useState(false);
@@ -598,6 +599,7 @@ export function EnterpriseCatalogWorkspace({
     setTaxable(true);
     setTaxProfileCode("");
     setTrackInventory(true);
+    setTrackExpiry(false);
     setIsSerialized(false);
     setTrackSize(false);
     setTrackColor(false);
@@ -662,6 +664,7 @@ export function EnterpriseCatalogWorkspace({
           taxProfileCode:
             taxable && taxProfileCode.trim() ? taxProfileCode : null,
           trackInventory,
+          trackExpiry,
           isSerialized,
           trackSize,
           trackColor,
@@ -1306,12 +1309,27 @@ export function EnterpriseCatalogWorkspace({
                             setTrackInventory(event.target.checked);
 
                             if (!event.target.checked) {
+                              setTrackExpiry(false);
                               setIsSerialized(false);
                             }
                           }}
                           type="checkbox"
                         />
                         Track inventory
+                      </label>
+                      <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
+                        <input
+                          checked={trackExpiry}
+                          onChange={(event) => {
+                            setTrackExpiry(event.target.checked);
+
+                            if (event.target.checked) {
+                              setTrackInventory(true);
+                            }
+                          }}
+                          type="checkbox"
+                        />
+                        Track batches and expiry
                       </label>
                       <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
                         <input

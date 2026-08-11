@@ -1,5 +1,6 @@
 import type {
   PurchaseOrderClosureReason,
+  InventoryBatchAllocationPayload,
   StoreRemoteInterStoreRequestInput,
   StoreRemoteInventoryLookupRequest,
   StoreRemoteInventoryLookupResponse,
@@ -11,6 +12,17 @@ import type {
   SyncPromotionDiscountType,
   SyncPromotionTargetScope
 } from "@flash-erp/sync-core";
+
+export type StoreInventoryBatchAllocation = InventoryBatchAllocationPayload;
+
+export type StoreCatalogBatchAvailability = {
+  batchId: string;
+  batchNo: string;
+  manufacturedAt: string | null;
+  expiryDate: string;
+  quantityOnHand: number;
+  status: string;
+};
 
 export type DesktopRuntimeContext = {
   mode: "store-desktop";
@@ -136,6 +148,7 @@ export type StoreDeploymentMode = "ENTERPRISE_MANAGED" | "STANDALONE";
 export type StoreDesktopConnectionConfigResult = {
   config: StoreDesktopConnectionConfig;
   configPath: string;
+  supportLogPath: string;
   restartRequired: boolean;
 };
 
@@ -404,6 +417,11 @@ export type StoreSyncRun = {
   finishedAt: string | null;
 };
 
+export type StoreSyncDiagnosticsExportInput = {
+  fileName: string;
+  diagnostic: Record<string, unknown>;
+};
+
 export type StoreSyncDeadLetterSummary = {
   id: string;
   direction: "UPSTREAM" | "DOWNSTREAM";
@@ -413,6 +431,11 @@ export type StoreSyncDeadLetterSummary = {
   eventType: string;
   nodeCode: string | null;
   attemptCount: number;
+  failureKind: string | null;
+  lastHttpStatus: number | null;
+  lastAttemptAt: string | null;
+  nextRetryAt: string | null;
+  syncRunId: string | null;
   errorMessage: string | null;
   diagnosticSummary: string;
   payloadPreview: string;
@@ -429,6 +452,11 @@ export type StoreSyncEventDetail = {
   eventType: string;
   nodeCode: string | null;
   attemptCount: number;
+  failureKind: string | null;
+  lastHttpStatus: number | null;
+  lastAttemptAt: string | null;
+  nextRetryAt: string | null;
+  syncRunId: string | null;
   summary: string;
   errorMessage: string | null;
   diagnosticSummary: string;
@@ -656,6 +684,7 @@ export type StoreBasketLineSummary = {
   lineNote: string | null;
   serialNumbers: string[];
   availableSerialNumbers: string[];
+  batchAllocations: StoreInventoryBatchAllocation[];
   quantity: number;
   unitPrice: number;
   discountAmount: number;
@@ -884,10 +913,12 @@ export type StoreCatalogLookupResult = {
   categoryName: string | null;
   subcategory: string | null;
   isSerialized: boolean;
+  trackExpiry: boolean;
   trackSize: boolean;
   trackColor: boolean;
   mustEnterPriceAtPos: boolean;
   availableSerialNumbers: string[];
+  availableBatches: StoreCatalogBatchAvailability[];
   unitPrice: number;
   quantityOnHand: number;
   barcode: string | null;
@@ -928,6 +959,10 @@ export type StoreCatalogBrowseItem = {
   taxable?: boolean;
   taxProfileCode?: string | null;
   trackInventory?: boolean;
+  trackExpiry?: boolean;
+  shelfLifeDays?: number | null;
+  earliestExpiryDate?: string | null;
+  expiringQuantity?: number;
   trackSize?: boolean;
   trackColor?: boolean;
   primaryImageUrl: string | null;
@@ -1014,6 +1049,10 @@ export type StoreInventoryBrowseItem = {
   safetyStockLevel: number | null;
   unitPrice: number;
   isSerialized: boolean;
+  trackExpiry: boolean;
+  earliestExpiryDate: string | null;
+  expiringQuantity: number;
+  batchQuantities: StoreInventoryBatchAllocation[];
   updatedAt: string;
 };
 
@@ -1024,6 +1063,7 @@ export type StoreInventoryBrowseRequest = {
   categoryCode?: string | null;
   serializedOnly?: boolean;
   criticalOnly?: boolean;
+  expiringOnly?: boolean;
   forStartupAlert?: boolean;
   limit?: number;
 };
@@ -1078,6 +1118,7 @@ export type StorePurchaseOrderLineSummary = {
   categoryName: string | null;
   subcategory: string | null;
   isSerialized: boolean;
+  trackExpiry: boolean;
   orderedQuantity: number;
   receivedQuantity: number;
   exceptionQuantity: number;
@@ -1122,6 +1163,9 @@ export type StorePurchaseOrderReceiptLineRequest = {
   purchaseOrderLineId: string;
   quantity: number;
   serialNumbers?: string[];
+  batchNo?: string | null;
+  manufacturedAt?: string | null;
+  expiryDate?: string | null;
 };
 
 export type StorePurchaseOrderReceiptExceptionRequest = {
@@ -1163,6 +1207,9 @@ export type StoreLocalGoodsReceiptLineSummary = {
   quantity: number;
   unitCost: number | null;
   serialNumbers: string[];
+  batchNo: string | null;
+  manufacturedAt: string | null;
+  expiryDate: string | null;
 };
 
 export type StoreLocalGoodsReceiptSummary = {
@@ -1206,6 +1253,7 @@ export type StoreLocalSupplierReturnLineSummary = {
   quantity: number;
   unitCost: number | null;
   serialNumbers: string[];
+  batchAllocations: StoreInventoryBatchAllocation[];
 };
 
 export type StoreLocalSupplierReturnSummary = {
@@ -1295,6 +1343,7 @@ export type StoreInterStoreTransferSummary = {
   categoryName: string | null;
   subcategory: string | null;
   isSerialized: boolean;
+  trackExpiry: boolean;
   requestedQuantity: number;
   issuedQuantity: number;
   receivedQuantity: number;
@@ -1303,6 +1352,8 @@ export type StoreInterStoreTransferSummary = {
   unitCost: number | null;
   issuedSerialNumbers: string[];
   receivedSerialNumbers: string[];
+  issuedBatchAllocations: StoreInventoryBatchAllocation[];
+  receivedBatchAllocations: StoreInventoryBatchAllocation[];
   requestNote: string | null;
   issueNote: string | null;
   receiptNote: string | null;
@@ -1406,6 +1457,8 @@ export type StoreStockCountSessionSummary = {
   varianceQuantity: number;
   previousSerialNumbers: string[];
   countedSerialNumbers: string[];
+  previousBatchQuantities: StoreInventoryBatchAllocation[];
+  countedBatchQuantities: StoreInventoryBatchAllocation[];
   operatorName: string;
   note: string | null;
   submittedAt: string | null;
@@ -1418,6 +1471,7 @@ export type StoreStockCountSessionDraftInput = {
   productCode: string;
   countedQuantity: number;
   serialNumbers?: string[];
+  batchQuantities?: StoreInventoryBatchAllocation[];
   note?: string | null;
   operatorName?: string;
 };
@@ -1426,6 +1480,7 @@ export type StoreInterStoreTransferIssueRequest = {
   transferId: string;
   quantity: number;
   serialNumbers?: string[];
+  batchAllocations?: StoreInventoryBatchAllocation[];
   operatorName?: string;
   note?: string | null;
 };
@@ -1434,6 +1489,7 @@ export type StoreInterStoreTransferReceiveRequest = {
   transferId: string;
   quantity: number;
   serialNumbers?: string[];
+  batchAllocations?: StoreInventoryBatchAllocation[];
   operatorName?: string;
   note?: string | null;
 };
@@ -1560,10 +1616,21 @@ export type StoreLoyaltySettingsSummary = {
 };
 
 export type StoreOptionSettingsSummary = {
+  allowNegativeInventory: boolean;
+  allowOfflineSales: boolean;
+  autoPrintReceipts: boolean;
+  enforceSerializedScanAtPos: boolean;
+  requireCustomerForCreditSales: boolean;
+  requireSupervisorForReceiptlessReturn: boolean;
+  defaultReceiptSearchDays: number;
   shiftFloatPromptAmount: number;
   showCriticalStocksOnStartup: boolean;
+  showExpiringBatchesOnStartup: boolean;
+  expiryAlertLeadDays: number;
+  expiryCriticalDays: number;
   productSizes: string[];
   posDiscountRates: number[];
+  posExpressChargeRates: number[];
 };
 
 export type StoreReceiptSettingsSummary = {
@@ -1705,6 +1772,9 @@ export type StorePrintableGoodsReceiptLine = {
   orderedQuantity: number;
   receivedQuantity: number;
   serialNumbers: string[];
+  batchNo: string | null;
+  manufacturedAt: string | null;
+  expiryDate: string | null;
 };
 
 export type StorePrintableGoodsReceiptDocument = {
@@ -1953,6 +2023,7 @@ export type StoreSyncSnapshot = {
 export type StoreSyncActionResult = {
   message: string;
   snapshot: StoreSyncSnapshot;
+  succeeded?: boolean;
   accountPaymentEntryNo?: string | null;
   expenseId?: string | null;
   expenseNo?: string | null;
@@ -1974,7 +2045,22 @@ export type StoreStandaloneSettingsInput = {
   timezone?: string | null;
   touchModeEnabled?: boolean | null;
   showCriticalStocksOnStartup?: boolean | null;
+  showExpiringBatchesOnStartup?: boolean | null;
+  expiryAlertLeadDays?: number | null;
+  expiryCriticalDays?: number | null;
+  allowNegativeInventory?: boolean | null;
+  allowOfflineSales?: boolean | null;
+  autoPrintReceipts?: boolean | null;
+  enforceSerializedScanAtPos?: boolean | null;
+  requireCustomerForCreditSales?: boolean | null;
+  requireSupervisorForReceiptlessReturn?: boolean | null;
+  defaultReceiptSearchDays?: number | null;
+  shiftFloatPromptAmount?: number | null;
+  productSizes?: string[] | null;
+  posDiscountRates?: number[] | null;
+  posExpressChargeRates?: number[] | null;
   companyLogoUrl?: string | null;
+  loginBackgroundImageUrl?: string | null;
   receiptHeader?: string | null;
   receiptFooter?: string | null;
 };
@@ -2122,6 +2208,8 @@ export type StoreStandaloneProductInput = {
   taxProfileCode?: string | null;
   taxable?: boolean | null;
   trackInventory?: boolean | null;
+  trackExpiry?: boolean | null;
+  shelfLifeDays?: number | null;
   isSerialized?: boolean | null;
   trackSize?: boolean | null;
   trackColor?: boolean | null;
@@ -2230,6 +2318,7 @@ export type StoreSellCaptureRequest = {
   deferInventoryValidationForSalesOrder?: boolean | null;
   productVariantCode?: string | null;
   serialNumbers?: string[];
+  preferredBatchId?: string | null;
   unitPrice?: number | null;
   variantSize?: string | null;
   variantColor?: string | null;
@@ -2299,6 +2388,7 @@ export type StoreCreateSalesOrderRequest = {
   note?: string | null;
   headerReference?: string | null;
   additionalDetails?: string | null;
+  payments?: StoreBasketCheckoutPayment[] | null;
   depositAmount?: number | null;
   depositTenderMethodCode?: string | null;
   depositReference?: string | null;
@@ -2433,6 +2523,10 @@ export type DesktopRuntimeApi = {
   ping: () => Promise<string>;
   getStoreRuntimeStatus: () => Promise<StoreRuntimeStatus>;
   getDesktopWindowStatus: () => Promise<StoreDesktopWindowStatus>;
+  openDesktopSupportFolder: () => Promise<string>;
+  exportSyncDiagnostics: (
+    input: StoreSyncDiagnosticsExportInput,
+  ) => Promise<string>;
   recoverDesktopWindow: (reason?: string | null) => Promise<StoreDesktopWindowStatus>;
   notifyRendererReady?: () => void;
   reportRendererHeartbeat?: () => void;

@@ -1406,7 +1406,15 @@ option {
 .rms-online-desktop .rms-pos-cart {
   display: flex;
   flex-direction: column;
-  overflow: visible;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.rms-online-desktop .rms-checkout-dock {
+  display: grid;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .rms-online-desktop .rms-pos-head,
@@ -1503,8 +1511,13 @@ option {
 }
 
 .rms-online-desktop .rms-cart-table {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
   height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .rms-online-desktop .rms-table-head,
@@ -1517,7 +1530,64 @@ option {
 
 .rms-online-desktop .rms-cart-table .rms-table-head,
 .rms-online-desktop .rms-cart-table .rms-table-row {
-  grid-template-columns: 34px minmax(0, 1.35fr) 68px 78px 84px 64px;
+  grid-template-columns: 24px minmax(120px, 1fr) 60px minmax(68px, 0.3fr) minmax(78px, 0.35fr) 36px;
+  gap: 6px;
+}
+
+.rms-online-desktop .rms-cart-table .rms-table-row {
+  min-height: 64px;
+  padding-block: 5px;
+}
+
+.rms-online-desktop .rms-cart-table > .rms-table-row:nth-child(even) {
+  background: #f3f7f4;
+}
+
+.rms-online-desktop .rms-cart-table > .rms-table-row:nth-child(odd) {
+  background: #fff;
+}
+
+.rms-online-desktop .rms-cart-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title title"
+    "meta discount";
+  align-content: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-cart-item > strong {
+  grid-area: title;
+}
+
+.rms-online-desktop .rms-cart-item > small {
+  grid-area: meta;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rms-online-desktop .rms-cart-item > .rms-pos-discount-select.is-line {
+  grid-area: discount;
+  margin-top: 0;
+}
+
+.rms-online-desktop .rms-cart-item > .rms-pos-discount-select.is-line select {
+  height: 28px;
+  min-height: 28px;
+}
+
+.rms-online-desktop .rms-cart-index,
+.rms-online-desktop .rms-cart-price,
+.rms-online-desktop .rms-cart-total {
+  font-variant-numeric: tabular-nums;
+}
+
+.rms-online-desktop .rms-cart-price,
+.rms-online-desktop .rms-cart-total {
+  text-align: right;
 }
 
 .rms-online-desktop .rms-table-head {
@@ -1604,6 +1674,14 @@ option {
   padding: 7px 9px;
 }
 
+.rms-online-desktop .rms-loyalty-strip.is-promotions-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rms-online-desktop .rms-loyalty-strip.is-loyalty-only {
+  grid-template-columns: minmax(0, 1fr) 96px auto auto;
+}
+
 .rms-online-desktop .rms-loyalty-strip strong {
   display: block;
   overflow: hidden;
@@ -1681,6 +1759,38 @@ option {
   border-top: 1px solid #e2e9e2;
   margin-top: 8px;
   padding-top: 8px;
+}
+
+.rms-online-desktop .rms-payment-row .rms-payment-remove-button {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  justify-self: center;
+}
+
+.rms-online-desktop .rms-payment-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.rms-online-desktop .rms-payment-toolbar > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-payment-toolbar strong {
+  color: #183725;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.rms-online-desktop .rms-payment-toolbar span {
+  color: #657568;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .rms-online-desktop .rms-payment-summary {
@@ -1853,7 +1963,6 @@ option {
   background: #347fb6;
 }
 
-.rms-online-desktop .rms-action-button.is-save-order,
 .rms-online-desktop .rms-action-button.is-pending-orders {
   border-color: #6f5ca8;
   background: #8170bd;
@@ -2188,6 +2297,100 @@ option {
 
 .rms-online-desktop .rms-transfer-feedback-dialog {
   width: min(1240px, calc(100vw - 64px));
+}
+
+.rms-online-desktop .rms-item-dialog {
+  width: min(760px, calc(100vw - 40px));
+  min-height: 0;
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+}
+
+.rms-online-desktop .rms-item-dialog.is-batch-selection {
+  width: min(860px, calc(100vw - 40px));
+}
+
+.rms-online-desktop .rms-item-dialog.is-serialized .rms-serial-grid {
+  min-height: 88px;
+  max-height: 160px;
+}
+
+.rms-online-desktop .rms-item-dialog.is-serialized .rms-manager-form textarea {
+  min-height: 64px;
+}
+
+.rms-online-desktop .rms-batch-picker {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.rms-online-desktop .rms-batch-picker-title {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rms-online-desktop .rms-batch-picker-title > div {
+  display: grid;
+  gap: 2px;
+}
+
+.rms-online-desktop .rms-batch-picker-title span,
+.rms-online-desktop .rms-batch-picker-title small,
+.rms-online-desktop .rms-batch-choice span,
+.rms-online-desktop .rms-batch-choice small {
+  color: #647568;
+  font-size: 12px;
+}
+
+.rms-online-desktop .rms-batch-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 1px;
+}
+
+.rms-online-desktop .rms-batch-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  min-height: 58px;
+  min-width: 0;
+  border: 1px solid #d7e2d8;
+  border-radius: 7px;
+  background: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-batch-choice.is-selected {
+  border-color: #2f855a;
+  background: #f1faf4;
+  box-shadow: 0 0 0 1px rgba(47, 133, 90, 0.16);
+}
+
+.rms-online-desktop .rms-batch-choice input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.rms-online-desktop .rms-batch-choice > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-batch-choice strong,
+.rms-online-desktop .rms-batch-choice span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rms-online-desktop .rms-document-dialog,
@@ -2703,6 +2906,30 @@ option {
   grid-column: 1 / -1;
 }
 
+.rms-online-desktop .rms-manager-form .rms-express-charge-field {
+  display: grid;
+  gap: 8px;
+}
+
+.rms-online-desktop .rms-manager-form .rms-express-toggle {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.rms-online-desktop .rms-manager-form .rms-express-toggle input {
+  height: 16px;
+  min-height: 16px;
+  width: 16px;
+}
+
+.rms-online-desktop .rms-manager-form .rms-express-charge-field small {
+  color: #657568;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: none;
+}
+
 .rms-online-desktop .rms-manager-form input,
 .rms-online-desktop .rms-manager-form select,
 .rms-online-desktop .rms-manager-form textarea,
@@ -3005,7 +3232,28 @@ option {
 
 .rms-online-desktop .rms-inventory-table .rms-table-head,
 .rms-online-desktop .rms-inventory-table .rms-table-row {
-  grid-template-columns: minmax(180px, 1.35fr) minmax(140px, 0.75fr) minmax(84px, 0.35fr) minmax(92px, 0.42fr);
+  grid-template-columns: minmax(180px, 1.35fr) minmax(140px, 0.75fr) minmax(84px, 0.35fr) minmax(150px, 0.65fr) minmax(92px, 0.42fr);
+}
+
+.rms-online-desktop .rms-inventory-batch-table .rms-table-head,
+.rms-online-desktop .rms-inventory-batch-table .rms-table-row {
+  grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.65fr) minmax(130px, 0.75fr) 112px 76px 112px;
+}
+
+.rms-online-desktop .rms-expiry-receive-cell {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 132px 132px minmax(76px, 0.55fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.rms-online-desktop .rms-expiry-receive-cell input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #cfdbd1;
+  border-radius: 6px;
+  padding: 0 8px;
 }
 
 .rms-online-desktop .rms-receiving-header-table .rms-table-head,
@@ -3107,6 +3355,228 @@ option {
     display: flex;
     align-items: center;
     min-height: 58px;
+    gap: 8px;
+  }
+
+  .rms-online-desktop .rms-panel-title h2 {
+    font-size: 16px;
+  }
+
+  .rms-online-desktop .rms-pos-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow: visible;
+  }
+
+  .rms-online-desktop .rms-pos-cart,
+  .rms-online-desktop .rms-product-panel {
+    min-height: 0;
+  }
+
+  .rms-online-desktop .rms-pos-cart {
+    height: auto;
+    overflow: visible;
+  }
+
+  .rms-online-desktop .rms-pos-head {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .rms-online-desktop .rms-customer-strip,
+  .rms-online-desktop .rms-scan-strip,
+  .rms-online-desktop .rms-filter-row,
+  .rms-online-desktop .rms-receipt-filters,
+  .rms-online-desktop .rms-receipt-filters.is-receipt-history,
+  .rms-online-desktop .rms-receipt-filters.is-report-filter,
+  .rms-online-desktop .rms-account-layout > .rms-receipt-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rms-online-desktop .rms-scan-strip input,
+  .rms-online-desktop .rms-scan-strip select,
+  .rms-online-desktop .rms-scan-strip button,
+  .rms-online-desktop .rms-filter-row input,
+  .rms-online-desktop .rms-filter-row select,
+  .rms-online-desktop .rms-filter-row button {
+    min-height: 44px;
+  }
+
+  .rms-online-desktop .rms-cart-table {
+    flex: 0 0 auto;
+    max-height: 44dvh;
+    overflow: auto;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-head {
+    display: none;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row {
+    grid-template-columns: 26px minmax(0, 1fr) 78px 42px;
+    grid-template-areas:
+      "idx item qty remove"
+      "idx item total remove";
+    min-height: 96px;
+    padding: 8px;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row > strong:first-child {
+    grid-area: idx;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row > div {
+    grid-area: item;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row .rms-qty-input {
+    grid-area: qty;
+    min-height: 40px;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row > span {
+    display: none;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row > strong:nth-of-type(2) {
+    grid-area: total;
+    font-size: 13px;
+    text-align: right;
+  }
+
+  .rms-online-desktop .rms-cart-table .rms-table-row > .rms-icon-button {
+    grid-area: remove;
+    align-self: stretch;
+    min-height: 44px;
+  }
+
+  .rms-online-desktop .rms-pos-discount-select.is-line {
+    grid-template-columns: auto minmax(70px, 1fr);
+    width: min(100%, 142px);
+    max-width: 142px;
+  }
+
+  .rms-online-desktop .rms-batch-choice-grid {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: 36dvh;
+  }
+
+  .rms-online-desktop .rms-total-strip,
+  .rms-online-desktop .rms-total-strip.is-sale-totals,
+  .rms-online-desktop .rms-dashboard-kpis,
+  .rms-online-desktop .rms-dashboard-mini-grid,
+  .rms-online-desktop .rms-stat-grid,
+  .rms-online-desktop .rms-shift-close-dialog .rms-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rms-online-desktop .rms-stat {
+    min-height: 48px;
+    padding: 7px;
+  }
+
+  .rms-online-desktop .rms-stat strong {
+    font-size: 16px;
+  }
+
+  .rms-online-desktop .rms-loyalty-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rms-online-desktop .rms-loyalty-strip input,
+  .rms-online-desktop .rms-loyalty-strip button {
+    min-height: 42px;
+  }
+
+  .rms-online-desktop .rms-payment-panel {
+    position: sticky;
+    bottom: 0;
+    z-index: 3;
+    border: 1px solid #cfded1;
+    border-radius: 8px;
+    background: #fbfdfb;
+    box-shadow: 0 -10px 24px rgba(31, 42, 35, 0.12);
+    padding: 8px;
+  }
+
+  .rms-online-desktop .rms-payment-summary,
+  .rms-online-desktop .rms-payment-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .rms-online-desktop .rms-payment-row select,
+  .rms-online-desktop .rms-payment-row input,
+  .rms-online-desktop .rms-payment-row button {
+    min-height: 42px;
+  }
+
+  .rms-online-desktop .rms-payment-row select,
+  .rms-online-desktop .rms-payment-row input {
+    min-width: 0;
+  }
+
+  .rms-online-desktop .rms-pay-button {
+    min-height: 48px;
+    font-size: 15px;
+  }
+
+  .rms-online-desktop .rms-product-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: 126px;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .rms-online-desktop .rms-product-tile {
+    min-height: 126px;
+    height: 126px;
+    padding: 7px;
+  }
+
+  .rms-online-desktop .rms-product-tile img,
+  .rms-online-desktop .rms-product-placeholder {
+    max-height: 48px;
+  }
+
+  .rms-online-desktop .rms-product-tile strong,
+  .rms-online-desktop .rms-product-tile b {
+    font-size: 13px;
+  }
+
+  .rms-online-desktop .rms-pos-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    order: 3;
+    overflow: visible;
+  }
+
+  .rms-online-desktop .rms-action-mode,
+  .rms-online-desktop .rms-shift-rail {
+    display: contents;
+  }
+
+  .rms-online-desktop .rms-action-button,
+  .rms-online-desktop .rms-action-input {
+    min-height: 44px;
+  }
+
+  .rms-online-desktop .rms-pos-license-card {
+    display: none;
+  }
+
+  .rms-online-desktop .rms-receipt-drawer,
+  .rms-online-desktop .rms-report-drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    width: auto;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .rms-online-desktop .rms-panel.rms-receipt-drawer {
+    grid-template-rows: auto auto minmax(0, 1fr);
     overflow: hidden;
   }
 
@@ -3127,10 +3597,29 @@ option {
     grid-template-columns: 1fr;
   }
 
-  .rms-online-desktop .rms-modal-backdrop {
-    align-items: start;
-    overflow-y: auto;
+  .rms-online-desktop .rms-form-grid,
+  .rms-online-desktop .rms-manager-form,
+  .rms-online-desktop .rms-override-form,
+  .rms-online-desktop .rms-shift-open-form,
+  .rms-online-desktop .rms-transfer-header-grid,
+  .rms-online-desktop .rms-transfer-line-entry,
+  .rms-online-desktop .rms-count-header-grid,
+  .rms-online-desktop .rms-count-line-entry,
+  .rms-online-desktop .rms-dialog-toolbar,
+  .rms-online-desktop .rms-serial-entry-row,
+  .rms-online-desktop .rms-expiry-receive-cell,
+  .rms-online-desktop .rms-serial-entry-row.is-range {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rms-online-desktop .rms-modal-backdrop,
+  .rms-online-desktop .rms-lock-overlay {
+    align-items: end;
     padding: 10px;
+  }
+
+  .rms-online-desktop .rms-modal-backdrop {
+    overflow-y: auto;
   }
 
   .rms-online-desktop .rms-dialog,
@@ -3201,6 +3690,22 @@ option {
     content: "Amount";
   }
 
+  .rms-online-desktop .rms-customer-strip,
+  .rms-online-desktop .rms-scan-strip,
+  .rms-online-desktop .rms-filter-row,
+  .rms-online-desktop .rms-payment-summary,
+  .rms-online-desktop .rms-payment-toolbar,
+  .rms-online-desktop .rms-payment-row,
+  .rms-online-desktop .rms-loyalty-strip,
+  .rms-online-desktop .rms-loyalty-strip.is-promotions-only,
+  .rms-online-desktop .rms-loyalty-strip.is-loyalty-only,
+  .rms-online-desktop .rms-total-strip,
+  .rms-online-desktop .rms-total-strip.is-sale-totals,
+  .rms-online-desktop .rms-stat-grid,
+  .rms-online-desktop .rms-shift-close-dialog .rms-stat-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .rms-online-desktop .rms-expense-table .rms-table-row > :nth-child(5)::before {
     content: "Status";
   }
@@ -3213,5 +3718,355 @@ option {
   .rms-online-desktop .rms-dialog-button-row {
     display: grid;
     grid-template-columns: 1fr;
+  }
+}
+
+.rms-online-desktop .rms-wide-dialog {
+  width: min(1280px, calc(100vw - 40px));
+  max-height: calc(100dvh - 40px);
+}
+
+.rms-online-desktop .rms-document-dialog {
+  width: min(1320px, calc(100vw - 40px));
+  height: min(820px, calc(100dvh - 40px));
+  min-height: min(620px, calc(100dvh - 40px));
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.rms-online-desktop .rms-document-dialog > .rms-table {
+  height: 100%;
+  max-height: none;
+}
+
+.rms-online-desktop .rms-po-document-line-table .rms-table-head,
+.rms-online-desktop .rms-po-document-line-table .rms-table-row {
+  grid-template-columns: minmax(210px, 1fr) 76px 76px 92px minmax(650px, 2.5fr);
+}
+
+.rms-online-desktop .rms-expiry-receive-cell {
+  grid-template-columns: minmax(138px, 1fr) 148px 148px minmax(108px, 0.65fr) 88px;
+  align-items: end;
+}
+
+.rms-online-desktop .rms-receive-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-receive-field > span {
+  color: #5f7065;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.rms-online-desktop .rms-receive-action {
+  min-width: 88px;
+  min-height: 34px;
+}
+
+.rms-online-desktop .rms-inventory-subtabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  overflow: visible;
+  padding: 0;
+}
+
+.rms-online-desktop .rms-inventory-subtabs button {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  font-size: 13px;
+}
+
+.rms-online-desktop .rms-receiving-subtabs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.rms-online-desktop .rms-stock-section-grid {
+  min-height: min(58vh, 620px);
+  max-height: min(66vh, 720px);
+}
+
+.rms-online-desktop .rms-receiving-section {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: min(58vh, 620px);
+}
+
+.rms-online-desktop .rms-receiving-section > .rms-table {
+  max-height: min(58vh, 620px);
+}
+
+.rms-online-desktop .rms-inventory-alert-backdrop {
+  z-index: 35;
+}
+
+.rms-online-desktop .rms-online-inventory-alert-dialog {
+  width: min(1240px, calc(100vw - 32px));
+  height: min(820px, calc(100dvh - 32px));
+  min-height: 620px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.rms-online-desktop .rms-inventory-alert-body {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.rms-online-desktop .rms-inventory-alert-body:has(.rms-inventory-alert-export-error) {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.rms-online-desktop .rms-inventory-alert-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rms-online-desktop .rms-inventory-alert-tabs button {
+  min-width: 0;
+  min-height: 46px;
+  border: 1px solid #cad9ce;
+  border-radius: 6px;
+  background: #f4f8f5;
+  color: #344b3c;
+  font-size: 14px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-inventory-alert-tabs button.is-active {
+  border-color: #1e6641;
+  background: #1e6641;
+  color: #fff;
+}
+
+.rms-online-desktop .rms-inventory-alert-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-inventory-alert-toolbar > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-inventory-alert-toolbar strong,
+.rms-online-desktop .rms-inventory-alert-toolbar span {
+  overflow-wrap: anywhere;
+}
+
+.rms-online-desktop .rms-inventory-alert-toolbar span {
+  color: #657568;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rms-online-desktop .rms-inventory-alert-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.rms-online-desktop .rms-inventory-alert-export svg {
+  width: 17px;
+  height: 17px;
+}
+
+.rms-online-desktop .rms-inventory-alert-export-error {
+  border: 1px solid #efb9b9;
+  border-radius: 6px;
+  background: #fff1f1;
+  color: #9b2323;
+  padding: 9px 11px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #cfdbd1;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid table {
+  width: 100%;
+  min-width: 840px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid th,
+.rms-online-desktop .rms-inventory-alert-grid td {
+  padding: 11px 12px;
+  border-bottom: 1px solid #e1e9e3;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #245f84;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid tbody tr:hover {
+  background: #f5f9f6;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid td {
+  color: #27382d;
+  font-size: 13px;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid td strong,
+.rms-online-desktop .rms-inventory-alert-grid td small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid td small {
+  margin-top: 3px;
+  color: #657568;
+  font-size: 11px;
+}
+
+.rms-online-desktop .rms-inventory-alert-grid .is-numeric {
+  text-align: right;
+}
+
+.rms-online-desktop .rms-inventory-alert-status {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  border-radius: 999px;
+  background: #fff3cd;
+  color: #725000;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.rms-online-desktop .rms-inventory-alert-status.is-critical {
+  background: #ffe4e4;
+  color: #992d2d;
+}
+
+@media (max-width: 820px) {
+  .rms-online-desktop .rms-document-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rms-online-desktop .rms-document-summary-grid .rms-stat strong {
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .rms-online-desktop .rms-inventory-subtabs,
+  .rms-online-desktop .rms-receiving-subtabs {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: visible;
+  }
+
+  .rms-online-desktop .rms-stock-section-grid,
+  .rms-online-desktop .rms-receiving-section {
+    min-height: 0;
+    max-height: none;
+  }
+
+  .rms-online-desktop .rms-document-dialog {
+    width: 100%;
+    height: calc(100dvh - 20px);
+    min-height: 0;
+    max-height: calc(100dvh - 20px);
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-head {
+    display: none;
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
+    gap: 8px;
+    margin: 8px;
+    border: 1px solid #d5e0d7;
+    border-radius: 6px;
+    padding: 10px;
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > div:first-child,
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > :nth-child(5) {
+    grid-column: 1 / -1;
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > span:nth-child(2)::before,
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > span:nth-child(3)::before,
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > strong:nth-child(4)::before {
+    display: block;
+    margin-bottom: 3px;
+    color: #657568;
+    font-size: 9px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > span:nth-child(2)::before {
+    content: "Ordered";
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > span:nth-child(3)::before {
+    content: "Received";
+  }
+
+  .rms-online-desktop .rms-po-document-line-table .rms-table-row > strong:nth-child(4)::before {
+    content: "Outstanding";
+  }
+
+  .rms-online-desktop .rms-expiry-receive-cell,
+  .rms-online-desktop .rms-receive-cell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rms-online-desktop .rms-online-inventory-alert-dialog {
+    width: 100%;
+    height: calc(100dvh - 20px);
+    min-height: 0;
+    max-height: calc(100dvh - 20px);
+    overflow: hidden;
+  }
+
+  .rms-online-desktop .rms-inventory-alert-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rms-online-desktop .rms-inventory-alert-export {
+    width: 100%;
+    min-height: 44px;
+    justify-content: center;
   }
 }

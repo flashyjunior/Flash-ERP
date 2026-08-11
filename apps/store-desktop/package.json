@@ -1,6 +1,6 @@
 {
   "name": "@flash-erp/store-desktop",
-  "version": "0.1.56",
+  "version": "0.1.57",
   "description": "Flash ERP store desktop point-of-sale and sync runtime.",
   "author": "Flash Code Solutions",
   "private": true,
@@ -39,7 +39,8 @@
     "node": "24.16.0",
     "pg": "^8.16.3",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "write-excel-file": "^4.1.1"
   },
   "devDependencies": {
     "@types/mssql": "^9.1.11",

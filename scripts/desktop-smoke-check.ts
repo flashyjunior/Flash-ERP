@@ -37,6 +37,12 @@ const rendererStyles = requireFile(
 );
 const runtimeSource = requireFile("apps/store-desktop/src/shared/desktop-runtime.ts");
 const serviceSource = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
+const companyLogoUploadSource = requireFile(
+  "apps/enterprise-web/src/app/api/settings/company-logo/route.ts",
+);
+const loginBackgroundUploadSource = requireFile(
+  "apps/enterprise-web/src/app/api/settings/login-background/route.ts",
+);
 
 for (const dependency of ["electron-updater", "pg", "@flash-erp/sync-core"]) {
   if (!desktopPackage.dependencies?.[dependency]) {
@@ -51,6 +57,31 @@ for (const scriptName of ["build", "preview", "dist:win", "smoke"]) {
 }
 
 requireIncludes(mainSource, "getDesktopSupportLogPath", "main process exposes support log diagnostics");
+requireIncludes(
+  mainSource,
+  "supportLogPath: getDesktopSupportLogPath()",
+  "desktop setup response includes the exact support log path",
+);
+requireIncludes(
+  rendererSource,
+  "Support log file",
+  "desktop setup displays the support log path",
+);
+requireIncludes(
+  rendererSource,
+  "rms-login-background-image",
+  "login branding uses an image layer that supports large synced backgrounds",
+);
+requireIncludes(
+  companyLogoUploadSource,
+  "/uploads/company/",
+  "HQ stores company logos as durable media URLs instead of inline sync payloads",
+);
+requireIncludes(
+  loginBackgroundUploadSource,
+  "/uploads/company/",
+  "HQ stores login backgrounds as durable media URLs instead of inline sync payloads",
+);
 requireIncludes(mainSource, "FLASH_ERP_DESKTOP_UPDATE_URL", "runtime config stores update feed URL");
 requireIncludes(builderConfig, "updates.flashcodesolutions.com", "packager keeps first-run update metadata");
 requireIncludes(mainSource, "runtime status unavailable", "runtime status fails soft");

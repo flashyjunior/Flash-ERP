@@ -7,6 +7,7 @@ import {
   PosShiftStatus,
   PosTransactionStatus,
   PosTransactionType,
+  RecordStatus,
   securityPermissionCatalog,
   SyncEventStatus,
   SyncNodeType,
@@ -1912,12 +1913,20 @@ async function main() {
       update: {
         sku: seed.sku,
         name: seed.name,
+        productType: "STOCK",
+        trackInventory: true,
+        isSerialized: false,
+        trackExpiry: false,
+        trackSize: false,
+        trackColor: false,
         baseUnitPrice: seed.baseUnitPrice,
         baseCostPrice: seed.baseCostPrice,
         minStockLevel: seed.minStockLevel,
         reorderPoint: seed.reorderPoint,
         reorderQuantity: seed.reorderQuantity,
         safetyStockLevel: seed.safetyStockLevel,
+        status: RecordStatus.ACTIVE,
+        deletedAt: null,
         originNodeCode: enterpriseNode.code
       },
       create: {
@@ -1925,6 +1934,12 @@ async function main() {
         code: seed.code,
         sku: seed.sku,
         name: seed.name,
+        productType: "STOCK",
+        trackInventory: true,
+        isSerialized: false,
+        trackExpiry: false,
+        trackSize: false,
+        trackColor: false,
         baseUnitPrice: seed.baseUnitPrice,
         baseCostPrice: seed.baseCostPrice,
         minStockLevel: seed.minStockLevel,
@@ -2697,6 +2712,74 @@ async function main() {
     });
   }
 
+  const demoCatalog = await prisma.inventoryCatalog.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: retailOrg.id,
+        code: "FLASH-DEMO-CORE"
+      }
+    },
+    update: {
+      name: "Flash Demo Core Assortment",
+      description: "Core seeded products used for POS and online-store certification.",
+      status: RecordStatus.ACTIVE,
+      deletedAt: null,
+      lastModifiedByNodeCode: enterpriseNode.code
+    },
+    create: {
+      retailOrgId: retailOrg.id,
+      code: "FLASH-DEMO-CORE",
+      name: "Flash Demo Core Assortment",
+      description: "Core seeded products used for POS and online-store certification.",
+      status: RecordStatus.ACTIVE,
+      originNodeCode: enterpriseNode.code,
+      lastModifiedByNodeCode: enterpriseNode.code
+    }
+  });
+
+  for (const [index, seed] of catalogProductSeeds.entries()) {
+    const product = catalogProductByCode.get(seed.code);
+
+    if (!product) {
+      continue;
+    }
+
+    await prisma.inventoryCatalogProduct.upsert({
+      where: {
+        catalogId_productId: {
+          catalogId: demoCatalog.id,
+          productId: product.id
+        }
+      },
+      update: {
+        sortOrder: index + 1
+      },
+      create: {
+        retailOrgId: retailOrg.id,
+        catalogId: demoCatalog.id,
+        productId: product.id,
+        sortOrder: index + 1
+      }
+    });
+  }
+
+  for (const storeNode of storesWithNodes) {
+    await prisma.inventoryCatalogStore.upsert({
+      where: {
+        catalogId_storeId: {
+          catalogId: demoCatalog.id,
+          storeId: storeNode.store.id
+        }
+      },
+      update: {},
+      create: {
+        retailOrgId: retailOrg.id,
+        catalogId: demoCatalog.id,
+        storeId: storeNode.store.id
+      }
+    });
+  }
+
   const storeByCode = new Map(storesWithNodes.map((entry) => [entry.store.code, entry.store] as const));
   await ensureFuelMasterDataSeedDefaults(
     retailOrg.id,
@@ -3141,21 +3224,30 @@ async function main() {
       }
     });
 
-    const shift = await prisma.posShift.create({
-      data: {
-        retailOrgId: retailOrg.id,
-        storeId: storeNode.store.id,
-        terminalId: storeNode.terminal.id,
-        cashierUserId: cashier.id,
-        shiftNo: `SEED-${storeCodeSlug}-CLOSE`,
-        status: PosShiftStatus.CLOSED,
-        openingFloatAmount: "250.00",
-        closingDeclaredCash: "0.00",
-        closingVariance: "0.00",
-        originNodeCode: storeNode.syncNode.code,
-        openedAt: daysAgo(1, 8, 0),
-        closedAt: daysAgo(0, 21, 30)
-      }
+    const shiftNo = `SEED-${storeCodeSlug}-CLOSE`;
+    const shiftData = {
+      retailOrgId: retailOrg.id,
+      storeId: storeNode.store.id,
+      terminalId: storeNode.terminal.id,
+      cashierUserId: cashier.id,
+      shiftNo,
+      status: PosShiftStatus.CLOSED,
+      openingFloatAmount: "250.00",
+      closingDeclaredCash: "0.00",
+      closingVariance: "0.00",
+      originNodeCode: storeNode.syncNode.code,
+      openedAt: daysAgo(1, 8, 0),
+      closedAt: daysAgo(0, 21, 30)
+    };
+    const shift = await prisma.posShift.upsert({
+      where: {
+        storeId_shiftNo: {
+          storeId: storeNode.store.id,
+          shiftNo
+        }
+      },
+      update: shiftData,
+      create: shiftData
     });
 
     let storeCashTendered = 0;
@@ -3185,73 +3277,99 @@ async function main() {
       const tenderMethod = tenderMethodByCode.get(tenderSeed.code);
       const customer = demoCustomers[(saleIndex + storeIndex) % demoCustomers.length];
       const transactionNo = `DEMO-${storeCodeSlug}-${`${saleIndex + 1}`.padStart(3, "0")}`;
-      const transaction = await prisma.posTransaction.create({
-        data: {
-          retailOrgId: retailOrg.id,
-          storeId: storeNode.store.id,
-          terminalId: storeNode.terminal.id,
-          posShiftId: shift.id,
-          customerId: customer?.id ?? null,
-          transactionNo,
-          transactionType: PosTransactionType.SALE,
-          status: PosTransactionStatus.COMPLETED,
-          customerNameSnapshot: customer?.fullName ?? null,
-          cashierCodeSnapshot: cashier.loginId,
-          subtotalAmount: toMoney(subtotalAmount),
+      const transactionData = {
+        retailOrgId: retailOrg.id,
+        storeId: storeNode.store.id,
+        terminalId: storeNode.terminal.id,
+        posShiftId: shift.id,
+        customerId: customer?.id ?? null,
+        transactionNo,
+        transactionType: PosTransactionType.SALE,
+        status: PosTransactionStatus.COMPLETED,
+        customerNameSnapshot: customer?.fullName ?? null,
+        cashierCodeSnapshot: cashier.loginId,
+        subtotalAmount: toMoney(subtotalAmount),
+        discountAmount: toMoney(discountAmount),
+        taxAmount: "0.00",
+        totalAmount: toMoney(totalAmount),
+        paidAmount: toMoney(totalAmount),
+        changeAmount: "0.00",
+        notes: "Seeded HQ dashboard sale",
+        originNodeCode: storeNode.syncNode.code,
+        completedAt,
+        createdAt: completedAt
+      };
+      const transactionLines = [
+        {
+          productId: productA.id,
+          lineIntent: "SALE",
+          productCodeSnapshot: productA.code,
+          productNameSnapshot: productA.name,
+          barcodeSnapshot: productA.barcode,
+          appliedPromotionCodeSnapshot: appliedPromotion?.code ?? null,
+          appliedPromotionNameSnapshot: appliedPromotion?.name ?? null,
+          quantity: toQuantity(quantityA),
+          unitPrice: productA.baseUnitPrice,
           discountAmount: toMoney(discountAmount),
           taxAmount: "0.00",
-          totalAmount: toMoney(totalAmount),
-          paidAmount: toMoney(totalAmount),
-          changeAmount: "0.00",
-          notes: "Seeded HQ dashboard sale",
-          originNodeCode: storeNode.syncNode.code,
-          completedAt,
-          createdAt: completedAt,
+          lineTotal: toMoney(lineGrossA - discountAmount)
+        },
+        {
+          productId: productB.id,
+          lineIntent: "SALE",
+          productCodeSnapshot: productB.code,
+          productNameSnapshot: productB.name,
+          barcodeSnapshot: productB.barcode,
+          appliedPromotionCodeSnapshot: null,
+          appliedPromotionNameSnapshot: null,
+          quantity: toQuantity(quantityB),
+          unitPrice: productB.baseUnitPrice,
+          discountAmount: "0.00",
+          taxAmount: "0.00",
+          lineTotal: toMoney(lineGrossB)
+        }
+      ];
+      const transactionPayment = {
+        tenderMethodId: tenderMethod?.id ?? null,
+        tenderMethodCodeSnapshot: tenderMethod?.code ?? tenderSeed.code,
+        tenderMethodNameSnapshot: tenderMethod?.name ?? tenderSeed.name,
+        method: tenderSeed.paymentMethod,
+        amount: toMoney(totalAmount),
+        reference:
+          tenderSeed.paymentMethod === PaymentMethod.CASH
+            ? null
+            : `SEED-${storeCodeSlug}-${saleIndex + 1}`,
+        receivedAt: completedAt
+      };
+      const transaction = await prisma.posTransaction.upsert({
+        where: {
+          retailOrgId_transactionNo: {
+            retailOrgId: retailOrg.id,
+            transactionNo
+          }
+        },
+        update: {
+          ...transactionData,
           lines: {
+            deleteMany: {},
             createMany: {
-              data: [
-                {
-                  productId: productA.id,
-                  lineIntent: "SALE",
-                  productCodeSnapshot: productA.code,
-                  productNameSnapshot: productA.name,
-                  barcodeSnapshot: productA.barcode,
-                  appliedPromotionCodeSnapshot: appliedPromotion?.code ?? null,
-                  appliedPromotionNameSnapshot: appliedPromotion?.name ?? null,
-                  quantity: toQuantity(quantityA),
-                  unitPrice: productA.baseUnitPrice,
-                  discountAmount: toMoney(discountAmount),
-                  taxAmount: "0.00",
-                  lineTotal: toMoney(lineGrossA - discountAmount)
-                },
-                {
-                  productId: productB.id,
-                  lineIntent: "SALE",
-                  productCodeSnapshot: productB.code,
-                  productNameSnapshot: productB.name,
-                  barcodeSnapshot: productB.barcode,
-                  quantity: toQuantity(quantityB),
-                  unitPrice: productB.baseUnitPrice,
-                  discountAmount: "0.00",
-                  taxAmount: "0.00",
-                  lineTotal: toMoney(lineGrossB)
-                }
-              ]
+              data: transactionLines
             }
           },
           payments: {
-            create: {
-              tenderMethodId: tenderMethod?.id ?? null,
-              tenderMethodCodeSnapshot: tenderMethod?.code ?? tenderSeed.code,
-              tenderMethodNameSnapshot: tenderMethod?.name ?? tenderSeed.name,
-              method: tenderSeed.paymentMethod,
-              amount: toMoney(totalAmount),
-              reference:
-                tenderSeed.paymentMethod === PaymentMethod.CASH
-                  ? null
-                  : `SEED-${storeCodeSlug}-${saleIndex + 1}`,
-              receivedAt: completedAt
+            deleteMany: {},
+            create: transactionPayment
+          }
+        },
+        create: {
+          ...transactionData,
+          lines: {
+            createMany: {
+              data: transactionLines
             }
+          },
+          payments: {
+            create: transactionPayment
           }
         }
       });
@@ -3336,8 +3454,7 @@ async function main() {
     const varianceAmount = storeIndex % 2 === 0 ? 0 : -2.5;
     const declaredCashAmount = Number((storeCashTendered + varianceAmount).toFixed(2));
     const reconciliationNo = `SEED-EOD-${storeCodeSlug}`;
-    const reconciliation = await prisma.eodReconciliation.create({
-      data: {
+    const reconciliationData = {
         retailOrgId: retailOrg.id,
         storeId: storeNode.store.id,
         terminalId: storeNode.terminal.id,
@@ -3356,7 +3473,16 @@ async function main() {
         note: "Seeded HQ dashboard closeout",
         originNodeCode: storeNode.syncNode.code,
         reconciledAt: daysAgo(0, 21, 30)
-      }
+    };
+    const reconciliation = await prisma.eodReconciliation.upsert({
+      where: {
+        retailOrgId_reconciliationNo: {
+          retailOrgId: retailOrg.id,
+          reconciliationNo
+        }
+      },
+      update: reconciliationData,
+      create: reconciliationData
     });
     const bankedAmount = Number((Math.max(0, declaredCashAmount) * 0.9).toFixed(2));
 
@@ -3370,13 +3496,13 @@ async function main() {
       }
     });
 
-    await prisma.bankingDeposit.create({
-      data: {
+    const depositNo = `SEED-BANK-${storeCodeSlug}`;
+    const bankingDepositData = {
         retailOrgId: retailOrg.id,
         storeId: storeNode.store.id,
         terminalId: storeNode.terminal.id,
         reconciliationId: reconciliation.id,
-        depositNo: `SEED-BANK-${storeCodeSlug}`,
+        depositNo,
         reconciliationNo,
         shiftId: shift.id,
         shiftNo: shift.shiftNo,
@@ -3387,7 +3513,16 @@ async function main() {
         note: "Seeded dashboard banking deposit",
         originNodeCode: storeNode.syncNode.code,
         depositedAt: daysAgo(0, 22, 15)
-      }
+    };
+    await prisma.bankingDeposit.upsert({
+      where: {
+        retailOrgId_depositNo: {
+          retailOrgId: retailOrg.id,
+          depositNo
+        }
+      },
+      update: bankingDepositData,
+      create: bankingDepositData
     });
 
     inboundEventSeeds.push(
@@ -3434,12 +3569,20 @@ async function main() {
     );
   }
 
-  await prisma.syncInboundEvent.createMany({
-    data: inboundEventSeeds.map((event) => ({
+  for (const event of inboundEventSeeds) {
+    const eventData = {
       ...event,
       payload: serializeJson(event.payload) ?? "null"
-    }))
-  });
+    };
+
+    await prisma.syncInboundEvent.upsert({
+      where: {
+        id: event.id
+      },
+      update: eventData,
+      create: eventData
+    });
+  }
 
   await prisma.syncOutboxEvent.deleteMany({
     where: {
@@ -3621,14 +3764,22 @@ async function main() {
     }
   ];
 
-  await prisma.syncOutboxEvent.createMany({
-    data: eventSeeds.map((event) => ({
+  for (const event of eventSeeds) {
+    const eventData = {
       ...event,
       payload: serializeJson(event.payload) ?? "null",
       createdAt: new Date(),
       updatedAt: new Date()
-    }))
-  });
+    };
+
+    await prisma.syncOutboxEvent.upsert({
+      where: {
+        id: event.id
+      },
+      update: eventData,
+      create: eventData
+    });
+  }
 }
 
 main()

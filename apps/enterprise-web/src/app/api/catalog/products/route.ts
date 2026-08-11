@@ -27,6 +27,7 @@ export async function POST(request: Request) {
       taxable?: boolean;
       taxProfileCode?: string | null;
       trackInventory?: boolean;
+      trackExpiry?: boolean;
       isSerialized?: boolean;
       trackSize?: boolean;
       trackColor?: boolean;
@@ -65,6 +66,7 @@ export async function POST(request: Request) {
       taxable: body.taxable ?? true,
       taxProfileCode: body.taxProfileCode ?? null,
       trackInventory: body.trackInventory ?? true,
+      trackExpiry: body.trackExpiry ?? false,
       isSerialized: body.isSerialized ?? false,
       trackSize: body.trackSize ?? false,
       trackColor: body.trackColor ?? false,

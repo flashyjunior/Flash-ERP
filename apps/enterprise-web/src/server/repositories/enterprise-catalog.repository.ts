@@ -1283,6 +1283,7 @@ export type EnterpriseProductDetailData = {
     notes: string | null;
     taxable: boolean;
     trackInventory: boolean;
+    trackExpiry: boolean;
     isSerialized: boolean;
     trackSize: boolean;
     trackColor: boolean;
@@ -1483,6 +1484,7 @@ export async function getEnterpriseProductDetail(
       notes: true,
       taxable: true,
       trackInventory: true,
+      trackExpiry: true,
       isSerialized: true,
       trackSize: true,
       trackColor: true,
@@ -1890,6 +1892,7 @@ export async function getEnterpriseProductDetail(
       notes: product.notes,
       taxable: product.taxable,
       trackInventory: product.trackInventory,
+      trackExpiry: product.trackExpiry,
       isSerialized: product.isSerialized,
       trackSize: product.trackSize,
       trackColor: product.trackColor,
@@ -2138,6 +2141,7 @@ export type CreateEnterpriseProductRequest = {
   taxable?: boolean;
   taxProfileCode?: string | null;
   trackInventory?: boolean;
+  trackExpiry?: boolean;
   isSerialized?: boolean;
   trackSize?: boolean;
   trackColor?: boolean;
@@ -2185,6 +2189,7 @@ export type UpdateEnterpriseProductProfileRequest = {
   taxable?: boolean;
   taxProfileCode?: string | null;
   trackInventory?: boolean;
+  trackExpiry?: boolean;
   isSerialized?: boolean;
   trackSize?: boolean;
   trackColor?: boolean;
@@ -3252,6 +3257,7 @@ export async function createEnterpriseProduct(
   const taxProfileCode =
     normalizeOptionalText(input.taxProfileCode)?.toUpperCase() ?? null;
   const trackInventory = input.trackInventory ?? true;
+  const trackExpiry = input.trackExpiry ?? false;
   const isSerialized = input.isSerialized ?? false;
   const trackSize = input.trackSize ?? false;
   const trackColor = input.trackColor ?? false;
@@ -3292,6 +3298,12 @@ export async function createEnterpriseProduct(
   if (isSerialized && !trackInventory) {
     throw new Error(
       "Serialized products must keep inventory tracking enabled in Flash ERP.",
+    );
+  }
+
+  if (trackExpiry && !trackInventory) {
+    throw new Error(
+      "Expiry-controlled products must keep inventory tracking enabled in Flash ERP.",
     );
   }
 
@@ -3396,6 +3408,7 @@ export async function createEnterpriseProduct(
           notes,
           taxable,
           trackInventory,
+          trackExpiry,
           isSerialized,
           trackSize,
           trackColor,
@@ -3485,6 +3498,7 @@ export async function updateEnterpriseProductProfile(
   const taxProfileCode =
     normalizeOptionalText(input.taxProfileCode)?.toUpperCase() ?? null;
   const trackInventory = input.trackInventory ?? true;
+  const trackExpiry = input.trackExpiry ?? false;
   const isSerialized = input.isSerialized ?? false;
   const trackSize = input.trackSize ?? false;
   const trackColor = input.trackColor ?? false;
@@ -3521,6 +3535,13 @@ export async function updateEnterpriseProductProfile(
   if (isSerialized && !trackInventory) {
     throw new Error(
       "Serialized products must keep inventory tracking enabled in Flash ERP.",
+    );
+  }
+
+
+  if (trackExpiry && !trackInventory) {
+    throw new Error(
+      "Expiry-controlled products must keep inventory tracking enabled in Flash ERP.",
     );
   }
 
@@ -3572,6 +3593,7 @@ export async function updateEnterpriseProductProfile(
           notes: true,
           taxable: true,
           trackInventory: true,
+          trackExpiry: true,
           isSerialized: true,
           trackSize: true,
           trackColor: true,
@@ -3681,6 +3703,7 @@ export async function updateEnterpriseProductProfile(
         (product.taxProfile?.code ?? null) ===
           (taxable ? taxProfileCode : null) &&
         product.trackInventory === trackInventory &&
+        product.trackExpiry === trackExpiry &&
         product.isSerialized === isSerialized &&
         product.trackSize === trackSize &&
         product.trackColor === trackColor &&
@@ -3729,6 +3752,7 @@ export async function updateEnterpriseProductProfile(
           taxable,
           taxProfileId: taxable ? (taxProfile?.id ?? null) : null,
           trackInventory,
+          trackExpiry,
           isSerialized,
           trackSize,
           trackColor,

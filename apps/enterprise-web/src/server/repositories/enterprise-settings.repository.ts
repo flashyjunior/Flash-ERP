@@ -102,6 +102,7 @@ type CompanyProfileSettings = {
   documentNumberFormats: DocumentNumberFormatSettings;
   productSizes: string[];
   posDiscountRates: number[];
+  posExpressChargeRates: number[];
   salesOrderFulfilmentStoreId: string;
   phone: string;
   email: string;
@@ -186,6 +187,9 @@ type OptionSettings = {
   requireCustomerForCreditSales: boolean;
   requireSupervisorForReceiptlessReturn: boolean;
   showCriticalStocksOnStartup: boolean;
+  showExpiringBatchesOnStartup: boolean;
+  expiryAlertLeadDays: number;
+  expiryCriticalDays: number;
   defaultReceiptSearchDays: number;
   shiftFloatPromptAmount: number;
 };
@@ -238,6 +242,9 @@ const defaultOptionSettings: OptionSettings = {
   requireCustomerForCreditSales: true,
   requireSupervisorForReceiptlessReturn: true,
   showCriticalStocksOnStartup: false,
+  showExpiringBatchesOnStartup: true,
+  expiryAlertLeadDays: 30,
+  expiryCriticalDays: 7,
   defaultReceiptSearchDays: 30,
   shiftFloatPromptAmount: 0
 };
@@ -390,6 +397,7 @@ function readCompanyProfileSettings(
     documentNumberFormats: readDocumentNumberFormats(value),
     productSizes: normalizeProductSizes(payload.productSizes),
     posDiscountRates: normalizePosDiscountRates(payload.posDiscountRates),
+    posExpressChargeRates: normalizePosDiscountRates(payload.posExpressChargeRates),
     salesOrderFulfilmentStoreId: readString(payload, "salesOrderFulfilmentStoreId"),
     phone: readString(payload, "phone"),
     email: readString(payload, "email"),
@@ -704,6 +712,32 @@ async function probeHttpEndpoint(url: string, timeoutMs = 3_000) {
 
 function readOptionSettings(value: Prisma.JsonValue | null | undefined): OptionSettings {
   const payload = readObject(value);
+  const expiryAlertLeadDays = Math.min(
+    3650,
+    Math.max(
+      1,
+      Math.trunc(
+        readNumber(
+          payload,
+          "expiryAlertLeadDays",
+          defaultOptionSettings.expiryAlertLeadDays
+        )
+      )
+    )
+  );
+  const expiryCriticalDays = Math.min(
+    expiryAlertLeadDays,
+    Math.max(
+      0,
+      Math.trunc(
+        readNumber(
+          payload,
+          "expiryCriticalDays",
+          defaultOptionSettings.expiryCriticalDays
+        )
+      )
+    )
+  );
 
   return {
     allowNegativeInventory: readBoolean(
@@ -741,6 +775,13 @@ function readOptionSettings(value: Prisma.JsonValue | null | undefined): OptionS
       "showCriticalStocksOnStartup",
       defaultOptionSettings.showCriticalStocksOnStartup
     ),
+    showExpiringBatchesOnStartup: readBoolean(
+      payload,
+      "showExpiringBatchesOnStartup",
+      defaultOptionSettings.showExpiringBatchesOnStartup
+    ),
+    expiryAlertLeadDays,
+    expiryCriticalDays,
     defaultReceiptSearchDays: readNumber(
       payload,
       "defaultReceiptSearchDays",
@@ -924,6 +965,7 @@ export function buildUnavailableEnterpriseSettingsWorkspace(
       documentNumberFormats: defaultDocumentNumberFormats,
       productSizes: [],
       posDiscountRates: [],
+      posExpressChargeRates: [],
       salesOrderFulfilmentStoreId: "",
       phone: "",
       email: "",
@@ -1190,6 +1232,9 @@ export async function updateEnterpriseCompanyProfile(
         productSizes: normalizeProductSizes(input.productSizes ?? previousJson.productSizes),
         posDiscountRates: normalizePosDiscountRates(
           input.posDiscountRates ?? previousJson.posDiscountRates
+        ),
+        posExpressChargeRates: normalizePosDiscountRates(
+          input.posExpressChargeRates ?? previousJson.posExpressChargeRates
         ),
         salesOrderFulfilmentStoreId,
         phone: normalizeOptionalText(input.phone ?? previousJson.phone) ?? "",
@@ -1854,6 +1899,19 @@ export async function updateEnterpriseOptionSettings(
   try {
     return await prisma.$transaction(async (tx) => {
       const enterpriseNode = await getWritableEnterpriseNode(tx);
+      const requestedExpiryAlertLeadDays = Number(input.expiryAlertLeadDays ?? 30);
+      const expiryAlertLeadDays = Math.min(
+        3650,
+        Math.max(
+          1,
+          Math.trunc(
+            Number.isFinite(requestedExpiryAlertLeadDays)
+              ? requestedExpiryAlertLeadDays
+              : 30
+          )
+        )
+      );
+      const requestedExpiryCriticalDays = Number(input.expiryCriticalDays ?? 7);
       const payload: OptionSettings = {
         allowNegativeInventory: Boolean(input.allowNegativeInventory),
         allowOfflineSales: Boolean(input.allowOfflineSales),
@@ -1862,6 +1920,20 @@ export async function updateEnterpriseOptionSettings(
         requireCustomerForCreditSales: Boolean(input.requireCustomerForCreditSales),
         requireSupervisorForReceiptlessReturn: Boolean(input.requireSupervisorForReceiptlessReturn),
         showCriticalStocksOnStartup: Boolean(input.showCriticalStocksOnStartup),
+        showExpiringBatchesOnStartup:
+          input.showExpiringBatchesOnStartup !== false,
+        expiryAlertLeadDays,
+        expiryCriticalDays: Math.min(
+          expiryAlertLeadDays,
+          Math.max(
+            0,
+            Math.trunc(
+              Number.isFinite(requestedExpiryCriticalDays)
+                ? requestedExpiryCriticalDays
+                : 7
+            )
+          )
+        ),
         defaultReceiptSearchDays: Math.max(1, Math.trunc(Number(input.defaultReceiptSearchDays ?? 30))),
         shiftFloatPromptAmount: Number(
           Number(input.shiftFloatPromptAmount ?? 0).toFixed(2)

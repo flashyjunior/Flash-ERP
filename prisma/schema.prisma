@@ -79,6 +79,7 @@ model RetailOrg {
   inventoryLocations                InventoryLocation[]
   inventoryLedgerEntries            InventoryLedgerEntry[]
   inventorySerialUnits              InventorySerialUnit[]
+  inventoryBatches                  InventoryBatch[]
   purchaseOrders                    PurchaseOrder[]
   supplierClaims                    SupplierClaim[]
   supplierReturns                   SupplierReturn[]
@@ -322,6 +323,7 @@ model Store {
   inventoryLocations                InventoryLocation[]
   inventoryLedgerEntries            InventoryLedgerEntry[]
   inventorySerialUnits              InventorySerialUnit[]
+  inventoryBatches                  InventoryBatch[]
   purchaseOrders                    PurchaseOrder[]
   supplierClaims                    SupplierClaim[]
   supplierReturns                   SupplierReturn[]
@@ -3228,6 +3230,7 @@ model Warehouse {
   supplierReturns        SupplierReturn[]
   stockCountSessions     StockCountSession[]
   goodsReceipts          GoodsReceipt[]
+  inventoryBatches       InventoryBatch[]
 
   @@unique([retailOrgId, code])
   @@index([storeId])
@@ -3856,6 +3859,7 @@ model Product {
   taxable                Boolean                   @default(true)
   trackInventory         Boolean                   @default(true)
   isSerialized           Boolean                   @default(false)
+  trackExpiry            Boolean                   @default(false)
   trackSize              Boolean                   @default(false)
   trackColor             Boolean                   @default(false)
   allowPriceOverride     Boolean                   @default(false)
@@ -3889,6 +3893,7 @@ model Product {
   inventoryCatalogLinks  InventoryCatalogProduct[]
   inventoryLedgerEntries InventoryLedgerEntry[]
   inventorySerialUnits   InventorySerialUnit[]
+  inventoryBatches       InventoryBatch[]
   purchaseOrderLines     PurchaseOrderLine[]
   supplierClaimLines     SupplierClaimLine[]
   supplierReturnLines    SupplierReturnLine[]
@@ -4133,6 +4138,7 @@ model InventoryLocation {
   warehouse                   Warehouse?             @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
   inventoryLedgerEntries      InventoryLedgerEntry[]
   inventorySerialUnits        InventorySerialUnit[]
+  inventoryBatches            InventoryBatch[]
   purchaseOrders              PurchaseOrder[]
   supplierClaims              SupplierClaim[]
   supplierReturns             SupplierReturn[]
@@ -4156,6 +4162,9 @@ model InventoryLedgerEntry {
   inventoryLocationId String
   productId           String
   productVariantId    String?
+  inventoryBatchId    String?
+  batchNoSnapshot     String?
+  expiryDateSnapshot  DateTime?
   movementType        String
   quantity            Decimal               @db.Decimal(18, 3)
   unitCost            Decimal?              @db.Decimal(18, 2)
@@ -4172,6 +4181,7 @@ model InventoryLedgerEntry {
   inventoryLocation   InventoryLocation     @relation(fields: [inventoryLocationId], references: [id], onDelete: Cascade)
   product             Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
   productVariant      ProductMatrixVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  inventoryBatch      InventoryBatch?       @relation(fields: [inventoryBatchId], references: [id], onDelete: SetNull)
 
   @@index([retailOrgId])
   @@index([storeId])
@@ -4179,6 +4189,7 @@ model InventoryLedgerEntry {
   @@index([inventoryLocationId])
   @@index([productId])
   @@index([productVariantId])
+  @@index([inventoryBatchId])
 }
 
 model InventorySerialUnit {
@@ -4208,6 +4219,39 @@ model InventorySerialUnit {
   @@index([inventoryLocationId, productId, status, updatedAt])
   @@index([warehouseId])
   @@index([productId])
+}
+
+model InventoryBatch {
+  id                     String                 @id @default(uuid())
+  retailOrgId            String
+  storeId                String?
+  warehouseId            String?
+  inventoryLocationId    String
+  productId              String
+  batchNo                String
+  manufacturedAt         DateTime?
+  expiryDate             DateTime
+  quantityOnHand         Decimal                @default(0) @db.Decimal(18, 3)
+  status                 String                 @default("ACTIVE")
+  sourceReferenceType    String?
+  sourceReferenceId      String?
+  sourceReferenceLabel   String?
+  sourceNodeCode         String?
+  lastOccurredAt         DateTime?
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  retailOrg              RetailOrg              @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store                  Store?                 @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  warehouse              Warehouse?             @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+  inventoryLocation      InventoryLocation      @relation(fields: [inventoryLocationId], references: [id], onDelete: Cascade)
+  product                Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  inventoryLedgerEntries InventoryLedgerEntry[]
+
+  @@unique([retailOrgId, inventoryLocationId, productId, batchNo])
+  @@index([storeId, productId, status, expiryDate])
+  @@index([warehouseId, productId, status, expiryDate])
+  @@index([inventoryLocationId, productId, status, expiryDate])
+  @@index([productId, expiryDate])
 }
 
 model PurchaseOrder {
@@ -4275,85 +4319,87 @@ model PurchaseOrderLine {
 }
 
 model InterStoreTransfer {
-  id                             String            @id @default(uuid())
-  retailOrgId                    String
-  sourceStoreId                  String
-  destinationStoreId             String
-  sourceInventoryLocationId      String
-  destinationInventoryLocationId String
-  productId                      String
-  fuelStationId                  String?
-  sourceFuelTankId               String?
-  transferNo                     String
-  transferBatchNo                String?
-  lineNo                         Int               @default(1)
-  externalReference              String?
-  workflowType                   String?
-  origin                         String
-  status                         String            @default("REQUESTED")
-  requestedQuantity              Decimal           @db.Decimal(18, 3)
-  issuedQuantity                 Decimal           @default(0) @db.Decimal(18, 3)
-  receivedQuantity               Decimal           @default(0) @db.Decimal(18, 3)
-  unitCost                       Decimal?          @db.Decimal(18, 2)
-  transporterName                String?
-  vehicleRegistrationNo          String?
-  driverName                     String?
-  driverContact                  String?
-  deliveryNoteNo                 String?
-  feedbackStatus                 String            @default("PENDING")
-  issueStockUpdateStatus         String            @default("POSTED")
-  issueStockConfirmedAt          DateTime?
-  issueStockConfirmedBy          String?
-  receiptStockUpdateStatus       String            @default("POSTED")
-  receiptStockConfirmedAt        DateTime?
-  receiptStockConfirmedBy        String?
-  valuationStatus                String            @default("PENDING")
-  issueJournalEntryId            String?
-  receiptJournalEntryId          String?
-  issuedValuationAmount          Decimal?          @db.Decimal(18, 2)
-  receivedValuationAmount        Decimal?          @db.Decimal(18, 2)
-  varianceValuationAmount        Decimal?          @db.Decimal(18, 2)
-  valuationPostedAt              DateTime?
-  waterTestResult                String?
-  quantityBeforeDelivery         Decimal?          @db.Decimal(18, 3)
-  expectedQuantityReceived       Decimal?          @db.Decimal(18, 3)
-  expectedStockQuantity          Decimal?          @db.Decimal(18, 3)
-  quantityAfterDelivery          Decimal?          @db.Decimal(18, 3)
-  actualQuantityReceived         Decimal?          @db.Decimal(18, 3)
-  feedbackVarianceQuantity       Decimal?          @db.Decimal(18, 3)
-  feedbackDipReading             Decimal?          @db.Decimal(18, 3)
-  beforeDischargeEvidenceJson    String?           @db.NVarChar(Max)
-  afterDischargeEvidenceJson     String?           @db.NVarChar(Max)
-  feedbackNote                   String?           @db.NVarChar(Max)
-  feedbackRecordedAt             DateTime?
-  feedbackConfirmedAt            DateTime?
-  feedbackPostedAt               DateTime?
-  feedbackOperatorName           String?
-  issuedSerialNumbersSnapshot    String?           @db.NVarChar(Max)
-  receivedSerialNumbersSnapshot  String?           @db.NVarChar(Max)
-  requestNote                    String?
-  issueNote                      String?
-  receiptNote                    String?
-  requestOperatorName            String?
-  issueOperatorName              String?
-  receiptOperatorName            String?
-  requestedByNodeCode            String?
-  sourceNodeCode                 String?
-  destinationNodeCode            String?
-  requestedAt                    DateTime          @default(now())
-  requiredAt                     DateTime?
-  issuedAt                       DateTime?
-  receivedAt                     DateTime?
-  closedAt                       DateTime?
-  createdAt                      DateTime          @default(now())
-  updatedAt                      DateTime          @updatedAt
-  retailOrg                      RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  sourceStore                    Store             @relation("InterStoreTransferSourceStore", fields: [sourceStoreId], references: [id], onDelete: NoAction)
-  destinationStore               Store             @relation("InterStoreTransferDestinationStore", fields: [destinationStoreId], references: [id], onDelete: NoAction)
-  sourceInventoryLocation        InventoryLocation @relation("InterStoreTransferSourceLocation", fields: [sourceInventoryLocationId], references: [id], onDelete: NoAction)
-  destinationInventoryLocation   InventoryLocation @relation("InterStoreTransferDestinationLocation", fields: [destinationInventoryLocationId], references: [id], onDelete: NoAction)
-  product                        Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
-  fuelStation                    ErpFuelStation?   @relation("FuelStationInterStoreTransfer", fields: [fuelStationId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  id                               String            @id @default(uuid())
+  retailOrgId                      String
+  sourceStoreId                    String
+  destinationStoreId               String
+  sourceInventoryLocationId        String
+  destinationInventoryLocationId   String
+  productId                        String
+  fuelStationId                    String?
+  sourceFuelTankId                 String?
+  transferNo                       String
+  transferBatchNo                  String?
+  lineNo                           Int               @default(1)
+  externalReference                String?
+  workflowType                     String?
+  origin                           String
+  status                           String            @default("REQUESTED")
+  requestedQuantity                Decimal           @db.Decimal(18, 3)
+  issuedQuantity                   Decimal           @default(0) @db.Decimal(18, 3)
+  receivedQuantity                 Decimal           @default(0) @db.Decimal(18, 3)
+  unitCost                         Decimal?          @db.Decimal(18, 2)
+  transporterName                  String?
+  vehicleRegistrationNo            String?
+  driverName                       String?
+  driverContact                    String?
+  deliveryNoteNo                   String?
+  feedbackStatus                   String            @default("PENDING")
+  issueStockUpdateStatus           String            @default("POSTED")
+  issueStockConfirmedAt            DateTime?
+  issueStockConfirmedBy            String?
+  receiptStockUpdateStatus         String            @default("POSTED")
+  receiptStockConfirmedAt          DateTime?
+  receiptStockConfirmedBy          String?
+  valuationStatus                  String            @default("PENDING")
+  issueJournalEntryId              String?
+  receiptJournalEntryId            String?
+  issuedValuationAmount            Decimal?          @db.Decimal(18, 2)
+  receivedValuationAmount          Decimal?          @db.Decimal(18, 2)
+  varianceValuationAmount          Decimal?          @db.Decimal(18, 2)
+  valuationPostedAt                DateTime?
+  waterTestResult                  String?
+  quantityBeforeDelivery           Decimal?          @db.Decimal(18, 3)
+  expectedQuantityReceived         Decimal?          @db.Decimal(18, 3)
+  expectedStockQuantity            Decimal?          @db.Decimal(18, 3)
+  quantityAfterDelivery            Decimal?          @db.Decimal(18, 3)
+  actualQuantityReceived           Decimal?          @db.Decimal(18, 3)
+  feedbackVarianceQuantity         Decimal?          @db.Decimal(18, 3)
+  feedbackDipReading               Decimal?          @db.Decimal(18, 3)
+  beforeDischargeEvidenceJson      String?           @db.NVarChar(Max)
+  afterDischargeEvidenceJson       String?           @db.NVarChar(Max)
+  feedbackNote                     String?           @db.NVarChar(Max)
+  feedbackRecordedAt               DateTime?
+  feedbackConfirmedAt              DateTime?
+  feedbackPostedAt                 DateTime?
+  feedbackOperatorName             String?
+  issuedSerialNumbersSnapshot      String?           @db.NVarChar(Max)
+  receivedSerialNumbersSnapshot    String?           @db.NVarChar(Max)
+  issuedBatchAllocationsSnapshot   String?           @db.NVarChar(Max)
+  receivedBatchAllocationsSnapshot String?           @db.NVarChar(Max)
+  requestNote                      String?
+  issueNote                        String?
+  receiptNote                      String?
+  requestOperatorName              String?
+  issueOperatorName                String?
+  receiptOperatorName              String?
+  requestedByNodeCode              String?
+  sourceNodeCode                   String?
+  destinationNodeCode              String?
+  requestedAt                      DateTime          @default(now())
+  requiredAt                       DateTime?
+  issuedAt                         DateTime?
+  receivedAt                       DateTime?
+  closedAt                         DateTime?
+  createdAt                        DateTime          @default(now())
+  updatedAt                        DateTime          @updatedAt
+  retailOrg                        RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  sourceStore                      Store             @relation("InterStoreTransferSourceStore", fields: [sourceStoreId], references: [id], onDelete: NoAction)
+  destinationStore                 Store             @relation("InterStoreTransferDestinationStore", fields: [destinationStoreId], references: [id], onDelete: NoAction)
+  sourceInventoryLocation          InventoryLocation @relation("InterStoreTransferSourceLocation", fields: [sourceInventoryLocationId], references: [id], onDelete: NoAction)
+  destinationInventoryLocation     InventoryLocation @relation("InterStoreTransferDestinationLocation", fields: [destinationInventoryLocationId], references: [id], onDelete: NoAction)
+  product                          Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
+  fuelStation                      ErpFuelStation?   @relation("FuelStationInterStoreTransfer", fields: [fuelStationId], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@unique([retailOrgId, transferNo])
   @@index([retailOrgId, transferBatchNo])
@@ -4416,6 +4462,9 @@ model GoodsReceiptLine {
   quantity              Decimal              @db.Decimal(18, 3)
   unitCost              Decimal?             @db.Decimal(18, 2)
   serialNumbersSnapshot String?              @db.NVarChar(Max)
+  batchNo               String?
+  manufacturedAt        DateTime?
+  expiryDate            DateTime?
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @updatedAt
   goodsReceipt          GoodsReceipt         @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
@@ -4541,19 +4590,20 @@ model SupplierReturn {
 }
 
 model SupplierReturnLine {
-  id                    String            @id @default(uuid())
-  supplierReturnId      String
-  goodsReceiptLineId    String?
-  productId             String
-  lineNo                Int
-  quantity              Decimal           @db.Decimal(18, 3)
-  unitCost              Decimal?          @db.Decimal(18, 2)
-  serialNumbersSnapshot String?           @db.NVarChar(Max)
-  createdAt             DateTime          @default(now())
-  updatedAt             DateTime          @updatedAt
-  supplierReturn        SupplierReturn    @relation(fields: [supplierReturnId], references: [id], onDelete: Cascade)
-  goodsReceiptLine      GoodsReceiptLine? @relation(fields: [goodsReceiptLineId], references: [id], onDelete: SetNull)
-  product               Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
+  id                       String            @id @default(uuid())
+  supplierReturnId         String
+  goodsReceiptLineId       String?
+  productId                String
+  lineNo                   Int
+  quantity                 Decimal           @db.Decimal(18, 3)
+  unitCost                 Decimal?          @db.Decimal(18, 2)
+  serialNumbersSnapshot    String?           @db.NVarChar(Max)
+  batchAllocationsSnapshot String?           @db.NVarChar(Max)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  supplierReturn           SupplierReturn    @relation(fields: [supplierReturnId], references: [id], onDelete: Cascade)
+  goodsReceiptLine         GoodsReceiptLine? @relation(fields: [goodsReceiptLineId], references: [id], onDelete: SetNull)
+  product                  Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
 
   @@unique([supplierReturnId, lineNo])
   @@index([goodsReceiptLineId])
@@ -4561,32 +4611,34 @@ model SupplierReturnLine {
 }
 
 model StockCountSession {
-  id                            String            @id @default(uuid())
-  retailOrgId                   String
-  storeId                       String?
-  warehouseId                   String?
-  inventoryLocationId           String
-  productId                     String
-  sessionNo                     String
-  status                        String            @default("SUBMITTED")
-  previousQuantity              Decimal           @db.Decimal(18, 3)
-  countedQuantity               Decimal           @db.Decimal(18, 3)
-  varianceQuantity              Decimal           @db.Decimal(18, 3)
-  previousSerialNumbersSnapshot String?           @db.NVarChar(Max)
-  countedSerialNumbersSnapshot  String?           @db.NVarChar(Max)
-  note                          String?
-  operatorName                  String
-  submittedByNodeCode           String?
-  committedByNodeCode           String?
-  submittedAt                   DateTime          @default(now())
-  committedAt                   DateTime?
-  createdAt                     DateTime          @default(now())
-  updatedAt                     DateTime          @updatedAt
-  retailOrg                     RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  store                         Store?            @relation(fields: [storeId], references: [id], onDelete: SetNull)
-  warehouse                     Warehouse?        @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
-  inventoryLocation             InventoryLocation @relation(fields: [inventoryLocationId], references: [id], onDelete: Cascade)
-  product                       Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
+  id                              String            @id @default(uuid())
+  retailOrgId                     String
+  storeId                         String?
+  warehouseId                     String?
+  inventoryLocationId             String
+  productId                       String
+  sessionNo                       String
+  status                          String            @default("SUBMITTED")
+  previousQuantity                Decimal           @db.Decimal(18, 3)
+  countedQuantity                 Decimal           @db.Decimal(18, 3)
+  varianceQuantity                Decimal           @db.Decimal(18, 3)
+  previousSerialNumbersSnapshot   String?           @db.NVarChar(Max)
+  countedSerialNumbersSnapshot    String?           @db.NVarChar(Max)
+  previousBatchQuantitiesSnapshot String?           @db.NVarChar(Max)
+  countedBatchQuantitiesSnapshot  String?           @db.NVarChar(Max)
+  note                            String?
+  operatorName                    String
+  submittedByNodeCode             String?
+  committedByNodeCode             String?
+  submittedAt                     DateTime          @default(now())
+  committedAt                     DateTime?
+  createdAt                       DateTime          @default(now())
+  updatedAt                       DateTime          @updatedAt
+  retailOrg                       RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store                           Store?            @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  warehouse                       Warehouse?        @relation(fields: [warehouseId], references: [id], onDelete: SetNull)
+  inventoryLocation               InventoryLocation @relation(fields: [inventoryLocationId], references: [id], onDelete: Cascade)
+  product                         Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
 
   @@unique([retailOrgId, sessionNo])
   @@index([inventoryLocationId, status, updatedAt])
@@ -4686,6 +4738,7 @@ model PosTransactionLine {
   appliedPromotionCodeSnapshot String?
   appliedPromotionNameSnapshot String?
   serialNumbersSnapshot        String?               @db.NVarChar(Max)
+  batchAllocationsSnapshot     String?               @db.NVarChar(Max)
   quantity                     Decimal               @db.Decimal(18, 3)
   unitPrice                    Decimal               @db.Decimal(18, 2)
   discountAmount               Decimal               @db.Decimal(18, 2)

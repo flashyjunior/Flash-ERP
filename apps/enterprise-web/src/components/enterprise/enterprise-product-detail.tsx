@@ -345,6 +345,7 @@ export function EnterpriseProductDetail({
   const [taxable, setTaxable] = useState(detail.product.taxable);
   const [taxProfileCode, setTaxProfileCode] = useState(detail.taxProfile?.code ?? "");
   const [trackInventory, setTrackInventory] = useState(detail.product.trackInventory);
+  const [trackExpiry, setTrackExpiry] = useState(detail.product.trackExpiry);
   const [isSerialized, setIsSerialized] = useState(detail.product.isSerialized);
   const [trackSize, setTrackSize] = useState(detail.product.trackSize);
   const [trackColor, setTrackColor] = useState(detail.product.trackColor);
@@ -795,6 +796,7 @@ export function EnterpriseProductDetail({
       setTaxable(detail.product.taxable);
       setTaxProfileCode(detail.taxProfile?.code ?? "");
       setTrackInventory(detail.product.trackInventory);
+      setTrackExpiry(detail.product.trackExpiry);
       setIsSerialized(detail.product.isSerialized);
       setTrackSize(detail.product.trackSize);
       setTrackColor(detail.product.trackColor);
@@ -1004,6 +1006,7 @@ export function EnterpriseProductDetail({
             taxable,
             taxProfileCode: taxable && taxProfileCode.trim() ? taxProfileCode : null,
             trackInventory,
+            trackExpiry,
             isSerialized,
             trackSize,
             trackColor,
@@ -1913,9 +1916,10 @@ export function EnterpriseProductDetail({
                   <input className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]" onChange={(event) => setVolumeLitres(event.target.value)} step="0.001" type="number" value={volumeLitres} />
                 </label>
               </div>
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={taxable} onChange={(event) => setTaxable(event.target.checked)} type="checkbox" />Taxable</label>
-                <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={trackInventory} onChange={(event) => { setTrackInventory(event.target.checked); if (!event.target.checked) { setIsSerialized(false); } }} type="checkbox" />Track inventory</label>
+                <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={trackInventory} onChange={(event) => { setTrackInventory(event.target.checked); if (!event.target.checked) { setTrackExpiry(false); setIsSerialized(false); } }} type="checkbox" />Track inventory</label>
+                <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={trackExpiry} onChange={(event) => { setTrackExpiry(event.target.checked); if (event.target.checked) { setTrackInventory(true); } }} type="checkbox" />Track batches and expiry</label>
                 <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={isSerialized} onChange={(event) => { setIsSerialized(event.target.checked); if (event.target.checked) { setTrackInventory(true); } }} type="checkbox" />Serialized item</label>
                 <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={trackSize} onChange={(event) => setTrackSize(event.target.checked)} type="checkbox" />Track size</label>
                 <label className="inline-flex items-center gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700"><input checked={trackColor} onChange={(event) => setTrackColor(event.target.checked)} type="checkbox" />Track colour</label>
@@ -2562,6 +2566,7 @@ export function EnterpriseProductDetail({
                   {[
                     ["Taxable", detail.product.taxable ? "Yes" : "No"],
                     ["Track inventory", detail.product.trackInventory ? "Yes" : "No"],
+                    ["Track batches and expiry", detail.product.trackExpiry ? "Yes" : "No"],
                     ["Serialized item", detail.product.isSerialized ? "Yes" : "No"],
                     ["Track size", detail.product.trackSize ? "Yes" : "No"],
                     ["Track colour", detail.product.trackColor ? "Yes" : "No"],

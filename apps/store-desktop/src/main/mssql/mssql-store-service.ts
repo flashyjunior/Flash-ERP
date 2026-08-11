@@ -2,7 +2,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import sql from "mssql";
-import { deriveRetailUserCapabilities } from "@flash-erp/domain";
+import {
+  allocateInventoryBatchesFefo,
+  deriveInventoryBatchStatus,
+  deriveRetailUserCapabilities,
+  validateInventoryBatchReceipt,
+} from "@flash-erp/domain";
 import {
   getRetryDelayMs,
   MAX_SYNC_RETRY_ATTEMPTS,
@@ -105,6 +110,7 @@ import type {
   StoreEodReconciliationSummary,
   StoreInventoryBrowseItem,
   StoreInventoryBrowseRequest,
+  StoreInventoryBatchAllocation,
   StoreInventoryLocationSummary,
   StoreInventoryReportRow,
   StoreInterStoreTransferBrowseRequest,
@@ -137,6 +143,7 @@ import type {
   StoreReceiptSearchResult,
   StoreReportBrowseRequest,
   StoreReportResult,
+  StoreRecoveryTaskSummary,
   StoreRemoteInterStoreStockRequestInput,
   StoreRemoteInventoryLookupInput,
   StoreRemoteInventoryLookupResult,
@@ -177,12 +184,15 @@ import type {
   StoreSalesReportRow,
   StoreSupervisorOverrideInput,
   StoreSyncActionResult,
+  StoreSyncDeadLetterSummary,
+  StoreSyncEventDetail,
   StoreSyncHealth,
   StoreSyncRun,
   StoreSyncRunOptions,
   StoreSyncSnapshot,
   StoreTenderReportRow,
   StoreTenderMethodSummary,
+  StoreTerminalConnectionSummary,
   StoreTransferRequestTargetSummary,
   StoreTransactionSummary,
   StoreUserSummary,
@@ -300,6 +310,8 @@ type ProductRow = {
   tax_rate_percent: string | number | null;
   tax_inclusive: string | number;
   track_inventory: string | number;
+  track_expiry: string | number;
+  shelf_life_days: string | number | null;
   is_serialized: string | number;
   track_size: string | number;
   track_color: string | number;
@@ -376,6 +388,10 @@ type InventoryBrowseRow = {
   safety_stock_level: string | number | null;
   unit_price: string | number;
   is_serialized: string | number;
+  track_expiry: string | number;
+  earliest_expiry_date: string | null;
+  expiring_quantity: string | number | null;
+  batch_quantities_json: string | null;
   updated_at: string;
 };
 
@@ -442,6 +458,7 @@ type PurchaseOrderLineSnapshotRow = {
   category_name: string | null;
   subcategory: string | null;
   is_serialized: string | number;
+  track_expiry: string | number;
   ordered_quantity: string | number;
   received_quantity: string | number;
   exception_quantity: string | number;
@@ -475,6 +492,7 @@ type InterStoreTransferSnapshotRow = {
   category_name: string | null;
   subcategory: string | null;
   is_serialized: string | number;
+  track_expiry: string | number;
   requested_quantity: string | number;
   issued_quantity: string | number;
   received_quantity: string | number;
@@ -483,6 +501,8 @@ type InterStoreTransferSnapshotRow = {
   unit_cost: string | number | null;
   issued_serial_numbers_json: string | null;
   received_serial_numbers_json: string | null;
+  issued_batch_allocations_json: string | null;
+  received_batch_allocations_json: string | null;
   request_note: string | null;
   issue_note: string | null;
   receipt_note: string | null;
@@ -574,6 +594,9 @@ type LocalGoodsReceiptLineRow = {
   quantity: string | number;
   unit_cost: string | number | null;
   serial_numbers_json: string | null;
+  batch_no: string | null;
+  manufactured_at: string | null;
+  expiry_date: string | null;
   updated_at?: string;
 };
 
@@ -629,6 +652,51 @@ type RecoveryTaskRow = {
   completed_at: string | null;
 };
 
+type RecoveryTaskSnapshotRow = RecoveryTaskRow & {
+  product_name: string | null;
+  department_code: string | null;
+  department_name: string | null;
+  category_code: string | null;
+  category_name: string | null;
+  subcategory: string | null;
+  is_serialized: string | number | null;
+};
+
+type SyncDeadLetterRow = {
+  id: string;
+  direction: "UPSTREAM" | "DOWNSTREAM";
+  status: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  node_code: string | null;
+  attempt_count: string | number;
+  failure_kind: string | null;
+  last_http_status: string | number | null;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
+  sync_run_id: string | null;
+  payload_json: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SyncEventDetailRow = SyncDeadLetterRow & {
+  applied_at: string | null;
+  acknowledged_at: string | null;
+};
+
+type TerminalConnectionRow = {
+  terminal_code: string;
+  client_name: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  request_count: string | number;
+  last_method: string | null;
+  remote_address: string | null;
+};
+
 type StockCountSessionRow = {
   id: string;
   session_no: string;
@@ -648,6 +716,8 @@ type StockCountSessionRow = {
   variance_quantity: string | number;
   previous_serial_numbers_json: string | null;
   counted_serial_numbers_json: string | null;
+  previous_batch_quantities_json: string | null;
+  counted_batch_quantities_json: string | null;
   note: string | null;
   operator_name: string;
   submitted_at: string | null;
@@ -739,6 +809,7 @@ type BasketLineRow = {
   variant_attributes_snapshot: string | null;
   line_note: string | null;
   serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
   quantity: string | number;
   unit_price: string | number;
   discount_amount: string | number;
@@ -1088,6 +1159,16 @@ function asBooleanFlag(value: string | number | null | undefined) {
   return asNumber(value) > 0;
 }
 
+function tracksInventoryForSale(row: {
+  product_type?: string | null;
+  track_inventory?: string | number | null;
+}) {
+  return (
+    asBooleanFlag(row.track_inventory) &&
+    row.product_type?.trim().toUpperCase() !== "SERVICE"
+  );
+}
+
 function formatMssqlLocationDefaults(row: Pick<
   InventoryLocationSummaryRow,
   "defaults" | "is_sales_default" | "is_sales_order_default" | "is_receiving_default"
@@ -1289,6 +1370,107 @@ function readSerializedLineNumbers(value: string | null | undefined) {
   }
 }
 
+function readInventoryBatchAllocations(
+  value: string | null | undefined,
+): StoreInventoryBatchAllocation[] {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.flatMap((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return [];
+          }
+
+          const candidate = entry as Record<string, unknown>;
+          const batchNo = typeof candidate.batchNo === "string" ? candidate.batchNo : "";
+          const expiryDate = typeof candidate.expiryDate === "string" ? candidate.expiryDate : "";
+          const quantity = Number(candidate.quantity);
+          return batchNo && expiryDate && Number.isFinite(quantity) && quantity >= 0
+            ? [{
+                batchId: typeof candidate.batchId === "string" ? candidate.batchId : null,
+                batchNo,
+                manufacturedAt:
+                  typeof candidate.manufacturedAt === "string"
+                    ? candidate.manufacturedAt
+                    : null,
+                expiryDate,
+                quantity: Number(quantity.toFixed(3)),
+              }]
+            : [];
+        })
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeInventoryBatchAllocations(
+  allocations: StoreInventoryBatchAllocation[] | null | undefined,
+) {
+  return allocations?.length ? JSON.stringify(allocations) : null;
+}
+
+function takeOutstandingInventoryBatchAllocations(input: {
+  productName: string;
+  quantity: number;
+  issued: StoreInventoryBatchAllocation[];
+  received: StoreInventoryBatchAllocation[];
+}) {
+  const receivedByBatch = new Map<string, number>();
+
+  for (const allocation of input.received) {
+    const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+    receivedByBatch.set(
+      key,
+      Number(
+        ((receivedByBatch.get(key) ?? 0) + allocation.quantity).toFixed(3),
+      ),
+    );
+  }
+
+  let remainingQuantity = Number(input.quantity.toFixed(3));
+  const allocations: StoreInventoryBatchAllocation[] = [];
+
+  for (const issuedAllocation of input.issued) {
+    if (remainingQuantity <= 0.0001) {
+      break;
+    }
+
+    const key = `${issuedAllocation.batchNo.toUpperCase()}\u0000${issuedAllocation.expiryDate.slice(0, 10)}`;
+    const availableQuantity = Number(
+      Math.max(
+        0,
+        issuedAllocation.quantity - (receivedByBatch.get(key) ?? 0),
+      ).toFixed(3),
+    );
+    const allocatedQuantity = Number(
+      Math.min(availableQuantity, remainingQuantity).toFixed(3),
+    );
+
+    if (allocatedQuantity > 0) {
+      allocations.push({
+        ...issuedAllocation,
+        quantity: allocatedQuantity,
+      });
+      remainingQuantity = Number(
+        (remainingQuantity - allocatedQuantity).toFixed(3),
+      );
+    }
+  }
+
+  if (remainingQuantity > 0.0001) {
+    throw new Error(
+      `The source issue does not contain enough outstanding batch quantity for ${input.productName}. Sync the source issue before receiving.`,
+    );
+  }
+
+  return allocations;
+}
+
 function writeSerializedLineNumbers(serialNumbers: string[]) {
   return serialNumbers.length > 0 ? JSON.stringify(serialNumbers) : null;
 }
@@ -1462,6 +1644,17 @@ function normalizeSetupNumber(
 ) {
   const numeric = Number.isFinite(value) ? Number(value) : fallback;
   return Number(numeric.toFixed(decimals));
+}
+
+function normalizePolicyInteger(
+  value: number | string | null | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+) {
+  const parsed = Math.trunc(Number(value ?? fallback));
+  const normalized = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.min(maximum, Math.max(minimum, normalized));
 }
 
 function standalonePermissionCodes(input: {
@@ -3275,7 +3468,14 @@ export class MssqlStoreService {
         transaction.transaction_type === "RETURN" ||
         (transaction.transaction_type === "EXCHANGE" && totalAmount < 0);
 
-      netSalesAmount = Number((netSalesAmount + totalAmount).toFixed(2));
+      netSalesAmount = Number(
+        (
+          netSalesAmount +
+          (transaction.transaction_type === "RETURN"
+            ? -Math.abs(totalAmount)
+            : totalAmount)
+        ).toFixed(2),
+      );
 
       if (transaction.transaction_type === "SALE") {
         salesCount += 1;
@@ -3433,6 +3633,7 @@ export class MssqlStoreService {
         [variant_attributes_snapshot],
         [line_note],
         [serial_numbers_json],
+        [batch_allocations_json],
         [quantity],
         [unit_price],
         [discount_amount],
@@ -3471,6 +3672,7 @@ export class MssqlStoreService {
         [variant_attributes_snapshot],
         [line_note],
         [serial_numbers_json],
+        [batch_allocations_json],
         [quantity],
         [unit_price],
         [discount_amount],
@@ -3507,6 +3709,7 @@ export class MssqlStoreService {
         [variant_attributes_snapshot],
         [line_note],
         [serial_numbers_json],
+        [batch_allocations_json],
         [quantity],
         [unit_price],
         [discount_amount],
@@ -3693,6 +3896,9 @@ export class MssqlStoreService {
         asBooleanFlag(product?.is_serialized) || serialNumbers.length > 0,
       serialNumbers,
       availableSerialNumbers,
+      batchAllocations: readInventoryBatchAllocations(
+        line.batch_allocations_json,
+      ),
       quantity: Number(asNumber(line.quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
       discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
@@ -4361,6 +4567,267 @@ export class MssqlStoreService {
     );
   }
 
+  private formatSyncPayloadPreview(payloadJson: string) {
+    const formatted = JSON.stringify(this.parsePayloadJson(payloadJson), null, 2);
+    return formatted.length > 1400 ? `${formatted.slice(0, 1400)}...` : formatted;
+  }
+
+  private describeSyncEventPayload(
+    aggregateType: string,
+    eventType: string,
+    payloadJson: string,
+  ) {
+    const payload = this.parsePayloadRecord(payloadJson);
+    const readText = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = payload[key];
+
+        if (typeof value === "string" && value.trim()) {
+          return value.trim();
+        }
+      }
+
+      return null;
+    };
+    const code = readText(
+      "code",
+      "customerNo",
+      "productCode",
+      "promotionCode",
+      "transactionNo",
+    );
+    const name = readText(
+      "name",
+      "displayName",
+      "fullName",
+      "productName",
+      "promotionName",
+    );
+
+    if (name && code) {
+      return `${name} (${code})`;
+    }
+
+    return name ?? code ?? `${aggregateType} · ${eventType}`;
+  }
+
+  private async getSyncDeadLetters(): Promise<StoreSyncDeadLetterSummary[]> {
+    const result = await this.query<SyncDeadLetterRow>(
+      `SELECT TOP (20) *
+       FROM (
+         SELECT
+           [id], N'UPSTREAM' AS [direction], [status], [aggregate_type],
+           [aggregate_id], [event_type], [target_node_code] AS [node_code],
+           [attempt_count], [failure_kind], [last_http_status], [last_attempt_at],
+           [next_retry_at], [sync_run_id], [payload_json], [error_message],
+           [created_at], [updated_at]
+         FROM [dbo].[sync_outbox]
+         WHERE [status] IN (N'FAILED', N'DEAD_LETTER')
+         UNION ALL
+         SELECT
+           [id], N'DOWNSTREAM' AS [direction], [status], [aggregate_type],
+           [aggregate_id], [event_type], [source_node_code] AS [node_code],
+           0 AS [attempt_count], NULL AS [failure_kind], NULL AS [last_http_status],
+           NULL AS [last_attempt_at], NULL AS [next_retry_at], NULL AS [sync_run_id],
+           [payload_json], [error_message], [received_at] AS [created_at],
+           COALESCE([applied_at], [received_at]) AS [updated_at]
+         FROM [dbo].[sync_inbox]
+         WHERE [status] IN (N'FAILED', N'DEAD_LETTER')
+       ) AS [failed_events]
+       ORDER BY [updated_at] DESC`,
+    );
+
+    return result.recordset.map((row) => ({
+      id: row.id,
+      direction: row.direction,
+      status: row.status,
+      aggregateType: row.aggregate_type,
+      aggregateId: row.aggregate_id,
+      eventType: row.event_type,
+      nodeCode: row.node_code,
+      attemptCount: Math.trunc(asNumber(row.attempt_count)),
+      failureKind: row.failure_kind,
+      lastHttpStatus:
+        row.last_http_status == null
+          ? null
+          : Math.trunc(asNumber(row.last_http_status)),
+      lastAttemptAt: row.last_attempt_at,
+      nextRetryAt: row.next_retry_at,
+      syncRunId: row.sync_run_id,
+      errorMessage: row.error_message,
+      diagnosticSummary: this.describeSyncEventPayload(
+        row.aggregate_type,
+        row.event_type,
+        row.payload_json,
+      ),
+      payloadPreview: this.formatSyncPayloadPreview(row.payload_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private async getRecentSyncEvents(): Promise<StoreSyncEventDetail[]> {
+    const result = await this.query<SyncEventDetailRow>(
+      `SELECT TOP (30) *
+       FROM (
+         SELECT
+           [id], N'UPSTREAM' AS [direction], [status], [aggregate_type],
+           [aggregate_id], [event_type], [target_node_code] AS [node_code],
+           [attempt_count], [failure_kind], [last_http_status], [last_attempt_at],
+           [next_retry_at], [sync_run_id], [payload_json], [error_message],
+           [created_at], [last_attempt_at] AS [applied_at], [acknowledged_at],
+           COALESCE([acknowledged_at], [last_attempt_at], [updated_at], [created_at]) AS [updated_at]
+         FROM [dbo].[sync_outbox]
+         UNION ALL
+         SELECT
+           [id], N'DOWNSTREAM' AS [direction], [status], [aggregate_type],
+           [aggregate_id], [event_type], [source_node_code] AS [node_code],
+           0 AS [attempt_count], NULL AS [failure_kind], NULL AS [last_http_status],
+           NULL AS [last_attempt_at], NULL AS [next_retry_at], NULL AS [sync_run_id],
+           [payload_json], [error_message], [received_at] AS [created_at],
+           [applied_at], [acknowledged_at],
+           COALESCE([acknowledged_at], [applied_at], [received_at]) AS [updated_at]
+         FROM [dbo].[sync_inbox]
+       ) AS [sync_events]
+       ORDER BY [updated_at] DESC`,
+    );
+
+    return result.recordset.map((row) => ({
+      id: row.id,
+      direction: row.direction,
+      status: row.status,
+      aggregateType: row.aggregate_type,
+      aggregateId: row.aggregate_id,
+      eventType: row.event_type,
+      nodeCode: row.node_code,
+      attemptCount: Math.trunc(asNumber(row.attempt_count)),
+      failureKind: row.failure_kind,
+      lastHttpStatus:
+        row.last_http_status == null
+          ? null
+          : Math.trunc(asNumber(row.last_http_status)),
+      lastAttemptAt: row.last_attempt_at,
+      nextRetryAt: row.next_retry_at,
+      syncRunId: row.sync_run_id,
+      summary: this.describeSyncEventPayload(
+        row.aggregate_type,
+        row.event_type,
+        row.payload_json,
+      ),
+      errorMessage: row.error_message,
+      diagnosticSummary: this.describeSyncEventPayload(
+        row.aggregate_type,
+        row.event_type,
+        row.payload_json,
+      ),
+      payloadPreview: this.formatSyncPayloadPreview(row.payload_json),
+      createdAt: row.created_at,
+      appliedAt: row.applied_at,
+      acknowledgedAt: row.acknowledged_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  private async getTerminalConnections(): Promise<StoreTerminalConnectionSummary[]> {
+    const result = await this.query<TerminalConnectionRow>(
+      `SELECT TOP (24)
+         [terminal_code], [client_name], [first_seen_at], [last_seen_at],
+         [request_count], [last_method], [remote_address]
+       FROM [dbo].[terminal_connection]
+       ORDER BY [last_seen_at] DESC, [terminal_code] ASC`,
+    );
+
+    return result.recordset.map((row) => ({
+      terminalCode: row.terminal_code,
+      clientName: row.client_name,
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      requestCount: Math.trunc(asNumber(row.request_count)),
+      lastMethod: row.last_method,
+      remoteAddress: row.remote_address,
+      online:
+        Date.now() - new Date(row.last_seen_at).getTime() <= 5 * 60_000,
+    }));
+  }
+
+  private async getRecoveryTaskSummaries(): Promise<StoreRecoveryTaskSummary[]> {
+    const result = await this.query<RecoveryTaskSnapshotRow>(
+      `SELECT TOP (6)
+         task.[id], task.[task_type], task.[status], task.[title], task.[instructions],
+         task.[source_inbound_event_id], task.[source_event_type], task.[aggregate_type],
+         task.[aggregate_id], task.[transaction_no], task.[product_code],
+         task.[replacement_aggregate_type], task.[replacement_aggregate_id],
+         task.[replacement_event_type], task.[replacement_record_version],
+         task.[replacement_payload_json], task.[operator_name], task.[operator_note],
+         task.[store_note], task.[requested_at], task.[completed_at],
+         product.[product_name], product.[department_code], department.[department_name],
+         product.[category_code], category.[category_name], product.[subcategory],
+         product.[is_serialized]
+       FROM [dbo].[sync_recovery_task] AS task
+       LEFT JOIN [dbo].[product_snapshot] AS product
+         ON product.[product_code] = task.[product_code]
+       LEFT JOIN [dbo].[product_department_snapshot] AS department
+         ON department.[department_code] = product.[department_code]
+       LEFT JOIN [dbo].[product_category_snapshot] AS category
+         ON category.[category_code] = product.[category_code]
+       ORDER BY CASE WHEN task.[status] = N'OPEN' THEN 0 ELSE 1 END,
+         task.[requested_at] DESC`,
+    );
+
+    return result.recordset.map((task) => {
+      const payload = this.parsePayloadRecord(task.replacement_payload_json ?? "{}");
+      const sourceLocationCode =
+        typeof payload.inventoryLocationCode === "string"
+          ? payload.inventoryLocationCode
+          : typeof payload.sourceInventoryLocationCode === "string"
+            ? payload.sourceInventoryLocationCode
+            : null;
+      const targetLocationCode =
+        typeof payload.destinationInventoryLocationCode === "string"
+          ? payload.destinationInventoryLocationCode
+          : null;
+      const rawSerialNumbers = Array.isArray(payload.serialNumbers)
+        ? payload.serialNumbers.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+
+      return {
+        id: task.id,
+        taskType: task.task_type,
+        status: task.status,
+        title: task.title,
+        instructions: task.instructions,
+        transactionNo: task.transaction_no,
+        productCode: task.product_code,
+        productName: task.product_name,
+        departmentCode: task.department_code,
+        departmentName: task.department_name,
+        categoryCode: task.category_code,
+        categoryName: task.category_name,
+        subcategory: task.subcategory,
+        isSerialized: asBooleanFlag(task.is_serialized ?? 0),
+        locationCode: sourceLocationCode,
+        targetLocationCode,
+        movementType:
+          typeof payload.movementType === "string" ? payload.movementType : null,
+        quantity:
+          typeof payload.quantity === "number"
+            ? payload.quantity
+            : typeof payload.countedQuantity === "number"
+              ? payload.countedQuantity
+              : null,
+        serialNumbers: normalizeSerialNumbers(rawSerialNumbers),
+        operatorName: task.operator_name ?? "Unknown operator",
+        operatorNote: task.operator_note ?? "",
+        storeNote: task.store_note,
+        requestedAt: task.requested_at,
+        completedAt: task.completed_at,
+        sourceInboundEventId: task.source_inbound_event_id ?? "",
+      };
+    });
+  }
+
   async getSyncSnapshot(): Promise<StoreSyncSnapshot> {
     const metadata = await this.metadata();
     const [
@@ -4384,18 +4851,18 @@ export class MssqlStoreService {
       openRecoveryTasks,
     ] = await Promise.all([
       this.countScalar(
-        "SELECT COUNT(*) AS [value] FROM [dbo].[sync_outbox] WHERE [status] IN (N'PENDING', N'FAILED')",
+        "SELECT COUNT(*) AS [value] FROM [dbo].[sync_outbox] WHERE [status] = N'PENDING'",
       ),
       this.countScalar(
         "SELECT COUNT(*) AS [value] FROM [dbo].[sync_outbox] WHERE [status] = N'IN_FLIGHT'",
       ),
       this.countScalar(
-        "SELECT COUNT(*) AS [value] FROM [dbo].[sync_inbox] WHERE [status] IN (N'RECEIVED', N'PENDING', N'FAILED') AND [acknowledged_at] IS NULL",
+        "SELECT COUNT(*) AS [value] FROM [dbo].[sync_inbox] WHERE [status] IN (N'RECEIVED', N'PENDING') AND [acknowledged_at] IS NULL",
       ),
       this.countScalar(
         `SELECT
-           (SELECT COUNT(*) FROM [dbo].[sync_outbox] WHERE [status] = N'DEAD_LETTER') +
-           (SELECT COUNT(*) FROM [dbo].[sync_inbox] WHERE [status] = N'DEAD_LETTER') AS [value]`,
+           (SELECT COUNT(*) FROM [dbo].[sync_outbox] WHERE [status] IN (N'FAILED', N'DEAD_LETTER')) +
+           (SELECT COUNT(*) FROM [dbo].[sync_inbox] WHERE [status] IN (N'FAILED', N'DEAD_LETTER')) AS [value]`,
       ),
       this.countScalar("SELECT COUNT(*) AS [value] FROM [dbo].[product_snapshot]"),
       this.countScalar(
@@ -4456,6 +4923,17 @@ export class MssqlStoreService {
       startedAt: run.started_at,
       finishedAt: run.finished_at,
     }));
+    const [
+      syncDeadLetters,
+      recentSyncEvents,
+      connectedTerminalDetails,
+      recoveryTasks,
+    ] = await Promise.all([
+      this.getSyncDeadLetters(),
+      this.getRecentSyncEvents(),
+      this.getTerminalConnections(),
+      this.getRecoveryTaskSummaries(),
+    ]);
     const [
       activeOperatorSession,
       activeBasket,
@@ -4571,16 +5049,16 @@ export class MssqlStoreService {
       queueMetrics,
       operationsMetrics,
       recentRuns,
-      syncDeadLetters: [],
-      recentSyncEvents: [],
-      connectedTerminals: [],
+      syncDeadLetters,
+      recentSyncEvents,
+      connectedTerminals: connectedTerminalDetails,
       recentTransactions,
       activeShift,
       openShifts,
       recentClosedShifts,
       recentStoreShifts,
       activeOperatorSession,
-      recoveryTasks: [],
+      recoveryTasks,
       activeBasket,
       parkedBaskets,
       salesOrders,
@@ -4603,13 +5081,45 @@ export class MssqlStoreService {
       promotions: [],
       passwordPolicy: {} as StoreSyncSnapshot["passwordPolicy"],
       optionSettings: {
+        allowNegativeInventory: metadata.allow_negative_inventory === "1",
+        allowOfflineSales: metadata.allow_offline_sales !== "0",
+        autoPrintReceipts: metadata.auto_print_receipts !== "0",
+        enforceSerializedScanAtPos:
+          metadata.enforce_serialized_scan_at_pos !== "0",
+        requireCustomerForCreditSales:
+          metadata.require_customer_for_credit_sales !== "0",
+        requireSupervisorForReceiptlessReturn:
+          metadata.require_supervisor_for_receiptless_return !== "0",
+        defaultReceiptSearchDays: normalizePolicyInteger(
+          metadata.default_receipt_search_days,
+          30,
+          1,
+          365,
+        ),
         shiftFloatPromptAmount: Number(
           Math.max(0, asNumber(metadata.shift_float_prompt_amount)).toFixed(2),
         ),
         showCriticalStocksOnStartup:
-          metadata.show_critical_stocks_on_startup === "1",
-        productSizes: readProductSizesMetadata(metadata.product_sizes_json),
+          metadata.show_critical_stocks_on_startup !== "0",
+      showExpiringBatchesOnStartup:
+        metadata.show_expiring_batches_on_startup !== "0",
+      expiryAlertLeadDays: normalizePolicyInteger(
+        metadata.expiry_alert_lead_days,
+        30,
+        1,
+        3650,
+      ),
+      expiryCriticalDays: normalizePolicyInteger(
+        metadata.expiry_critical_days,
+        7,
+        0,
+        normalizePolicyInteger(metadata.expiry_alert_lead_days, 30, 1, 3650),
+      ),
+      productSizes: readProductSizesMetadata(metadata.product_sizes_json),
         posDiscountRates: readPosDiscountRatesMetadata(metadata.pos_discount_rates_json),
+        posExpressChargeRates: readPosDiscountRatesMetadata(
+          metadata.pos_express_charge_rates_json,
+        ),
       },
       loyaltySettings: {} as StoreSyncSnapshot["loyaltySettings"],
       receiptSettings: {} as StoreSyncSnapshot["receiptSettings"],
@@ -4753,6 +5263,7 @@ export class MssqlStoreService {
       return {
         message: actionMessage,
         snapshot: await this.getSyncSnapshot(),
+        succeeded: false,
       };
     } finally {
       if (this.syncCycleInFlight === syncCycle) {
@@ -5342,6 +5853,8 @@ export class MssqlStoreService {
         product.[tax_rate_percent],
         product.[tax_inclusive],
         product.[track_inventory],
+        product.[track_expiry],
+        product.[shelf_life_days],
         product.[is_serialized],
         product.[track_size],
         product.[track_color],
@@ -5397,6 +5910,8 @@ export class MssqlStoreService {
         product.[tax_rate_percent],
         product.[tax_inclusive],
         product.[track_inventory],
+        product.[track_expiry],
+        product.[shelf_life_days],
         product.[is_serialized],
         product.[track_size],
         product.[track_color],
@@ -5506,7 +6021,7 @@ export class MssqlStoreService {
     match: CatalogLookupRow,
     query: string,
   ): Promise<StoreCatalogLookupResult> {
-    const [department, category, availableSerialNumbers] = await Promise.all([
+    const [department, category, availableSerialNumbers, availableBatches] = await Promise.all([
       match.department_code
         ? this.query<{ department_name: string }>(
             `SELECT TOP (1) [department_name]
@@ -5529,6 +6044,38 @@ export class MssqlStoreService {
             match.sales_location_code,
           )
         : Promise.resolve([] as string[]),
+      asBooleanFlag(match.track_expiry) && match.sales_location_code
+        ? this.query<{
+            id: string;
+            batch_no: string;
+            manufactured_at: string | null;
+            expiry_date: string;
+            quantity_on_hand: string | number;
+            status: string;
+          }>(
+            `SELECT [id], [batch_no], [manufactured_at], [expiry_date], [quantity_on_hand], [status]
+             FROM [dbo].[inventory_batch_registry]
+             WHERE [inventory_location_code] = @locationCode
+               AND [product_code] = @productCode
+               AND [quantity_on_hand] > 0
+               AND [status] = N'ACTIVE'
+               AND [expiry_date] >= CONVERT(nvarchar(10), SYSUTCDATETIME(), 23)
+             ORDER BY [expiry_date] ASC, [manufactured_at] ASC, [batch_no] ASC`,
+            {
+              locationCode: match.sales_location_code,
+              productCode: match.product_code,
+            },
+          )
+        : Promise.resolve({
+            recordset: [] as Array<{
+              id: string;
+              batch_no: string;
+              manufactured_at: string | null;
+              expiry_date: string;
+              quantity_on_hand: string | number;
+              status: string;
+            }>,
+          }),
     ]);
 
     return {
@@ -5545,10 +6092,19 @@ export class MssqlStoreService {
       categoryName: category.recordset[0]?.category_name ?? null,
       subcategory: match.subcategory,
       isSerialized: asBooleanFlag(match.is_serialized),
+      trackExpiry: asBooleanFlag(match.track_expiry),
       trackSize: asBooleanFlag(match.track_size),
       trackColor: asBooleanFlag(match.track_color),
       mustEnterPriceAtPos: asBooleanFlag(match.must_enter_price_at_pos),
       availableSerialNumbers,
+      availableBatches: availableBatches.recordset.map((batch) => ({
+        batchId: batch.id,
+        batchNo: batch.batch_no,
+        manufacturedAt: batch.manufactured_at,
+        expiryDate: batch.expiry_date,
+        quantityOnHand: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+        status: batch.status,
+      })),
       unitPrice: Number(asNumber(match.unit_price).toFixed(2)),
       quantityOnHand: Number(asNumber(match.quantity_on_hand).toFixed(3)),
       barcode: match.barcode_code,
@@ -5645,6 +6201,8 @@ export class MssqlStoreService {
         product.[tax_rate_percent],
         product.[tax_inclusive],
         product.[track_inventory],
+        product.[track_expiry],
+        product.[shelf_life_days],
         product.[is_serialized],
         product.[track_size],
         product.[track_color],
@@ -6028,9 +6586,10 @@ export class MssqlStoreService {
     const normalizedCategoryCode = normalizeCatalogCode(input?.categoryCode);
     const serializedOnly = input?.serializedOnly === true;
     const criticalOnly = input?.criticalOnly === true;
+    const expiringOnly = input?.expiringOnly === true;
     const limit = Math.min(
       Math.max(input?.limit ?? 12, 1),
-      criticalOnly ? 100 : 30,
+      criticalOnly || expiringOnly || input?.forStartupAlert === true ? 100 : 30,
     );
     const requestedLocationCode = input?.locationCode?.trim() || null;
     const result = await this.query<InventoryBrowseRow>(
@@ -6051,6 +6610,22 @@ export class MssqlStoreService {
         product.[safety_stock_level],
         product.[unit_price],
         product.[is_serialized],
+        product.[track_expiry],
+        expiryPosition.[earliest_expiry_date],
+        ISNULL(expiryPosition.[expiring_quantity], 0) AS [expiring_quantity],
+        ISNULL((
+          SELECT
+            batch.[id] AS [batchId],
+            batch.[batch_no] AS [batchNo],
+            batch.[manufactured_at] AS [manufacturedAt],
+            batch.[expiry_date] AS [expiryDate],
+            batch.[quantity_on_hand] AS [quantity]
+          FROM [dbo].[inventory_batch_registry] AS batch
+          WHERE batch.[product_code] = product.[product_code]
+            AND batch.[inventory_location_code] = ISNULL(location.[location_code], ISNULL(fallbackLocation.[location_code], N'UNASSIGNED'))
+          ORDER BY batch.[expiry_date] ASC, batch.[batch_no] ASC
+          FOR JSON PATH
+        ), N'[]') AS [batch_quantities_json],
         ISNULL(balance.[updated_at], product.[updated_at]) AS [updated_at]
        FROM [dbo].[product_snapshot] AS product
        LEFT JOIN [dbo].[inventory_location_balance] AS balance
@@ -6078,6 +6653,21 @@ export class MssqlStoreService {
            END,
            fallback.[location_name] ASC
        ) AS fallbackLocation
+       OUTER APPLY (
+         SELECT
+           MIN(batch.[expiry_date]) AS [earliest_expiry_date],
+           SUM(CASE
+             WHEN batch.[status] = N'ACTIVE'
+              AND TRY_CONVERT(date, batch.[expiry_date]) >= CONVERT(date, SYSUTCDATETIME())
+              AND TRY_CONVERT(date, batch.[expiry_date]) <= DATEADD(day, 30, CONVERT(date, SYSUTCDATETIME()))
+             THEN batch.[quantity_on_hand]
+             ELSE 0
+           END) AS [expiring_quantity]
+         FROM [dbo].[inventory_batch_registry] AS batch
+         WHERE batch.[product_code] = product.[product_code]
+           AND batch.[inventory_location_code] = ISNULL(location.[location_code], ISNULL(fallbackLocation.[location_code], N'UNASSIGNED'))
+           AND batch.[quantity_on_hand] > 0
+       ) AS expiryPosition
        LEFT JOIN [dbo].[product_department_snapshot] AS department
          ON department.[department_code] = product.[department_code]
        LEFT JOIN [dbo].[product_category_snapshot] AS category
@@ -6140,6 +6730,13 @@ export class MssqlStoreService {
         }
       }
 
+      if (
+        expiringOnly &&
+        (!asBooleanFlag(row.track_expiry) || asNumber(row.expiring_quantity) <= 0)
+      ) {
+        return false;
+      }
+
       if (!normalizedQuery) {
         return true;
       }
@@ -6172,6 +6769,12 @@ export class MssqlStoreService {
 
         return left.product_name.localeCompare(right.product_name);
       });
+    } else if (expiringOnly) {
+      filteredRows.sort((left, right) =>
+        (left.earliest_expiry_date ?? "9999-12-31").localeCompare(
+          right.earliest_expiry_date ?? "9999-12-31",
+        ),
+      );
     }
 
     return filteredRows
@@ -6203,6 +6806,12 @@ export class MssqlStoreService {
             : Number(asNumber(row.safety_stock_level).toFixed(3)),
         unitPrice: Number(asNumber(row.unit_price).toFixed(2)),
         isSerialized: asBooleanFlag(row.is_serialized),
+        trackExpiry: asBooleanFlag(row.track_expiry),
+        earliestExpiryDate: row.earliest_expiry_date,
+        expiringQuantity: Number(asNumber(row.expiring_quantity).toFixed(3)),
+        batchQuantities: readInventoryBatchAllocations(
+          row.batch_quantities_json,
+        ),
         updatedAt: row.updated_at,
       }));
   }
@@ -6517,6 +7126,7 @@ export class MssqlStoreService {
           category.[category_name],
           line.[subcategory],
           line.[is_serialized],
+          line.[track_expiry],
           line.[ordered_quantity],
           line.[received_quantity],
           line.[exception_quantity],
@@ -6552,6 +7162,7 @@ export class MssqlStoreService {
           categoryName: line.category_name,
           subcategory: line.subcategory,
           isSerialized: asBooleanFlag(line.is_serialized),
+          trackExpiry: asBooleanFlag(line.track_expiry),
           orderedQuantity: Number(asNumber(line.ordered_quantity).toFixed(3)),
           receivedQuantity: Number(asNumber(line.received_quantity).toFixed(3)),
           exceptionQuantity: Number(
@@ -6730,6 +7341,7 @@ export class MssqlStoreService {
         category.[category_name],
         transfer.[subcategory],
         transfer.[is_serialized],
+        transfer.[track_expiry],
         transfer.[requested_quantity],
         transfer.[issued_quantity],
         transfer.[received_quantity],
@@ -6738,6 +7350,8 @@ export class MssqlStoreService {
         transfer.[unit_cost],
         transfer.[issued_serial_numbers_json],
         transfer.[received_serial_numbers_json],
+        transfer.[issued_batch_allocations_json],
+        transfer.[received_batch_allocations_json],
         transfer.[request_note],
         transfer.[issue_note],
         transfer.[receipt_note],
@@ -6797,6 +7411,7 @@ export class MssqlStoreService {
       categoryName: row.category_name,
       subcategory: row.subcategory,
       isSerialized: asBooleanFlag(row.is_serialized),
+      trackExpiry: asBooleanFlag(row.track_expiry),
       requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
       issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
       receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
@@ -6812,6 +7427,12 @@ export class MssqlStoreService {
       ),
       receivedSerialNumbers: readSerializedLineNumbers(
         row.received_serial_numbers_json,
+      ),
+      issuedBatchAllocations: readInventoryBatchAllocations(
+        row.issued_batch_allocations_json,
+      ),
+      receivedBatchAllocations: readInventoryBatchAllocations(
+        row.received_batch_allocations_json,
       ),
       requestNote: row.request_note,
       issueNote: row.issue_note,
@@ -7342,6 +7963,7 @@ export class MssqlStoreService {
     this.requireStandaloneSetupMode();
     await this.requireStandaloneSupervisor();
     const timestamp = isoNow();
+    const currentMetadata = await this.metadata();
 
     await this.withTransaction(async (transaction) => {
       const entries = [
@@ -7350,6 +7972,7 @@ export class MssqlStoreService {
         ["currency_code", optionalSetupText(input.currencyCode)?.toUpperCase() ?? null],
         ["timezone", optionalSetupText(input.timezone)],
         ["local_company_logo_url", optionalSetupText(input.companyLogoUrl)],
+        ["login_background_image_url", optionalSetupText(input.loginBackgroundImageUrl)],
         ["receipt_header", optionalSetupText(input.receiptHeader)],
         ["receipt_footer", optionalSetupText(input.receiptFooter)],
       ] as const;
@@ -7360,6 +7983,8 @@ export class MssqlStoreService {
         } else if (
           (key === "store_short_name" && input.shortName !== undefined) ||
           (key === "local_company_logo_url" && input.companyLogoUrl !== undefined) ||
+          (key === "login_background_image_url" &&
+            input.loginBackgroundImageUrl !== undefined) ||
           (key === "receipt_header" && input.receiptHeader !== undefined) ||
           (key === "receipt_footer" && input.receiptFooter !== undefined)
         ) {
@@ -7380,6 +8005,111 @@ export class MssqlStoreService {
           input.showCriticalStocksOnStartup ? "1" : "0",
           transaction,
         );
+      }
+      if (typeof input.showExpiringBatchesOnStartup === "boolean") {
+        await this.setMetadata(
+          "show_expiring_batches_on_startup",
+          input.showExpiringBatchesOnStartup ? "1" : "0",
+          transaction,
+        );
+      }
+      if (
+        (input.expiryAlertLeadDays !== undefined &&
+          input.expiryAlertLeadDays !== null) ||
+        (input.expiryCriticalDays !== undefined &&
+          input.expiryCriticalDays !== null)
+      ) {
+        const expiryAlertLeadDays = normalizePolicyInteger(
+          input.expiryAlertLeadDays ?? currentMetadata.expiry_alert_lead_days,
+          30,
+          1,
+          3650,
+        );
+        const expiryCriticalDays = normalizePolicyInteger(
+          input.expiryCriticalDays ?? currentMetadata.expiry_critical_days,
+          7,
+          0,
+          expiryAlertLeadDays,
+        );
+        await this.setMetadata(
+          "expiry_alert_lead_days",
+          String(expiryAlertLeadDays),
+          transaction,
+        );
+        await this.setMetadata(
+          "expiry_critical_days",
+          String(expiryCriticalDays),
+          transaction,
+        );
+      }
+
+      const booleanSettings = [
+        ["allow_negative_inventory", input.allowNegativeInventory],
+        ["allow_offline_sales", input.allowOfflineSales],
+        ["auto_print_receipts", input.autoPrintReceipts],
+        ["enforce_serialized_scan_at_pos", input.enforceSerializedScanAtPos],
+        ["require_customer_for_credit_sales", input.requireCustomerForCreditSales],
+        [
+          "require_supervisor_for_receiptless_return",
+          input.requireSupervisorForReceiptlessReturn,
+        ],
+      ] as const;
+
+      for (const [key, value] of booleanSettings) {
+        if (typeof value === "boolean") {
+          await this.setMetadata(key, value ? "1" : "0", transaction);
+        }
+      }
+
+      if (
+        input.defaultReceiptSearchDays !== undefined &&
+        input.defaultReceiptSearchDays !== null
+      ) {
+        await this.setMetadata(
+          "default_receipt_search_days",
+          String(
+            normalizePolicyInteger(input.defaultReceiptSearchDays, 30, 1, 365),
+          ),
+          transaction,
+        );
+      }
+
+      if (
+        input.shiftFloatPromptAmount !== undefined &&
+        input.shiftFloatPromptAmount !== null
+      ) {
+        await this.setMetadata(
+          "shift_float_prompt_amount",
+          Math.max(0, Number(input.shiftFloatPromptAmount) || 0).toFixed(2),
+          transaction,
+        );
+      }
+
+      const listSettings = [
+        [
+          "product_sizes_json",
+          Array.isArray(input.productSizes)
+            ? JSON.stringify(normalizeSetupStringList(input.productSizes) ?? [])
+            : null,
+        ],
+        [
+          "pos_discount_rates_json",
+          Array.isArray(input.posDiscountRates)
+            ? JSON.stringify(normalizeSetupNumberList(input.posDiscountRates) ?? [])
+            : null,
+        ],
+        [
+          "pos_express_charge_rates_json",
+          Array.isArray(input.posExpressChargeRates)
+            ? JSON.stringify(normalizeSetupNumberList(input.posExpressChargeRates) ?? [])
+            : null,
+        ],
+      ] as const;
+
+      for (const [key, value] of listSettings) {
+        if (value !== null) {
+          await this.setMetadata(key, value, transaction);
+        }
       }
       await this.setMetadata("last_local_write_at", timestamp, transaction);
     });
@@ -7716,6 +8446,11 @@ export class MssqlStoreService {
       tax_rate_percent: null,
       tax_inclusive: 0,
       track_inventory: input.trackInventory === false ? 0 : 1,
+      track_expiry: input.trackExpiry ? 1 : 0,
+      shelf_life_days:
+        input.shelfLifeDays == null
+          ? null
+          : Math.trunc(normalizeSetupNumber(input.shelfLifeDays, 1, 0)),
       is_serialized: input.isSerialized ? 1 : 0,
       must_enter_price_at_pos: input.mustEnterPriceAtPos ? 1 : 0,
       min_stock_level: input.minStockLevel == null ? null : normalizeSetupNumber(input.minStockLevel, 0, 3),
@@ -8011,12 +8746,12 @@ export class MssqlStoreService {
           `INSERT INTO [dbo].[purchase_order_line_snapshot] (
             [id], [purchase_order_id], [line_no], [product_code],
             [product_name], [department_code], [category_code], [subcategory],
-            [is_serialized], [ordered_quantity], [received_quantity],
+            [is_serialized], [track_expiry], [ordered_quantity], [received_quantity],
             [exception_quantity], [outstanding_quantity], [unit_cost],
             [updated_at]
           ) VALUES (
             @lineId, @purchaseOrderId, @lineNo, @productCode, @productName,
-            @departmentCode, @categoryCode, @subcategory, @isSerialized,
+            @departmentCode, @categoryCode, @subcategory, @isSerialized, @trackExpiry,
             @orderedQuantity, 0, 0, @orderedQuantity, @unitCost, @timestamp
           )`,
           {
@@ -8029,6 +8764,7 @@ export class MssqlStoreService {
             categoryCode: line.product.category_code,
             subcategory: line.product.subcategory,
             isSerialized: asBooleanFlag(line.product.is_serialized) ? 1 : 0,
+            trackExpiry: asBooleanFlag(line.product.track_expiry) ? 1 : 0,
             orderedQuantity: line.orderedQuantity,
             unitCost: line.unitCost,
             timestamp,
@@ -8066,6 +8802,8 @@ export class MssqlStoreService {
         session.[variance_quantity],
         session.[previous_serial_numbers_json],
         session.[counted_serial_numbers_json],
+        session.[previous_batch_quantities_json],
+        session.[counted_batch_quantities_json],
         session.[note],
         session.[operator_name],
         session.[submitted_at],
@@ -8144,6 +8882,12 @@ export class MssqlStoreService {
       countedSerialNumbers: readSerializedLineNumbers(
         row.counted_serial_numbers_json,
       ),
+      previousBatchQuantities: readInventoryBatchAllocations(
+        row.previous_batch_quantities_json,
+      ),
+      countedBatchQuantities: readInventoryBatchAllocations(
+        row.counted_batch_quantities_json,
+      ),
       operatorName: row.operator_name,
       note: row.note,
       submittedAt: row.submitted_at,
@@ -8163,6 +8907,15 @@ export class MssqlStoreService {
     const productCode = input.productCode.trim().toUpperCase();
     const requestedCountedQuantity = Number(
       Number(input.countedQuantity).toFixed(3),
+    );
+    const requestedBatchQuantities = (input.batchQuantities ?? []).map(
+      (batch) => ({
+        batchId: batch.batchId ?? null,
+        batchNo: batch.batchNo?.trim().toUpperCase(),
+        manufacturedAt: batch.manufacturedAt?.trim() || null,
+        expiryDate: batch.expiryDate?.trim(),
+        quantity: Number(Number(batch.quantity).toFixed(3)),
+      }),
     );
 
     if (!locationCode || !productCode) {
@@ -8221,9 +8974,114 @@ export class MssqlStoreService {
           location.location_code,
         )
       : [];
+    const previousBatchQuantities = asBooleanFlag(product.track_expiry)
+      ? (
+          await this.query<{
+            id: string;
+            batch_no: string;
+            manufactured_at: string | null;
+            expiry_date: string;
+            quantity_on_hand: string | number;
+          }>(
+            `SELECT [id], [batch_no], [manufactured_at], [expiry_date], [quantity_on_hand]
+             FROM [dbo].[inventory_batch_registry]
+             WHERE [inventory_location_code] = @locationCode
+               AND [product_code] = @productCode
+             ORDER BY [expiry_date] ASC, [batch_no] ASC`,
+            {
+              locationCode: location.location_code,
+              productCode: product.product_code,
+            },
+          )
+        ).recordset.map((batch) => ({
+          batchId: batch.id,
+          batchNo: batch.batch_no,
+          manufacturedAt: batch.manufactured_at,
+          expiryDate: batch.expiry_date,
+          quantity: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
+        }))
+      : [];
+    let countedBatchQuantities: StoreInventoryBatchAllocation[] = [];
+
+    if (asBooleanFlag(product.track_expiry)) {
+      const previousByBatchNo = new Map(
+        previousBatchQuantities.map((batch) => [
+          batch.batchNo.toUpperCase(),
+          batch,
+        ] as const),
+      );
+      const seenBatchNos = new Set<string>();
+
+      countedBatchQuantities = requestedBatchQuantities.map((batch) => {
+        if (
+          !batch.batchNo ||
+          !batch.expiryDate ||
+          !Number.isFinite(batch.quantity) ||
+          batch.quantity < 0
+        ) {
+          throw new Error(
+            `${product.product_name} needs a valid non-negative counted quantity for every batch.`,
+          );
+        }
+
+        if (seenBatchNos.has(batch.batchNo)) {
+          throw new Error(
+            `${batch.batchNo} was entered more than once in this stock count.`,
+          );
+        }
+        seenBatchNos.add(batch.batchNo);
+
+        const previousBatch = previousByBatchNo.get(batch.batchNo);
+        if (!previousBatch) {
+          throw new Error(
+            `Batch ${batch.batchNo} is not registered for ${product.product_name} in ${location.location_code}. Receive it before counting it into stock.`,
+          );
+        }
+
+        if (
+          previousBatch.expiryDate.slice(0, 10) !==
+          batch.expiryDate.slice(0, 10)
+        ) {
+          throw new Error(
+            `Batch ${batch.batchNo} is registered with expiry ${previousBatch.expiryDate.slice(0, 10)}.`,
+          );
+        }
+
+        return { ...previousBatch, quantity: batch.quantity };
+      });
+
+      const omittedBatch = previousBatchQuantities.find(
+        (batch) => !seenBatchNos.has(batch.batchNo.toUpperCase()),
+      );
+      if (omittedBatch) {
+        throw new Error(
+          `Include batch ${omittedBatch.batchNo} in the count, using zero if no units remain.`,
+        );
+      }
+    } else if (requestedBatchQuantities.length > 0) {
+      throw new Error(
+        `${product.product_name} is not configured for expiry batch tracking.`,
+      );
+    }
+
     const countedQuantity = asBooleanFlag(product.is_serialized)
       ? countedSerialNumbers.length
-      : requestedCountedQuantity;
+      : asBooleanFlag(product.track_expiry)
+        ? Number(
+            countedBatchQuantities
+              .reduce((sum, batch) => sum + batch.quantity, 0)
+              .toFixed(3),
+          )
+        : requestedCountedQuantity;
+
+    if (
+      asBooleanFlag(product.track_expiry) &&
+      Math.abs(countedQuantity - requestedCountedQuantity) > 0.0001
+    ) {
+      throw new Error(
+        `The batch count totals ${countedQuantity.toFixed(3)}, but the entered product count is ${requestedCountedQuantity.toFixed(3)}.`,
+      );
+    }
 
     if (asBooleanFlag(product.is_serialized)) {
       validateSerializedLineInput({
@@ -8272,6 +9130,8 @@ export class MssqlStoreService {
         [variance_quantity],
         [previous_serial_numbers_json],
         [counted_serial_numbers_json],
+        [previous_batch_quantities_json],
+        [counted_batch_quantities_json],
         [note],
         [operator_name],
         [submitted_at],
@@ -8294,6 +9154,8 @@ export class MssqlStoreService {
         @varianceQuantity,
         @previousSerialNumbersJson,
         @countedSerialNumbersJson,
+        @previousBatchQuantitiesJson,
+        @countedBatchQuantitiesJson,
         @note,
         @operatorName,
         NULL,
@@ -8318,6 +9180,12 @@ export class MssqlStoreService {
           writeSerializedLineNumbers(previousSerialNumbers),
         countedSerialNumbersJson:
           writeSerializedLineNumbers(countedSerialNumbers),
+        previousBatchQuantitiesJson: writeInventoryBatchAllocations(
+          previousBatchQuantities,
+        ),
+        countedBatchQuantitiesJson: writeInventoryBatchAllocations(
+          countedBatchQuantities,
+        ),
         note,
         operatorName,
         timestamp,
@@ -8390,6 +9258,12 @@ export class MssqlStoreService {
       ),
       countedSerialNumbers: readSerializedLineNumbers(
         session.counted_serial_numbers_json,
+      ),
+      previousBatchQuantities: readInventoryBatchAllocations(
+        session.previous_batch_quantities_json,
+      ),
+      countedBatchQuantities: readInventoryBatchAllocations(
+        session.counted_batch_quantities_json,
       ),
       operatorName: session.operator_name,
       note: session.note,
@@ -8518,6 +9392,57 @@ export class MssqlStoreService {
         }
       }
 
+      const previousBatchQuantities = readInventoryBatchAllocations(
+        session.previous_batch_quantities_json,
+      );
+      const countedBatchQuantities = readInventoryBatchAllocations(
+        session.counted_batch_quantities_json,
+      );
+
+      if (
+        previousBatchQuantities.length > 0 ||
+        countedBatchQuantities.length > 0
+      ) {
+        const currentBatchResult = await this.query<{
+          id: string;
+          batch_no: string;
+          expiry_date: string;
+          quantity_on_hand: string | number;
+        }>(
+          `SELECT [id], [batch_no], [expiry_date], [quantity_on_hand]
+           FROM [dbo].[inventory_batch_registry] WITH (UPDLOCK, ROWLOCK)
+           WHERE [inventory_location_code] = @locationCode
+             AND [product_code] = @productCode`,
+          {
+            locationCode: session.inventory_location_code,
+            productCode: session.product_code,
+          },
+          transaction,
+        );
+        const currentByBatchNo = new Map(
+          currentBatchResult.recordset.map((batch) => [
+            batch.batch_no.toUpperCase(),
+            batch,
+          ] as const),
+        );
+        const changedBatch = previousBatchQuantities.find((batch) => {
+          const current = currentByBatchNo.get(batch.batchNo.toUpperCase());
+          return (
+            !current ||
+            current.expiry_date.slice(0, 10) !==
+              batch.expiryDate.slice(0, 10) ||
+            Math.abs(asNumber(current.quantity_on_hand) - batch.quantity) >
+              0.0001
+          );
+        });
+
+        if (changedBatch) {
+          throw new Error(
+            `${session.session_no} can no longer be committed because batch ${changedBatch.batchNo} changed after the count was saved. Start a new count from the latest posture.`,
+          );
+        }
+      }
+
       const timestamp = isoNow();
       const metadata = await this.metadata();
       const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
@@ -8536,6 +9461,37 @@ export class MssqlStoreService {
         updatedAt: timestamp,
         runner: transaction,
       });
+
+      for (const batch of countedBatchQuantities) {
+        const result = await this.query(
+          `UPDATE [dbo].[inventory_batch_registry]
+           SET [quantity_on_hand] = @quantityOnHand,
+               [status] = @status,
+               [source_reference_type] = N'STOCK_COUNT_SESSION',
+               [source_reference_id] = @sourceReferenceId,
+               [source_reference_label] = @sourceReferenceLabel,
+               [updated_at] = @timestamp
+           WHERE [id] = @batchId`,
+          {
+            quantityOnHand: batch.quantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: batch.expiryDate,
+              quantityOnHand: batch.quantity,
+            }),
+            sourceReferenceId: session.id,
+            sourceReferenceLabel: session.session_no,
+            timestamp,
+            batchId: batch.batchId,
+          },
+          transaction,
+        );
+
+        if (result.rowsAffected[0] !== 1) {
+          throw new Error(
+            `Flash ERP could not update batch ${batch.batchNo} during ${session.session_no}.`,
+          );
+        }
+      }
       const ledgerEntryId = `inventory-count-session-${session.id}`;
       const payload: StoreInventoryLedgerRecordedPayload = {
         ledgerEntryId,
@@ -9155,17 +10111,38 @@ export class MssqlStoreService {
         ).length,
         netSalesAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.totalAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.totalAmount)
+                  : row.totalAmount),
+              0,
+            )
             .toFixed(2),
         ),
         discountAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.discountAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.discountAmount)
+                  : row.discountAmount),
+              0,
+            )
             .toFixed(2),
         ),
         taxAmount: Number(
           mappedSalesRows
-            .reduce((sum, row) => sum + row.taxAmount, 0)
+            .reduce(
+              (sum, row) =>
+                sum +
+                (row.transactionType === "RETURN"
+                  ? -Math.abs(row.taxAmount)
+                  : row.taxAmount),
+              0,
+            )
             .toFixed(2),
         ),
         tenderedAmount: Number(
@@ -10742,8 +11719,17 @@ export class MssqlStoreService {
     const totalAmount = Number(
       asNumber(refreshedBasket.total_amount).toFixed(2),
     );
+    const hasDepositPaymentRows =
+      Array.isArray(input.payments) && input.payments.length > 0;
     const requestedDepositAmount = Number(
-      Number(input.depositAmount ?? 0).toFixed(2),
+      (
+        hasDepositPaymentRows
+          ? input.payments!.reduce(
+              (sum, payment) => sum + Number(payment.amount ?? 0),
+              0,
+            )
+          : Number(input.depositAmount ?? 0)
+      ).toFixed(2),
     );
 
     if (
@@ -10761,17 +11747,15 @@ export class MssqlStoreService {
       );
     }
 
-    const depositAmount = requestedDepositAmount;
-    const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
     const depositReference = input.depositReference?.trim() || null;
     const depositTender =
-      depositAmount > 0
+      !hasDepositPaymentRows && requestedDepositAmount > 0
         ? await this.getTenderMethodByCode(
             input.depositTenderMethodCode?.trim().toUpperCase() ?? "",
           )
         : null;
 
-    if (depositAmount > 0 && !depositTender) {
+    if (!hasDepositPaymentRows && requestedDepositAmount > 0 && !depositTender) {
       throw new Error(
         "Choose an active tender method before taking a sales order deposit.",
       );
@@ -10782,8 +11766,37 @@ export class MssqlStoreService {
         `Flash ERP needs a reference for ${depositTender.tenderMethodName}.`,
       );
     }
-    const depositPaymentId =
-      depositAmount > 0 && depositTender ? randomUUID() : null;
+    const depositPaymentRequest =
+      hasDepositPaymentRows && input.payments
+        ? input.payments
+        : requestedDepositAmount > 0 && depositTender
+          ? [
+              {
+                method: depositTender.paymentMethod,
+                tenderMethodCode: depositTender.tenderMethodCode,
+                tenderMethodName: depositTender.tenderMethodName,
+                amount: requestedDepositAmount,
+                reference: depositReference,
+              },
+            ]
+          : [];
+    const preparedDepositPayments =
+      requestedDepositAmount > 0
+        ? await this.normalizeCheckoutPayments(
+            { payments: depositPaymentRequest },
+            requestedDepositAmount,
+            orderNo,
+            timestamp,
+            "SALE",
+          )
+        : {
+            payments: [] as NormalizedCheckoutPayment[],
+            paidAmount: 0,
+            changeAmount: 0,
+          };
+    const depositAmount = preparedDepositPayments.paidAmount;
+    const primaryDepositPayment = preparedDepositPayments.payments[0] ?? null;
+    const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
 
     const payload: StoreSalesOrderRecordedPayload = {
       orderId,
@@ -10805,10 +11818,10 @@ export class MssqlStoreService {
       totalAmount,
       depositAmount,
       balanceAmount,
-      depositTenderMethodCode: depositTender?.tenderMethodCode ?? null,
-      depositTenderMethodName: depositTender?.tenderMethodName ?? null,
-      depositPaymentMethod: depositTender?.paymentMethod ?? null,
-      depositReference,
+      depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
+      depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
+      depositPaymentMethod: primaryDepositPayment?.method ?? null,
+      depositReference: primaryDepositPayment?.reference ?? null,
       depositPaidAt: depositAmount > 0 ? timestamp : null,
       status: "OPEN",
       operatorName,
@@ -10819,32 +11832,27 @@ export class MssqlStoreService {
       fulfilledAt: null,
       cancelledAt: null,
       lines: this.toSalesOrderPayloadLines(lines),
-      payments:
-        depositAmount > 0 && depositTender && depositPaymentId
-          ? [
-              {
-                paymentId: depositPaymentId,
-                method: depositTender.paymentMethod,
-                tenderMethodCode: depositTender.tenderMethodCode,
-                tenderMethodName: depositTender.tenderMethodName,
-                bankAccountId: null,
-                bankCode: null,
-                bankName: null,
-                bankBranchCode: null,
-                bankBranchName: null,
-                bankAccountNumber: null,
-                bankAccountName: null,
-                amount: depositAmount,
-                reference: depositReference ?? `DEP-${orderNo}`,
-                paymentPurpose: "SALES_ORDER_DEPOSIT",
-                receivedShiftId: openShift.id,
-                receivedShiftNo: openShift.shift_no,
-                receivedTerminalCode: terminalCode,
-                receivedCashierCode: operatorSession.loginId,
-                receivedAt: timestamp,
-              },
-            ]
-          : [],
+      payments: preparedDepositPayments.payments.map((payment) => ({
+        paymentId: payment.paymentId,
+        method: payment.method,
+        tenderMethodCode: payment.tenderMethodCode,
+        tenderMethodName: payment.tenderMethodName,
+        bankAccountId: payment.bankAccountId,
+        bankCode: payment.bankCode,
+        bankName: payment.bankName,
+        bankBranchCode: payment.bankBranchCode,
+        bankBranchName: payment.bankBranchName,
+        bankAccountNumber: payment.bankAccountNumber,
+        bankAccountName: payment.bankAccountName,
+        amount: payment.amount,
+        reference: payment.reference,
+        paymentPurpose: "SALES_ORDER_DEPOSIT",
+        receivedShiftId: openShift.id,
+        receivedShiftNo: openShift.shift_no,
+        receivedTerminalCode: terminalCode,
+        receivedCashierCode: operatorSession.loginId,
+        receivedAt: payment.receivedAt,
+      })),
     };
 
     await this.withTransaction(async (transaction) => {
@@ -10913,10 +11921,10 @@ export class MssqlStoreService {
           totalAmount,
           depositAmount,
           balanceAmount,
-          depositTenderMethodCode: depositTender?.tenderMethodCode ?? null,
-          depositTenderMethodName: depositTender?.tenderMethodName ?? null,
-          depositPaymentMethod: depositTender?.paymentMethod ?? null,
-          depositReference,
+          depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
+          depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
+          depositPaymentMethod: primaryDepositPayment?.method ?? null,
+          depositReference: primaryDepositPayment?.reference ?? null,
           depositPaidAt: depositAmount > 0 ? timestamp : null,
           operatorName,
           note,
@@ -10925,13 +11933,20 @@ export class MssqlStoreService {
         transaction,
       );
 
-      if (depositAmount > 0 && depositTender) {
+      for (const payment of preparedDepositPayments.payments) {
         await this.query(
           `INSERT INTO [dbo].[pos_payment] (
             [id],
             [pos_transaction_id],
             [tender_method_code],
             [tender_method_name],
+            [bank_account_id],
+            [bank_code],
+            [bank_name],
+            [bank_branch_code],
+            [bank_branch_name],
+            [bank_account_number],
+            [bank_account_name],
             [method],
             [payment_purpose],
             [amount],
@@ -10946,6 +11961,13 @@ export class MssqlStoreService {
             @transactionId,
             @tenderMethodCode,
             @tenderMethodName,
+            @bankAccountId,
+            @bankCode,
+            @bankName,
+            @bankBranchCode,
+            @bankBranchName,
+            @bankAccountNumber,
+            @bankAccountName,
             @method,
             N'SALES_ORDER_DEPOSIT',
             @amount,
@@ -10957,18 +11979,25 @@ export class MssqlStoreService {
             @receivedAt
           )`,
           {
-            paymentId: depositPaymentId,
+            paymentId: payment.paymentId,
             transactionId: refreshedBasket.id,
-            tenderMethodCode: depositTender.tenderMethodCode,
-            tenderMethodName: depositTender.tenderMethodName,
-            method: depositTender.paymentMethod,
-            amount: depositAmount,
-            reference: depositReference ?? `DEP-${orderNo}`,
+            tenderMethodCode: payment.tenderMethodCode,
+            tenderMethodName: payment.tenderMethodName,
+            bankAccountId: payment.bankAccountId,
+            bankCode: payment.bankCode,
+            bankName: payment.bankName,
+            bankBranchCode: payment.bankBranchCode,
+            bankBranchName: payment.bankBranchName,
+            bankAccountNumber: payment.bankAccountNumber,
+            bankAccountName: payment.bankAccountName,
+            method: payment.method,
+            amount: payment.amount,
+            reference: payment.reference,
             receivedShiftId: openShift.id,
             receivedShiftNo: openShift.shift_no,
             receivedTerminalCode: terminalCode,
             receivedCashierCode: operatorSession.loginId,
-            receivedAt: timestamp,
+            receivedAt: payment.receivedAt,
           },
           transaction,
         );
@@ -12825,6 +13854,45 @@ export class MssqlStoreService {
     const variantSize = optionalSetupText(input.variantSize);
     const variantColor = optionalSetupText(input.variantColor);
     const lineNote = optionalSetupText(input.lineNote);
+    const preferredBatchAllocations =
+      !deferInventoryValidation &&
+      tracksInventoryForSale(match) &&
+      asBooleanFlag(match.track_expiry) &&
+      match.sales_location_code
+        ? allocateInventoryBatchesFefo({
+            productName: match.product_name,
+            quantity: normalizedQuantity,
+            preferredBatchId: optionalSetupText(input.preferredBatchId),
+            batches: (
+              await this.query<{
+                id: string;
+                batch_no: string;
+                manufactured_at: string | null;
+                expiry_date: string;
+                quantity_on_hand: string | number;
+                status: string;
+              }>(
+                `SELECT [id], [batch_no], [manufactured_at], [expiry_date], [quantity_on_hand], [status]
+                 FROM [dbo].[inventory_batch_registry]
+                 WHERE [inventory_location_code] = @locationCode
+                   AND [product_code] = @productCode
+                   AND [quantity_on_hand] > 0
+                 ORDER BY [expiry_date] ASC, [manufactured_at] ASC, [batch_no] ASC`,
+                {
+                  locationCode: match.sales_location_code,
+                  productCode: match.product_code,
+                },
+              )
+            ).recordset.map((batch) => ({
+              batchId: batch.id,
+              batchNo: batch.batch_no,
+              manufacturedAt: batch.manufactured_at,
+              expiryDate: batch.expiry_date,
+              quantityOnHand: asNumber(batch.quantity_on_hand),
+              status: batch.status,
+            })),
+          })
+        : [];
 
     await this.query(
       `INSERT INTO [dbo].[pos_transaction_line] (
@@ -12842,6 +13910,7 @@ export class MssqlStoreService {
         [variant_attributes_snapshot],
         [line_note],
         [serial_numbers_json],
+        [batch_allocations_json],
         [quantity],
         [unit_price],
         [discount_amount],
@@ -12864,6 +13933,7 @@ export class MssqlStoreService {
         @variantAttributesSnapshot,
         @lineNote,
         @serialNumbersJson,
+        @batchAllocationsJson,
         @quantity,
         @unitPrice,
         @discountAmount,
@@ -12886,6 +13956,9 @@ export class MssqlStoreService {
         variantAttributesSnapshot,
         lineNote,
         serialNumbersJson: writeSerializedLineNumbers(nextSerialNumbers),
+        batchAllocationsJson: writeInventoryBatchAllocations(
+          preferredBatchAllocations,
+        ),
         quantity: normalizedQuantity,
         unitPrice,
         discountAmount: lineAmounts.discountAmount,
@@ -12987,6 +14060,8 @@ export class MssqlStoreService {
         product.[tax_rate_percent],
         product.[tax_inclusive],
         product.[track_inventory],
+        product.[track_expiry],
+        product.[shelf_life_days],
         product.[is_serialized],
         product.[must_enter_price_at_pos],
         product.[min_stock_level],
@@ -13556,6 +14631,7 @@ export class MssqlStoreService {
       asNumber(refreshedBasket.record_version) + 1,
     );
     const saleQuantityByProduct = new Map<string, number>();
+    const reservedBatchQuantityById = new Map<string, number>();
     const checkoutLines: Array<{
       line: BasketLineRow;
       product: CatalogLookupRow;
@@ -13565,6 +14641,7 @@ export class MssqlStoreService {
       serialNumbers: string[];
       barcode: string | null;
       selectedVariant: ProductVariantSnapshotRow | null;
+      batchAllocations: StoreInventoryBatchAllocation[];
     }> = [];
 
     for (const line of lines) {
@@ -13654,6 +14731,68 @@ export class MssqlStoreService {
         saleQuantityByProduct.set(quantityKey, requestedProductQuantity);
       }
 
+      const batchAllocations =
+        lineIntent === "SALE" &&
+        tracksInventoryForSale(product) &&
+        asBooleanFlag(product.track_expiry) &&
+        lineLocationCode
+          ? allocateInventoryBatchesFefo({
+              productName: line.product_name_snapshot,
+              quantity,
+              preferredBatchId:
+                readInventoryBatchAllocations(line.batch_allocations_json)[0]
+                  ?.batchId ?? null,
+              batches: (
+                await this.query<{
+                  id: string;
+                  batch_no: string;
+                  manufactured_at: string | null;
+                  expiry_date: string;
+                  quantity_on_hand: string | number;
+                  status: string;
+                }>(
+                  `SELECT [id], [batch_no], [manufactured_at], [expiry_date], [quantity_on_hand], [status]
+                   FROM [dbo].[inventory_batch_registry]
+                   WHERE [inventory_location_code] = @locationCode
+                     AND [product_code] = @productCode
+                     AND [quantity_on_hand] > 0
+                   ORDER BY [expiry_date] ASC, [manufactured_at] ASC, [batch_no] ASC`,
+                  {
+                    locationCode: lineLocationCode,
+                    productCode: line.product_code_snapshot,
+                  },
+                )
+              ).recordset.map((batch) => ({
+                batchId: batch.id,
+                batchNo: batch.batch_no,
+                manufacturedAt: batch.manufactured_at,
+                expiryDate: batch.expiry_date,
+                quantityOnHand: Number(
+                  Math.max(
+                    0,
+                    asNumber(batch.quantity_on_hand) -
+                      (reservedBatchQuantityById.get(batch.id) ?? 0),
+                  ).toFixed(3),
+                ),
+                status: batch.status,
+              })),
+            })
+          : [];
+
+      for (const allocation of batchAllocations) {
+        if (allocation.batchId) {
+          reservedBatchQuantityById.set(
+            allocation.batchId,
+            Number(
+              (
+                (reservedBatchQuantityById.get(allocation.batchId) ?? 0) +
+                allocation.quantity
+              ).toFixed(3),
+            ),
+          );
+        }
+      }
+
       checkoutLines.push({
         line,
         product,
@@ -13667,12 +14806,13 @@ export class MssqlStoreService {
             ?.barcode_code ??
           null,
         selectedVariant,
+        batchAllocations,
       });
     }
 
     const salePayloadLines: StorePosTransactionCompletedPayload["lines"] =
       checkoutLines.map(
-        ({ line, lineIntent, inventoryLocationCode, quantity, serialNumbers, barcode, selectedVariant }) => ({
+        ({ line, lineIntent, inventoryLocationCode, quantity, serialNumbers, barcode, selectedVariant, batchAllocations }) => ({
           lineId: line.id,
           lineIntent,
           sourceLineId: line.source_line_id,
@@ -13693,6 +14833,7 @@ export class MssqlStoreService {
           appliedPromotionCode: line.applied_promotion_code,
           appliedPromotionName: line.applied_promotion_name,
           inventoryLocationCode,
+          batchAllocations,
         }),
       );
     const salePayload: StorePosTransactionCompletedPayload = {
@@ -13864,6 +15005,7 @@ export class MssqlStoreService {
         quantity,
         serialNumbers,
         selectedVariant,
+        batchAllocations,
       } of checkoutLines) {
         const direction = getLineDirection(
           refreshedBasket.transaction_type,
@@ -13877,6 +15019,64 @@ export class MssqlStoreService {
           asBooleanFlag(product.track_inventory) &&
           !isServiceProductType(product.product_type)
         ) {
+          await this.query(
+            `UPDATE [dbo].[pos_transaction_line]
+             SET [batch_allocations_json] = @batchAllocationsJson
+             WHERE [id] = @lineId`,
+            {
+              batchAllocationsJson: writeInventoryBatchAllocations(batchAllocations),
+              lineId: line.id,
+            },
+            transaction,
+          );
+
+          for (const allocation of batchAllocations) {
+            const batchResult = await this.query<{
+              quantity_on_hand: string | number;
+              expiry_date: string;
+              status: string;
+            }>(
+              `SELECT [quantity_on_hand], [expiry_date], [status]
+               FROM [dbo].[inventory_batch_registry] WITH (UPDLOCK, ROWLOCK)
+               WHERE [id] = @batchId`,
+              { batchId: allocation.batchId },
+              transaction,
+            );
+            const batch = batchResult.recordset[0] ?? null;
+
+            if (!batch || asNumber(batch.quantity_on_hand) < allocation.quantity) {
+              throw new Error(
+                `Batch ${allocation.batchNo} no longer has enough ${line.product_name_snapshot} to complete this sale.`,
+              );
+            }
+
+            const nextBatchQuantity = Number(
+              (asNumber(batch.quantity_on_hand) - allocation.quantity).toFixed(3),
+            );
+            await this.query(
+              `UPDATE [dbo].[inventory_batch_registry]
+               SET [quantity_on_hand] = @quantityOnHand,
+                   [status] = @status,
+                   [source_reference_type] = N'POS_TRANSACTION',
+                   [source_reference_id] = @transactionId,
+                   [source_reference_label] = @transactionNo,
+                   [updated_at] = @timestamp
+               WHERE [id] = @batchId`,
+              {
+                quantityOnHand: nextBatchQuantity,
+                status: deriveInventoryBatchStatus({
+                  expiryDate: batch.expiry_date,
+                  quantityOnHand: nextBatchQuantity,
+                  status: batch.status,
+                }),
+                transactionId: refreshedBasket.id,
+                transactionNo: refreshedBasket.transaction_no,
+                timestamp,
+                batchId: allocation.batchId,
+              },
+              transaction,
+            );
+          }
           await this.query(
             `UPDATE [dbo].[product_snapshot]
              SET [quantity_on_hand] = [quantity_on_hand] + @signedInventoryDelta,
@@ -13970,6 +15170,7 @@ export class MssqlStoreService {
               movementType: lineIntent === "RETURN" ? "RETURN" : "SALE",
               quantity,
               ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+              batchAllocations,
               unitCost: null,
               referenceType: "POS_TRANSACTION",
               referenceId: refreshedBasket.id,
@@ -14215,6 +15416,7 @@ export class MssqlStoreService {
         category.[category_name],
         transfer.[subcategory],
         transfer.[is_serialized],
+        transfer.[track_expiry],
         transfer.[requested_quantity],
         transfer.[issued_quantity],
         transfer.[received_quantity],
@@ -14223,6 +15425,8 @@ export class MssqlStoreService {
         transfer.[unit_cost],
         transfer.[issued_serial_numbers_json],
         transfer.[received_serial_numbers_json],
+        transfer.[issued_batch_allocations_json],
+        transfer.[received_batch_allocations_json],
         transfer.[request_note],
         transfer.[issue_note],
         transfer.[receipt_note],
@@ -14363,6 +15567,81 @@ export class MssqlStoreService {
       }
 
       const timestamp = isoNow();
+      const batchAllocations = asBooleanFlag(product.track_expiry)
+        ? allocateInventoryBatchesFefo({
+            productName: transfer.product_name,
+            quantity,
+            batches: (
+              await this.query<{
+                id: string;
+                batch_no: string;
+                manufactured_at: string | null;
+                expiry_date: string;
+                quantity_on_hand: string | number;
+                status: string;
+              }>(
+                `SELECT [id], [batch_no], [manufactured_at], [expiry_date], [quantity_on_hand], [status]
+                 FROM [dbo].[inventory_batch_registry] WITH (UPDLOCK, ROWLOCK)
+                 WHERE [inventory_location_code] = @locationCode
+                   AND [product_code] = @productCode
+                   AND [quantity_on_hand] > 0
+                 ORDER BY [expiry_date] ASC, [manufactured_at] ASC, [batch_no] ASC`,
+                {
+                  locationCode: transfer.source_location_code,
+                  productCode: transfer.product_code,
+                },
+                transaction,
+              )
+            ).recordset.map((batch) => ({
+              batchId: batch.id,
+              batchNo: batch.batch_no,
+              manufacturedAt: batch.manufactured_at,
+              expiryDate: batch.expiry_date,
+              quantityOnHand: asNumber(batch.quantity_on_hand),
+              status: batch.status,
+            })),
+          })
+        : [];
+
+      for (const allocation of batchAllocations) {
+        const batchResult = await this.query<{
+          quantity_on_hand: string | number;
+        }>(
+          `SELECT [quantity_on_hand]
+           FROM [dbo].[inventory_batch_registry]
+           WHERE [id] = @batchId`,
+          { batchId: allocation.batchId },
+          transaction,
+        );
+        const nextBatchQuantity = Number(
+          (
+            asNumber(batchResult.recordset[0]?.quantity_on_hand) -
+            allocation.quantity
+          ).toFixed(3),
+        );
+        await this.query(
+          `UPDATE [dbo].[inventory_batch_registry]
+           SET [quantity_on_hand] = @quantityOnHand,
+               [status] = @status,
+               [source_reference_type] = N'INTER_STORE_TRANSFER',
+               [source_reference_id] = @sourceReferenceId,
+               [source_reference_label] = @sourceReferenceLabel,
+               [updated_at] = @timestamp
+           WHERE [id] = @batchId`,
+          {
+            quantityOnHand: nextBatchQuantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: allocation.expiryDate,
+              quantityOnHand: nextBatchQuantity,
+            }),
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transfer_no,
+            timestamp,
+            batchId: allocation.batchId,
+          },
+          transaction,
+        );
+      }
       const metadata = await this.metadata();
       const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
       const terminalCode = this.getTerminalCode();
@@ -14384,6 +15663,12 @@ export class MssqlStoreService {
         ...readSerializedLineNumbers(transfer.issued_serial_numbers_json),
         ...serialNumbers,
       ]);
+      const nextIssuedBatchAllocations = [
+        ...readInventoryBatchAllocations(
+          transfer.issued_batch_allocations_json,
+        ),
+        ...batchAllocations,
+      ];
       const issueNote =
         input.note?.trim() ||
         `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${transfer.source_location_code}.`;
@@ -14422,6 +15707,7 @@ export class MssqlStoreService {
              [outstanding_issue_quantity] = @outstandingIssueQuantity,
              [outstanding_receipt_quantity] = @outstandingReceiptQuantity,
              [issued_serial_numbers_json] = @issuedSerialNumbersJson,
+             [issued_batch_allocations_json] = @issuedBatchAllocationsJson,
              [issue_note] = @issueNote,
              [issue_operator_name] = @operatorName,
              [source_node_code] = @nodeCode,
@@ -14442,6 +15728,9 @@ export class MssqlStoreService {
           ),
           issuedSerialNumbersJson:
             writeSerializedLineNumbers(nextIssuedSerialNumbers),
+          issuedBatchAllocationsJson: writeInventoryBatchAllocations(
+            nextIssuedBatchAllocations,
+          ),
           issueNote,
           operatorName,
           nodeCode,
@@ -14461,6 +15750,7 @@ export class MssqlStoreService {
         productCode: transfer.product_code,
         quantity,
         ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        ...(batchAllocations.length > 0 ? { batchAllocations } : {}),
         operatorName,
         note: issueNote,
         occurredAt: timestamp,
@@ -14620,6 +15910,109 @@ export class MssqlStoreService {
       }
 
       const timestamp = isoNow();
+      const receivedBatchAllocations = asBooleanFlag(product.track_expiry)
+        ? takeOutstandingInventoryBatchAllocations({
+            productName: transfer.product_name,
+            quantity,
+            issued: readInventoryBatchAllocations(
+              transfer.issued_batch_allocations_json,
+            ),
+            received: readInventoryBatchAllocations(
+              transfer.received_batch_allocations_json,
+            ),
+          })
+        : [];
+
+      for (const allocation of receivedBatchAllocations) {
+        const existingBatchResult = await this.query<{
+          id: string;
+          expiry_date: string;
+          quantity_on_hand: string | number;
+          status: string;
+        }>(
+          `SELECT TOP (1) [id], [expiry_date], [quantity_on_hand], [status]
+           FROM [dbo].[inventory_batch_registry] WITH (UPDLOCK, ROWLOCK)
+           WHERE [inventory_location_code] = @inventoryLocationCode
+             AND [product_code] = @productCode
+             AND [batch_no] = @batchNo`,
+          {
+            inventoryLocationCode: transfer.destination_location_code,
+            productCode: transfer.product_code,
+            batchNo: allocation.batchNo,
+          },
+          transaction,
+        );
+        const existingBatch = existingBatchResult.recordset[0] ?? null;
+
+        if (
+          existingBatch &&
+          existingBatch.expiry_date.slice(0, 10) !==
+            allocation.expiryDate.slice(0, 10)
+        ) {
+          throw new Error(
+            `Batch ${allocation.batchNo} already exists for ${transfer.product_name} at the destination with a different expiry date.`,
+          );
+        }
+
+        const nextBatchQuantity = Number(
+          (
+            asNumber(existingBatch?.quantity_on_hand ?? 0) +
+            allocation.quantity
+          ).toFixed(3),
+        );
+        const destinationBatchId = existingBatch?.id ?? randomUUID();
+        await this.query(
+          `MERGE [dbo].[inventory_batch_registry] AS target
+           USING (SELECT
+             @inventoryLocationCode AS [inventory_location_code],
+             @productCode AS [product_code],
+             @batchNo AS [batch_no]
+           ) AS source
+           ON target.[inventory_location_code] = source.[inventory_location_code]
+            AND target.[product_code] = source.[product_code]
+            AND target.[batch_no] = source.[batch_no]
+           WHEN MATCHED THEN UPDATE SET
+             [manufactured_at] = ISNULL(@manufacturedAt, target.[manufactured_at]),
+             [expiry_date] = @expiryDate,
+             [quantity_on_hand] = @quantityOnHand,
+             [status] = @status,
+             [source_reference_type] = N'INTER_STORE_TRANSFER',
+             [source_reference_id] = @sourceReferenceId,
+             [source_reference_label] = @sourceReferenceLabel,
+             [updated_at] = @timestamp
+           WHEN NOT MATCHED THEN INSERT (
+             [id], [product_code], [inventory_location_code], [batch_no],
+             [manufactured_at], [expiry_date], [quantity_on_hand], [status],
+             [source_reference_type], [source_reference_id],
+             [source_reference_label], [updated_at]
+           ) VALUES (
+             @batchId, @productCode, @inventoryLocationCode, @batchNo,
+             @manufacturedAt, @expiryDate, @quantityOnHand, @status,
+             N'INTER_STORE_TRANSFER', @sourceReferenceId,
+             @sourceReferenceLabel, @timestamp
+           );`,
+          {
+            batchId: destinationBatchId,
+            inventoryLocationCode: transfer.destination_location_code,
+            productCode: transfer.product_code,
+            batchNo: allocation.batchNo,
+            manufacturedAt: allocation.manufacturedAt ?? null,
+            expiryDate: allocation.expiryDate,
+            quantityOnHand: nextBatchQuantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: allocation.expiryDate,
+              quantityOnHand: nextBatchQuantity,
+              status: existingBatch?.status,
+            }),
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transfer_no,
+            timestamp,
+          },
+          transaction,
+        );
+
+        allocation.batchId = destinationBatchId;
+      }
       const metadata = await this.metadata();
       const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
       const terminalCode = this.getTerminalCode();
@@ -14641,6 +16034,12 @@ export class MssqlStoreService {
         ...readSerializedLineNumbers(transfer.received_serial_numbers_json),
         ...serialNumbers,
       ]);
+      const nextReceivedBatchAllocations = [
+        ...readInventoryBatchAllocations(
+          transfer.received_batch_allocations_json,
+        ),
+        ...receivedBatchAllocations,
+      ];
       const receiptNote =
         input.note?.trim() ||
         `Received ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} into ${transfer.destination_location_code}.`;
@@ -14678,6 +16077,7 @@ export class MssqlStoreService {
              [received_quantity] = @nextReceivedQuantity,
              [outstanding_receipt_quantity] = @outstandingReceiptQuantity,
              [received_serial_numbers_json] = @receivedSerialNumbersJson,
+             [received_batch_allocations_json] = @receivedBatchAllocationsJson,
              [receipt_note] = @receiptNote,
              [receipt_operator_name] = @operatorName,
              [destination_node_code] = @nodeCode,
@@ -14692,6 +16092,9 @@ export class MssqlStoreService {
           ),
           receivedSerialNumbersJson: writeSerializedLineNumbers(
             nextReceivedSerialNumbers,
+          ),
+          receivedBatchAllocationsJson: writeInventoryBatchAllocations(
+            nextReceivedBatchAllocations,
           ),
           receiptNote,
           operatorName,
@@ -14712,6 +16115,9 @@ export class MssqlStoreService {
         productCode: transfer.product_code,
         quantity,
         ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+        ...(receivedBatchAllocations.length > 0
+          ? { batchAllocations: receivedBatchAllocations }
+          : {}),
         operatorName,
         note: receiptNote,
         occurredAt: timestamp,
@@ -14770,6 +16176,9 @@ export class MssqlStoreService {
       purchaseOrderLineId: line.purchaseOrderLineId.trim(),
       quantity: Number(Number(line.quantity).toFixed(3)),
       serialNumbers: normalizeSerialNumbers(line.serialNumbers),
+      batchNo: line.batchNo?.trim() || null,
+      manufacturedAt: line.manufacturedAt?.trim() || null,
+      expiryDate: line.expiryDate?.trim() || null,
     }));
     const requestedExceptionLines = (input.exceptionLines ?? []).map(
       (line) => ({
@@ -14895,6 +16304,7 @@ export class MssqlStoreService {
         category.[category_name],
         line.[subcategory],
         line.[is_serialized],
+        line.[track_expiry],
         line.[ordered_quantity],
         line.[received_quantity],
         line.[exception_quantity],
@@ -14996,6 +16406,19 @@ export class MssqlStoreService {
         throw new Error(
           `${line.product_name} is not serialized, so this receipt line cannot include serial numbers.`,
         );
+      }
+
+      if (requestedLine) {
+        const batch = validateInventoryBatchReceipt({
+          productName: line.product_name,
+          trackExpiry: asBooleanFlag(product.track_expiry),
+          batchNo: requestedLine.batchNo,
+          manufacturedAt: requestedLine.manufacturedAt,
+          expiryDate: requestedLine.expiryDate,
+        });
+        requestedLine.batchNo = batch.batchNo;
+        requestedLine.manufacturedAt = batch.manufacturedAt;
+        requestedLine.expiryDate = batch.expiryDate;
       }
 
       totalQuantity = Number((totalQuantity + quantity).toFixed(3));
@@ -15132,6 +16555,9 @@ export class MssqlStoreService {
               [quantity],
               [unit_cost],
               [serial_numbers_json],
+              [batch_no],
+              [manufactured_at],
+              [expiry_date],
               [updated_at]
             ) VALUES (
               @goodsReceiptLineId,
@@ -15143,6 +16569,9 @@ export class MssqlStoreService {
               @receivedQuantity,
               @unitCost,
               @serialNumbersJson,
+              @batchNo,
+              @manufacturedAt,
+              @expiryDate,
               @timestamp
             )`,
             {
@@ -15157,10 +16586,100 @@ export class MssqlStoreService {
               serialNumbersJson: writeSerializedLineNumbers(
                 requestedLine.serialNumbers,
               ),
+              batchNo: requestedLine.batchNo,
+              manufacturedAt: requestedLine.manufacturedAt,
+              expiryDate: requestedLine.expiryDate,
               timestamp,
             },
             transaction,
           );
+
+          if (requestedLine.batchNo && requestedLine.expiryDate) {
+            const existingBatchResult = await this.query<{
+              id: string;
+              expiry_date: string;
+              quantity_on_hand: string | number;
+              status: string;
+            }>(
+              `SELECT TOP (1) [id], [expiry_date], [quantity_on_hand], [status]
+               FROM [dbo].[inventory_batch_registry]
+               WHERE [inventory_location_code] = @inventoryLocationCode
+                 AND [product_code] = @productCode
+                 AND [batch_no] = @batchNo`,
+              {
+                inventoryLocationCode: purchaseOrder.inventory_location_code,
+                productCode: line.product_code,
+                batchNo: requestedLine.batchNo,
+              },
+              transaction,
+            );
+            const existingBatch = existingBatchResult.recordset[0] ?? null;
+
+            if (
+              existingBatch &&
+              existingBatch.expiry_date.slice(0, 10) !==
+                requestedLine.expiryDate.slice(0, 10)
+            ) {
+              throw new Error(
+                `Batch ${requestedLine.batchNo} already exists for ${line.product_name} with a different expiry date.`,
+              );
+            }
+
+            const nextBatchQuantity = Number(
+              (
+                asNumber(existingBatch?.quantity_on_hand ?? 0) +
+                receivedQuantity
+              ).toFixed(3),
+            );
+            await this.query(
+              `MERGE [dbo].[inventory_batch_registry] AS target
+               USING (SELECT
+                 @inventoryLocationCode AS [inventory_location_code],
+                 @productCode AS [product_code],
+                 @batchNo AS [batch_no]
+               ) AS source
+               ON target.[inventory_location_code] = source.[inventory_location_code]
+                AND target.[product_code] = source.[product_code]
+                AND target.[batch_no] = source.[batch_no]
+               WHEN MATCHED THEN UPDATE SET
+                 [manufactured_at] = ISNULL(@manufacturedAt, target.[manufactured_at]),
+                 [expiry_date] = @expiryDate,
+                 [quantity_on_hand] = @quantityOnHand,
+                 [status] = @status,
+                 [source_reference_type] = N'GOODS_RECEIPT',
+                 [source_reference_id] = @goodsReceiptId,
+                 [source_reference_label] = @goodsReceiptNo,
+                 [updated_at] = @timestamp
+               WHEN NOT MATCHED THEN INSERT (
+                 [id], [product_code], [inventory_location_code], [batch_no],
+                 [manufactured_at], [expiry_date], [quantity_on_hand], [status],
+                 [source_reference_type], [source_reference_id],
+                 [source_reference_label], [updated_at]
+               ) VALUES (
+                 @batchId, @productCode, @inventoryLocationCode, @batchNo,
+                 @manufacturedAt, @expiryDate, @quantityOnHand, @status,
+                 N'GOODS_RECEIPT', @goodsReceiptId, @goodsReceiptNo, @timestamp
+               );`,
+              {
+                batchId: existingBatch?.id ?? randomUUID(),
+                inventoryLocationCode: purchaseOrder.inventory_location_code,
+                productCode: line.product_code,
+                batchNo: requestedLine.batchNo,
+                manufacturedAt: requestedLine.manufacturedAt,
+                expiryDate: requestedLine.expiryDate,
+                quantityOnHand: nextBatchQuantity,
+                status: deriveInventoryBatchStatus({
+                  expiryDate: requestedLine.expiryDate,
+                  quantityOnHand: nextBatchQuantity,
+                  status: existingBatch?.status,
+                }),
+                goodsReceiptId,
+                goodsReceiptNo,
+                timestamp,
+              },
+              transaction,
+            );
+          }
           await this.query(
             `UPDATE [dbo].[product_snapshot]
              SET [quantity_on_hand] = [quantity_on_hand] + @receivedQuantity,
@@ -15220,6 +16739,9 @@ export class MssqlStoreService {
             quantity: receivedQuantity,
             unitCost: asNullableNumber(line.unit_cost),
             serialNumbers: requestedLine.serialNumbers,
+            batchNo: requestedLine.batchNo ?? null,
+            manufacturedAt: requestedLine.manufacturedAt ?? null,
+            expiryDate: requestedLine.expiryDate ?? null,
           });
         }
 
@@ -15523,6 +17045,9 @@ export class MssqlStoreService {
           [quantity],
           [unit_cost],
           [serial_numbers_json],
+          [batch_no],
+          [manufactured_at],
+          [expiry_date],
           [updated_at]
          FROM [dbo].[local_goods_receipt_line]
          WHERE [local_goods_receipt_id] = @goodsReceiptId
@@ -15819,6 +17344,7 @@ export class MssqlStoreService {
             [quantity],
             [unit_cost],
             [serial_numbers_json],
+            [batch_allocations_json],
             [updated_at]
           ) VALUES (
             @supplierReturnLineId,
@@ -15831,6 +17357,7 @@ export class MssqlStoreService {
             @quantity,
             @unitCost,
             @serialNumbersJson,
+            @batchAllocationsJson,
             @timestamp
           )`,
           {
@@ -15846,10 +17373,83 @@ export class MssqlStoreService {
             serialNumbersJson: writeSerializedLineNumbers(
               requestedLine.serialNumbers,
             ),
+            batchAllocationsJson: null,
             timestamp,
           },
           transaction,
         );
+        const batchAllocations: StoreInventoryBatchAllocation[] = [];
+
+        if (goodsReceiptLine.batch_no && goodsReceiptLine.expiry_date) {
+          const batchResult = await this.query<{
+            id: string;
+            quantity_on_hand: string | number;
+            expiry_date: string;
+            status: string;
+          }>(
+            `SELECT [id], [quantity_on_hand], [expiry_date], [status]
+             FROM [dbo].[inventory_batch_registry] WITH (UPDLOCK, ROWLOCK)
+             WHERE [inventory_location_code] = @inventoryLocationCode
+               AND [product_code] = @productCode
+               AND [batch_no] = @batchNo`,
+            {
+              inventoryLocationCode: goodsReceipt.inventory_location_code,
+              productCode: goodsReceiptLine.product_code,
+              batchNo: goodsReceiptLine.batch_no,
+            },
+            transaction,
+          );
+          const batch = batchResult.recordset[0] ?? null;
+
+          if (!batch || asNumber(batch.quantity_on_hand) < requestedLine.quantity) {
+            throw new Error(
+              `Batch ${goodsReceiptLine.batch_no} does not have enough ${goodsReceiptLine.product_name} for this supplier return.`,
+            );
+          }
+
+          const nextBatchQuantity = Number(
+            (asNumber(batch.quantity_on_hand) - requestedLine.quantity).toFixed(3),
+          );
+          await this.query(
+            `UPDATE [dbo].[inventory_batch_registry]
+             SET [quantity_on_hand] = @quantityOnHand,
+                 [status] = @status,
+                 [source_reference_type] = N'SUPPLIER_RETURN',
+                 [source_reference_id] = @supplierReturnId,
+                 [source_reference_label] = @supplierReturnNo,
+                 [updated_at] = @timestamp
+             WHERE [id] = @batchId`,
+            {
+              quantityOnHand: nextBatchQuantity,
+              status: deriveInventoryBatchStatus({
+                expiryDate: batch.expiry_date,
+                quantityOnHand: nextBatchQuantity,
+                status: batch.status,
+              }),
+              supplierReturnId,
+              supplierReturnNo,
+              timestamp,
+              batchId: batch.id,
+            },
+            transaction,
+          );
+          batchAllocations.push({
+            batchId: batch.id,
+            batchNo: goodsReceiptLine.batch_no,
+            expiryDate: goodsReceiptLine.expiry_date,
+            quantity: requestedLine.quantity,
+          });
+          await this.query(
+            `UPDATE [dbo].[local_supplier_return_line]
+             SET [batch_allocations_json] = @batchAllocationsJson
+             WHERE [id] = @lineId`,
+            {
+              batchAllocationsJson: writeInventoryBatchAllocations(batchAllocations),
+              lineId: supplierReturnLineId,
+            },
+            transaction,
+          );
+        }
         await this.query(
           `UPDATE [dbo].[product_snapshot]
            SET [quantity_on_hand] = [quantity_on_hand] - @quantity,
@@ -15910,6 +17510,7 @@ export class MssqlStoreService {
           quantity: requestedLine.quantity,
           unitCost: asNullableNumber(goodsReceiptLine.unit_cost),
           serialNumbers: requestedLine.serialNumbers,
+          batchAllocations,
         });
       }
 
@@ -17480,6 +19081,86 @@ export class MssqlStoreService {
         ["login_background_image_url", storePayload.loginBackgroundImageUrl],
         ["sales_receipt_template_html", storePayload.salesReceiptTemplateHtml],
         [
+          "allow_negative_inventory",
+          storePayload.allowNegativeInventory === true ? "1" : "0",
+        ],
+        [
+          "allow_offline_sales",
+          storePayload.allowOfflineSales === false ? "0" : "1",
+        ],
+        [
+          "auto_print_receipts",
+          storePayload.autoPrintReceipts === false ? "0" : "1",
+        ],
+        [
+          "enforce_serialized_scan_at_pos",
+          storePayload.enforceSerializedScanAtPos === false ? "0" : "1",
+        ],
+        [
+          "require_customer_for_credit_sales",
+          storePayload.requireCustomerForCreditSales === false ? "0" : "1",
+        ],
+        [
+          "require_supervisor_for_receiptless_return",
+          storePayload.requireSupervisorForReceiptlessReturn === false
+            ? "0"
+            : "1",
+        ],
+        [
+          "default_receipt_search_days",
+          String(
+            normalizePolicyInteger(
+              storePayload.defaultReceiptSearchDays,
+              30,
+              1,
+              365,
+            ),
+          ),
+        ],
+        [
+          "shift_float_prompt_amount",
+          String(
+            Number(
+              Math.max(0, storePayload.shiftFloatPromptAmount ?? 0).toFixed(2),
+            ),
+          ),
+        ],
+        [
+          "show_critical_stocks_on_startup",
+          storePayload.showCriticalStocksOnStartup ? "1" : "0",
+        ],
+        [
+          "show_expiring_batches_on_startup",
+          storePayload.showExpiringBatchesOnStartup === false ? "0" : "1",
+        ],
+        [
+          "expiry_alert_lead_days",
+          String(
+            normalizePolicyInteger(
+              storePayload.expiryAlertLeadDays,
+              30,
+              1,
+              3650,
+            ),
+          ),
+        ],
+        [
+          "expiry_critical_days",
+          String(
+            normalizePolicyInteger(
+              storePayload.expiryCriticalDays,
+              7,
+              0,
+              normalizePolicyInteger(
+                storePayload.expiryAlertLeadDays,
+                30,
+                1,
+                3650,
+              ),
+            ),
+          ),
+        ],
+        [
           "product_sizes_json",
           Array.isArray(storePayload.productSizes)
             ? JSON.stringify(
@@ -18050,6 +19731,8 @@ export class MssqlStoreService {
              @taxRatePercent AS [tax_rate_percent],
              @taxInclusive AS [tax_inclusive],
              @trackInventory AS [track_inventory],
+             @trackExpiry AS [track_expiry],
+             @shelfLifeDays AS [shelf_life_days],
              @isSerialized AS [is_serialized],
              @trackSize AS [track_size],
              @trackColor AS [track_color],
@@ -18079,6 +19762,8 @@ export class MssqlStoreService {
            [tax_rate_percent] = source.[tax_rate_percent],
            [tax_inclusive] = source.[tax_inclusive],
            [track_inventory] = source.[track_inventory],
+           [track_expiry] = source.[track_expiry],
+           [shelf_life_days] = source.[shelf_life_days],
            [is_serialized] = source.[is_serialized],
            [track_size] = source.[track_size],
            [track_color] = source.[track_color],
@@ -18095,7 +19780,7 @@ export class MssqlStoreService {
            [id], [product_code], [product_name], [product_type], [short_name], [description],
            [primary_image_url], [department_code], [category_code], [subcategory],
            [unit_of_measure], [taxable], [tax_profile_code], [tax_profile_name],
-           [tax_rate_percent], [tax_inclusive], [track_inventory], [is_serialized],
+           [tax_rate_percent], [tax_inclusive], [track_inventory], [track_expiry], [shelf_life_days], [is_serialized],
            [track_size], [track_color], [must_enter_price_at_pos], [min_stock_level], [reorder_point],
            [safety_stock_level], [catalog_membership_active], [catalog_sort_order],
            [unit_price], [quantity_on_hand], [updated_at]
@@ -18105,7 +19790,7 @@ export class MssqlStoreService {
            source.[department_code], source.[category_code], source.[subcategory],
            source.[unit_of_measure], source.[taxable], source.[tax_profile_code],
            source.[tax_profile_name], source.[tax_rate_percent],
-           source.[tax_inclusive], source.[track_inventory], source.[is_serialized],
+           source.[tax_inclusive], source.[track_inventory], source.[track_expiry], source.[shelf_life_days], source.[is_serialized],
            source.[track_size], source.[track_color],
            source.[must_enter_price_at_pos], source.[min_stock_level],
            source.[reorder_point], source.[safety_stock_level], 1,
@@ -18130,6 +19815,11 @@ export class MssqlStoreService {
           taxRatePercent: productPayload.taxRatePercent ?? null,
           taxInclusive: productPayload.taxInclusive ? 1 : 0,
           trackInventory: productPayload.trackInventory === false ? 0 : 1,
+          trackExpiry: productPayload.trackExpiry ? 1 : 0,
+          shelfLifeDays:
+            typeof productPayload.shelfLifeDays === "number"
+              ? Math.trunc(productPayload.shelfLifeDays)
+              : null,
           isSerialized: productPayload.isSerialized ? 1 : 0,
           trackSize: productPayload.trackSize ? 1 : 0,
           trackColor: productPayload.trackColor ? 1 : 0,
@@ -18784,6 +20474,7 @@ export class MssqlStoreService {
             category_code: optionalString(line.categoryCode),
             subcategory: optionalString(line.subcategory),
             is_serialized: booleanFlag(line.isSerialized),
+            track_expiry: booleanFlag(line.trackExpiry),
             ordered_quantity:
               typeof line.orderedQuantity === "number"
                 ? line.orderedQuantity
@@ -18932,7 +20623,8 @@ export class MssqlStoreService {
              [sync_run_id] = NULL,
              [error_message] = NULL
          OUTPUT 1 AS [affected_count]
-         WHERE [status] IN (N'FAILED', N'DEAD_LETTER')`,
+         WHERE [status] IN (N'FAILED', N'DEAD_LETTER')
+           AND ISNULL([failure_kind], N'') NOT IN (N'STALE_VERSION', N'UNKNOWN_AGGREGATE', N'INVALID_PAYLOAD', N'POLICY_REJECTED')`,
         { finishedAt },
       ),
       this.query<{ affected_count: number }>(
@@ -18948,15 +20640,16 @@ export class MssqlStoreService {
 
     await this.insertRunLog({
       runKind: "REQUEUE",
-      result: "SUCCESS",
+      result:
+        upstreamRequeued > 0 || downstreamRequeued > 0 ? "SUCCESS" : "IDLE",
       summary:
         upstreamRequeued > 0 || downstreamRequeued > 0
           ? shouldQueueEnterprise
-            ? `Requeued ${upstreamRequeued + downstreamRequeued} SQL Server dead-letter item(s) for another enterprise pass.`
-            : `Requeued ${upstreamRequeued + downstreamRequeued} SQL Server standalone recovery item(s) for local review.`
-          : "No SQL Server dead-letter items were waiting for requeue.",
-      upstreamProcessed: 0,
-      downstreamApplied: 0,
+            ? `Requeued ${upstreamRequeued + downstreamRequeued} eligible SQL Server failed item(s) for another enterprise pass.`
+            : `Requeued ${upstreamRequeued + downstreamRequeued} eligible SQL Server standalone recovery item(s) for local review. Permanent conflicts remained unchanged.`
+          : "No eligible SQL Server failed items were waiting for retry. Permanent conflicts remain available for support review.",
+      upstreamProcessed: upstreamRequeued,
+      downstreamApplied: downstreamRequeued,
       startedAt,
       finishedAt,
     });
@@ -18965,9 +20658,9 @@ export class MssqlStoreService {
       message:
         upstreamRequeued > 0 || downstreamRequeued > 0
           ? shouldQueueEnterprise
-            ? "Failed items were moved back into active SQL Server queues."
-            : "Standalone recovery items were moved back into SQL Server local review queues."
-          : "There were no dead-letter items to requeue.",
+            ? "Eligible failed items were moved back into active SQL Server queues. Permanent conflicts were left unchanged."
+            : "Eligible standalone recovery items were moved back into SQL Server local review queues. Permanent conflicts were left unchanged."
+          : "There were no eligible failed items to retry. Permanent conflicts were left unchanged.",
       snapshot: await this.getSyncSnapshot(),
     };
   }

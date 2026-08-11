@@ -38,6 +38,7 @@ const financeRepository = requireFile(
 );
 const sqliteStore = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
 const postgresStore = requireFile("apps/store-desktop/src/main/postgres/postgres-store-service.ts");
+const mssqlStore = requireFile("apps/store-desktop/src/main/mssql/mssql-store-service.ts");
 const syncDocs = requireFile("docs/09-sync-hardening-and-observability.md");
 const hardeningPack = requireFile("docs/15-production-hardening-execution-pack.md");
 const uatEvidence = requireFile("docs/14-uat-evidence-log.md");
@@ -50,7 +51,8 @@ for (const [source, label] of [
   [syncContracts, "sync contracts"],
   [enterpriseSync, "enterprise sync repository"],
   [sqliteStore, "SQLite desktop store"],
-  [postgresStore, "PostgreSQL desktop store"]
+  [postgresStore, "PostgreSQL desktop store"],
+  [mssqlStore, "SQL Server desktop store"]
 ] as const) {
   requireIncludes(source, "syncRunId", `${label} must carry sync run correlation.`);
 }
@@ -86,7 +88,8 @@ requireIncludes(financeRepository, "INVENTORY_RECEIPT", "receipts must reconcile
 
 for (const [source, label] of [
   [sqliteStore, "SQLite desktop store"],
-  [postgresStore, "PostgreSQL desktop store"]
+  [postgresStore, "PostgreSQL desktop store"],
+  [mssqlStore, "SQL Server desktop store"]
 ] as const) {
   requireIncludes(source, "StoreSyncTransportError", `${label} must classify network and HTTP failures.`);
   requireIncludes(source, "markOutboxAttemptStarted", `${label} must mark attempts before sending.`);

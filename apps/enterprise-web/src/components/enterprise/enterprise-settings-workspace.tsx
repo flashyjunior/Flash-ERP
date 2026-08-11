@@ -38,6 +38,7 @@ type CompanySettingsTab =
   | "stock"
   | "sizes"
   | "discounts"
+  | "express-charges"
   | "sales-orders"
   | "options"
   | "sms";
@@ -73,13 +74,19 @@ function Field({
   value,
   onChange,
   type = "text",
-  disabled = false
+  disabled = false,
+  min,
+  max,
+  step
 }: {
   label: string;
   value: string | number;
   onChange: (value: string) => void;
   type?: "text" | "number" | "email";
   disabled?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
 }) {
   return (
     <label className="grid gap-1 text-[13px] text-stone-700">
@@ -87,7 +94,10 @@ function Field({
       <input
         className="h-8 w-full rounded-lg border border-stone-200 bg-white px-2.5 text-[13px] outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_3px_rgba(37,99,235,0.08)] disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500"
         disabled={disabled}
+        max={max}
+        min={min}
         onChange={(event) => onChange(event.target.value)}
+        step={step}
         type={type}
         value={value}
       />
@@ -357,6 +367,7 @@ const companySettingsTabs: Array<{ key: CompanySettingsTab; label: string }> = [
   { key: "stock", label: "Stock control" },
   { key: "sizes", label: "Product sizes" },
   { key: "discounts", label: "POS discounts" },
+  { key: "express-charges", label: "Express charges" },
   { key: "sales-orders", label: "Sales orders" },
   { key: "options", label: "Options" },
   { key: "sms", label: "Sale SMS" }
@@ -416,6 +427,7 @@ export function EnterpriseSettingsWorkspace({
   );
   const [newProductSize, setNewProductSize] = useState("");
   const [newPosDiscountRate, setNewPosDiscountRate] = useState("");
+  const [newPosExpressChargeRate, setNewPosExpressChargeRate] = useState("");
   const [companyTab, setCompanyTab] = useState<CompanySettingsTab>("details");
   const [companyState, setCompanyState] = useState<MutationState>({ status: "idle", message: "" });
   const [ldapState, setLdapState] = useState<MutationState>({ status: "idle", message: "" });
@@ -634,6 +646,21 @@ export function EnterpriseSettingsWorkspace({
             icon: ShieldCheck,
             label: "Critical startup",
             value: formatToggleState(optionsDraft.showCriticalStocksOnStartup, "Shown", "Hidden")
+          },
+          {
+            icon: Building2,
+            label: "Expiry startup",
+            value: formatToggleState(optionsDraft.showExpiringBatchesOnStartup, "Shown", "Hidden")
+          },
+          {
+            icon: Building2,
+            label: "Expiry alert window",
+            value: `${optionsDraft.expiryAlertLeadDays} days`
+          },
+          {
+            icon: ShieldCheck,
+            label: "Critical expiry window",
+            value: `${optionsDraft.expiryCriticalDays} days`
           }
         ];
       default:
@@ -1139,6 +1166,95 @@ export function EnterpriseSettingsWorkspace({
               </SettingsFormCard>
             ) : null}
 
+            {companyTab === "express-charges" ? (
+              <SettingsFormCard
+                actionLabel="Save express charges"
+                actionToneClassName="bg-[linear-gradient(135deg,var(--brand),var(--brand-deep))]"
+                mutationState={companyState}
+                onSave={() =>
+                  void saveSection(
+                    "/api/settings/company-profile",
+                    companyDraft,
+                    setCompanyState,
+                    () => router.refresh(),
+                    "Flash ERP could not update the express charge rates."
+                  )
+                }
+                title="Express charge rates"
+              >
+                <div className="grid gap-3">
+                  <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                    <Field
+                      label="Express charge rate (%)"
+                      onChange={setNewPosExpressChargeRate}
+                      type="number"
+                      value={newPosExpressChargeRate}
+                    />
+                    <button
+                      className="h-8 self-end rounded-lg bg-stone-950 px-3 text-[13px] font-semibold text-white"
+                      onClick={() => {
+                        const parsedRate = Number(newPosExpressChargeRate);
+
+                        if (!Number.isFinite(parsedRate) || parsedRate <= 0 || parsedRate > 100) {
+                          return;
+                        }
+
+                        const nextRate = Number(parsedRate.toFixed(2));
+
+                        setCompanyDraft((current) => {
+                          const existing = current.posExpressChargeRates ?? [];
+                          const exists = existing.some(
+                            (rate) => Number(rate).toFixed(2) === nextRate.toFixed(2)
+                          );
+
+                          return exists
+                            ? current
+                            : { ...current, posExpressChargeRates: [...existing, nextRate] };
+                        });
+                        setNewPosExpressChargeRate("");
+                      }}
+                      type="button"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {(companyDraft.posExpressChargeRates ?? []).length ? (
+                      [...(companyDraft.posExpressChargeRates ?? [])]
+                        .sort((left, right) => left - right)
+                        .map((rate) => (
+                          <span
+                            className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-stone-200 bg-white px-2.5 text-[13px] font-semibold text-stone-800"
+                            key={rate.toFixed(2)}
+                          >
+                            {Number.isInteger(rate) ? rate.toFixed(0) : rate.toFixed(2)}%
+                            <button
+                              aria-label={`Remove ${rate}% express charge`}
+                              className="text-stone-400 transition hover:text-rose-600"
+                              onClick={() =>
+                                setCompanyDraft((current) => ({
+                                  ...current,
+                                  posExpressChargeRates: (current.posExpressChargeRates ?? []).filter(
+                                    (currentRate) => currentRate.toFixed(2) !== rate.toFixed(2)
+                                  )
+                                }))
+                              }
+                              type="button"
+                            >
+                              x
+                            </button>
+                          </span>
+                        ))
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-stone-300 bg-white/70 px-3 py-2 text-sm text-stone-500">
+                        No express charge rates have been defined.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </SettingsFormCard>
+            ) : null}
+
             {companyTab === "sales-orders" ? (
               <SettingsFormCard
                 actionLabel="Save routing"
@@ -1260,8 +1376,54 @@ export function EnterpriseSettingsWorkspace({
                       }))
                     }
                   />
+                  <Check
+                    checked={optionsDraft.showExpiringBatchesOnStartup}
+                    label="Show expiring batches on startup"
+                    onChange={(value) =>
+                      setOptionsDraft((current) => ({
+                        ...current,
+                        showExpiringBatchesOnStartup: value
+                      }))
+                    }
+                  />
                 </div>
-                <div className="grid gap-2 md:grid-cols-2">
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                  <Field
+                    label="Expiry alert lead days"
+                    max={3650}
+                    min={1}
+                    onChange={(value) =>
+                      setOptionsDraft((current) => {
+                        const expiryAlertLeadDays = Number(value) || 0;
+
+                        return {
+                          ...current,
+                          expiryAlertLeadDays,
+                          expiryCriticalDays: Math.min(
+                            current.expiryCriticalDays,
+                            Math.max(0, expiryAlertLeadDays)
+                          )
+                        };
+                      })
+                    }
+                    step={1}
+                    type="number"
+                    value={optionsDraft.expiryAlertLeadDays}
+                  />
+                  <Field
+                    label="Critical expiry days"
+                    max={Math.max(0, optionsDraft.expiryAlertLeadDays)}
+                    min={0}
+                    onChange={(value) =>
+                      setOptionsDraft((current) => ({
+                        ...current,
+                        expiryCriticalDays: Number(value) || 0
+                      }))
+                    }
+                    step={1}
+                    type="number"
+                    value={optionsDraft.expiryCriticalDays}
+                  />
                   <Field
                     label="Default receipt search days"
                     onChange={(value) =>
@@ -1841,8 +2003,54 @@ export function EnterpriseSettingsWorkspace({
                   }))
                 }
               />
+              <Check
+                checked={optionsDraft.showExpiringBatchesOnStartup}
+                label="Show expiring batches on startup"
+                onChange={(value) =>
+                  setOptionsDraft((current) => ({
+                    ...current,
+                    showExpiringBatchesOnStartup: value
+                  }))
+                }
+              />
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Field
+                label="Expiry alert lead days"
+                max={3650}
+                min={1}
+                onChange={(value) =>
+                  setOptionsDraft((current) => {
+                    const expiryAlertLeadDays = Number(value) || 0;
+
+                    return {
+                      ...current,
+                      expiryAlertLeadDays,
+                      expiryCriticalDays: Math.min(
+                        current.expiryCriticalDays,
+                        Math.max(0, expiryAlertLeadDays)
+                      )
+                    };
+                  })
+                }
+                step={1}
+                type="number"
+                value={optionsDraft.expiryAlertLeadDays}
+              />
+              <Field
+                label="Critical expiry days"
+                max={Math.max(0, optionsDraft.expiryAlertLeadDays)}
+                min={0}
+                onChange={(value) =>
+                  setOptionsDraft((current) => ({
+                    ...current,
+                    expiryCriticalDays: Number(value) || 0
+                  }))
+                }
+                step={1}
+                type="number"
+                value={optionsDraft.expiryCriticalDays}
+              />
               <Field
                 label="Default receipt search days"
                 onChange={(value) =>

@@ -4,7 +4,10 @@ import { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import {
   CustomerAccountEntryType,
+  allocateInventoryBatchesFefo,
+  deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
+  inventoryBatchDaysUntilExpiry,
   InterStoreTransferOrigin,
   InterStoreTransferStatus,
   InventoryMovementType,
@@ -24,7 +27,9 @@ import {
   StockCountSessionStatus,
   SupplierReturnReason,
   SupplierReturnStatus,
-  UserAccountStatus
+  UserAccountStatus,
+  validateInventoryBatchReceipt,
+  type InventoryBatchAllocation
 } from "@flash-erp/domain";
 import {
   applyAutomaticPromotions,
@@ -47,6 +52,7 @@ import { resolveStoreReceiptTemplateSelection } from "@/server/repositories/rece
 import {
   ensureInventoryLocationSalesOrderSchemaCompatibility,
   ensureOperatingExpenseSchemaCompatibility,
+  ensureInventoryExpirySchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility
 } from "@/server/repositories/schema-compatibility.repository";
 import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
@@ -83,6 +89,108 @@ function normalizeQuantity(value: unknown) {
   return Number(quantity.toFixed(3));
 }
 
+function readInventoryBatchAllocations(value: unknown): InventoryBatchAllocation[] {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return [];
+      }
+
+      const candidate = entry as Record<string, unknown>;
+      const batchNo = typeof candidate.batchNo === "string" ? candidate.batchNo.trim() : "";
+      const expiryDate = typeof candidate.expiryDate === "string" ? candidate.expiryDate : "";
+      const quantity = Number(candidate.quantity);
+
+      if (!batchNo || !expiryDate || !Number.isFinite(quantity) || quantity < 0) {
+        return [];
+      }
+
+      return [{
+        batchId: typeof candidate.batchId === "string" ? candidate.batchId : null,
+        batchNo,
+        manufacturedAt:
+          typeof candidate.manufacturedAt === "string"
+            ? candidate.manufacturedAt
+            : null,
+        expiryDate,
+        quantity: toQuantity(quantity)
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function takeOutstandingInventoryBatchAllocations(input: {
+  productName: string;
+  quantity: number;
+  issued: InventoryBatchAllocation[];
+  received: InventoryBatchAllocation[];
+}) {
+  const receivedByBatch = new Map<string, number>();
+
+  for (const allocation of input.received) {
+    const key = `${allocation.batchNo.toUpperCase()}:${allocation.expiryDate.slice(0, 10)}`;
+    receivedByBatch.set(key, toQuantity((receivedByBatch.get(key) ?? 0) + allocation.quantity));
+  }
+
+  let remainingQuantity = toQuantity(input.quantity);
+  const allocations: InventoryBatchAllocation[] = [];
+
+  for (const allocation of input.issued) {
+    if (remainingQuantity <= 0.0001) {
+      break;
+    }
+
+    const key = `${allocation.batchNo.toUpperCase()}:${allocation.expiryDate.slice(0, 10)}`;
+    const alreadyReceived = receivedByBatch.get(key) ?? 0;
+    const available = toQuantity(Math.max(0, allocation.quantity - alreadyReceived));
+    receivedByBatch.set(key, toQuantity(Math.max(0, alreadyReceived - allocation.quantity)));
+    const allocatedQuantity = toQuantity(
+      Math.min(available, remainingQuantity)
+    );
+
+    if (allocatedQuantity > 0) {
+      allocations.push({ ...allocation, quantity: allocatedQuantity });
+      remainingQuantity = toQuantity(remainingQuantity - allocatedQuantity);
+    }
+  }
+
+  if (remainingQuantity > 0.0001) {
+    throw new Error(
+      `The source issue does not contain enough outstanding batch quantity for ${input.productName}. Sync the source issue before receiving.`
+    );
+  }
+
+  return allocations;
+}
+
+function isNonInventorySaleProduct(product: {
+  productType?: string | null;
+  trackInventory?: boolean | null;
+}) {
+  return (
+    product.productType?.trim().toUpperCase() === "SERVICE" ||
+    product.trackInventory === false
+  );
+}
+
+function tracksInventoryForSale(product: {
+  productType?: string | null;
+  trackInventory?: boolean | null;
+}) {
+  return product.trackInventory === true && !isNonInventorySaleProduct(product);
+}
 function normalizeNonNegativeQuantity(value: unknown, label: string) {
   const quantity = Number(value);
 
@@ -841,6 +949,35 @@ function readOnlinePosDiscountRates(value: Prisma.JsonValue | null | undefined) 
   return rates;
 }
 
+function readOnlinePosExpressChargeRates(value: Prisma.JsonValue | null | undefined) {
+  const payload = readJsonObject(value);
+  const rawRates = Array.isArray(payload.posExpressChargeRates)
+    ? payload.posExpressChargeRates
+    : [];
+  const seen = new Set<string>();
+  const rates: number[] = [];
+
+  for (const rawRate of rawRates) {
+    const rate = Number(rawRate);
+
+    if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
+      continue;
+    }
+
+    const normalizedRate = Number(rate.toFixed(2));
+    const key = normalizedRate.toFixed(2);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    rates.push(normalizedRate);
+  }
+
+  return rates;
+}
+
 function readOnlineSalesOrderFulfilmentStoreId(value: Prisma.JsonValue | null | undefined) {
   return optionalText(readJsonObject(value).salesOrderFulfilmentStoreId);
 }
@@ -945,10 +1082,21 @@ const defaultOnlineLoyaltyPolicy: LoyaltyPolicy = {
 };
 
 const defaultOnlineOptionSettings = {
+  allowNegativeInventory: false,
+  allowOfflineSales: true,
+  autoPrintReceipts: true,
+  enforceSerializedScanAtPos: true,
+  requireCustomerForCreditSales: true,
+  requireSupervisorForReceiptlessReturn: true,
+  defaultReceiptSearchDays: 30,
   shiftFloatPromptAmount: 0,
   showCriticalStocksOnStartup: false,
+  showExpiringBatchesOnStartup: true,
+  expiryAlertLeadDays: 30,
+  expiryCriticalDays: 7,
   productSizes: [] as string[],
-  posDiscountRates: [] as number[]
+  posDiscountRates: [] as number[],
+  posExpressChargeRates: [] as number[]
 };
 
 const defaultOnlineSalesOrderRouting = {
@@ -964,13 +1112,89 @@ function readJsonObject(value: unknown) {
 
 function readOnlineOptionSettings(value: Prisma.JsonValue | null | undefined) {
   const payload = readJsonObject(value);
-  const shiftFloatPromptAmount = Number(payload.shiftFloatPromptAmount ?? 0);
+  const readBooleanOption = (key: string, fallback: boolean) =>
+    typeof payload[key] === "boolean" ? payload[key] === true : fallback;
+  const readNumberOption = (key: string, fallback: number) => {
+    const parsed = Number(payload[key] ?? fallback);
+
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  const shiftFloatPromptAmount = readNumberOption("shiftFloatPromptAmount", 0);
+  const expiryAlertLeadDays = Math.min(
+    3650,
+    Math.max(
+      1,
+      Math.trunc(
+        readNumberOption(
+          "expiryAlertLeadDays",
+          defaultOnlineOptionSettings.expiryAlertLeadDays
+        )
+      )
+    )
+  );
+  const expiryCriticalDays = Math.min(
+    expiryAlertLeadDays,
+    Math.max(
+      0,
+      Math.trunc(
+        readNumberOption(
+          "expiryCriticalDays",
+          defaultOnlineOptionSettings.expiryCriticalDays
+        )
+      )
+    )
+  );
 
   return {
+    allowNegativeInventory: readBooleanOption(
+      "allowNegativeInventory",
+      defaultOnlineOptionSettings.allowNegativeInventory
+    ),
+    allowOfflineSales: readBooleanOption(
+      "allowOfflineSales",
+      defaultOnlineOptionSettings.allowOfflineSales
+    ),
+    autoPrintReceipts: readBooleanOption(
+      "autoPrintReceipts",
+      defaultOnlineOptionSettings.autoPrintReceipts
+    ),
+    enforceSerializedScanAtPos: readBooleanOption(
+      "enforceSerializedScanAtPos",
+      defaultOnlineOptionSettings.enforceSerializedScanAtPos
+    ),
+    requireCustomerForCreditSales: readBooleanOption(
+      "requireCustomerForCreditSales",
+      defaultOnlineOptionSettings.requireCustomerForCreditSales
+    ),
+    requireSupervisorForReceiptlessReturn: readBooleanOption(
+      "requireSupervisorForReceiptlessReturn",
+      defaultOnlineOptionSettings.requireSupervisorForReceiptlessReturn
+    ),
+    defaultReceiptSearchDays: Math.min(
+      365,
+      Math.max(
+        1,
+        Math.trunc(
+          readNumberOption(
+            "defaultReceiptSearchDays",
+            defaultOnlineOptionSettings.defaultReceiptSearchDays
+          )
+        )
+      )
+    ),
     shiftFloatPromptAmount: Number(
       Math.max(0, Number.isFinite(shiftFloatPromptAmount) ? shiftFloatPromptAmount : 0).toFixed(2)
     ),
-    showCriticalStocksOnStartup: payload.showCriticalStocksOnStartup === true
+    showCriticalStocksOnStartup: readBooleanOption(
+      "showCriticalStocksOnStartup",
+      defaultOnlineOptionSettings.showCriticalStocksOnStartup
+    ),
+    showExpiringBatchesOnStartup: readBooleanOption(
+      "showExpiringBatchesOnStartup",
+      defaultOnlineOptionSettings.showExpiringBatchesOnStartup
+    ),
+    expiryAlertLeadDays,
+    expiryCriticalDays
   };
 }
 
@@ -1344,6 +1568,15 @@ function signedPaymentAmount(input: {
   return toMoney(input.paymentAmount);
 }
 
+function signedTransactionAmount(input: {
+  transactionType: PosTransactionType | string;
+  amount: number;
+}) {
+  return input.transactionType === PosTransactionType.RETURN
+    ? toMoney(Math.abs(input.amount) * -1)
+    : toMoney(input.amount);
+}
+
 function signedLineAmount(input: {
   lineIntent: PosTransactionLineIntent | string;
   amount: number;
@@ -1354,7 +1587,10 @@ function signedLineAmount(input: {
 async function getOnlineStoreAssignment(
   options: { redirectOnMissingSession?: boolean } = {}
 ) {
-  await ensureProductVariantSalesOrderDepositSchemaCompatibility();
+  await Promise.all([
+    ensureProductVariantSalesOrderDepositSchemaCompatibility(),
+    ensureInventoryExpirySchemaCompatibility()
+  ]);
 
   const session =
     options.redirectOnMissingSession === false
@@ -1681,10 +1917,21 @@ export type OnlineStoreWorkspaceData = {
     productCount: number;
   };
   optionSettings: {
+    allowNegativeInventory: boolean;
+    allowOfflineSales: boolean;
+    autoPrintReceipts: boolean;
+    enforceSerializedScanAtPos: boolean;
+    requireCustomerForCreditSales: boolean;
+    requireSupervisorForReceiptlessReturn: boolean;
+    defaultReceiptSearchDays: number;
     shiftFloatPromptAmount: number;
     showCriticalStocksOnStartup: boolean;
+    showExpiringBatchesOnStartup: boolean;
+    expiryAlertLeadDays: number;
+    expiryCriticalDays: number;
     productSizes: string[];
     posDiscountRates: number[];
+    posExpressChargeRates: number[];
   };
   salesOrderRouting: {
     fulfilmentStoreId: string | null;
@@ -1726,6 +1973,13 @@ export type OnlineStoreWorkspaceData = {
     trackInventory: boolean;
     trackSize: boolean;
     trackColor: boolean;
+    trackExpiry: boolean;
+    shelfLifeDays: number | null;
+    minStockLevel: number | null;
+    reorderPoint: number | null;
+    safetyStockLevel: number | null;
+    earliestExpiryDate: string | null;
+    expiringQuantity: number;
     matrixVariants: Array<{
       variantId: string;
       code: string;
@@ -1760,6 +2014,13 @@ export type OnlineStoreWorkspaceData = {
     trackInventory: boolean;
     trackSize: boolean;
     trackColor: boolean;
+    trackExpiry: boolean;
+    shelfLifeDays: number | null;
+    minStockLevel: number | null;
+    reorderPoint: number | null;
+    safetyStockLevel: number | null;
+    earliestExpiryDate: string | null;
+    expiringQuantity: number;
     matrixVariants: Array<{
       variantId: string;
       code: string;
@@ -1783,11 +2044,27 @@ export type OnlineStoreWorkspaceData = {
     productCode: string;
     productName: string;
     isSerialized: boolean;
+    trackExpiry: boolean;
     locationId: string;
     locationCode: string;
     locationName: string;
     quantityOnHand: number;
     price: number;
+  }>;
+  inventoryBatches: Array<{
+    batchId: string;
+    productId: string;
+    productCode: string;
+    productName: string;
+    locationId: string;
+    locationCode: string;
+    locationName: string;
+    batchNo: string;
+    manufacturedAt: string | null;
+    expiryDate: string;
+    daysUntilExpiry: number;
+    quantityOnHand: number;
+    status: string;
   }>;
   inventoryLocations: Array<{
     locationId: string;
@@ -1902,6 +2179,7 @@ export type OnlineStoreWorkspaceData = {
       productCode: string;
       productName: string;
       isSerialized: boolean;
+      trackExpiry: boolean;
       orderedQuantity: number;
       receivedQuantity: number;
       exceptionQuantity: number;
@@ -1930,6 +2208,9 @@ export type OnlineStoreWorkspaceData = {
       quantity: number;
       unitCost: number | null;
       serialNumbers: string[];
+      batchNo: string | null;
+      manufacturedAt: string | null;
+      expiryDate: string | null;
     }>;
   }>;
   supplierReturns: Array<{
@@ -1968,6 +2249,7 @@ export type OnlineStoreWorkspaceData = {
     productCode: string;
     productName: string;
     isSerialized: boolean;
+    trackExpiry: boolean;
     status: string;
     requestedQuantity: number;
     issuedQuantity: number;
@@ -2008,6 +2290,8 @@ export type OnlineStoreWorkspaceData = {
     feedbackOperatorName: string | null;
     issuedSerialNumbers: string[];
     receivedSerialNumbers: string[];
+    issuedBatchAllocations: InventoryBatchAllocation[];
+    receivedBatchAllocations: InventoryBatchAllocation[];
     requestNote: string | null;
     issueNote: string | null;
     receiptNote: string | null;
@@ -2285,6 +2569,7 @@ const emptyOnlineStoreCollections = {
   inventoryProducts: [],
   purchaseOrderSuppliers: [],
   inventoryRows: [],
+  inventoryBatches: [],
   inventoryLocations: [],
   transferStores: [],
   tenderMethods: [],
@@ -2624,7 +2909,13 @@ function summarizeOnlineShift(shift: {
       transaction.transactionType === PosTransactionType.RETURN ||
       (transaction.transactionType === PosTransactionType.EXCHANGE && totalAmount < 0);
 
-    netSalesAmount = toMoney(netSalesAmount + totalAmount);
+    netSalesAmount = toMoney(
+      netSalesAmount +
+        signedTransactionAmount({
+          transactionType: transaction.transactionType,
+          amount: totalAmount
+        })
+    );
 
     if (transaction.transactionType === PosTransactionType.SALE) {
       salesCount += 1;
@@ -3029,6 +3320,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   await Promise.all([
     ensureInventoryLocationSalesOrderSchemaCompatibility(),
     ensureOperatingExpenseSchemaCompatibility(),
+    ensureInventoryExpirySchemaCompatibility(),
     ensureProductVariantSalesOrderDepositSchemaCompatibility()
   ]);
 
@@ -3125,7 +3417,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   const optionSettings = {
     ...readOnlineOptionSettings(assignment.store.retailOrg.optionsSettingsJson),
     productSizes: readOnlineProductSizes(assignment.store.retailOrg.companySettingsJson),
-    posDiscountRates: readOnlinePosDiscountRates(assignment.store.retailOrg.companySettingsJson)
+    posDiscountRates: readOnlinePosDiscountRates(assignment.store.retailOrg.companySettingsJson),
+    posExpressChargeRates: readOnlinePosExpressChargeRates(
+      assignment.store.retailOrg.companySettingsJson
+    )
   };
   const salesOrderFulfilmentStoreId = readOnlineSalesOrderFulfilmentStoreId(
     assignment.store.retailOrg.companySettingsJson
@@ -3210,9 +3505,29 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         },
         mustEnterPriceAtPos: true,
         trackInventory: true,
+        trackExpiry: true,
+        shelfLifeDays: true,
+        minStockLevel: true,
+        reorderPoint: true,
+        safetyStockLevel: true,
         isSerialized: true,
         trackSize: true,
         trackColor: true,
+        inventoryBatches: {
+          where: {
+            storeId: assignment.store.id
+          },
+          orderBy: [{ expiryDate: "asc" }, { batchNo: "asc" }],
+          select: {
+            id: true,
+            inventoryLocationId: true,
+            batchNo: true,
+            manufacturedAt: true,
+            expiryDate: true,
+            quantityOnHand: true,
+            status: true
+          }
+        },
         matrixVariants: {
           where: {
             status: RecordStatus.ACTIVE
@@ -3711,7 +4026,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
               select: {
                 code: true,
                 name: true,
-                isSerialized: true
+                isSerialized: true,
+                trackExpiry: true
               }
             }
           }
@@ -3758,6 +4074,9 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             quantity: true,
             unitCost: true,
             serialNumbersSnapshot: true,
+            batchNo: true,
+            expiryDate: true,
+            manufacturedAt: true,
             product: {
               select: {
                 code: true,
@@ -3855,6 +4174,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         feedbackOperatorName: true,
         issuedSerialNumbersSnapshot: true,
         receivedSerialNumbersSnapshot: true,
+        issuedBatchAllocationsSnapshot: true,
+        receivedBatchAllocationsSnapshot: true,
         requestNote: true,
         issueNote: true,
         receiptNote: true,
@@ -3900,7 +4221,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             id: true,
             code: true,
             name: true,
-            isSerialized: true
+            isSerialized: true,
+            trackExpiry: true
           }
         }
       }
@@ -4188,6 +4510,21 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   const returnSummary = todayBreakdown.find((row) => row.transactionType === PosTransactionType.RETURN);
   const exchangeSummary = todayBreakdown.find((row) => row.transactionType === PosTransactionType.EXCHANGE);
   const mapWorkspaceProduct = (product: (typeof products)[number]) => {
+    const salesBatches = salesLocation
+      ? product.inventoryBatches.filter(
+          (batch) => batch.inventoryLocationId === salesLocation.id && Number(batch.quantityOnHand) > 0
+        )
+      : [];
+    const earliestExpiryDate = salesBatches[0]?.expiryDate.toISOString() ?? null;
+    const expiringQuantity = toQuantity(
+      salesBatches
+        .filter(
+          (batch) =>
+            inventoryBatchDaysUntilExpiry(batch.expiryDate) <=
+            optionSettings.expiryAlertLeadDays
+        )
+        .reduce((sum, batch) => sum + Number(batch.quantityOnHand), 0)
+    );
     const matrixVariants = product.matrixVariants.map((variant) => ({
       variantId: variant.id,
       code: variant.code,
@@ -4234,6 +4571,18 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       trackSize: product.trackSize,
       trackColor: product.trackColor,
       trackInventory: product.trackInventory,
+      trackExpiry: product.trackExpiry,
+      shelfLifeDays: product.shelfLifeDays,
+      minStockLevel:
+        product.minStockLevel === null ? null : Number(product.minStockLevel),
+      reorderPoint:
+        product.reorderPoint === null ? null : Number(product.reorderPoint),
+      safetyStockLevel:
+        product.safetyStockLevel === null
+          ? null
+          : Number(product.safetyStockLevel),
+      earliestExpiryDate,
+      expiringQuantity,
       matrixVariants
     };
   };
@@ -4254,19 +4603,21 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     taxInclusive: product.taxInclusive,
     mustEnterPriceAtPos: product.mustEnterPriceAtPos,
     isSerialized: product.isSerialized,
-    trackInventory: product.trackInventory,
     trackSize: product.trackSize,
     trackColor: product.trackColor,
+    trackInventory: product.trackInventory,
+    trackExpiry: product.trackExpiry,
+    shelfLifeDays: product.shelfLifeDays,
+    minStockLevel: product.minStockLevel,
+    reorderPoint: product.reorderPoint,
+    safetyStockLevel: product.safetyStockLevel,
+    earliestExpiryDate: product.earliestExpiryDate,
+    expiringQuantity: product.expiringQuantity,
     matrixVariants: product.matrixVariants
   }));
-  const serviceCatalogProducts = catalogProducts.filter((product) => isServiceProductType(product.productType));
-  const stockedCatalogProducts = catalogProducts
-    .filter((product) => !isServiceProductType(product.productType) && product.quantityOnHand > 0)
-    .slice(0, 80);
-  const sellableProductIds = new Set(
-    [...stockedCatalogProducts, ...serviceCatalogProducts].map((product) => product.productId)
+  const sellableProducts = catalogProducts.filter(
+    (product) => product.quantityOnHand > 0 || isNonInventorySaleProduct(product)
   );
-  const sellableProducts = catalogProducts.filter((product) => sellableProductIds.has(product.productId));
   const shiftSummaries = recentShifts.map((shift) => summarizeOnlineShift(shift));
   const activeShiftSummary = shiftSummaries.find((shift) => shift.status === PosShiftStatus.OPEN) ?? null;
   const mappedEodReconciliations = eodReconciliations.map((reconciliation) => {
@@ -4312,6 +4663,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         productCode: line.product.code,
         productName: line.product.name,
         isSerialized: line.product.isSerialized,
+        trackExpiry: line.product.trackExpiry,
         orderedQuantity,
         receivedQuantity,
         exceptionQuantity,
@@ -4361,7 +4713,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       productName: line.product.name,
       quantity: toQuantity(line.quantity),
       unitCost: line.unitCost === null ? null : Number(line.unitCost),
-      serialNumbers: readStringArrayJson(line.serialNumbersSnapshot) ?? []
+      serialNumbers: readStringArrayJson(line.serialNumbersSnapshot) ?? [],
+      batchNo: line.batchNo,
+      manufacturedAt: line.manufacturedAt?.toISOString() ?? null,
+      expiryDate: line.expiryDate?.toISOString() ?? null
     }))
   }));
   const mappedSupplierReturns = supplierReturns.map((supplierReturn) => ({
@@ -4411,6 +4766,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       productCode: transfer.product.code,
       productName: transfer.product.name,
       isSerialized: transfer.product.isSerialized,
+      trackExpiry: transfer.product.trackExpiry,
       status: transfer.status,
       requestedQuantity,
       issuedQuantity,
@@ -4452,6 +4808,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       feedbackOperatorName: transfer.feedbackOperatorName,
       issuedSerialNumbers: readStringArrayJson(transfer.issuedSerialNumbersSnapshot) ?? [],
       receivedSerialNumbers: readStringArrayJson(transfer.receivedSerialNumbersSnapshot) ?? [],
+      issuedBatchAllocations: readInventoryBatchAllocations(transfer.issuedBatchAllocationsSnapshot),
+      receivedBatchAllocations: readInventoryBatchAllocations(transfer.receivedBatchAllocationsSnapshot),
       requestNote: transfer.requestNote,
       issueNote: transfer.issueNote,
       receiptNote: transfer.receiptNote,
@@ -4861,6 +5219,13 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       trackInventory: product.trackInventory,
       trackSize: product.trackSize,
       trackColor: product.trackColor,
+      trackExpiry: product.trackExpiry,
+      shelfLifeDays: product.shelfLifeDays,
+      minStockLevel: product.minStockLevel,
+      reorderPoint: product.reorderPoint,
+      safetyStockLevel: product.safetyStockLevel,
+      earliestExpiryDate: product.earliestExpiryDate,
+      expiringQuantity: product.expiringQuantity,
       matrixVariants: product.matrixVariants
     })),
     purchaseOrderSuppliers: purchaseOrderSuppliers.map((supplier) => ({
@@ -4882,6 +5247,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           productCode: product.code,
           productName: product.name,
           isSerialized: product.isSerialized,
+          trackExpiry: product.trackExpiry,
           locationId: location.id,
           locationCode: location.code,
           locationName: location.name,
@@ -4890,6 +5256,31 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         };
       })
       .filter((row): row is NonNullable<typeof row> => row !== null),
+    inventoryBatches: products.flatMap((product) =>
+      product.inventoryBatches.flatMap((batch) => {
+        const location = locationById.get(batch.inventoryLocationId);
+
+        if (!location || Number(batch.quantityOnHand) <= 0) {
+          return [];
+        }
+
+        return [{
+          batchId: batch.id,
+          productId: product.id,
+          productCode: product.code,
+          productName: product.name,
+          locationId: location.id,
+          locationCode: location.code,
+          locationName: location.name,
+          batchNo: batch.batchNo,
+          manufacturedAt: batch.manufacturedAt?.toISOString() ?? null,
+          expiryDate: batch.expiryDate.toISOString(),
+          daysUntilExpiry: inventoryBatchDaysUntilExpiry(batch.expiryDate),
+          quantityOnHand: toQuantity(batch.quantityOnHand),
+          status: batch.status
+        }];
+      })
+    ),
     inventoryLocations: inventoryLocations.map((location) => ({
       locationId: location.id,
       locationCode: location.code,
@@ -5116,14 +5507,12 @@ export async function browseOnlineStoreReports(
       : {}),
     ...(criteria.productQuery
       ? {
-          sourceTransaction: {
-            lines: {
-              some: {
-                OR: [
-                  { productCodeSnapshot: { contains: criteria.productQuery } },
-                  { productNameSnapshot: { contains: criteria.productQuery } }
-                ]
-              }
+          lines: {
+            some: {
+              OR: [
+                { productCodeSnapshot: { contains: criteria.productQuery } },
+                { productNameSnapshot: { contains: criteria.productQuery } }
+              ]
             }
           }
         }
@@ -5348,11 +5737,11 @@ export async function browseOnlineStoreReports(
   ]);
   const salesOrderReportLineCounts =
     salesOrderReportRows.length > 0
-      ? await prisma.posTransactionLine.groupBy({
-          by: ["posTransactionId"],
+      ? await prisma.salesOrderLine.groupBy({
+          by: ["salesOrderId"],
           where: {
-            posTransactionId: {
-              in: salesOrderReportRows.map((order) => order.sourceTransactionId)
+            salesOrderId: {
+              in: salesOrderReportRows.map((order) => order.id)
             }
           },
           _count: {
@@ -5363,9 +5752,9 @@ export async function browseOnlineStoreReports(
           }
         })
       : [];
-  const salesOrderReportLineCountByTransactionId = new Map(
+  const salesOrderReportLineCountByOrderId = new Map(
     salesOrderReportLineCounts.map((row) => [
-      row.posTransactionId,
+      row.salesOrderId,
       {
         lineCount: row._count._all,
         itemCount: toQuantity(row._sum.quantity)
@@ -5451,7 +5840,39 @@ export async function browseOnlineStoreReports(
     .filter((row) => row.quantityOnHand !== 0)
     .sort((left, right) => Math.abs(right.stockValue) - Math.abs(left.stockValue))
     .slice(0, criteria.limit);
-  const netSalesAmount = toMoney(transactions.reduce((sum, transaction) => sum + Number(transaction.totalAmount), 0));
+  const netSalesAmount = toMoney(
+    transactions.reduce(
+      (sum, transaction) =>
+        sum +
+        signedTransactionAmount({
+          transactionType: transaction.transactionType,
+          amount: Number(transaction.totalAmount)
+        }),
+      0
+    )
+  );
+  const discountAmount = toMoney(
+    transactions.reduce(
+      (sum, transaction) =>
+        sum +
+        signedTransactionAmount({
+          transactionType: transaction.transactionType,
+          amount: Number(transaction.discountAmount)
+        }),
+      0
+    )
+  );
+  const taxAmount = toMoney(
+    transactions.reduce(
+      (sum, transaction) =>
+        sum +
+        signedTransactionAmount({
+          transactionType: transaction.transactionType,
+          amount: Number(transaction.taxAmount)
+        }),
+      0
+    )
+  );
   const reports: OnlineStoreWorkspaceData["reports"] = {
     summary: {
       salesCount: transactions.filter((transaction) => transaction.transactionType === PosTransactionType.SALE).length,
@@ -5459,8 +5880,8 @@ export async function browseOnlineStoreReports(
       exchangeCount: transactions.filter((transaction) => transaction.transactionType === PosTransactionType.EXCHANGE).length,
       netSalesAmount,
       returnAmount,
-      discountAmount: toMoney(transactions.reduce((sum, transaction) => sum + Number(transaction.discountAmount), 0)),
-      taxAmount: toMoney(transactions.reduce((sum, transaction) => sum + Number(transaction.taxAmount), 0)),
+      discountAmount,
+      taxAmount,
       tenderedAmount: toMoney([...tenderRowsByKey.values()].reduce((sum, row) => sum + row.netAmount, 0)),
       inventoryStockValue: toMoney(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0))
     },
@@ -5479,7 +5900,7 @@ export async function browseOnlineStoreReports(
     tenderRows: [...tenderRowsByKey.values()].sort((left, right) => right.netAmount - left.netAmount),
     productRows: [...productRowsByKey.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount)),
     salesOrderRows: salesOrderReportRows.map((order) => {
-      const lineCounts = salesOrderReportLineCountByTransactionId.get(order.sourceTransactionId);
+      const lineCounts = salesOrderReportLineCountByOrderId.get(order.id);
 
       return {
         orderId: order.id,
@@ -5589,6 +6010,7 @@ export type CreateOnlineStoreSaleRequest = {
     variantSize?: string | null;
     variantColor?: string | null;
     lineNote?: string | null;
+    preferredBatchId?: string | null;
   }>;
   payments?: OnlinePaymentRequest[] | null;
   paymentMethod?: string | null;
@@ -5850,6 +6272,9 @@ export type CreateOnlineStoreGoodsReceiptRequest = {
     quantity: number;
     unitCost?: number | null;
     serialNumbers?: string[] | null;
+    batchNo?: string | null;
+    manufacturedAt?: string | null;
+    expiryDate?: string | null;
   }>;
 };
 
@@ -5912,6 +6337,10 @@ export type CreateOnlineStoreStockCountRequest = {
   inventoryLocationId?: string | null;
   productId: string;
   countedQuantity: number;
+  batchCounts?: Array<{
+    batchId: string;
+    countedQuantity: number;
+  }> | null;
   commitNow?: boolean | null;
   note?: string | null;
 };
@@ -6461,7 +6890,8 @@ async function prepareOnlineStoreBasketLines(
           isTaxInclusive: true
         }
       },
-      trackInventory: true
+      trackInventory: true,
+      trackExpiry: true
     }
   });
   const productById = new Map(products.map((product) => [product.id, product] as const));
@@ -6895,6 +7325,7 @@ async function completeOnlineStoreParkedTransaction(
           createdAt: "asc"
         },
         select: {
+          id: true,
           productId: true,
           productVariantId: true,
           productCodeSnapshot: true,
@@ -6930,7 +7361,8 @@ async function completeOnlineStoreParkedTransaction(
               subcategory: true,
               unitOfMeasure: true,
               baseCostPrice: true,
-              trackInventory: true
+              trackInventory: true,
+              trackExpiry: true
             }
           }
         }
@@ -6962,8 +7394,10 @@ async function completeOnlineStoreParkedTransaction(
       subcategory: line.product.subcategory,
       unitOfMeasure: line.product.unitOfMeasure,
       baseCostPrice: line.product.baseCostPrice,
-      trackInventory: line.product.trackInventory
+      trackInventory: line.product.trackInventory,
+      trackExpiry: line.product.trackExpiry
     },
+    sourceLineId: line.id,
     productVariant: line.productVariant,
     productId: line.productId,
     productCodeSnapshot: line.productCodeSnapshot,
@@ -6996,6 +7430,78 @@ async function completeOnlineStoreParkedTransaction(
   });
 
   await assertOnlineStoreSaleStockAvailable(tx, context, salesLocation, preparedLines, "selling");
+
+  const expiryProductIds = [
+    ...new Set(
+      preparedLines
+        .filter((line) => tracksInventoryForSale(line.product) && line.product.trackExpiry)
+        .map((line) => line.product.id)
+    )
+  ];
+  const availableBatchRows = expiryProductIds.length
+    ? await tx.inventoryBatch.findMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          inventoryLocationId: salesLocation.id,
+          productId: { in: expiryProductIds },
+          quantityOnHand: { gt: 0 }
+        },
+        orderBy: [{ expiryDate: "asc" }, { manufacturedAt: "asc" }, { batchNo: "asc" }],
+        select: {
+          id: true,
+          productId: true,
+          batchNo: true,
+          manufacturedAt: true,
+          expiryDate: true,
+          quantityOnHand: true,
+          status: true
+        }
+      })
+    : [];
+  const batchRowsByProduct = new Map<string, Array<{
+    batchId: string;
+    batchNo: string;
+    manufacturedAt: string | null;
+    expiryDate: string;
+    quantityOnHand: number;
+    status: string;
+  }>>();
+
+  for (const batch of availableBatchRows) {
+    const rows = batchRowsByProduct.get(batch.productId) ?? [];
+    rows.push({
+      batchId: batch.id,
+      batchNo: batch.batchNo,
+      manufacturedAt: batch.manufacturedAt?.toISOString() ?? null,
+      expiryDate: batch.expiryDate.toISOString(),
+      quantityOnHand: toQuantity(batch.quantityOnHand),
+      status: batch.status
+    });
+    batchRowsByProduct.set(batch.productId, rows);
+  }
+
+  const batchAllocationsBySourceLineId = new Map<string, ReturnType<typeof allocateInventoryBatchesFefo>>();
+
+  for (const line of preparedLines) {
+    if (!tracksInventoryForSale(line.product) || !line.product.trackExpiry) {
+      continue;
+    }
+
+    const availableBatches = batchRowsByProduct.get(line.product.id) ?? [];
+    const allocations = allocateInventoryBatchesFefo({
+      productName: line.product.name,
+      quantity: line.quantity,
+      batches: availableBatches
+    });
+    batchAllocationsBySourceLineId.set(line.sourceLineId, allocations);
+
+    for (const allocation of allocations) {
+      const batch = availableBatches.find((candidate) => candidate.batchId === allocation.batchId);
+      if (batch) {
+        batch.quantityOnHand = toQuantity(batch.quantityOnHand - allocation.quantity);
+      }
+    }
+  }
 
   const { terminal, shift } = await ensureOnlineRegisterShift(tx, context);
   const loyaltyPolicy = await getOnlineLoyaltyPolicy(tx, session.retailOrgId);
@@ -7104,6 +7610,42 @@ async function completeOnlineStoreParkedTransaction(
     }
   });
 
+  for (const [sourceLineId, allocations] of batchAllocationsBySourceLineId) {
+    await tx.posTransactionLine.update({
+      where: { id: sourceLineId },
+      data: {
+        batchAllocationsSnapshot: serializeJsonField(allocations)
+      }
+    });
+
+    for (const allocation of allocations) {
+      if (!allocation.batchId) {
+        throw new Error(`Flash ERP could not resolve batch ${allocation.batchNo} during fulfilment.`);
+      }
+
+      const updated = await tx.inventoryBatch.updateMany({
+        where: {
+          id: allocation.batchId,
+          quantityOnHand: { gte: allocation.quantity },
+          status: "ACTIVE"
+        },
+        data: {
+          quantityOnHand: { decrement: allocation.quantity },
+          lastOccurredAt: transaction.completedAt ?? completedAt,
+          sourceReferenceType: "POS_TRANSACTION",
+          sourceReferenceId: transaction.id,
+          sourceReferenceLabel: transaction.transactionNo
+        }
+      });
+
+      if (updated.count !== 1) {
+        throw new Error(
+          `${allocation.batchNo} changed during fulfilment. Refresh the order and retry.`
+        );
+      }
+    }
+  }
+
   const customerAccount = await applyOnlineCustomerAccountPostingForSale(tx, context, {
     transactionId: transaction.id,
     transactionNo: transaction.transactionNo,
@@ -7117,17 +7659,28 @@ async function completeOnlineStoreParkedTransaction(
     loyaltyRedemptionAmount: loyaltyRedemption.amount
   });
 
-  const inventoryMovements = preparedLines
-    .filter((line) => isOnlineStoreStockManagedProduct(line.product))
-    .map((line) => ({
+  const inventoryMovements = preparedLines.flatMap((line) => {
+    if (!tracksInventoryForSale(line.product)) {
+      return [];
+    }
+
+    const allocations = batchAllocationsBySourceLineId.get(line.sourceLineId);
+    const movementAllocations = allocations?.length
+      ? allocations
+      : [{ batchId: null, batchNo: null, expiryDate: null, quantity: line.quantity }];
+
+    return movementAllocations.map((allocation) => ({
       retailOrgId: session.retailOrgId,
       storeId: store.id,
       warehouseId: salesLocation.warehouseId,
       inventoryLocationId: salesLocation.id,
       productId: line.productId,
       productVariantId: line.productVariant?.id ?? null,
+      inventoryBatchId: allocation.batchId,
+      batchNoSnapshot: allocation.batchNo,
+      expiryDateSnapshot: allocation.expiryDate ? new Date(allocation.expiryDate) : null,
       movementType: InventoryMovementType.SALE,
-      quantity: line.quantity * -1,
+      quantity: allocation.quantity * -1,
       unitCost: line.product.baseCostPrice,
       referenceType: "POS_TRANSACTION",
       referenceId: transaction.id,
@@ -7136,6 +7689,7 @@ async function completeOnlineStoreParkedTransaction(
       createdByUserId: user.id,
       occurredAt: transaction.completedAt ?? completedAt
     }));
+  });
 
   if (inventoryMovements.length > 0) {
     await tx.inventoryLedgerEntry.createMany({
@@ -7446,7 +8000,8 @@ export async function createOnlineStoreSale(
           isTaxInclusive: true
         }
       },
-      trackInventory: true
+      trackInventory: true,
+      trackExpiry: true
     }
   });
   const productById = new Map(products.map((product) => [product.id, product] as const));
@@ -7540,6 +8095,7 @@ export async function createOnlineStoreSale(
       variantSize,
       variantColor,
       lineNote,
+      preferredBatchId: optionalText(line.preferredBatchId),
       unitPrice,
       discountAmount: amounts.discountAmount,
       appliedPromotionCode: null as string | null,
@@ -7681,6 +8237,79 @@ export async function createOnlineStoreSale(
       );
     }
 
+    const expiryProductIds = [
+      ...new Set(
+        pricedLines
+          .filter((line) => tracksInventoryForSale(line.product) && line.product.trackExpiry)
+          .map((line) => line.product.id)
+      )
+    ];
+    const availableBatchRows = expiryProductIds.length
+      ? await tx.inventoryBatch.findMany({
+          where: {
+            retailOrgId: session.retailOrgId,
+            inventoryLocationId: salesLocation.id,
+            productId: { in: expiryProductIds },
+            quantityOnHand: { gt: 0 }
+          },
+          orderBy: [{ expiryDate: "asc" }, { manufacturedAt: "asc" }, { batchNo: "asc" }],
+          select: {
+            id: true,
+            productId: true,
+            batchNo: true,
+            manufacturedAt: true,
+            expiryDate: true,
+            quantityOnHand: true,
+            status: true
+          }
+        })
+      : [];
+    const availableBatchesByProduct = new Map<string, Array<{
+      batchId: string;
+      batchNo: string;
+      manufacturedAt: string | null;
+      expiryDate: string;
+      quantityOnHand: number;
+      status: string;
+    }>>();
+
+    for (const batch of availableBatchRows) {
+      const rows = availableBatchesByProduct.get(batch.productId) ?? [];
+      rows.push({
+        batchId: batch.id,
+        batchNo: batch.batchNo,
+        manufacturedAt: batch.manufacturedAt?.toISOString() ?? null,
+        expiryDate: batch.expiryDate.toISOString(),
+        quantityOnHand: toQuantity(batch.quantityOnHand),
+        status: batch.status
+      });
+      availableBatchesByProduct.set(batch.productId, rows);
+    }
+
+    const batchAllocationsByLineIndex = new Map<number, ReturnType<typeof allocateInventoryBatchesFefo>>();
+
+    pricedLines.forEach((line, lineIndex) => {
+      if (!tracksInventoryForSale(line.product) || !line.product.trackExpiry) {
+        return;
+      }
+
+      const availableBatches = availableBatchesByProduct.get(line.product.id) ?? [];
+      const allocations = allocateInventoryBatchesFefo({
+        productName: line.product.name,
+        quantity: line.quantity,
+        preferredBatchId: line.preferredBatchId,
+        batches: availableBatches
+      });
+      batchAllocationsByLineIndex.set(lineIndex, allocations);
+
+      for (const allocation of allocations) {
+        const batch = availableBatches.find((candidate) => candidate.batchId === allocation.batchId);
+        if (batch) {
+          batch.quantityOnHand = toQuantity(batch.quantityOnHand - allocation.quantity);
+        }
+      }
+    });
+
     const { terminal, shift } = await ensureOnlineRegisterShift(tx, {
       session,
       user,
@@ -7719,7 +8348,7 @@ export async function createOnlineStoreSale(
         originNodeCode: "ONLINE_DIRECT",
         completedAt: new Date(),
         lines: {
-          create: pricedLines.map((line) => ({
+          create: pricedLines.map((line, lineIndex) => ({
             productId: line.product.id,
             productVariantId: line.productVariant?.id ?? null,
             inventoryLocationId: salesLocation.id,
@@ -7729,6 +8358,9 @@ export async function createOnlineStoreSale(
             variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
             variantAttributesSnapshot: line.variantAttributesSnapshot,
+            batchAllocationsSnapshot: batchAllocationsByLineIndex.has(lineIndex)
+              ? serializeJsonField(batchAllocationsByLineIndex.get(lineIndex) ?? [])
+              : null,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -7773,17 +8405,57 @@ export async function createOnlineStoreSale(
       loyaltyRedemptionAmount: loyaltyRedemption.amount
     });
 
-    const inventoryMovements = pricedLines
-      .filter((line) => isOnlineStoreStockManagedProduct(line.product))
-      .map((line) => ({
+    for (const allocations of batchAllocationsByLineIndex.values()) {
+      for (const allocation of allocations) {
+        if (!allocation.batchId) {
+          throw new Error(`Flash ERP could not resolve batch ${allocation.batchNo} during checkout.`);
+        }
+
+        const updated = await tx.inventoryBatch.updateMany({
+          where: {
+            id: allocation.batchId,
+            quantityOnHand: { gte: allocation.quantity },
+            status: "ACTIVE"
+          },
+          data: {
+            quantityOnHand: { decrement: allocation.quantity },
+            lastOccurredAt: transaction.completedAt ?? new Date(),
+            sourceReferenceType: "POS_TRANSACTION",
+            sourceReferenceId: transaction.id,
+            sourceReferenceLabel: transaction.transactionNo
+          }
+        });
+
+        if (updated.count !== 1) {
+          throw new Error(
+            `${allocation.batchNo} changed during checkout. Refresh the basket and retry the sale.`
+          );
+        }
+      }
+    }
+
+    const inventoryMovements = pricedLines.flatMap((line, lineIndex) => {
+      if (!tracksInventoryForSale(line.product)) {
+        return [];
+      }
+
+      const allocations = batchAllocationsByLineIndex.get(lineIndex);
+      const movementAllocations = allocations?.length
+        ? allocations
+        : [{ batchId: null, batchNo: null, expiryDate: null, quantity: line.quantity }];
+
+      return movementAllocations.map((allocation) => ({
           retailOrgId: session.retailOrgId,
           storeId: store.id,
           warehouseId: salesLocation.warehouseId,
           inventoryLocationId: salesLocation.id,
           productId: line.product.id,
           productVariantId: line.productVariant?.id ?? null,
+          inventoryBatchId: allocation.batchId,
+          batchNoSnapshot: allocation.batchNo,
+          expiryDateSnapshot: allocation.expiryDate ? new Date(allocation.expiryDate) : null,
           movementType: InventoryMovementType.SALE,
-          quantity: -line.quantity,
+          quantity: -allocation.quantity,
           unitCost: line.product.baseCostPrice,
           referenceType: "POS_TRANSACTION",
           referenceId: transaction.id,
@@ -7792,6 +8464,7 @@ export async function createOnlineStoreSale(
           createdByUserId: user.id,
           occurredAt: transaction.completedAt ?? new Date()
       }));
+    });
 
     if (inventoryMovements.length > 0) {
       await tx.inventoryLedgerEntry.createMany({
@@ -9985,12 +10658,14 @@ export async function createOnlineStoreCorrection(
             taxAmount: true,
             lineTotal: true,
             lineNote: true,
+            batchAllocationsSnapshot: true,
             product: {
               select: {
                 id: true,
                 productType: true,
                 baseCostPrice: true,
-                trackInventory: true
+                trackInventory: true,
+                trackExpiry: true
               }
             }
           }
@@ -10005,10 +10680,9 @@ export async function createOnlineStoreCorrection(
     const requestedReturnLineIds = returnLineInputs
       .map((line) => optionalText(line.sourceLineId))
       .filter((lineId): lineId is string => Boolean(lineId));
-    const returnedQuantities =
+    const priorReturnedLines =
       requestedReturnLineIds.length > 0
-        ? await tx.posTransactionLine.groupBy({
-            by: ["sourceLineId"],
+        ? await tx.posTransactionLine.findMany({
             where: {
               sourceLineId: {
                 in: requestedReturnLineIds
@@ -10022,16 +10696,38 @@ export async function createOnlineStoreCorrection(
                 }
               }
             },
-            _sum: {
-              quantity: true
+            select: {
+              sourceLineId: true,
+              quantity: true,
+              batchAllocationsSnapshot: true
             }
           })
         : [];
-    const returnedQuantityByLineId = new Map(
-      returnedQuantities
-        .filter((row) => row.sourceLineId)
-        .map((row) => [row.sourceLineId as string, toQuantity(row._sum.quantity)] as const)
-    );
+    const returnedQuantityByLineId = new Map<string, number>();
+    const returnedBatchAllocationsByLineId = new Map<
+      string,
+      InventoryBatchAllocation[]
+    >();
+
+    for (const returnedLine of priorReturnedLines) {
+      if (!returnedLine.sourceLineId) {
+        continue;
+      }
+
+      returnedQuantityByLineId.set(
+        returnedLine.sourceLineId,
+        toQuantity(
+          (returnedQuantityByLineId.get(returnedLine.sourceLineId) ?? 0) +
+            Number(returnedLine.quantity)
+        )
+      );
+      returnedBatchAllocationsByLineId.set(returnedLine.sourceLineId, [
+        ...(returnedBatchAllocationsByLineId.get(returnedLine.sourceLineId) ?? []),
+        ...readInventoryBatchAllocations(
+          returnedLine.batchAllocationsSnapshot
+        )
+      ]);
+    }
     const sourceLineById = new Map(sourceTransaction.lines.map((line) => [line.id, line] as const));
     const preparedReturnLines = returnLineInputs.map((lineInput) => {
       const sourceLineId = optionalText(lineInput.sourceLineId);
@@ -10051,9 +10747,23 @@ export async function createOnlineStoreCorrection(
         );
       }
 
+      const sourceBatchAllocations = readInventoryBatchAllocations(
+        sourceLine.batchAllocationsSnapshot
+      );
+      const batchAllocations = sourceLine.product.trackExpiry
+        ? takeOutstandingInventoryBatchAllocations({
+            productName: sourceLine.productNameSnapshot,
+            quantity,
+            issued: sourceBatchAllocations,
+            received:
+              returnedBatchAllocationsByLineId.get(sourceLineId) ?? []
+          })
+        : [];
+
       return {
         sourceLine,
         sourceLineId,
+        batchAllocations,
         ...buildSourceLineAmounts(sourceLine, quantity)
       };
     });
@@ -10104,6 +10814,7 @@ export async function createOnlineStoreCorrection(
               baseCostPrice: true,
               mustEnterPriceAtPos: true,
               trackInventory: true,
+              trackExpiry: true,
               trackSize: true,
               trackColor: true,
               taxProfile: {
@@ -10239,6 +10950,67 @@ export async function createOnlineStoreCorrection(
       );
     }
 
+    const reservedBatchQuantityById = new Map<string, number>();
+    const replacementBatchAllocations = await Promise.all(
+      preparedSaleLines.map(async (line) => {
+        if (!tracksInventoryForSale(line.product) || !line.product.trackExpiry) {
+          return [] as InventoryBatchAllocation[];
+        }
+
+        const allocations = allocateInventoryBatchesFefo({
+          productName: line.product.name,
+          quantity: line.quantity,
+          batches: (
+            await tx.inventoryBatch.findMany({
+              where: {
+                retailOrgId: session.retailOrgId,
+                inventoryLocationId: salesLocation.id,
+                productId: line.product.id,
+                quantityOnHand: { gt: 0 }
+              },
+              orderBy: [
+                { expiryDate: "asc" },
+                { manufacturedAt: "asc" },
+                { batchNo: "asc" }
+              ],
+              select: {
+                id: true,
+                batchNo: true,
+                manufacturedAt: true,
+                expiryDate: true,
+                quantityOnHand: true,
+                status: true
+              }
+            })
+          ).map((batch) => ({
+            batchId: batch.id,
+            batchNo: batch.batchNo,
+            manufacturedAt: batch.manufacturedAt?.toISOString() ?? null,
+            expiryDate: batch.expiryDate.toISOString(),
+            quantityOnHand: toQuantity(
+              Number(batch.quantityOnHand) -
+                (reservedBatchQuantityById.get(batch.id) ?? 0)
+            ),
+            status: batch.status
+          }))
+        });
+
+        for (const allocation of allocations) {
+          if (allocation.batchId) {
+            reservedBatchQuantityById.set(
+              allocation.batchId,
+              toQuantity(
+                (reservedBatchQuantityById.get(allocation.batchId) ?? 0) +
+                  allocation.quantity
+              )
+            );
+          }
+        }
+
+        return allocations;
+      })
+    );
+
     const returnSubtotal = toMoney(
       preparedReturnLines.reduce((sum, line) => sum + line.quantity * line.unitPrice - line.discountAmount, 0)
     );
@@ -10345,9 +11117,16 @@ export async function createOnlineStoreCorrection(
               discountAmount: line.discountAmount,
               taxAmount: line.taxAmount,
               lineTotal: line.lineTotal,
-              lineNote: line.sourceLine.lineNote ?? null
+              lineNote: line.sourceLine.lineNote ?? null,
+              ...(line.batchAllocations.length > 0
+                ? {
+                    batchAllocationsSnapshot: serializeJsonField(
+                      line.batchAllocations
+                    )
+                  }
+                : {})
             })),
-            ...preparedSaleLines.map((line) => ({
+            ...preparedSaleLines.map((line, lineIndex) => ({
               productId: line.product.id,
               inventoryLocationId: salesLocation.id,
               lineIntent: PosTransactionLineIntent.SALE,
@@ -10360,7 +11139,14 @@ export async function createOnlineStoreCorrection(
               discountAmount: line.discountAmount,
               taxAmount: line.taxAmount,
               lineTotal: line.lineTotal,
-              lineNote: line.lineNote
+              lineNote: line.lineNote,
+              ...(replacementBatchAllocations[lineIndex]?.length
+                ? {
+                    batchAllocationsSnapshot: serializeJsonField(
+                      replacementBatchAllocations[lineIndex]
+                    )
+                  }
+                : {})
             }))
           ]
         },
@@ -10381,49 +11167,176 @@ export async function createOnlineStoreCorrection(
         completedAt: true
       }
     });
+
+    const occurredAt = transaction.completedAt ?? new Date();
+
+    for (const line of preparedReturnLines) {
+      const returnLocation = line.sourceLine.inventoryLocationId
+        ? (returnLocationById.get(line.sourceLine.inventoryLocationId) ??
+          salesLocation)
+        : salesLocation;
+
+      for (const allocation of line.batchAllocations) {
+        const batch = await tx.inventoryBatch.findFirst({
+          where: {
+            retailOrgId: session.retailOrgId,
+            inventoryLocationId: returnLocation.id,
+            productId: line.sourceLine.productId,
+            batchNo: allocation.batchNo
+          },
+          select: {
+            id: true,
+            productId: true,
+            inventoryLocationId: true,
+            expiryDate: true,
+            quantityOnHand: true,
+            status: true
+          }
+        });
+
+        if (
+          !batch ||
+          batch.productId !== line.sourceLine.productId ||
+          batch.inventoryLocationId !== returnLocation.id ||
+          batch.expiryDate.toISOString().slice(0, 10) !==
+            allocation.expiryDate.slice(0, 10)
+        ) {
+          throw new Error(
+            `Flash ERP could not match returned batch ${allocation.batchNo} to the original sales location.`
+          );
+        }
+
+        const nextQuantity = toQuantity(
+          Number(batch.quantityOnHand) + allocation.quantity
+        );
+        await tx.inventoryBatch.update({
+          where: { id: batch.id },
+          data: {
+            quantityOnHand: nextQuantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: batch.expiryDate,
+              quantityOnHand: nextQuantity,
+              status: batch.status,
+              at: occurredAt
+            }),
+            sourceReferenceType: "POS_TRANSACTION",
+            sourceReferenceId: transaction.id,
+            sourceReferenceLabel: transaction.transactionNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            lastOccurredAt: occurredAt
+          }
+        });
+      }
+    }
+
+    for (const [lineIndex, line] of preparedSaleLines.entries()) {
+      for (const allocation of replacementBatchAllocations[lineIndex] ?? []) {
+        if (!allocation.batchId) {
+          throw new Error(
+            `Flash ERP could not resolve replacement batch ${allocation.batchNo} for ${line.product.name}.`
+          );
+        }
+
+        const batch = await tx.inventoryBatch.findUnique({
+          where: { id: allocation.batchId },
+          select: {
+            id: true,
+            expiryDate: true,
+            quantityOnHand: true,
+            status: true
+          }
+        });
+
+        if (!batch || Number(batch.quantityOnHand) < allocation.quantity) {
+          throw new Error(
+            `Batch ${allocation.batchNo} no longer has enough ${line.product.name} for this exchange.`
+          );
+        }
+
+        const nextQuantity = toQuantity(
+          Number(batch.quantityOnHand) - allocation.quantity
+        );
+        await tx.inventoryBatch.update({
+          where: { id: batch.id },
+          data: {
+            quantityOnHand: nextQuantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: batch.expiryDate,
+              quantityOnHand: nextQuantity,
+              status: batch.status,
+              at: occurredAt
+            }),
+            sourceReferenceType: "POS_TRANSACTION",
+            sourceReferenceId: transaction.id,
+            sourceReferenceLabel: transaction.transactionNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            lastOccurredAt: occurredAt
+          }
+        });
+      }
+    }
+
     const inventoryMovements = [
       ...preparedReturnLines
-        .filter((line) => isOnlineStoreStockManagedProduct(line.sourceLine.product))
-        .map((line) => {
+        .filter((line) => tracksInventoryForSale(line.sourceLine.product))
+        .flatMap((line) => {
           const returnLocation = line.sourceLine.inventoryLocationId
             ? (returnLocationById.get(line.sourceLine.inventoryLocationId) ?? salesLocation)
             : salesLocation;
 
-          return {
+          const batches = line.batchAllocations.length > 0
+            ? line.batchAllocations
+            : [null];
+          return batches.map((batch) => ({
             retailOrgId: session.retailOrgId,
             storeId: store.id,
             warehouseId: returnLocation.warehouseId,
             inventoryLocationId: returnLocation.id,
             productId: line.sourceLine.productId,
+            inventoryBatchId: batch?.batchId ?? null,
+            batchNoSnapshot: batch?.batchNo ?? null,
+            expiryDateSnapshot: batch?.expiryDate
+              ? new Date(batch.expiryDate)
+              : null,
             movementType: InventoryMovementType.RETURN,
-            quantity: line.quantity,
+            quantity: batch?.quantity ?? line.quantity,
             unitCost: line.sourceLine.product.baseCostPrice,
             referenceType: "POS_TRANSACTION",
             referenceId: transaction.id,
             externalReference: transaction.transactionNo,
             sourceNodeCode: "ONLINE_DIRECT",
             createdByUserId: user.id,
-            occurredAt: transaction.completedAt ?? new Date()
-          };
+            occurredAt
+          }));
         }),
       ...preparedSaleLines
-        .filter((line) => isOnlineStoreStockManagedProduct(line.product))
-        .map((line) => ({
-          retailOrgId: session.retailOrgId,
-          storeId: store.id,
-          warehouseId: salesLocation.warehouseId,
-          inventoryLocationId: salesLocation.id,
-          productId: line.product.id,
-          movementType: InventoryMovementType.SALE,
-          quantity: -line.quantity,
-          unitCost: line.product.baseCostPrice,
-          referenceType: "POS_TRANSACTION",
-          referenceId: transaction.id,
-          externalReference: transaction.transactionNo,
-          sourceNodeCode: "ONLINE_DIRECT",
-          createdByUserId: user.id,
-          occurredAt: transaction.completedAt ?? new Date()
-        }))
+        .filter((line) => tracksInventoryForSale(line.product))
+        .flatMap((line, lineIndex) => {
+          const batches = replacementBatchAllocations[lineIndex]?.length
+            ? replacementBatchAllocations[lineIndex]
+            : [null];
+          return batches.map((batch) => ({
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            warehouseId: salesLocation.warehouseId,
+            inventoryLocationId: salesLocation.id,
+            productId: line.product.id,
+            inventoryBatchId: batch?.batchId ?? null,
+            batchNoSnapshot: batch?.batchNo ?? null,
+            expiryDateSnapshot: batch?.expiryDate
+              ? new Date(batch.expiryDate)
+              : null,
+            movementType: InventoryMovementType.SALE,
+            quantity: -(batch?.quantity ?? line.quantity),
+            unitCost: line.product.baseCostPrice,
+            referenceType: "POS_TRANSACTION",
+            referenceId: transaction.id,
+            externalReference: transaction.transactionNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            createdByUserId: user.id,
+            occurredAt
+          }));
+        })
     ];
 
     if (inventoryMovements.length > 0) {
@@ -11098,7 +12011,9 @@ export async function createOnlineStoreGoodsReceipt(
       subcategory: true,
       unitOfMeasure: true,
       baseCostPrice: true,
-      isSerialized: true
+      isSerialized: true,
+      trackExpiry: true,
+      shelfLifeDays: true
     }
   });
   const productById = new Map(products.map((product) => [product.id, product] as const));
@@ -11150,6 +12065,13 @@ export async function createOnlineStoreGoodsReceipt(
 
     const requestedCost = Number(line.unitCost ?? purchaseOrderLine?.unitCost ?? product.baseCostPrice ?? 0);
     const unitCost = Number.isFinite(requestedCost) && requestedCost >= 0 ? toMoney(requestedCost) : 0;
+    const batch = validateInventoryBatchReceipt({
+      productName: product.name,
+      trackExpiry: product.trackExpiry,
+      batchNo: line.batchNo,
+      manufacturedAt: line.manufacturedAt,
+      expiryDate: line.expiryDate
+    });
 
     return {
       lineNo: index + 1,
@@ -11157,7 +12079,10 @@ export async function createOnlineStoreGoodsReceipt(
       purchaseOrderLineId: purchaseOrderLine?.id ?? null,
       quantity,
       unitCost,
-      serialNumbers
+      serialNumbers,
+      batchNo: batch.batchNo,
+      manufacturedAt: batch.manufacturedAt,
+      expiryDate: batch.expiryDate
     };
   });
   const requestedSerialKeys = new Set<string>();
@@ -11236,6 +12161,9 @@ export async function createOnlineStoreGoodsReceipt(
             purchaseOrderLineId: line.purchaseOrderLineId,
             quantity: line.quantity,
             unitCost: line.unitCost,
+            batchNo: line.batchNo,
+            manufacturedAt: line.manufacturedAt ? new Date(line.manufacturedAt) : null,
+            expiryDate: line.expiryDate ? new Date(line.expiryDate) : null,
             ...(line.serialNumbers.length > 0 ? { serialNumbersSnapshot: serializeJsonField(line.serialNumbers) } : {})
           }))
         }
@@ -11301,23 +12229,101 @@ export async function createOnlineStoreGoodsReceipt(
     };
 
     if (postStockImmediately) {
+      const inventoryBatchByLineNo = new Map<number, {
+        id: string;
+        batchNo: string;
+        expiryDate: Date;
+      }>();
+
+      for (const line of preparedLines) {
+        if (!line.batchNo || !line.expiryDate) {
+          continue;
+        }
+
+        const existingBatch = await tx.inventoryBatch.findUnique({
+          where: {
+            retailOrgId_inventoryLocationId_productId_batchNo: {
+              retailOrgId: session.retailOrgId,
+              inventoryLocationId: location.id,
+              productId: line.product.id,
+              batchNo: line.batchNo
+            }
+          },
+          select: { id: true, batchNo: true, expiryDate: true }
+        });
+
+        if (
+          existingBatch &&
+          existingBatch.expiryDate.toISOString().slice(0, 10) !== line.expiryDate
+        ) {
+          throw new Error(
+            `${line.product.name} batch ${line.batchNo} is already registered with expiry ${existingBatch.expiryDate.toISOString().slice(0, 10)}.`
+          );
+        }
+
+        const inventoryBatch = existingBatch
+          ? await tx.inventoryBatch.update({
+              where: { id: existingBatch.id },
+              data: {
+                quantityOnHand: { increment: line.quantity },
+                status: "ACTIVE",
+                manufacturedAt: line.manufacturedAt ? new Date(line.manufacturedAt) : undefined,
+                sourceReferenceType: "GOODS_RECEIPT",
+                sourceReferenceId: receipt.id,
+                sourceReferenceLabel: receipt.receiptNo,
+                sourceNodeCode: "ONLINE_DIRECT",
+                lastOccurredAt: now
+              },
+              select: { id: true, batchNo: true, expiryDate: true }
+            })
+          : await tx.inventoryBatch.create({
+              data: {
+                retailOrgId: session.retailOrgId,
+                storeId: store.id,
+                warehouseId: location.warehouseId,
+                inventoryLocationId: location.id,
+                productId: line.product.id,
+                batchNo: line.batchNo,
+                manufacturedAt: line.manufacturedAt ? new Date(line.manufacturedAt) : null,
+                expiryDate: new Date(line.expiryDate),
+                quantityOnHand: line.quantity,
+                status: "ACTIVE",
+                sourceReferenceType: "GOODS_RECEIPT",
+                sourceReferenceId: receipt.id,
+                sourceReferenceLabel: receipt.receiptNo,
+                sourceNodeCode: "ONLINE_DIRECT",
+                lastOccurredAt: now
+              },
+              select: { id: true, batchNo: true, expiryDate: true }
+            });
+
+        inventoryBatchByLineNo.set(line.lineNo, inventoryBatch);
+      }
+
       await tx.inventoryLedgerEntry.createMany({
-        data: preparedLines.map((line) => ({
-          retailOrgId: session.retailOrgId,
-          storeId: store.id,
-          warehouseId: location.warehouseId,
-          inventoryLocationId: location.id,
-          productId: line.product.id,
-          movementType: InventoryMovementType.GOODS_RECEIPT,
-          quantity: line.quantity,
-          unitCost: line.unitCost,
-          referenceType: "GOODS_RECEIPT",
-          referenceId: receipt.id,
-          externalReference: receipt.receiptNo,
-          sourceNodeCode: "ONLINE_DIRECT",
-          createdByUserId: user.id,
-          occurredAt: now
-        }))
+        data: preparedLines.map((line) => {
+          const inventoryBatch = inventoryBatchByLineNo.get(line.lineNo);
+
+          return {
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            warehouseId: location.warehouseId,
+            inventoryLocationId: location.id,
+            productId: line.product.id,
+            inventoryBatchId: inventoryBatch?.id ?? null,
+            batchNoSnapshot: inventoryBatch?.batchNo ?? null,
+            expiryDateSnapshot: inventoryBatch?.expiryDate ?? null,
+            movementType: InventoryMovementType.GOODS_RECEIPT,
+            quantity: line.quantity,
+            unitCost: line.unitCost,
+            referenceType: "GOODS_RECEIPT",
+            referenceId: receipt.id,
+            externalReference: receipt.receiptNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            createdByUserId: user.id,
+            occurredAt: now
+          };
+        })
       });
 
       fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
@@ -11459,6 +12465,8 @@ export async function createOnlineStoreSupplierReturn(
             quantity: true,
             unitCost: true,
             serialNumbersSnapshot: true,
+            batchNo: true,
+            expiryDate: true,
             product: {
               select: {
                 code: true,
@@ -11534,6 +12542,31 @@ export async function createOnlineStoreSupplierReturn(
       throw new Error(`${line.product.name} does not have enough on-hand quantity in ${receipt.inventoryLocation.name}.`);
     }
 
+    const batch = line.batchNo && line.expiryDate
+      ? await tx.inventoryBatch.findFirst({
+          where: {
+            retailOrgId: session.retailOrgId,
+            inventoryLocationId: receipt.inventoryLocationId,
+            productId: line.productId,
+            batchNo: line.batchNo
+          }
+        })
+      : null;
+    const batchAllocations: InventoryBatchAllocation[] = batch
+      ? [{
+          batchId: batch.id,
+          batchNo: batch.batchNo,
+          expiryDate: batch.expiryDate.toISOString().slice(0, 10),
+          quantity
+        }]
+      : [];
+
+    if (line.batchNo && (!batch || quantity > toQuantity(batch.quantityOnHand))) {
+      throw new Error(
+        `${line.product.name} batch ${line.batchNo} does not have ${formatNumberForMessage(quantity)} returnable unit(s) in ${receipt.inventoryLocation.name}.`
+      );
+    }
+
     const now = new Date();
     const supplierReturnNo = `WEB-SR-${store.code.toUpperCase()}-${Date.now()}`;
     const supplierReturn = await tx.supplierReturn.create({
@@ -11561,7 +12594,10 @@ export async function createOnlineStoreSupplierReturn(
             productId: line.productId,
             quantity,
             unitCost: line.unitCost,
-            ...(serialNumbers.length > 0 ? { serialNumbersSnapshot: serializeJsonField(serialNumbers) } : {})
+            ...(serialNumbers.length > 0 ? { serialNumbersSnapshot: serializeJsonField(serialNumbers) } : {}),
+            ...(batchAllocations.length > 0
+              ? { batchAllocationsSnapshot: serializeJsonField(batchAllocations) }
+              : {})
           }
         }
       },
@@ -11571,6 +12607,35 @@ export async function createOnlineStoreSupplierReturn(
       }
     });
 
+    if (batch) {
+      const nextBatchQuantity = toQuantity(Number(batch.quantityOnHand) - quantity);
+      const batchUpdate = await tx.inventoryBatch.updateMany({
+        where: {
+          id: batch.id,
+          quantityOnHand: {
+            gte: quantity
+          }
+        },
+        data: {
+          quantityOnHand: nextBatchQuantity,
+          status: deriveInventoryBatchStatus({
+            expiryDate: batch.expiryDate,
+            quantityOnHand: nextBatchQuantity,
+            status: batch.status
+          }),
+          sourceReferenceType: "SUPPLIER_RETURN",
+          sourceReferenceId: supplierReturn.id,
+          sourceReferenceLabel: supplierReturn.supplierReturnNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          lastOccurredAt: now
+        }
+      });
+
+      if (batchUpdate.count !== 1) {
+        throw new Error(`Flash ERP could not reserve ${line.product.name} batch ${batch.batchNo} for this supplier return.`);
+      }
+    }
+
     await tx.inventoryLedgerEntry.create({
       data: {
         retailOrgId: session.retailOrgId,
@@ -11578,6 +12643,9 @@ export async function createOnlineStoreSupplierReturn(
         warehouseId: receipt.warehouseId,
         inventoryLocationId: receipt.inventoryLocationId,
         productId: line.productId,
+        inventoryBatchId: batch?.id ?? null,
+        batchNoSnapshot: batch?.batchNo ?? null,
+        expiryDateSnapshot: batch?.expiryDate ?? null,
         movementType: InventoryMovementType.RETURN_TO_VENDOR,
         quantity: quantity * -1,
         unitCost: line.unitCost,
@@ -11686,7 +12754,8 @@ export async function createOnlineStoreStockCount(
       code: true,
       name: true,
       baseCostPrice: true,
-      trackInventory: true
+      trackInventory: true,
+      trackExpiry: true
     }
   });
 
@@ -11714,6 +12783,67 @@ export async function createOnlineStoreStockCount(
     });
     const previousQuantity = toQuantity(currentPosition._sum.quantity);
     const varianceQuantity = toQuantity(countedQuantity - previousQuantity);
+    const batchRows = product.trackExpiry
+      ? await tx.inventoryBatch.findMany({
+          where: {
+            retailOrgId: session.retailOrgId,
+            inventoryLocationId: location.id,
+            productId: product.id,
+            quantityOnHand: { gt: 0 }
+          },
+          orderBy: [{ expiryDate: "asc" }, { batchNo: "asc" }]
+        })
+      : [];
+    const previousBatchQuantities: InventoryBatchAllocation[] = batchRows.map((batch) => ({
+      batchId: batch.id,
+      batchNo: batch.batchNo,
+      expiryDate: batch.expiryDate.toISOString().slice(0, 10),
+      quantity: toQuantity(batch.quantityOnHand)
+    }));
+    const requestedBatchCounts = Array.isArray(input.batchCounts) ? input.batchCounts : [];
+    const countedByBatchId = new Map<string, number>();
+
+    for (const batchCount of requestedBatchCounts) {
+      const batchId = optionalText(batchCount.batchId);
+
+      if (!batchId || countedByBatchId.has(batchId)) {
+        throw new Error(`Enter one counted quantity for each ${product.name} batch.`);
+      }
+
+      countedByBatchId.set(
+        batchId,
+        normalizeNonNegativeQuantity(batchCount.countedQuantity, "batch counted")
+      );
+    }
+
+    if (product.trackExpiry) {
+      if (countedQuantity > 0 && batchRows.length === 0) {
+        throw new Error(`${product.name} has no batch register. Receive a valid batch before recording positive stock.`);
+      }
+
+      const missingBatch = batchRows.find((batch) => !countedByBatchId.has(batch.id));
+      const unknownBatch = [...countedByBatchId.keys()].find((batchId) => !batchRows.some((batch) => batch.id === batchId));
+
+      if (missingBatch || unknownBatch) {
+        throw new Error(`Count every active batch of ${product.name} before saving the stock count.`);
+      }
+    }
+
+    const countedBatchQuantities: InventoryBatchAllocation[] = batchRows.map((batch) => ({
+      batchId: batch.id,
+      batchNo: batch.batchNo,
+      expiryDate: batch.expiryDate.toISOString().slice(0, 10),
+      quantity: countedByBatchId.get(batch.id) ?? 0
+    }));
+    const countedBatchTotal = toQuantity(
+      countedBatchQuantities.reduce((sum, batch) => sum + batch.quantity, 0)
+    );
+
+    if (product.trackExpiry && Math.abs(countedBatchTotal - countedQuantity) > 0.0001) {
+      throw new Error(
+        `${product.name} batch counts total ${formatNumberForMessage(countedBatchTotal)}, not ${formatNumberForMessage(countedQuantity)}.`
+      );
+    }
     const sessionNo = `WEB-CNT-${store.code.toUpperCase()}-${Date.now()}`;
     const now = new Date();
     const commitNow = input.commitNow !== false;
@@ -11729,6 +12859,12 @@ export async function createOnlineStoreStockCount(
         previousQuantity,
         countedQuantity,
         varianceQuantity,
+        previousBatchQuantitiesSnapshot: product.trackExpiry
+          ? serializeJsonField(previousBatchQuantities)
+          : null,
+        countedBatchQuantitiesSnapshot: product.trackExpiry
+          ? serializeJsonField(countedBatchQuantities)
+          : null,
         note,
         operatorName: user.displayName,
         submittedByNodeCode: "ONLINE_DIRECT",
@@ -11743,7 +12879,58 @@ export async function createOnlineStoreStockCount(
       }
     });
 
-    if (commitNow && varianceQuantity !== 0) {
+    if (commitNow && product.trackExpiry) {
+      for (const countedBatch of countedBatchQuantities) {
+        const previousBatch = previousBatchQuantities.find((batch) => batch.batchId === countedBatch.batchId);
+        const batch = batchRows.find((candidate) => candidate.id === countedBatch.batchId);
+
+        if (!previousBatch || !batch) {
+          throw new Error(`Flash ERP could not verify every ${product.name} batch during count commit.`);
+        }
+
+        const batchVariance = toQuantity(countedBatch.quantity - previousBatch.quantity);
+        await tx.inventoryBatch.update({
+          where: { id: batch.id },
+          data: {
+            quantityOnHand: countedBatch.quantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: batch.expiryDate,
+              quantityOnHand: countedBatch.quantity,
+              status: batch.status
+            }),
+            sourceReferenceType: "STOCK_COUNT",
+            sourceReferenceId: countSession.id,
+            sourceReferenceLabel: countSession.sessionNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            lastOccurredAt: now
+          }
+        });
+
+        if (batchVariance !== 0) {
+          await tx.inventoryLedgerEntry.create({
+            data: {
+              retailOrgId: session.retailOrgId,
+              storeId: store.id,
+              warehouseId: location.warehouseId,
+              inventoryLocationId: location.id,
+              productId: product.id,
+              inventoryBatchId: batch.id,
+              batchNoSnapshot: batch.batchNo,
+              expiryDateSnapshot: batch.expiryDate,
+              movementType: InventoryMovementType.COUNT_VARIANCE,
+              quantity: batchVariance,
+              unitCost: product.baseCostPrice,
+              referenceType: "STOCK_COUNT",
+              referenceId: countSession.id,
+              externalReference: countSession.sessionNo,
+              sourceNodeCode: "ONLINE_DIRECT",
+              createdByUserId: user.id,
+              occurredAt: now
+            }
+          });
+        }
+      }
+    } else if (commitNow && varianceQuantity !== 0) {
       await tx.inventoryLedgerEntry.create({
         data: {
           retailOrgId: session.retailOrgId,
@@ -11830,6 +13017,8 @@ export async function commitOnlineStoreStockCount(
       previousQuantity: true,
       countedQuantity: true,
       varianceQuantity: true,
+      previousBatchQuantitiesSnapshot: true,
+      countedBatchQuantitiesSnapshot: true,
       inventoryLocationId: true,
       warehouseId: true,
       productId: true,
@@ -11842,7 +13031,8 @@ export async function commitOnlineStoreStockCount(
         select: {
           code: true,
           name: true,
-          baseCostPrice: true
+          baseCostPrice: true,
+          trackExpiry: true
         }
       }
     }
@@ -11861,10 +13051,84 @@ export async function commitOnlineStoreStockCount(
   }
 
   const varianceQuantity = toQuantity(countSession.varianceQuantity);
+  const previousBatchQuantities = readInventoryBatchAllocations(
+    countSession.previousBatchQuantitiesSnapshot
+  );
+  const countedBatchQuantities = readInventoryBatchAllocations(
+    countSession.countedBatchQuantitiesSnapshot
+  );
   const now = new Date();
 
   return prisma.$transaction(async (tx) => {
-    if (varianceQuantity !== 0) {
+    if (countSession.product.trackExpiry) {
+      if (previousBatchQuantities.length !== countedBatchQuantities.length) {
+        throw new Error(
+          `${countSession.sessionNo} has incomplete batch-count details and cannot be committed.`
+        );
+      }
+
+      for (const countedBatch of countedBatchQuantities) {
+        const previousBatch = previousBatchQuantities.find(
+          (batch) => batch.batchId === countedBatch.batchId
+        );
+
+        if (!previousBatch?.batchId) {
+          throw new Error(`${countSession.sessionNo} has an invalid batch-count line.`);
+        }
+
+        const batch = await tx.inventoryBatch.findUnique({
+          where: { id: previousBatch.batchId }
+        });
+
+        if (!batch || Math.abs(toQuantity(batch.quantityOnHand) - previousBatch.quantity) > 0.0001) {
+          throw new Error(
+            `${countSession.sessionNo} is stale because batch ${previousBatch.batchNo} changed after submission. Recount the item.`
+          );
+        }
+
+        const batchVariance = toQuantity(countedBatch.quantity - previousBatch.quantity);
+        await tx.inventoryBatch.update({
+          where: { id: batch.id },
+          data: {
+            quantityOnHand: countedBatch.quantity,
+            status: deriveInventoryBatchStatus({
+              expiryDate: batch.expiryDate,
+              quantityOnHand: countedBatch.quantity,
+              status: batch.status
+            }),
+            sourceReferenceType: "STOCK_COUNT",
+            sourceReferenceId: countSession.id,
+            sourceReferenceLabel: countSession.sessionNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            lastOccurredAt: now
+          }
+        });
+
+        if (batchVariance !== 0) {
+          await tx.inventoryLedgerEntry.create({
+            data: {
+              retailOrgId: session.retailOrgId,
+              storeId: store.id,
+              warehouseId: countSession.warehouseId,
+              inventoryLocationId: countSession.inventoryLocationId,
+              productId: countSession.productId,
+              inventoryBatchId: batch.id,
+              batchNoSnapshot: batch.batchNo,
+              expiryDateSnapshot: batch.expiryDate,
+              movementType: InventoryMovementType.COUNT_VARIANCE,
+              quantity: batchVariance,
+              unitCost: countSession.product.baseCostPrice,
+              referenceType: "STOCK_COUNT",
+              referenceId: countSession.id,
+              externalReference: countSession.sessionNo,
+              sourceNodeCode: "ONLINE_DIRECT",
+              createdByUserId: user.id,
+              occurredAt: now
+            }
+          });
+        }
+      }
+    } else if (varianceQuantity !== 0) {
       await tx.inventoryLedgerEntry.create({
         data: {
           retailOrgId: session.retailOrgId,
@@ -12189,6 +13453,8 @@ export async function processOnlineStoreTransfer(
       unitCost: true,
       issuedSerialNumbersSnapshot: true,
       receivedSerialNumbersSnapshot: true,
+      issuedBatchAllocationsSnapshot: true,
+      receivedBatchAllocationsSnapshot: true,
       sourceStoreId: true,
       destinationStoreId: true,
       sourceInventoryLocationId: true,
@@ -12220,7 +13486,8 @@ export async function processOnlineStoreTransfer(
           subcategory: true,
           unitOfMeasure: true,
           baseCostPrice: true,
-          isSerialized: true
+          isSerialized: true,
+          trackExpiry: true
         }
       }
     }
@@ -12235,6 +13502,8 @@ export async function processOnlineStoreTransfer(
   const receivedQuantity = toQuantity(transfer.receivedQuantity);
   const issuedSerialNumbers = readStringArrayJson(transfer.issuedSerialNumbersSnapshot) ?? [];
   const receivedSerialNumbers = readStringArrayJson(transfer.receivedSerialNumbersSnapshot) ?? [];
+  const issuedBatchAllocations = readInventoryBatchAllocations(transfer.issuedBatchAllocationsSnapshot);
+  const receivedBatchAllocations = readInventoryBatchAllocations(transfer.receivedBatchAllocationsSnapshot);
   const now = new Date();
 
   if (transfer.product.isSerialized) {
@@ -12283,6 +13552,29 @@ export async function processOnlineStoreTransfer(
       if (quantity - availableQuantity > 0.0001) {
         throw new Error(`Only ${formatNumberForMessage(availableQuantity)} ${transfer.product.name} is available in ${transfer.sourceInventoryLocation.code}.`);
       }
+
+      const issueBatchAllocations = transfer.product.trackExpiry
+        ? allocateInventoryBatchesFefo({
+            productName: transfer.product.name,
+            quantity,
+            batches: (await tx.inventoryBatch.findMany({
+              where: {
+                retailOrgId: session.retailOrgId,
+                inventoryLocationId: transfer.sourceInventoryLocationId,
+                productId: transfer.product.id,
+                quantityOnHand: { gt: 0 }
+              },
+              orderBy: [{ expiryDate: "asc" }, { batchNo: "asc" }]
+            })).map((batch) => ({
+              batchId: batch.id,
+              batchNo: batch.batchNo,
+              manufacturedAt: batch.manufacturedAt?.toISOString() ?? null,
+              expiryDate: batch.expiryDate.toISOString(),
+              quantityOnHand: toQuantity(batch.quantityOnHand),
+              status: batch.status
+            }))
+          })
+        : [];
 
       const nextIssuedQuantity = toQuantity(issuedQuantity + quantity);
       const nextStatus = deriveOnlineTransferStatus({
@@ -12343,24 +13635,63 @@ export async function processOnlineStoreTransfer(
       }
 
       if (postStockImmediately) {
-        await tx.inventoryLedgerEntry.create({
-          data: {
-            retailOrgId: session.retailOrgId,
-            storeId: store.id,
-            warehouseId: transfer.sourceInventoryLocation.warehouseId,
-            inventoryLocationId: transfer.sourceInventoryLocationId,
-            productId: transfer.product.id,
-            movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
-            quantity: quantity * -1,
-            unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
-            referenceType: "INTER_STORE_TRANSFER",
-            referenceId: transfer.id,
-            externalReference: transfer.transferNo,
-            sourceNodeCode: "ONLINE_DIRECT",
-            createdByUserId: user.id,
-            occurredAt: now
+        for (const allocation of issueBatchAllocations) {
+          const batch = await tx.inventoryBatch.findUniqueOrThrow({
+            where: { id: allocation.batchId ?? "" }
+          });
+          const nextQuantity = toQuantity(Number(batch.quantityOnHand) - allocation.quantity);
+          const updated = await tx.inventoryBatch.updateMany({
+            where: {
+              id: batch.id,
+              quantityOnHand: { gte: allocation.quantity }
+            },
+            data: {
+              quantityOnHand: nextQuantity,
+              status: deriveInventoryBatchStatus({
+                expiryDate: batch.expiryDate,
+                quantityOnHand: nextQuantity,
+                status: batch.status
+              }),
+              sourceReferenceType: "INTER_STORE_TRANSFER",
+              sourceReferenceId: transfer.id,
+              sourceReferenceLabel: transfer.transferNo,
+              sourceNodeCode: "ONLINE_DIRECT",
+              lastOccurredAt: now
+            }
+          });
+
+          if (updated.count !== 1) {
+            throw new Error(`Flash ERP could not reserve batch ${allocation.batchNo} for ${transfer.transferNo}.`);
           }
-        });
+        }
+
+        const issueLedgerAllocations = issueBatchAllocations.length
+          ? issueBatchAllocations
+          : [{ batchId: null, batchNo: "", expiryDate: "", quantity }];
+
+        for (const allocation of issueLedgerAllocations) {
+          await tx.inventoryLedgerEntry.create({
+            data: {
+              retailOrgId: session.retailOrgId,
+              storeId: store.id,
+              warehouseId: transfer.sourceInventoryLocation.warehouseId,
+              inventoryLocationId: transfer.sourceInventoryLocationId,
+              productId: transfer.product.id,
+              inventoryBatchId: allocation.batchId,
+              batchNoSnapshot: allocation.batchNo || null,
+              expiryDateSnapshot: allocation.expiryDate ? new Date(allocation.expiryDate) : null,
+              movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
+              quantity: allocation.quantity * -1,
+              unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
+              referenceType: "INTER_STORE_TRANSFER",
+              referenceId: transfer.id,
+              externalReference: transfer.transferNo,
+              sourceNodeCode: "ONLINE_DIRECT",
+              createdByUserId: user.id,
+              occurredAt: now
+            }
+          });
+        }
       }
 
       await tx.interStoreTransfer.update({
@@ -12377,6 +13708,9 @@ export async function processOnlineStoreTransfer(
           driverContact: driverContact ?? undefined,
           deliveryNoteNo: deliveryNoteNo ?? undefined,
           workflowType: isFuelTransferProduct(transfer.product) ? "FUEL_TRANSFER" : undefined,
+          issuedBatchAllocationsSnapshot: serializeJsonField(
+            issueBatchAllocations.length ? [...issuedBatchAllocations, ...issueBatchAllocations] : null
+          ),
           issueNote: note ?? `Issued ${formatNumberForMessage(quantity)} unit(s) from ${transfer.sourceInventoryLocation.code}.`,
           issueOperatorName: user.displayName,
           issueStockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,
@@ -12444,6 +13778,21 @@ export async function processOnlineStoreTransfer(
       throw new Error(`Only ${formatNumberForMessage(outstandingReceiptQuantity)} unit(s) remain to receive on ${transfer.transferNo}.`);
     }
 
+    if (transfer.product.trackExpiry && issuedBatchAllocations.length === 0) {
+      throw new Error(
+        `${transfer.transferNo} has no issued batch traceability for ${transfer.product.name}. Reissue the transfer after syncing the expiry-control update.`
+      );
+    }
+
+    const receiptBatchAllocations = transfer.product.trackExpiry
+      ? takeOutstandingInventoryBatchAllocations({
+          productName: transfer.product.name,
+          quantity,
+          issued: issuedBatchAllocations,
+          received: receivedBatchAllocations
+        })
+      : [];
+
     const nextReceivedQuantity = toQuantity(receivedQuantity + quantity);
     const nextStatus = deriveOnlineTransferStatus({
       requestedQuantity,
@@ -12502,24 +13851,78 @@ export async function processOnlineStoreTransfer(
     };
 
     if (postStockImmediately) {
-      await tx.inventoryLedgerEntry.create({
-        data: {
-          retailOrgId: session.retailOrgId,
-          storeId: store.id,
-          warehouseId: transfer.destinationInventoryLocation.warehouseId,
-          inventoryLocationId: transfer.destinationInventoryLocationId,
-          productId: transfer.product.id,
-          movementType: InventoryMovementType.STOCK_TRANSFER_IN,
-          quantity,
-          unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
-          referenceType: "INTER_STORE_TRANSFER",
-          referenceId: transfer.id,
-          externalReference: transfer.transferNo,
-          sourceNodeCode: "ONLINE_DIRECT",
-          createdByUserId: user.id,
-          occurredAt: now
-        }
-      });
+      for (const allocation of receiptBatchAllocations) {
+        const status = deriveInventoryBatchStatus({
+          expiryDate: allocation.expiryDate,
+          quantityOnHand: allocation.quantity
+        });
+        const destinationBatch = await tx.inventoryBatch.upsert({
+          where: {
+            retailOrgId_inventoryLocationId_productId_batchNo: {
+              retailOrgId: session.retailOrgId,
+              inventoryLocationId: transfer.destinationInventoryLocationId,
+              productId: transfer.product.id,
+              batchNo: allocation.batchNo
+            }
+          },
+          create: {
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            warehouseId: transfer.destinationInventoryLocation.warehouseId,
+            inventoryLocationId: transfer.destinationInventoryLocationId,
+            productId: transfer.product.id,
+            batchNo: allocation.batchNo,
+            expiryDate: new Date(allocation.expiryDate),
+            quantityOnHand: allocation.quantity,
+            status,
+            sourceReferenceType: "INTER_STORE_TRANSFER",
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transferNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            lastOccurredAt: now
+          },
+          update: {
+            expiryDate: new Date(allocation.expiryDate),
+            quantityOnHand: { increment: allocation.quantity },
+            status,
+            sourceReferenceType: "INTER_STORE_TRANSFER",
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transferNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            lastOccurredAt: now
+          }
+        });
+        allocation.batchId = destinationBatch.id;
+      }
+
+      const receiptLedgerAllocations = receiptBatchAllocations.length
+        ? receiptBatchAllocations
+        : [{ batchId: null, batchNo: "", expiryDate: "", quantity }];
+
+      for (const allocation of receiptLedgerAllocations) {
+        await tx.inventoryLedgerEntry.create({
+          data: {
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            warehouseId: transfer.destinationInventoryLocation.warehouseId,
+            inventoryLocationId: transfer.destinationInventoryLocationId,
+            productId: transfer.product.id,
+            inventoryBatchId: allocation.batchId,
+            batchNoSnapshot: allocation.batchNo || null,
+            expiryDateSnapshot: allocation.expiryDate ? new Date(allocation.expiryDate) : null,
+            movementType: InventoryMovementType.STOCK_TRANSFER_IN,
+            quantity: allocation.quantity,
+            unitCost: transfer.unitCost ?? transfer.product.baseCostPrice,
+            referenceType: "INTER_STORE_TRANSFER",
+            referenceId: transfer.id,
+            externalReference: transfer.transferNo,
+            sourceNodeCode: "ONLINE_DIRECT",
+            createdByUserId: user.id,
+            occurredAt: now
+          }
+        });
+      }
+
       fuelMirror = await mirrorOnlineFuelReceiptToTank(tx, {
         retailOrgId: session.retailOrgId,
         storeId: store.id,
@@ -12534,7 +13937,9 @@ export async function processOnlineStoreTransfer(
           {
             product: transfer.product,
             quantity,
-            unitCost: transfer.unitCost === null ? Number(transfer.product.baseCostPrice ?? 0) : Number(transfer.unitCost)
+            unitCost: transfer.unitCost === null
+              ? Number(transfer.product.baseCostPrice ?? 0)
+              : Number(transfer.unitCost)
           }
         ]
       });
@@ -12548,6 +13953,9 @@ export async function processOnlineStoreTransfer(
         status: nextStatus,
         receivedQuantity: nextReceivedQuantity,
         receivedSerialNumbersSnapshot: serializeJsonField(nextReceivedSerialNumbers.length ? nextReceivedSerialNumbers : null),
+        receivedBatchAllocationsSnapshot: serializeJsonField(
+          receiptBatchAllocations.length ? [...receivedBatchAllocations, ...receiptBatchAllocations] : null
+        ),
         receiptNote: note ?? `Received ${formatNumberForMessage(quantity)} unit(s) into ${transfer.destinationInventoryLocation.code}.`,
         receiptOperatorName: user.displayName,
         receiptStockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,

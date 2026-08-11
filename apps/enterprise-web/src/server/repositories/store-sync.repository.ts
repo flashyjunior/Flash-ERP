@@ -4,6 +4,8 @@ import { readJsonObject, readJsonStringArray, serializeJsonField, serializeRequi
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   CustomerAccountEntryType,
+  deriveInventoryBatchStatus,
+  validateInventoryBatchReceipt,
   type EntityOwnershipRule,
   entityOwnershipRules,
   InterStoreTransferOrigin,
@@ -109,6 +111,7 @@ import type {
   SyncRejectedEnvelope,
   InventoryGoodsReceiptRequest,
   InventoryGoodsReceiptResponse,
+  InventoryBatchAllocationPayload,
   PurchaseOrderLifecycleResponse,
   UpdateInterStoreTransferBatchRequest,
   PurchaseOrderClosureReason as SyncPurchaseOrderClosureReason,
@@ -150,6 +153,7 @@ import {
 } from "@/server/repositories/receipt-template-support";
 import {
   ensureInterStoreTransferSchemaCompatibility,
+  ensureInventoryExpirySchemaCompatibility,
   ensureInventoryLocationSalesOrderSchemaCompatibility,
   ensureOperatingExpenseSchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility,
@@ -316,6 +320,35 @@ function readPosDiscountRates(value: Prisma.JsonValue | null | undefined) {
   return rates;
 }
 
+function readPosExpressChargeRates(value: Prisma.JsonValue | null | undefined) {
+  const payload = readCompanySettingsObject(value);
+  const rawRates = Array.isArray(payload.posExpressChargeRates)
+    ? payload.posExpressChargeRates
+    : [];
+  const seen = new Set<string>();
+  const rates: number[] = [];
+
+  for (const rawRate of rawRates) {
+    const rate = Number(rawRate);
+
+    if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
+      continue;
+    }
+
+    const normalizedRate = Number(rate.toFixed(2));
+    const key = normalizedRate.toFixed(2);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    rates.push(normalizedRate);
+  }
+
+  return rates;
+}
+
 function readShiftFloatPromptAmount(
   value: Prisma.JsonValue | null | undefined,
 ) {
@@ -334,6 +367,52 @@ function readShowCriticalStocksOnStartup(
   return payload.showCriticalStocksOnStartup === true;
 }
 
+function readShowExpiringBatchesOnStartup(
+  value: Prisma.JsonValue | null | undefined,
+) {
+  const payload = readCompanySettingsObject(value);
+  return payload.showExpiringBatchesOnStartup !== false;
+}
+
+function readStorePosOptionSettings(value: Prisma.JsonValue | null | undefined) {
+  const payload = readCompanySettingsObject(value);
+  const readBooleanOption = (key: string, fallback: boolean) =>
+    typeof payload[key] === "boolean" ? payload[key] === true : fallback;
+  const readNumberOption = (key: string, fallback: number) => {
+    const parsed = Number(payload[key] ?? fallback);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  const expiryAlertLeadDays = Math.min(
+    3650,
+    Math.max(1, Math.trunc(readNumberOption("expiryAlertLeadDays", 30))),
+  );
+  const expiryCriticalDays = Math.min(
+    expiryAlertLeadDays,
+    Math.max(0, Math.trunc(readNumberOption("expiryCriticalDays", 7))),
+  );
+
+  return {
+    allowNegativeInventory: readBooleanOption("allowNegativeInventory", false),
+    allowOfflineSales: readBooleanOption("allowOfflineSales", true),
+    autoPrintReceipts: readBooleanOption("autoPrintReceipts", true),
+    enforceSerializedScanAtPos: readBooleanOption("enforceSerializedScanAtPos", true),
+    requireCustomerForCreditSales: readBooleanOption("requireCustomerForCreditSales", true),
+    requireSupervisorForReceiptlessReturn: readBooleanOption(
+      "requireSupervisorForReceiptlessReturn",
+      true,
+    ),
+    defaultReceiptSearchDays: Math.min(
+      365,
+      Math.max(1, Math.trunc(readNumberOption("defaultReceiptSearchDays", 30))),
+    ),
+    shiftFloatPromptAmount: readShiftFloatPromptAmount(value),
+    showCriticalStocksOnStartup: readShowCriticalStocksOnStartup(value),
+    showExpiringBatchesOnStartup: readShowExpiringBatchesOnStartup(value),
+    expiryAlertLeadDays,
+    expiryCriticalDays,
+  };
+}
 const maxDownstreamPullLimit = 50;
 
 const syncNodePolicySelect = {
@@ -701,6 +780,56 @@ function readOptionalStringArray(
     .filter((entry): entry is string => typeof entry === "string")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function readOptionalInventoryBatchAllocations(
+  payload: Record<string, unknown>,
+  fieldName: string,
+  options?: { allowZero?: boolean },
+): InventoryBatchAllocationPayload[] {
+  const value = payload[fieldName];
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+
+    const row = entry as Record<string, unknown>;
+    const batchNo = typeof row.batchNo === "string" ? row.batchNo.trim().toUpperCase() : "";
+    const expiryDate = typeof row.expiryDate === "string" ? row.expiryDate.trim() : "";
+    const quantity = Number(row.quantity);
+
+    if (
+      !batchNo ||
+      !expiryDate ||
+      !Number.isFinite(quantity) ||
+      (options?.allowZero ? quantity < 0 : quantity <= 0)
+    ) {
+      return [];
+    }
+
+    return [{
+      batchId: typeof row.batchId === "string" ? row.batchId : null,
+      batchNo,
+      manufacturedAt: typeof row.manufacturedAt === "string" ? row.manufacturedAt : null,
+      expiryDate,
+      quantity: Number(quantity.toFixed(3)),
+    }];
+  });
+}
+
+function toOptionalInventoryBatchAllocationSnapshot(
+  value: Prisma.JsonValue | null | undefined,
+) {
+  return readOptionalInventoryBatchAllocations(
+    { value },
+    "value",
+    { allowZero: true },
+  );
 }
 
 function normalizeSerialNumbers(serialNumbers?: string[] | null) {
@@ -2297,6 +2426,7 @@ async function queueAutomaticStoreMasterDataPublications(
           notes: true,
           taxable: true,
           trackInventory: true,
+          trackExpiry: true,
           isSerialized: true,
           trackSize: true,
           trackColor: true,
@@ -2641,6 +2771,7 @@ async function queueAutomaticStoreMasterDataPublications(
                   category: true,
                   subcategory: true,
                   isSerialized: true,
+                  trackExpiry: true,
                 },
               },
             },
@@ -2872,6 +3003,9 @@ async function queueAutomaticStoreMasterDataPublications(
       )
     )
   ) {
+    const posOptionSettings = readStorePosOptionSettings(
+      storeSettings.retailOrg.optionsSettingsJson,
+    );
     const payload: EnterpriseStoreSettingsPublishedPayload = {
       retailOrgName: storeSettings.retailOrg.name,
       companyLogoUrl: readCompanyLogoUrl(
@@ -2885,6 +3019,9 @@ async function queueAutomaticStoreMasterDataPublications(
       ),
       productSizes: readProductSizes(storeSettings.retailOrg.companySettingsJson),
       posDiscountRates: readPosDiscountRates(storeSettings.retailOrg.companySettingsJson),
+      posExpressChargeRates: readPosExpressChargeRates(
+        storeSettings.retailOrg.companySettingsJson,
+      ),
       storeCode: storeSettings.code,
       storeName: storeSettings.name,
       storePhone: storeSettings.phone,
@@ -2908,12 +3045,22 @@ async function queueAutomaticStoreMasterDataPublications(
       currencyCode: storeSettings.currencyCode,
       salesEnabled: storeSettings.salesEnabled,
       warehouseEnabled: storeSettings.warehouseEnabled,
-      shiftFloatPromptAmount: readShiftFloatPromptAmount(
-        storeSettings.retailOrg.optionsSettingsJson,
-      ),
-      showCriticalStocksOnStartup: readShowCriticalStocksOnStartup(
-        storeSettings.retailOrg.optionsSettingsJson,
-      ),
+      allowNegativeInventory: posOptionSettings.allowNegativeInventory,
+      allowOfflineSales: posOptionSettings.allowOfflineSales,
+      autoPrintReceipts: posOptionSettings.autoPrintReceipts,
+      enforceSerializedScanAtPos: posOptionSettings.enforceSerializedScanAtPos,
+      requireCustomerForCreditSales:
+        posOptionSettings.requireCustomerForCreditSales,
+      requireSupervisorForReceiptlessReturn:
+        posOptionSettings.requireSupervisorForReceiptlessReturn,
+      defaultReceiptSearchDays: posOptionSettings.defaultReceiptSearchDays,
+      shiftFloatPromptAmount: posOptionSettings.shiftFloatPromptAmount,
+      showCriticalStocksOnStartup:
+        posOptionSettings.showCriticalStocksOnStartup,
+      showExpiringBatchesOnStartup:
+        posOptionSettings.showExpiringBatchesOnStartup,
+      expiryAlertLeadDays: posOptionSettings.expiryAlertLeadDays,
+      expiryCriticalDays: posOptionSettings.expiryCriticalDays,
       loyaltyProgramEnabled: storeSettings.retailOrg.loyaltyProgramEnabled,
       loyaltyPointsPerCurrencyUnit: Number(
         storeSettings.retailOrg.loyaltyPointsPerCurrencyUnit,
@@ -3529,6 +3676,7 @@ async function queueAutomaticStoreMasterDataPublications(
         ),
         taxInclusive: product.taxProfile?.isTaxInclusive ?? false,
         trackInventory: product.trackInventory,
+        trackExpiry: product.trackExpiry,
         isSerialized: product.isSerialized,
         trackSize: product.trackSize,
         trackColor: product.trackColor,
@@ -3949,6 +4097,7 @@ async function queueAutomaticStoreMasterDataPublications(
           categoryName: line.product.category,
           subcategory: line.product.subcategory,
           isSerialized: line.product.isSerialized,
+          trackExpiry: line.product.trackExpiry,
           orderedQuantity: lineOrderedQuantity,
           receivedQuantity: lineReceivedQuantity,
           exceptionQuantity: lineExceptionQuantity,
@@ -4200,16 +4349,6 @@ function parseStorePosShiftClosedPayload(
     event.payload,
     event.aggregateType,
     event.eventType,
-  );
-  const totalAmount = readRequiredNumber(
-    payload,
-    "totalAmount",
-    event.aggregateType,
-    event.eventType,
-  );
-  const depositAmount = Math.max(
-    0,
-    readOptionalNumber(payload, "depositAmount") ?? 0,
   );
   return {
     shiftId: readRequiredString(
@@ -4467,6 +4606,10 @@ function parseStorePosTransactionCompletedPayload(
         ),
         lineNote: readOptionalString(linePayload, "lineNote"),
         serialNumbers: readOptionalStringArray(linePayload, "serialNumbers"),
+        batchAllocations: readOptionalInventoryBatchAllocations(
+          linePayload,
+          "batchAllocations",
+        ),
         quantity: readRequiredNumber(
           linePayload,
           "quantity",
@@ -5159,6 +5302,10 @@ function parseStoreInventoryLedgerRecordedPayload(
       event.eventType,
     ),
     serialNumbers: readOptionalStringArray(payload, "serialNumbers"),
+    batchAllocations: readOptionalInventoryBatchAllocations(
+      payload,
+      "batchAllocations",
+    ),
     unitCost:
       payload.unitCost === null || payload.unitCost === undefined
         ? null
@@ -5408,6 +5555,9 @@ function parseStoreGoodsReceiptRecordedPayload(
                 `${event.eventType}:line:${index + 1}`,
               ),
         serialNumbers: readOptionalStringArray(linePayload, "serialNumbers"),
+        batchNo: readOptionalString(linePayload, "batchNo"),
+        manufacturedAt: readOptionalString(linePayload, "manufacturedAt"),
+        expiryDate: readOptionalString(linePayload, "expiryDate"),
       };
     }),
     exceptions: rawExceptions.map((rawException, index) => {
@@ -5617,6 +5767,10 @@ function parseStoreSupplierReturnRecordedPayload(
                 `${event.eventType}:line:${index + 1}`,
               ),
         serialNumbers: readOptionalStringArray(linePayload, "serialNumbers"),
+        batchAllocations: readOptionalInventoryBatchAllocations(
+          linePayload,
+          "batchAllocations",
+        ),
       };
     }),
   };
@@ -5744,6 +5898,16 @@ function parseStoreStockCountSessionSubmittedPayload(
       payload,
       "countedSerialNumbers",
     ),
+    previousBatchQuantities: readOptionalInventoryBatchAllocations(
+      payload,
+      "previousBatchQuantities",
+      { allowZero: true },
+    ),
+    countedBatchQuantities: readOptionalInventoryBatchAllocations(
+      payload,
+      "countedBatchQuantities",
+      { allowZero: true },
+    ),
     operatorName: readRequiredString(
       payload,
       "operatorName",
@@ -5819,6 +5983,10 @@ function parseStoreInterStoreTransferIssuedPayload(
       event.eventType,
     ),
     serialNumbers: readOptionalStringArray(payload, "serialNumbers"),
+    batchAllocations: readOptionalInventoryBatchAllocations(
+      payload,
+      "batchAllocations",
+    ),
     operatorName: readRequiredString(
       payload,
       "operatorName",
@@ -5969,6 +6137,10 @@ function parseStoreInterStoreTransferReceivedPayload(
       event.eventType,
     ),
     serialNumbers: readOptionalStringArray(payload, "serialNumbers"),
+    batchAllocations: readOptionalInventoryBatchAllocations(
+      payload,
+      "batchAllocations",
+    ),
     operatorName: readRequiredString(
       payload,
       "operatorName",
@@ -6125,6 +6297,8 @@ async function resolveProductsByCode(
       sku: true,
       name: true,
       isSerialized: true,
+      trackInventory: true,
+      trackExpiry: true,
       baseCostPrice: true,
     },
   });
@@ -6150,6 +6324,235 @@ async function resolveProductsByCode(
   }
 
   return productByCode;
+}
+
+type EnterpriseInventoryBatchContext = {
+  retailOrgId: string;
+  storeId: string | null;
+  warehouseId: string | null;
+  inventoryLocationId: string;
+  productId: string;
+  productName: string;
+  sourceReferenceType: string;
+  sourceReferenceId: string;
+  sourceReferenceLabel: string | null;
+  sourceNodeCode: string;
+  occurredAt: Date;
+};
+
+async function increaseEnterpriseInventoryBatches(
+  tx: Prisma.TransactionClient | PrismaClient,
+  context: EnterpriseInventoryBatchContext,
+  allocations: InventoryBatchAllocationPayload[],
+) {
+  const applied: Array<{
+    inventoryBatchId: string;
+    batchNo: string;
+    expiryDate: Date;
+    quantity: number;
+  }> = [];
+
+  for (const allocation of allocations) {
+    const expiryDate = new Date(allocation.expiryDate);
+    const existingBatch = await tx.inventoryBatch.findUnique({
+      where: {
+        retailOrgId_inventoryLocationId_productId_batchNo: {
+          retailOrgId: context.retailOrgId,
+          inventoryLocationId: context.inventoryLocationId,
+          productId: context.productId,
+          batchNo: allocation.batchNo,
+        },
+      },
+      select: {
+        id: true,
+        expiryDate: true,
+        quantityOnHand: true,
+        status: true,
+      },
+    });
+
+    if (
+      existingBatch &&
+      existingBatch.expiryDate.toISOString().slice(0, 10) !==
+        expiryDate.toISOString().slice(0, 10)
+    ) {
+      throw new StoreProjectionError(
+        "POLICY_REJECTED",
+        `${context.productName} batch ${allocation.batchNo} is already registered with expiry ${existingBatch.expiryDate.toISOString().slice(0, 10)}.`,
+        false,
+      );
+    }
+
+    const nextQuantity = Number(
+      (
+        Number(existingBatch?.quantityOnHand ?? 0) + allocation.quantity
+      ).toFixed(3),
+    );
+    const status = deriveInventoryBatchStatus({
+      expiryDate: allocation.expiryDate,
+      quantityOnHand: nextQuantity,
+      status: existingBatch?.status,
+      at: context.occurredAt,
+    });
+    const inventoryBatch = existingBatch
+      ? await tx.inventoryBatch.update({
+          where: { id: existingBatch.id },
+          data: {
+            manufacturedAt: allocation.manufacturedAt
+              ? new Date(allocation.manufacturedAt)
+              : undefined,
+            quantityOnHand: toQuantityString(nextQuantity),
+            status,
+            sourceReferenceType: context.sourceReferenceType,
+            sourceReferenceId: context.sourceReferenceId,
+            sourceReferenceLabel: context.sourceReferenceLabel,
+            sourceNodeCode: context.sourceNodeCode,
+            lastOccurredAt: context.occurredAt,
+          },
+          select: { id: true },
+        })
+      : await tx.inventoryBatch.create({
+          data: {
+            retailOrgId: context.retailOrgId,
+            storeId: context.storeId,
+            warehouseId: context.warehouseId,
+            inventoryLocationId: context.inventoryLocationId,
+            productId: context.productId,
+            batchNo: allocation.batchNo,
+            manufacturedAt: allocation.manufacturedAt
+              ? new Date(allocation.manufacturedAt)
+              : null,
+            expiryDate,
+            quantityOnHand: toQuantityString(nextQuantity),
+            status,
+            sourceReferenceType: context.sourceReferenceType,
+            sourceReferenceId: context.sourceReferenceId,
+            sourceReferenceLabel: context.sourceReferenceLabel,
+            sourceNodeCode: context.sourceNodeCode,
+            lastOccurredAt: context.occurredAt,
+          },
+          select: { id: true },
+        });
+
+    applied.push({
+      inventoryBatchId: inventoryBatch.id,
+      batchNo: allocation.batchNo,
+      expiryDate,
+      quantity: allocation.quantity,
+    });
+  }
+
+  return applied;
+}
+
+async function decreaseEnterpriseInventoryBatches(
+  tx: Prisma.TransactionClient | PrismaClient,
+  context: EnterpriseInventoryBatchContext,
+  allocations: InventoryBatchAllocationPayload[],
+) {
+  const applied: Array<{
+    inventoryBatchId: string;
+    batchNo: string;
+    expiryDate: Date;
+    quantity: number;
+  }> = [];
+
+  for (const allocation of allocations) {
+    const inventoryBatch = await tx.inventoryBatch.findUnique({
+      where: {
+        retailOrgId_inventoryLocationId_productId_batchNo: {
+          retailOrgId: context.retailOrgId,
+          inventoryLocationId: context.inventoryLocationId,
+          productId: context.productId,
+          batchNo: allocation.batchNo,
+        },
+      },
+      select: {
+        id: true,
+        expiryDate: true,
+        quantityOnHand: true,
+        status: true,
+      },
+    });
+
+    if (!inventoryBatch) {
+      throw new StoreProjectionError(
+        "DEPENDENCY_MISSING",
+        `Flash ERP could not find batch ${allocation.batchNo} for ${context.productName} at the enterprise inventory location.`,
+        true,
+      );
+    }
+
+    if (
+      inventoryBatch.expiryDate.toISOString().slice(0, 10) !==
+      new Date(allocation.expiryDate).toISOString().slice(0, 10)
+    ) {
+      throw new StoreProjectionError(
+        "INVALID_PAYLOAD",
+        `${context.productName} batch ${allocation.batchNo} has a different enterprise expiry date.`,
+        false,
+      );
+    }
+
+    const nextQuantity = Number(
+      (Number(inventoryBatch.quantityOnHand) - allocation.quantity).toFixed(3),
+    );
+
+    if (nextQuantity < -0.0001) {
+      throw new StoreProjectionError(
+        "POLICY_REJECTED",
+        `Only ${Number(inventoryBatch.quantityOnHand).toFixed(3)} unit(s) remain in ${context.productName} batch ${allocation.batchNo}.`,
+        false,
+      );
+    }
+
+    await tx.inventoryBatch.update({
+      where: { id: inventoryBatch.id },
+      data: {
+        quantityOnHand: toQuantityString(Math.max(0, nextQuantity)),
+        status: deriveInventoryBatchStatus({
+          expiryDate: allocation.expiryDate,
+          quantityOnHand: Math.max(0, nextQuantity),
+          status: inventoryBatch.status,
+          at: context.occurredAt,
+        }),
+        sourceReferenceType: context.sourceReferenceType,
+        sourceReferenceId: context.sourceReferenceId,
+        sourceReferenceLabel: context.sourceReferenceLabel,
+        sourceNodeCode: context.sourceNodeCode,
+        lastOccurredAt: context.occurredAt,
+      },
+    });
+
+    applied.push({
+      inventoryBatchId: inventoryBatch.id,
+      batchNo: allocation.batchNo,
+      expiryDate: inventoryBatch.expiryDate,
+      quantity: allocation.quantity,
+    });
+  }
+
+  return applied;
+}
+
+function assertInventoryBatchAllocationTotal(input: {
+  productName: string;
+  quantity: number;
+  allocations: InventoryBatchAllocationPayload[];
+}) {
+  const allocatedQuantity = Number(
+    input.allocations
+      .reduce((sum, allocation) => sum + allocation.quantity, 0)
+      .toFixed(3),
+  );
+
+  if (Math.abs(allocatedQuantity - Math.abs(input.quantity)) > 0.0001) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `${input.productName} batch allocations total ${allocatedQuantity.toFixed(3)}, but the inventory movement is ${Math.abs(input.quantity).toFixed(3)}.`,
+      false,
+    );
+  }
 }
 
 async function resolveInventoryLocation(
@@ -6793,6 +7196,7 @@ async function queuePurchaseOrderPublication(
               category: true,
               subcategory: true,
               isSerialized: true,
+              trackExpiry: true,
             },
           },
         },
@@ -6912,6 +7316,7 @@ async function queuePurchaseOrderPublication(
         categoryName: line.product.category,
         subcategory: line.product.subcategory,
         isSerialized: line.product.isSerialized,
+        trackExpiry: line.product.trackExpiry,
         orderedQuantity: lineOrderedQuantity,
         receivedQuantity: lineReceivedQuantity,
         exceptionQuantity: lineExceptionQuantity,
@@ -7170,7 +7575,9 @@ export async function queueInterStoreTransferPublication(
       receivedQuantity: true,
       unitCost: true,
       issuedSerialNumbersSnapshot: true,
+      issuedBatchAllocationsSnapshot: true,
       receivedSerialNumbersSnapshot: true,
+      receivedBatchAllocationsSnapshot: true,
       requestNote: true,
       issueNote: true,
       receiptNote: true,
@@ -7218,6 +7625,7 @@ export async function queueInterStoreTransferPublication(
           category: true,
           subcategory: true,
           isSerialized: true,
+          trackExpiry: true,
         },
       },
     },
@@ -7271,6 +7679,12 @@ export async function queueInterStoreTransferPublication(
   const receivedSerialNumbers = toOptionalStringArraySnapshot(
     transfer.receivedSerialNumbersSnapshot,
   );
+  const issuedBatchAllocations = toOptionalInventoryBatchAllocationSnapshot(
+    transfer.issuedBatchAllocationsSnapshot,
+  );
+  const receivedBatchAllocations = toOptionalInventoryBatchAllocationSnapshot(
+    transfer.receivedBatchAllocationsSnapshot,
+  );
   const publishedAt = input.publishedAt ?? new Date();
   const publishToNode = async (
     targetNodeCode: string,
@@ -7308,6 +7722,7 @@ export async function queueInterStoreTransferPublication(
       categoryName: transfer.product.category,
       subcategory: transfer.product.subcategory,
       isSerialized: transfer.product.isSerialized,
+      trackExpiry: transfer.product.trackExpiry,
       requestedQuantity,
       issuedQuantity,
       receivedQuantity,
@@ -7320,6 +7735,8 @@ export async function queueInterStoreTransferPublication(
       unitCost: transfer.unitCost === null ? null : Number(transfer.unitCost),
       issuedSerialNumbers,
       receivedSerialNumbers,
+      issuedBatchAllocations,
+      receivedBatchAllocations,
       requestNote: transfer.requestNote,
       issueNote: transfer.issueNote,
       receiptNote: transfer.receiptNote,
@@ -9496,6 +9913,13 @@ async function projectStorePosTransaction(
               ...(line.serialNumbers.length > 0
                 ? { serialNumbersSnapshot: serializeJsonField(line.serialNumbers) }
                 : {}),
+              ...((line.batchAllocations?.length ?? 0) > 0
+                ? {
+                    batchAllocationsSnapshot: serializeJsonField(
+                      line.batchAllocations ?? [],
+                    ),
+                  }
+                : {}),
               quantity: toQuantityString(line.quantity),
               unitPrice: toMoneyString(line.unitPrice),
               discountAmount: toMoneyString(line.discountAmount),
@@ -9709,6 +10133,8 @@ async function projectStoreInventoryLedgerEntry(
             productId: true,
             varianceQuantity: true,
             countedSerialNumbersSnapshot: true,
+            previousBatchQuantitiesSnapshot: true,
+            countedBatchQuantitiesSnapshot: true,
           },
         })
       : null;
@@ -9770,18 +10196,187 @@ async function projectStoreInventoryLedgerEntry(
     );
   }
 
-  await tx.inventoryLedgerEntry.create({
-    data: {
-      id: payload.ledgerEntryId,
+  const occurredAt = new Date(payload.occurredAt);
+  const signedQuantity = toSignedInventoryQuantity(
+    payload.movementType,
+    payload.quantity,
+  );
+  let batchLedgerMovements: Array<{
+    inventoryBatchId: string;
+    batchNo: string;
+    expiryDate: Date;
+    quantity: number;
+  }> = [];
+
+  if (product.trackExpiry) {
+    if (relatedStockCountSession) {
+      const previousBatchQuantities =
+        toOptionalInventoryBatchAllocationSnapshot(
+          relatedStockCountSession.previousBatchQuantitiesSnapshot,
+        );
+      const countedBatchQuantities =
+        toOptionalInventoryBatchAllocationSnapshot(
+          relatedStockCountSession.countedBatchQuantitiesSnapshot,
+        );
+      const countedByBatchNo = new Map(
+        countedBatchQuantities.map((batch) => [
+          batch.batchNo.toUpperCase(),
+          batch,
+        ] as const),
+      );
+
+      for (const previousBatch of previousBatchQuantities) {
+        const countedBatch = countedByBatchNo.get(
+          previousBatch.batchNo.toUpperCase(),
+        );
+        const inventoryBatch = await tx.inventoryBatch.findUnique({
+          where: {
+            retailOrgId_inventoryLocationId_productId_batchNo: {
+              retailOrgId: target.storeNode.retailOrgId,
+              inventoryLocationId: inventoryLocation.id,
+              productId: product.id,
+              batchNo: previousBatch.batchNo,
+            },
+          },
+          select: {
+            id: true,
+            expiryDate: true,
+            quantityOnHand: true,
+            status: true,
+          },
+        });
+
+        if (
+          !countedBatch ||
+          !inventoryBatch ||
+          inventoryBatch.expiryDate.toISOString().slice(0, 10) !==
+            previousBatch.expiryDate.slice(0, 10) ||
+          Math.abs(
+            Number(inventoryBatch.quantityOnHand) - previousBatch.quantity,
+          ) > 0.0001
+        ) {
+          throw new StoreProjectionError(
+            "STALE_VERSION",
+            `Stock count session "${payload.externalReference ?? payload.referenceId}" cannot be committed because batch ${previousBatch.batchNo} changed at HQ after submission.`,
+            false,
+          );
+        }
+
+        await tx.inventoryBatch.update({
+          where: { id: inventoryBatch.id },
+          data: {
+            quantityOnHand: toQuantityString(countedBatch.quantity),
+            status: deriveInventoryBatchStatus({
+              expiryDate: inventoryBatch.expiryDate,
+              quantityOnHand: countedBatch.quantity,
+              status: inventoryBatch.status,
+              at: occurredAt,
+            }),
+            sourceReferenceType: payload.referenceType,
+            sourceReferenceId: payload.referenceId,
+            sourceReferenceLabel: payload.externalReference,
+            sourceNodeCode: target.storeNode.code,
+            lastOccurredAt: occurredAt,
+          },
+        });
+
+        const batchVariance = Number(
+          (countedBatch.quantity - previousBatch.quantity).toFixed(3),
+        );
+        if (Math.abs(batchVariance) > 0.0001) {
+          batchLedgerMovements.push({
+            inventoryBatchId: inventoryBatch.id,
+            batchNo: previousBatch.batchNo,
+            expiryDate: inventoryBatch.expiryDate,
+            quantity: batchVariance,
+          });
+        }
+      }
+
+      const batchVarianceTotal = Number(
+        batchLedgerMovements
+          .reduce((sum, movement) => sum + movement.quantity, 0)
+          .toFixed(3),
+      );
+      if (Math.abs(batchVarianceTotal - signedQuantity) > 0.0001) {
+        throw new StoreProjectionError(
+          "INVALID_PAYLOAD",
+          `Committed stock count session "${payload.externalReference ?? payload.referenceId}" has batch variances totalling ${batchVarianceTotal.toFixed(3)}, but its product variance is ${signedQuantity.toFixed(3)}.`,
+          false,
+        );
+      }
+    } else {
+      const batchAllocations = payload.batchAllocations ?? [];
+      assertInventoryBatchAllocationTotal({
+        productName: product.name,
+        quantity: signedQuantity,
+        allocations: batchAllocations,
+      });
+      const context: EnterpriseInventoryBatchContext = {
+        retailOrgId: target.storeNode.retailOrgId,
+        storeId: target.storeNode.store.id,
+        warehouseId: inventoryLocation.warehouseId,
+        inventoryLocationId: inventoryLocation.id,
+        productId: product.id,
+        productName: product.name,
+        sourceReferenceType: payload.referenceType,
+        sourceReferenceId: payload.referenceId,
+        sourceReferenceLabel: payload.externalReference,
+        sourceNodeCode: target.storeNode.code,
+        occurredAt,
+      };
+      const appliedBatches =
+        signedQuantity < 0
+          ? await decreaseEnterpriseInventoryBatches(
+              tx,
+              context,
+              batchAllocations,
+            )
+          : await increaseEnterpriseInventoryBatches(
+              tx,
+              context,
+              batchAllocations,
+            );
+      batchLedgerMovements = appliedBatches.map((batch) => ({
+        ...batch,
+        quantity:
+          signedQuantity < 0 ? batch.quantity * -1 : batch.quantity,
+      }));
+    }
+  } else if ((payload.batchAllocations?.length ?? 0) > 0) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Product "${product.code}" is not expiry-controlled, so its inventory movement should not include batch allocations.`,
+      false,
+    );
+  }
+
+  const ledgerMovements =
+    batchLedgerMovements.length > 0
+      ? batchLedgerMovements
+      : [{
+          inventoryBatchId: null,
+          batchNo: null,
+          expiryDate: null,
+          quantity: signedQuantity,
+        }];
+
+  await tx.inventoryLedgerEntry.createMany({
+    data: ledgerMovements.map((movement, index) => ({
+      id:
+        index === 0
+          ? payload.ledgerEntryId
+          : `${payload.ledgerEntryId}:batch:${index + 1}`,
       retailOrgId: target.storeNode.retailOrgId,
-      storeId: target.storeNode.store.id,
+      storeId: target.storeNode.store!.id,
       warehouseId: inventoryLocation.warehouseId,
       inventoryLocationId: inventoryLocation.id,
       productId: product.id,
+      inventoryBatchId: movement.inventoryBatchId,
+      batchNoSnapshot: movement.batchNo,
+      expiryDateSnapshot: movement.expiryDate,
       movementType: payload.movementType,
-      quantity: toQuantityString(
-        toSignedInventoryQuantity(payload.movementType, payload.quantity),
-      ),
+      quantity: toQuantityString(movement.quantity),
       unitCost:
         payload.unitCost === null
           ? (product.baseCostPrice?.toString() ?? null)
@@ -9790,8 +10385,8 @@ async function projectStoreInventoryLedgerEntry(
       referenceId: payload.referenceId,
       externalReference: payload.externalReference,
       sourceNodeCode: target.storeNode.code,
-      occurredAt: new Date(payload.occurredAt),
-    },
+      occurredAt,
+    })),
   });
   if (
     payload.referenceType === "POS_TRANSACTION" &&
@@ -9818,7 +10413,7 @@ async function projectStoreInventoryLedgerEntry(
       sourceReferenceId: payload.referenceId,
       sourceReferenceLabel: payload.externalReference,
       sourceNodeCode: target.storeNode.code,
-      occurredAt: new Date(payload.occurredAt),
+      occurredAt,
     });
   }
 
@@ -10268,6 +10863,7 @@ async function projectStoreInterStoreTransferIssue(
       receivedQuantity: true,
       unitCost: true,
       issuedSerialNumbersSnapshot: true,
+      issuedBatchAllocationsSnapshot: true,
       closedAt: true,
       sourceInventoryLocation: {
         select: {
@@ -10287,6 +10883,7 @@ async function projectStoreInterStoreTransferIssue(
           code: true,
           name: true,
           isSerialized: true,
+          trackExpiry: true,
           baseCostPrice: true,
         },
       },
@@ -10448,6 +11045,42 @@ async function projectStoreInterStoreTransferIssue(
     transfer.retailOrgId,
     transfer.sourceStoreId,
   );
+  const batchAllocations = payload.batchAllocations ?? [];
+
+  if (transfer.product.trackExpiry) {
+    assertInventoryBatchAllocationTotal({
+      productName: transfer.product.name,
+      quantity: payload.quantity,
+      allocations: batchAllocations,
+    });
+  } else if (batchAllocations.length > 0) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Product "${transfer.product.code}" is not expiry-controlled, so transfer "${transfer.transferNo}" should not include batch allocations.`,
+      false,
+    );
+  }
+
+  const appliedBatches =
+    postStockImmediately && batchAllocations.length > 0
+      ? await decreaseEnterpriseInventoryBatches(
+          tx,
+          {
+            retailOrgId: transfer.retailOrgId,
+            storeId: transfer.sourceStoreId,
+            warehouseId: transfer.sourceInventoryLocation.warehouseId,
+            inventoryLocationId: transfer.sourceInventoryLocationId,
+            productId: transfer.productId,
+            productName: transfer.product.name,
+            sourceReferenceType: "INTERSTORE_TRANSFER",
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transferNo,
+            sourceNodeCode: target.storeNode.code,
+            occurredAt,
+          },
+          batchAllocations,
+        )
+      : [];
   const nextIssuedQuantity = Number(
     (Number(transfer.issuedQuantity) + payload.quantity).toFixed(3),
   );
@@ -10464,16 +11097,28 @@ async function projectStoreInterStoreTransferIssue(
   });
 
   if (postStockImmediately) {
-    await tx.inventoryLedgerEntry.create({
-      data: {
+    const transferLedgerBatches =
+      appliedBatches.length > 0
+        ? appliedBatches
+        : [{
+            inventoryBatchId: null,
+            batchNo: null,
+            expiryDate: null,
+            quantity: payload.quantity,
+          }];
+    await tx.inventoryLedgerEntry.createMany({
+      data: transferLedgerBatches.map((batch) => ({
         id: randomUUID(),
         retailOrgId: transfer.retailOrgId,
         storeId: transfer.sourceStoreId,
         warehouseId: transfer.sourceInventoryLocation.warehouseId,
         inventoryLocationId: transfer.sourceInventoryLocationId,
         productId: transfer.productId,
+        inventoryBatchId: batch.inventoryBatchId,
+        batchNoSnapshot: batch.batchNo,
+        expiryDateSnapshot: batch.expiryDate,
         movementType: InventoryMovementType.STOCK_TRANSFER_OUT,
-        quantity: toQuantityString(payload.quantity * -1),
+        quantity: toQuantityString(batch.quantity * -1),
         unitCost:
           transfer.unitCost === null
             ? (transfer.product.baseCostPrice?.toString() ?? null)
@@ -10483,7 +11128,7 @@ async function projectStoreInterStoreTransferIssue(
         externalReference: transfer.transferNo,
         sourceNodeCode: target.storeNode.code,
         occurredAt,
-      },
+      })),
     });
   }
 
@@ -10515,6 +11160,16 @@ async function projectStoreInterStoreTransferIssue(
       issuedQuantity: toQuantityString(nextIssuedQuantity),
       ...(nextIssuedSerialNumbers.length > 0
         ? { issuedSerialNumbersSnapshot: serializeJsonField(nextIssuedSerialNumbers) }
+        : {}),
+      ...(batchAllocations.length > 0
+        ? {
+            issuedBatchAllocationsSnapshot: serializeJsonField([
+              ...toOptionalInventoryBatchAllocationSnapshot(
+                transfer.issuedBatchAllocationsSnapshot,
+              ),
+              ...batchAllocations,
+            ]),
+          }
         : {}),
       issueOperatorName: payload.operatorName,
       issueNote: payload.note,
@@ -10600,6 +11255,8 @@ async function projectStoreInterStoreTransferReceipt(
       unitCost: true,
       issuedSerialNumbersSnapshot: true,
       receivedSerialNumbersSnapshot: true,
+      issuedBatchAllocationsSnapshot: true,
+      receivedBatchAllocationsSnapshot: true,
       closedAt: true,
       destinationInventoryLocation: {
         select: {
@@ -10619,6 +11276,7 @@ async function projectStoreInterStoreTransferReceipt(
           code: true,
           name: true,
           isSerialized: true,
+          trackExpiry: true,
           baseCostPrice: true,
         },
       },
@@ -10751,6 +11409,99 @@ async function projectStoreInterStoreTransferReceipt(
     transfer.retailOrgId,
     transfer.destinationStoreId,
   );
+  const batchAllocations = payload.batchAllocations ?? [];
+
+  if (transfer.product.trackExpiry) {
+    assertInventoryBatchAllocationTotal({
+      productName: transfer.product.name,
+      quantity: payload.quantity,
+      allocations: batchAllocations,
+    });
+    const issuedBatchAllocations =
+      toOptionalInventoryBatchAllocationSnapshot(
+        transfer.issuedBatchAllocationsSnapshot,
+      );
+    const receivedBatchAllocations =
+      toOptionalInventoryBatchAllocationSnapshot(
+        transfer.receivedBatchAllocationsSnapshot,
+      );
+    const issuedByBatch = new Map<string, number>();
+    const receivedByBatch = new Map<string, number>();
+
+    for (const allocation of issuedBatchAllocations) {
+      const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+      issuedByBatch.set(
+        key,
+        Number(
+          ((issuedByBatch.get(key) ?? 0) + allocation.quantity).toFixed(3),
+        ),
+      );
+    }
+    for (const allocation of receivedBatchAllocations) {
+      const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+      receivedByBatch.set(
+        key,
+        Number(
+          ((receivedByBatch.get(key) ?? 0) + allocation.quantity).toFixed(3),
+        ),
+      );
+    }
+
+    for (const allocation of batchAllocations) {
+      const key = `${allocation.batchNo.toUpperCase()}\u0000${allocation.expiryDate.slice(0, 10)}`;
+      const outstanding = Number(
+        (
+          (issuedByBatch.get(key) ?? 0) -
+          (receivedByBatch.get(key) ?? 0)
+        ).toFixed(3),
+      );
+      if (allocation.quantity - outstanding > 0.0001) {
+        throw new StoreProjectionError(
+          "POLICY_REJECTED",
+          `Transfer "${transfer.transferNo}" does not have ${allocation.quantity.toFixed(3)} outstanding unit(s) in batch ${allocation.batchNo}.`,
+          false,
+        );
+      }
+      receivedByBatch.set(
+        key,
+        Number(
+          ((receivedByBatch.get(key) ?? 0) + allocation.quantity).toFixed(3),
+        ),
+      );
+    }
+  } else if (batchAllocations.length > 0) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Product "${transfer.product.code}" is not expiry-controlled, so transfer "${transfer.transferNo}" should not include batch allocations.`,
+      false,
+    );
+  }
+
+  const appliedBatches =
+    postStockImmediately && batchAllocations.length > 0
+      ? await increaseEnterpriseInventoryBatches(
+          tx,
+          {
+            retailOrgId: transfer.retailOrgId,
+            storeId: transfer.destinationStoreId,
+            warehouseId: transfer.destinationInventoryLocation.warehouseId,
+            inventoryLocationId: transfer.destinationInventoryLocationId,
+            productId: transfer.productId,
+            productName: transfer.product.name,
+            sourceReferenceType: "INTERSTORE_TRANSFER",
+            sourceReferenceId: transfer.id,
+            sourceReferenceLabel: transfer.transferNo,
+            sourceNodeCode: target.storeNode.code,
+            occurredAt,
+          },
+          batchAllocations,
+        )
+      : batchAllocations.map((allocation) => ({
+          inventoryBatchId: allocation.batchId ?? null,
+          batchNo: allocation.batchNo,
+          expiryDate: new Date(allocation.expiryDate),
+          quantity: allocation.quantity,
+        }));
   const nextReceivedQuantity = Number(
     (Number(transfer.receivedQuantity) + payload.quantity).toFixed(3),
   );
@@ -10767,16 +11518,28 @@ async function projectStoreInterStoreTransferReceipt(
   });
 
   if (postStockImmediately) {
-    await tx.inventoryLedgerEntry.create({
-      data: {
+    const transferLedgerBatches =
+      appliedBatches.length > 0
+        ? appliedBatches
+        : [{
+            inventoryBatchId: null,
+            batchNo: null,
+            expiryDate: null,
+            quantity: payload.quantity,
+          }];
+    await tx.inventoryLedgerEntry.createMany({
+      data: transferLedgerBatches.map((batch) => ({
         id: randomUUID(),
         retailOrgId: transfer.retailOrgId,
         storeId: transfer.destinationStoreId,
         warehouseId: transfer.destinationInventoryLocation.warehouseId,
         inventoryLocationId: transfer.destinationInventoryLocationId,
         productId: transfer.productId,
+        inventoryBatchId: batch.inventoryBatchId,
+        batchNoSnapshot: batch.batchNo,
+        expiryDateSnapshot: batch.expiryDate,
         movementType: InventoryMovementType.STOCK_TRANSFER_IN,
-        quantity: toQuantityString(payload.quantity),
+        quantity: toQuantityString(batch.quantity),
         unitCost:
           transfer.unitCost === null
             ? (transfer.product.baseCostPrice?.toString() ?? null)
@@ -10786,7 +11549,7 @@ async function projectStoreInterStoreTransferReceipt(
         externalReference: transfer.transferNo,
         sourceNodeCode: target.storeNode.code,
         occurredAt,
-      },
+      })),
     });
   }
 
@@ -10818,6 +11581,28 @@ async function projectStoreInterStoreTransferReceipt(
       receivedQuantity: toQuantityString(nextReceivedQuantity),
       ...(nextReceivedSerialNumbers.length > 0
         ? { receivedSerialNumbersSnapshot: serializeJsonField(nextReceivedSerialNumbers) }
+        : {}),
+      ...(batchAllocations.length > 0
+        ? {
+            receivedBatchAllocationsSnapshot: serializeJsonField([
+              ...toOptionalInventoryBatchAllocationSnapshot(
+                transfer.receivedBatchAllocationsSnapshot,
+              ),
+              ...appliedBatches.map((batch) => ({
+                batchId: batch.inventoryBatchId,
+                batchNo: batch.batchNo,
+                manufacturedAt:
+                  batchAllocations.find(
+                    (allocation) =>
+                      allocation.batchNo === batch.batchNo &&
+                      allocation.expiryDate.slice(0, 10) ===
+                        batch.expiryDate.toISOString().slice(0, 10),
+                  )?.manufacturedAt ?? null,
+                expiryDate: batch.expiryDate.toISOString(),
+                quantity: batch.quantity,
+              })),
+            ]),
+          }
         : {}),
       receiptOperatorName: payload.operatorName,
       receiptNote: payload.note,
@@ -11052,6 +11837,10 @@ async function projectStoreGoodsReceipt(
   );
   const receiptExternalReference =
     payload.externalReference ?? payload.goodsReceiptNo;
+  const normalizedBatchByReceiptLineId = new Map<
+    string,
+    { batchNo: string; manufacturedAt: string | null; expiryDate: string }
+  >();
 
   if (
     payload.exceptions.length > 0 &&
@@ -11178,6 +11967,33 @@ async function projectStoreGoodsReceipt(
       throw new StoreProjectionError(
         "INVALID_PAYLOAD",
         `Product "${product.code}" is not serialized, so its receipt line cannot include serial numbers.`,
+        false,
+      );
+    }
+
+    try {
+      const batch = validateInventoryBatchReceipt({
+        productName: product.name,
+        trackExpiry: product.trackExpiry,
+        batchNo: line.batchNo,
+        manufacturedAt: line.manufacturedAt,
+        expiryDate: line.expiryDate,
+        receivedAt: occurredAt,
+      });
+
+      if (batch.batchNo && batch.expiryDate) {
+        normalizedBatchByReceiptLineId.set(line.goodsReceiptLineId, {
+          batchNo: batch.batchNo,
+          manufacturedAt: batch.manufacturedAt,
+          expiryDate: batch.expiryDate,
+        });
+      }
+    } catch (error) {
+      throw new StoreProjectionError(
+        "INVALID_PAYLOAD",
+        error instanceof Error
+          ? error.message
+          : `Goods receipt line ${line.lineNo} has invalid batch details.`,
         false,
       );
     }
@@ -11311,6 +12127,9 @@ async function projectStoreGoodsReceipt(
           ? (purchaseOrderLinesByProductId.get(product.id) ?? null)
           : null;
     const ledgerEntryId = randomUUID();
+    const batch = normalizedBatchByReceiptLineId.get(
+      line.goodsReceiptLineId,
+    );
 
     await tx.goodsReceiptLine.create({
       data: {
@@ -11327,10 +12146,43 @@ async function projectStoreGoodsReceipt(
         ...(line.serialNumbers.length > 0
           ? { serialNumbersSnapshot: serializeJsonField(line.serialNumbers) }
           : {}),
+        batchNo: batch?.batchNo ?? null,
+        manufacturedAt: batch?.manufacturedAt
+          ? new Date(batch.manufacturedAt)
+          : null,
+        expiryDate: batch?.expiryDate ? new Date(batch.expiryDate) : null,
       },
     });
 
     if (postStockImmediately) {
+      const appliedBatch = batch
+        ? (
+            await increaseEnterpriseInventoryBatches(
+              tx,
+              {
+                retailOrgId: target.storeNode.retailOrgId,
+                storeId: target.storeNode.store.id,
+                warehouseId: inventoryLocation.warehouseId,
+                inventoryLocationId: inventoryLocation.id,
+                productId: product.id,
+                productName: product.name,
+                sourceReferenceType: "GOODS_RECEIPT",
+                sourceReferenceId: payload.goodsReceiptId,
+                sourceReferenceLabel: receiptExternalReference,
+                sourceNodeCode: target.storeNode.code,
+                occurredAt,
+              },
+              [{
+                batchId: null,
+                batchNo: batch.batchNo,
+                manufacturedAt: batch.manufacturedAt,
+                expiryDate: batch.expiryDate,
+                quantity: line.quantity,
+              }],
+            )
+          )[0]
+        : null;
+
       await tx.inventoryLedgerEntry.create({
         data: {
           id: ledgerEntryId,
@@ -11339,6 +12191,9 @@ async function projectStoreGoodsReceipt(
           warehouseId: inventoryLocation.warehouseId,
           inventoryLocationId: inventoryLocation.id,
           productId: product.id,
+          inventoryBatchId: appliedBatch?.inventoryBatchId ?? null,
+          batchNoSnapshot: appliedBatch?.batchNo ?? null,
+          expiryDateSnapshot: appliedBatch?.expiryDate ?? null,
           movementType: InventoryMovementType.GOODS_RECEIPT,
           quantity: toQuantityString(line.quantity),
           unitCost:
@@ -11624,6 +12479,9 @@ async function projectStoreSupplierReturn(
           unitCost: true,
           purchaseOrderLineId: true,
           serialNumbersSnapshot: true,
+          batchNo: true,
+          manufacturedAt: true,
+          expiryDate: true,
         },
       },
     },
@@ -11968,6 +12826,38 @@ async function projectStoreSupplierReturn(
         false,
       );
     }
+
+    if (product.trackExpiry) {
+      assertInventoryBatchAllocationTotal({
+        productName: product.name,
+        quantity: line.quantity,
+        allocations: line.batchAllocations,
+      });
+
+      const invalidBatchAllocation = line.batchAllocations.find(
+        (allocation) =>
+          !goodsReceiptLine.batchNo ||
+          !goodsReceiptLine.expiryDate ||
+          allocation.batchNo.toUpperCase() !==
+            goodsReceiptLine.batchNo.toUpperCase() ||
+          allocation.expiryDate.slice(0, 10) !==
+            goodsReceiptLine.expiryDate.toISOString().slice(0, 10),
+      );
+
+      if (invalidBatchAllocation) {
+        throw new StoreProjectionError(
+          "INVALID_PAYLOAD",
+          `Supplier return "${payload.supplierReturnNo}" must remove ${product.name} from the exact batch received on ${payload.goodsReceiptNo}.`,
+          false,
+        );
+      }
+    } else if (line.batchAllocations.length > 0) {
+      throw new StoreProjectionError(
+        "INVALID_PAYLOAD",
+        `Product "${product.code}" is not expiry-controlled, so its supplier return should not include batch allocations.`,
+        false,
+      );
+    }
   }
 
   await tx.supplierReturn.create({
@@ -12028,8 +12918,37 @@ async function projectStoreSupplierReturn(
         ...(line.serialNumbers.length > 0
           ? { serialNumbersSnapshot: serializeJsonField(line.serialNumbers) }
           : {}),
+        ...(line.batchAllocations.length > 0
+          ? {
+              batchAllocationsSnapshot: serializeJsonField(
+                line.batchAllocations,
+              ),
+            }
+          : {}),
       },
     });
+
+    const appliedBatches =
+      line.batchAllocations.length > 0
+        ? await decreaseEnterpriseInventoryBatches(
+            tx,
+            {
+              retailOrgId: target.storeNode.retailOrgId,
+              storeId: target.storeNode.store.id,
+              warehouseId: inventoryLocation.warehouseId,
+              inventoryLocationId: inventoryLocation.id,
+              productId: product.id,
+              productName: product.name,
+              sourceReferenceType: "SUPPLIER_RETURN",
+              sourceReferenceId: payload.supplierReturnId,
+              sourceReferenceLabel: supplierReturnExternalReference,
+              sourceNodeCode: target.storeNode.code,
+              occurredAt: returnedAt,
+            },
+            line.batchAllocations,
+          )
+        : [];
+    const appliedBatch = appliedBatches[0] ?? null;
 
     await tx.inventoryLedgerEntry.create({
       data: {
@@ -12039,6 +12958,9 @@ async function projectStoreSupplierReturn(
         warehouseId: inventoryLocation.warehouseId,
         inventoryLocationId: inventoryLocation.id,
         productId: product.id,
+        inventoryBatchId: appliedBatch?.inventoryBatchId ?? null,
+        batchNoSnapshot: appliedBatch?.batchNo ?? null,
+        expiryDateSnapshot: appliedBatch?.expiryDate ?? null,
         movementType: InventoryMovementType.RETURN_TO_VENDOR,
         quantity: toQuantityString(
           toSignedInventoryQuantity(
@@ -12301,6 +13223,8 @@ async function projectStoreStockCountSession(
   const countedSerialNumbers = normalizeSerialNumbers(
     payload.countedSerialNumbers,
   );
+  const previousBatchQuantities = payload.previousBatchQuantities ?? [];
+  const countedBatchQuantities = payload.countedBatchQuantities ?? [];
 
   if (product.isSerialized) {
     if (
@@ -12340,6 +13264,53 @@ async function projectStoreStockCountSession(
     );
   }
 
+  if (product.trackExpiry) {
+    assertInventoryBatchAllocationTotal({
+      productName: product.name,
+      quantity: payload.previousQuantity,
+      allocations: previousBatchQuantities,
+    });
+    assertInventoryBatchAllocationTotal({
+      productName: product.name,
+      quantity: payload.countedQuantity,
+      allocations: countedBatchQuantities,
+    });
+
+    const previousByBatchNo = new Map(
+      previousBatchQuantities.map((batch) => [
+        batch.batchNo.toUpperCase(),
+        batch,
+      ] as const),
+    );
+    const mismatchedBatch = countedBatchQuantities.find((batch) => {
+      const previous = previousByBatchNo.get(batch.batchNo.toUpperCase());
+      return (
+        !previous ||
+        previous.expiryDate.slice(0, 10) !== batch.expiryDate.slice(0, 10)
+      );
+    });
+
+    if (
+      mismatchedBatch ||
+      previousBatchQuantities.length !== countedBatchQuantities.length
+    ) {
+      throw new StoreProjectionError(
+        "INVALID_PAYLOAD",
+        `Expiry-controlled stock count session "${payload.sessionNo}" must contain the same registered batches before and after counting.`,
+        false,
+      );
+    }
+  } else if (
+    previousBatchQuantities.length > 0 ||
+    countedBatchQuantities.length > 0
+  ) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Product "${product.code}" is not expiry-controlled, so its stock count session should not include batch quantities.`,
+      false,
+    );
+  }
+
   await tx.stockCountSession.create({
     data: {
       id: payload.sessionId,
@@ -12355,6 +13326,14 @@ async function projectStoreStockCountSession(
       varianceQuantity: toQuantityString(payload.varianceQuantity),
       previousSerialNumbersSnapshot: previousSerialNumbers.length > 0 ? serializeJsonField(previousSerialNumbers) : undefined,
       countedSerialNumbersSnapshot: countedSerialNumbers.length > 0 ? serializeJsonField(countedSerialNumbers) : undefined,
+      previousBatchQuantitiesSnapshot:
+        previousBatchQuantities.length > 0
+          ? serializeJsonField(previousBatchQuantities)
+          : undefined,
+      countedBatchQuantitiesSnapshot:
+        countedBatchQuantities.length > 0
+          ? serializeJsonField(countedBatchQuantities)
+          : undefined,
       note: payload.note,
       operatorName: payload.operatorName,
       submittedByNodeCode: target.storeNode.code,
@@ -12790,7 +13769,8 @@ export async function pushStoreNodeSync(
       if (
         event.targetNodeCode &&
         event.targetNodeCode !== enterpriseNode.code
-      ) {
+) {
+  await ensureInventoryExpirySchemaCompatibility();
         const rejection: SyncRejectedEnvelope = {
           eventId: event.eventId,
           reasonCode: "POLICY_REJECTED",
@@ -13171,7 +14151,10 @@ export async function pullStoreNodeSync(
   nodeCode: string,
   input: StoreNodePullRequest,
 ): Promise<StoreNodePullResponse> {
-  await ensureProductVariantSalesOrderDepositSchemaCompatibility();
+  await Promise.all([
+    ensureProductVariantSalesOrderDepositSchemaCompatibility(),
+    ensureInventoryExpirySchemaCompatibility(),
+  ]);
 
   if (input.sourceNodeCode !== nodeCode) {
     throw new Error(
@@ -13416,6 +14399,9 @@ export async function pullStoreNodeSync(
       syncRunId: input.syncRunId ?? null,
       syncPolicy: toStoreNodeSyncPolicy(updatedStoreNode),
     };
+  }, {
+    maxWait: 5_000,
+    timeout: 15_000,
   });
 }
 
@@ -17087,6 +18073,8 @@ export async function recordInventoryGoodsReceipt(
   locationCode: string,
   input: InventoryGoodsReceiptRequest,
 ): Promise<InventoryGoodsReceiptResponse> {
+  await ensureInventoryExpirySchemaCompatibility();
+
   return prisma.$transaction(async (tx) => {
     const requestedQuantity = Number(input.quantity);
 
@@ -17160,6 +18148,7 @@ export async function recordInventoryGoodsReceipt(
         code: true,
         name: true,
         isSerialized: true,
+        trackExpiry: true,
         baseCostPrice: true,
       },
     });
@@ -17219,6 +18208,14 @@ export async function recordInventoryGoodsReceipt(
         `Product "${product.code}" is not serialized, so the goods receipt should not include serial numbers.`,
       );
     }
+
+    const batch = validateInventoryBatchReceipt({
+      productName: product.name,
+      trackExpiry: product.trackExpiry,
+      batchNo: input.batchNo,
+      manufacturedAt: input.manufacturedAt,
+      expiryDate: input.expiryDate,
+    });
 
     const supplierNo = input.supplierNo?.trim().toUpperCase() || null;
     const supplier =
@@ -17294,6 +18291,11 @@ export async function recordInventoryGoodsReceipt(
             productId: product.id,
             quantity: toQuantityString(receivedQuantity),
             unitCost: unitCost === null ? null : toMoneyString(unitCost),
+            batchNo: batch.batchNo,
+            manufacturedAt: batch.manufacturedAt
+              ? new Date(batch.manufacturedAt)
+              : null,
+            expiryDate: batch.expiryDate ? new Date(batch.expiryDate) : null,
             ...(serialNumbers.length > 0
               ? { serialNumbersSnapshot: serializeJsonField(serialNumbers) }
               : {}),
@@ -17302,7 +18304,77 @@ export async function recordInventoryGoodsReceipt(
       },
     });
 
+    let inventoryBatch: {
+      id: string;
+      batchNo: string;
+      expiryDate: Date;
+    } | null = null;
+
     if (postStockImmediately) {
+
+      if (batch.batchNo && batch.expiryDate) {
+        const existingBatch = await tx.inventoryBatch.findUnique({
+          where: {
+            retailOrgId_inventoryLocationId_productId_batchNo: {
+              retailOrgId: location.retailOrgId,
+              inventoryLocationId: location.id,
+              productId: product.id,
+              batchNo: batch.batchNo,
+            },
+          },
+          select: { id: true, batchNo: true, expiryDate: true },
+        });
+
+        if (
+          existingBatch &&
+          existingBatch.expiryDate.toISOString().slice(0, 10) !== batch.expiryDate
+        ) {
+          throw new Error(
+            `${product.name} batch ${batch.batchNo} is already registered with expiry ${existingBatch.expiryDate.toISOString().slice(0, 10)}.`,
+          );
+        }
+
+        inventoryBatch = existingBatch
+          ? await tx.inventoryBatch.update({
+              where: { id: existingBatch.id },
+              data: {
+                quantityOnHand: { increment: receivedQuantity },
+                status: "ACTIVE",
+                manufacturedAt: batch.manufacturedAt
+                  ? new Date(batch.manufacturedAt)
+                  : undefined,
+                sourceReferenceType: "GOODS_RECEIPT",
+                sourceReferenceId: goodsReceiptId,
+                sourceReferenceLabel: externalReference,
+                sourceNodeCode: enterpriseNode.code,
+                lastOccurredAt: now,
+              },
+              select: { id: true, batchNo: true, expiryDate: true },
+            })
+          : await tx.inventoryBatch.create({
+              data: {
+                retailOrgId: location.retailOrgId,
+                storeId: location.storeId,
+                warehouseId: location.warehouseId,
+                inventoryLocationId: location.id,
+                productId: product.id,
+                batchNo: batch.batchNo,
+                manufacturedAt: batch.manufacturedAt
+                  ? new Date(batch.manufacturedAt)
+                  : null,
+                expiryDate: new Date(batch.expiryDate),
+                quantityOnHand: receivedQuantity,
+                status: "ACTIVE",
+                sourceReferenceType: "GOODS_RECEIPT",
+                sourceReferenceId: goodsReceiptId,
+                sourceReferenceLabel: externalReference,
+                sourceNodeCode: enterpriseNode.code,
+                lastOccurredAt: now,
+              },
+              select: { id: true, batchNo: true, expiryDate: true },
+            });
+      }
+
       await tx.inventoryLedgerEntry.create({
         data: {
           id: ledgerEntryId,
@@ -17311,6 +18383,9 @@ export async function recordInventoryGoodsReceipt(
           warehouseId: location.warehouseId,
           inventoryLocationId: location.id,
           productId: product.id,
+          inventoryBatchId: inventoryBatch?.id ?? null,
+          batchNoSnapshot: inventoryBatch?.batchNo ?? null,
+          expiryDateSnapshot: inventoryBatch?.expiryDate ?? null,
           movementType: InventoryMovementType.GOODS_RECEIPT,
           quantity: toQuantityString(receivedQuantity),
           unitCost: unitCost === null ? null : toMoneyString(unitCost),
@@ -17381,6 +18456,17 @@ export async function recordInventoryGoodsReceipt(
             movementType: "GOODS_RECEIPT",
             quantity: receivedQuantity,
             ...(serialNumbers.length > 0 ? { serialNumbers } : {}),
+            ...(batch.batchNo && batch.expiryDate
+              ? {
+                  batchAllocations: [{
+                    batchId: inventoryBatch?.id ?? null,
+                    batchNo: batch.batchNo,
+                    manufacturedAt: batch.manufacturedAt,
+                    expiryDate: inventoryBatch?.expiryDate.toISOString() ?? batch.expiryDate,
+                    quantity: receivedQuantity,
+                  }],
+                }
+              : {}),
             unitCost,
             referenceType: "GOODS_RECEIPT",
             referenceId: goodsReceiptId,
@@ -17399,6 +18485,9 @@ export async function recordInventoryGoodsReceipt(
       productCode: product.code,
       quantity: receivedQuantity,
       serialNumbers,
+      batchNo: batch.batchNo,
+      manufacturedAt: batch.manufacturedAt,
+      expiryDate: batch.expiryDate,
       operatorName,
       note,
       message:
