@@ -2,6 +2,10 @@ import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
 import { prisma } from "@/lib/db/prisma";
+import {
+  readDocumentNumberFormats,
+  type DocumentNumberFormatSettings,
+} from "@/server/repositories/enterprise-settings.repository";
 import { ensureProductVariantSalesOrderDepositSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 import {
   CustomerType,
@@ -79,6 +83,7 @@ type EnterpriseContext = {
   retailOrg: {
     name: string;
     baseCurrencyCode: string;
+    companySettingsJson: Prisma.JsonValue | null;
   };
 };
 
@@ -98,10 +103,29 @@ async function getEnterpriseContext(): Promise<EnterpriseContext | null> {
         select: {
           name: true,
           baseCurrencyCode: true,
+          companySettingsJson: true,
         },
       },
     },
   });
+}
+
+export function buildNextEnterpriseProductCode(
+  format: DocumentNumberFormatSettings["productCode"],
+  existingCodes: string[],
+) {
+  const prefix = format.prefix.trim().toUpperCase();
+  const separator = prefix.endsWith("-") ? "" : "-";
+  const codePrefix = `${prefix}${separator}`;
+  const escapedPrefix = codePrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^${escapedPrefix}(\\d+)$`, "i");
+  const highestSequence = existingCodes.reduce((highest, code) => {
+    const match = pattern.exec(code.trim());
+    const sequence = match ? Number(match[1]) : 0;
+    return Number.isSafeInteger(sequence) ? Math.max(highest, sequence) : highest;
+  }, 0);
+
+  return `${codePrefix}${String(highestSequence + 1).padStart(format.digits, "0")}`;
 }
 
 function normalizeRequiredText(
@@ -745,6 +769,7 @@ async function resolveProductUomSelection(
 
 export type EnterpriseCatalogWorkspaceData = {
   currencyCode: string;
+  suggestedProductCode: string;
   availableDepartments: CatalogDepartmentOption[];
   availableCategories: CatalogCategoryOption[];
   availableTaxProfiles: Array<{
@@ -845,6 +870,7 @@ export function buildUnavailableEnterpriseCatalogWorkspace(
 ): EnterpriseCatalogWorkspaceData {
   return {
     currencyCode: "USD",
+    suggestedProductCode: "PRD-00001",
     availableDepartments: [],
     availableCategories: [],
     availableTaxProfiles: [],
@@ -889,6 +915,7 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
 
   const [
     products,
+    productCodesForNumbering,
     downstreamCatalogQueue,
     availableTaxProfiles,
     hierarchy,
@@ -938,6 +965,14 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
             unitPrice: true,
           },
         },
+      },
+    }),
+    prisma.product.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+      },
+      select: {
+        code: true,
       },
     }),
     prisma.syncOutboxEvent.count({
@@ -1152,6 +1187,10 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
 
   return {
     currencyCode: enterpriseNode.retailOrg.baseCurrencyCode,
+    suggestedProductCode: buildNextEnterpriseProductCode(
+      readDocumentNumberFormats(enterpriseNode.retailOrg.companySettingsJson).productCode,
+      productCodesForNumbering.map((product) => product.code),
+    ),
     availableDepartments: hierarchy.departments,
     availableCategories: hierarchy.categories,
     availableTaxProfiles: availableTaxProfiles.map((profile) => ({
@@ -2121,7 +2160,7 @@ export type UpsertEnterpriseProductMatrixResponse = {
 };
 
 export type CreateEnterpriseProductRequest = {
-  productCode: string;
+  productCode?: string;
   name: string;
   sku?: string | null;
   shortName?: string | null;
@@ -3236,7 +3275,7 @@ export async function createEnterpriseProduct(
 ): Promise<CreateEnterpriseProductResponse> {
   await ensureProductVariantSalesOrderDepositSchemaCompatibility();
 
-  const productCode = normalizeProductCode(input.productCode);
+  const requestedProductCode = input.productCode?.trim() ?? "";
   const name = normalizeRequiredText(input.name, "product name");
   const sku = normalizeSku(input.sku);
   const shortName = normalizeOptionalText(input.shortName);
@@ -3318,6 +3357,11 @@ export async function createEnterpriseProduct(
         select: {
           retailOrgId: true,
           code: true,
+          retailOrg: {
+            select: {
+              companySettingsJson: true,
+            },
+          },
         },
       });
 
@@ -3326,6 +3370,22 @@ export async function createEnterpriseProduct(
           "No primary enterprise node is available for catalog updates.",
         );
       }
+
+      const productCode = requestedProductCode
+        ? normalizeProductCode(requestedProductCode)
+        : buildNextEnterpriseProductCode(
+            readDocumentNumberFormats(enterpriseNode.retailOrg.companySettingsJson).productCode,
+            (
+              await tx.product.findMany({
+                where: {
+                  retailOrgId: enterpriseNode.retailOrgId,
+                },
+                select: {
+                  code: true,
+                },
+              })
+            ).map((product) => product.code),
+          );
 
       const defaultPriceList = await tx.priceList.findFirst({
         where: {
@@ -3462,6 +3522,8 @@ export async function createEnterpriseProduct(
           : `Flash ERP created ${product.name} with default pricing. The next store pull will publish the new catalog and pricing packets automatically.`,
         serverProcessedAt: new Date().toISOString(),
       };
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
     });
   } catch (error) {
     throw toCatalogMutationError(

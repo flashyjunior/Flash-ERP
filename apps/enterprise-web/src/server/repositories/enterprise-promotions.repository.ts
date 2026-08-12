@@ -3,6 +3,7 @@ import { readJsonStringArray, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
 import {
+  CustomerType,
   PromotionDiscountType,
   PromotionTargetScope,
   RecordStatus,
@@ -296,6 +297,12 @@ export type EnterprisePromotionWorkspaceData = {
     productCode: string;
     name: string;
   }>;
+  availableStores: Array<{
+    storeCode: string;
+    name: string;
+    status: string;
+  }>;
+  availableCustomerTypes: string[];
   promotionRows: Array<{
     promotionCode: string;
     name: string;
@@ -345,6 +352,8 @@ export function buildUnavailableEnterprisePromotionWorkspace(
     availableDepartments: [],
     availableCategories: [],
     availableProducts: [],
+    availableStores: [],
+    availableCustomerTypes: Object.values(CustomerType),
     promotionRows: [],
     postureMessages: [
       "Enterprise promotions will appear here once Flash ERP can read the control-plane database."
@@ -366,7 +375,7 @@ export async function getEnterprisePromotionWorkspace(): Promise<EnterprisePromo
     );
   }
 
-  const [promotions, departments, categories, products] = await Promise.all([
+  const [promotions, departments, categories, products, stores] = await Promise.all([
     prisma.promotionCampaign.findMany({
       where: {
         retailOrgId: enterpriseNode.retailOrgId,
@@ -442,6 +451,17 @@ export async function getEnterprisePromotionWorkspace(): Promise<EnterprisePromo
         code: true,
         name: true
       }
+    }),
+    prisma.store.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId
+      },
+      orderBy: [{ status: "asc" }, { name: "asc" }],
+      select: {
+        code: true,
+        name: true,
+        status: true
+      }
     })
   ]);
 
@@ -493,6 +513,12 @@ export async function getEnterprisePromotionWorkspace(): Promise<EnterprisePromo
       productCode: product.code,
       name: product.name
     })),
+    availableStores: stores.map((store) => ({
+      storeCode: store.code,
+      name: store.name,
+      status: store.status
+    })),
+    availableCustomerTypes: Object.values(CustomerType),
     promotionRows: promotions.map((promotion) => ({
       promotionCode: promotion.code,
       name: promotion.name,

@@ -216,7 +216,7 @@ function renderTimestamp(value: string, label: string) {
     <div className="min-w-0">
       <p className="truncate text-sm font-medium text-stone-800">{label}</p>
       <p className="mt-0.5 truncate text-xs text-stone-500">
-        {new Date(value).toLocaleString()}
+        {new Date(value).toLocaleString("en-GB")}
       </p>
     </div>
   );
@@ -232,7 +232,7 @@ export function EnterpriseCatalogWorkspace({
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = useState(false);
   const [isUnitDialogOpen, setIsUnitDialogOpen] = useState(false);
   const [isScheduleDialogOpen, setIsScheduleDialogOpen] = useState(false);
-  const [productCode, setProductCode] = useState("");
+  const [productCode, setProductCode] = useState(workspace.suggestedProductCode);
   const [name, setName] = useState("");
   const [sku, setSku] = useState("");
   const [shortName, setShortName] = useState("");
@@ -576,7 +576,7 @@ export function EnterpriseCatalogWorkspace({
   }
 
   function resetCreateDialog() {
-    setProductCode("");
+    setProductCode(workspace.suggestedProductCode);
     setName("");
     setSku("");
     setShortName("");
@@ -974,7 +974,7 @@ export function EnterpriseCatalogWorkspace({
                       <input
                         className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
                         onChange={(event) => setProductCode(event.target.value)}
-                        placeholder="FLASH-NEW-ITEM"
+                        placeholder={workspace.suggestedProductCode}
                         value={productCode}
                       />
                     </label>
@@ -1904,7 +1904,7 @@ export function EnterpriseCatalogWorkspace({
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="rounded-full border border-stone-200 bg-white/90 px-4 py-2 text-sm text-stone-700">
-            Last refresh {new Date(workspace.refreshedAt).toLocaleString()}
+            Last refresh {new Date(workspace.refreshedAt).toLocaleString("en-GB")}
           </div>
         </div>
       </section>
@@ -2096,7 +2096,7 @@ export function EnterpriseCatalogWorkspace({
                   </p>
                   <p className="mt-1 text-xs text-stone-500">
                     Last refreshed{" "}
-                    {new Date(workspace.refreshedAt).toLocaleString()}
+                    {new Date(workspace.refreshedAt).toLocaleString("en-GB")}
                   </p>
                 </div>
                 <div className="rounded-full border border-stone-200 bg-white/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-stone-600">
