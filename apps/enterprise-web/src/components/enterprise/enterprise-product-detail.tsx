@@ -293,7 +293,7 @@ function renderTimestamp(value: string | null, label: string) {
   return (
     <div className="min-w-0">
       <p className="truncate text-sm font-medium text-stone-800">{label}</p>
-      <p className="mt-0.5 truncate text-xs text-stone-500">{new Date(value).toLocaleString()}</p>
+      <p className="mt-0.5 truncate text-xs text-stone-500">{new Date(value).toLocaleString("en-GB")}</p>
     </div>
   );
 }
@@ -851,18 +851,48 @@ export function EnterpriseProductDetail({
     setIsSupplierDialogOpen(nextOpen);
 
     if (nextOpen) {
-      setSupplierNo(detail.availableSuppliers[0]?.supplierNo ?? "");
-      setSupplierSku("");
-      setSupplierProductName("");
-      setSupplierPackCostPrice("");
-      setSupplierLeadTimeDays("");
-      setSupplierMinimumOrderQuantity("");
-      setSupplierIsPrimary(detail.supplierRows.length === 0);
+      const nextSupplierNo =
+        detail.availableSuppliers.find(
+          (supplier) =>
+            !detail.supplierRows.some((link) => link.supplierNo === supplier.supplierNo)
+        )?.supplierNo ??
+        detail.supplierRows[0]?.supplierNo ??
+        detail.availableSuppliers[0]?.supplierNo ??
+        "";
+      loadSupplierDraft(nextSupplierNo);
       setSupplierState({
         status: "idle",
         message: ""
       });
     }
+  }
+
+  function loadSupplierDraft(nextSupplierNo: string) {
+    const existingSupplier = detail.supplierRows.find(
+      (supplier) => supplier.supplierNo === nextSupplierNo
+    );
+
+    setSupplierNo(nextSupplierNo);
+    setSupplierSku(existingSupplier?.supplierSku ?? "");
+    setSupplierProductName(existingSupplier?.supplierProductName ?? "");
+    setSupplierPackCostPrice(
+      existingSupplier?.packCostPrice !== null && existingSupplier?.packCostPrice !== undefined
+        ? String(existingSupplier.packCostPrice)
+        : ""
+    );
+    setSupplierLeadTimeDays(
+      existingSupplier?.leadTimeDays !== null && existingSupplier?.leadTimeDays !== undefined
+        ? String(existingSupplier.leadTimeDays)
+        : ""
+    );
+    setSupplierMinimumOrderQuantity(
+      existingSupplier?.minimumOrderQuantity !== null &&
+        existingSupplier?.minimumOrderQuantity !== undefined
+        ? String(existingSupplier.minimumOrderQuantity)
+        : ""
+    );
+    setSupplierIsPrimary(existingSupplier?.isPrimary ?? detail.supplierRows.length === 0);
+    setSupplierState({ status: "idle", message: "" });
   }
 
   function handleMatrixDialogOpenChange(nextOpen: boolean) {
@@ -1105,12 +1135,7 @@ export function EnterpriseProductDetail({
           "Flash ERP linked the supplier and queued the next product delta for stores."
       });
 
-      startTransition(() => {
-        window.setTimeout(() => {
-          setIsSupplierDialogOpen(false);
-          router.refresh();
-        }, 700);
-      });
+      startTransition(() => router.refresh());
     } catch (error) {
       setSupplierState({
         status: "error",
@@ -2318,21 +2343,49 @@ export function EnterpriseProductDetail({
             </div>
           </ActionDialog>
           <ActionDialog
-            description="Link an enterprise supplier so Flash ERP can carry replenishment posture, vendor SKU, and lead time from the product workspace."
+            description="Add or update the suppliers available for this product."
             onOpenChange={handleSupplierDialogOpenChange}
             open={isSupplierDialogOpen}
-            title="Link supplier"
+            title="Manage suppliers"
             triggerClassName="border-amber-300 bg-amber-50 text-amber-900 hover:border-amber-400 hover:text-amber-950"
-            triggerLabel="Link supplier"
-            widthClassName="max-w-3xl"
+            triggerLabel="Manage suppliers"
+            widthClassName="max-w-5xl"
           >
             <div className="space-y-4">
+              <div className="overflow-x-auto rounded-2xl border border-stone-200 bg-white">
+                <div className="grid min-w-[640px] grid-cols-[minmax(0,1fr)_7rem_7rem_6rem] gap-3 border-b border-stone-200 bg-stone-50 px-4 py-2 text-xs font-semibold uppercase text-stone-500">
+                  <span>Configured supplier</span>
+                  <span>Lead time</span>
+                  <span>MOQ</span>
+                  <span>Source</span>
+                </div>
+                {detail.supplierRows.length > 0 ? (
+                  detail.supplierRows.map((supplier) => (
+                    <button
+                      className="grid min-w-[640px] w-full grid-cols-[minmax(0,1fr)_7rem_7rem_6rem] gap-3 border-b border-stone-100 px-4 py-3 text-left text-sm text-stone-700 last:border-b-0 hover:bg-amber-50/60"
+                      key={supplier.supplierNo}
+                      onClick={() => loadSupplierDraft(supplier.supplierNo)}
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-semibold text-stone-900">{supplier.supplierName}</span>
+                        <span className="block truncate text-xs text-stone-500">{supplier.supplierNo}</span>
+                      </span>
+                      <span>{supplier.leadTimeDays ?? "Not set"}</span>
+                      <span>{supplier.minimumOrderQuantity ?? "Not set"}</span>
+                      <span>{supplier.isPrimary ? "Primary" : "Alternate"}</span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="px-4 py-4 text-sm text-stone-500">No suppliers configured.</p>
+                )}
+              </div>
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="space-y-2 text-sm text-stone-700">
                   <span className="block font-semibold text-stone-900">Supplier</span>
                   <select
                     className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
-                    onChange={(event) => setSupplierNo(event.target.value)}
+                    onChange={(event) => loadSupplierDraft(event.target.value)}
                     value={supplierNo}
                   >
                     {detail.availableSuppliers.map((supplier) => (
@@ -2398,7 +2451,7 @@ export function EnterpriseProductDetail({
               </label>
               <div className="flex flex-wrap justify-end gap-3">
                 <button className="inline-flex items-center justify-center rounded-full border border-stone-300 px-4 py-2 text-sm font-semibold text-stone-700 transition hover:border-stone-400 hover:text-stone-950" disabled={supplierState.status === "submitting"} onClick={() => setIsSupplierDialogOpen(false)} type="button">Close</button>
-                <button className="inline-flex items-center justify-center rounded-full bg-[linear-gradient(135deg,#b45309,#92400e)] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_18px_34px_rgba(146,64,14,0.22)] transition hover:brightness-[1.03]" disabled={supplierState.status === "submitting" || !supplierNo.trim()} onClick={() => void handleLinkSupplier()} type="button">{supplierState.status === "submitting" ? "Linking..." : "Link supplier"}</button>
+                <button className="inline-flex items-center justify-center rounded-full bg-[linear-gradient(135deg,#b45309,#92400e)] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_18px_34px_rgba(146,64,14,0.22)] transition hover:brightness-[1.03]" disabled={supplierState.status === "submitting" || !supplierNo.trim()} onClick={() => void handleLinkSupplier()} type="button">{supplierState.status === "submitting" ? "Saving..." : "Save supplier"}</button>
               </div>
               {supplierState.message ? <div className={`rounded-2xl border px-4 py-3 text-sm leading-6 ${supplierState.status === "error" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>{supplierState.message}</div> : null}
             </div>
@@ -2407,7 +2460,7 @@ export function EnterpriseProductDetail({
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="rounded-full border border-stone-200 bg-white/90 px-4 py-2 text-sm text-stone-700">
-            Last refresh {new Date(detail.refreshedAt).toLocaleString()}
+            Last refresh {new Date(detail.refreshedAt).toLocaleString("en-GB")}
           </div>
           <StatusBadge value={detail.product.status} />
         </div>
@@ -2736,7 +2789,7 @@ export function EnterpriseProductDetail({
                       "Available stock",
                       detail.matrixVariants
                         .reduce((sum, variant) => sum + variant.quantityOnHand, 0)
-                        .toLocaleString()
+                        .toLocaleString("en-GB")
                     ]
                   ].map(([label, value]) => (
                     <div className="rounded-2xl border border-stone-200 bg-white px-4 py-3" key={label}>

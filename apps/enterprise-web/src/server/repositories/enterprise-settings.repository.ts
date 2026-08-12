@@ -116,7 +116,8 @@ type CompanyProfileSettings = {
   postalCode: string;
 };
 
-type DocumentNumberFormatKey =
+export type DocumentNumberFormatKey =
+  | "productCode"
   | "purchaseOrder"
   | "goodsReceipt"
   | "transferIn"
@@ -124,7 +125,7 @@ type DocumentNumberFormatKey =
   | "stockCount"
   | "storeReceipt";
 
-type DocumentNumberFormatSettings = Record<
+export type DocumentNumberFormatSettings = Record<
   DocumentNumberFormatKey,
   {
     prefix: string;
@@ -133,7 +134,8 @@ type DocumentNumberFormatSettings = Record<
   }
 >;
 
-const defaultDocumentNumberFormats: DocumentNumberFormatSettings = {
+export const defaultDocumentNumberFormats: DocumentNumberFormatSettings = {
+  productCode: { prefix: "PRD", digits: 5, includeStoreCode: false },
   purchaseOrder: { prefix: "PO", digits: 4, includeStoreCode: true },
   goodsReceipt: { prefix: "GRN", digits: 4, includeStoreCode: true },
   transferIn: { prefix: "TIN", digits: 4, includeStoreCode: true },
@@ -279,7 +281,7 @@ function readNumber(
     : fallback;
 }
 
-function readDocumentNumberFormats(
+export function readDocumentNumberFormats(
   value: Prisma.JsonValue | null | undefined
 ): DocumentNumberFormatSettings {
   const payload = readObject(value);

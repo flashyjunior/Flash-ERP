@@ -353,6 +353,7 @@ function formatToggleState(value: boolean, enabledLabel = "Enabled", disabledLab
 }
 
 const documentNumberFormatFields = [
+  ["productCode", "Product codes"],
   ["purchaseOrder", "Purchase orders"],
   ["goodsReceipt", "GRN"],
   ["transferIn", "Transfer in"],
@@ -972,24 +973,26 @@ export function EnterpriseSettingsWorkspace({
                             value={format.digits}
                           />
                         </div>
-                        <div className="mt-2">
-                          <Check
-                            checked={format.includeStoreCode}
-                            label="Include shop/location code"
-                            onChange={(value) =>
-                              setCompanyDraft((current) => ({
-                                ...current,
-                                documentNumberFormats: {
-                                  ...current.documentNumberFormats,
-                                  [key]: {
-                                    ...current.documentNumberFormats[key],
-                                    includeStoreCode: value
+                        {key !== "productCode" ? (
+                          <div className="mt-2">
+                            <Check
+                              checked={format.includeStoreCode}
+                              label="Include shop/location code"
+                              onChange={(value) =>
+                                setCompanyDraft((current) => ({
+                                  ...current,
+                                  documentNumberFormats: {
+                                    ...current.documentNumberFormats,
+                                    [key]: {
+                                      ...current.documentNumberFormats[key],
+                                      includeStoreCode: value
+                                    }
                                   }
-                                }
-                              }))
-                            }
-                          />
-                        </div>
+                                }))
+                              }
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -2096,7 +2099,7 @@ export function EnterpriseSettingsWorkspace({
         </div>
 
         <div className="rounded-full border border-stone-200 bg-white/90 px-4 py-2 text-sm text-stone-700">
-          Last refresh {new Date(workspace.refreshedAt).toLocaleString()}
+          Last refresh {new Date(workspace.refreshedAt).toLocaleString("en-GB")}
         </div>
       </section>
 

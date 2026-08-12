@@ -38,6 +38,16 @@ const scopeOptions = [
   { value: "PRODUCT", label: "PRODUCT" }
 ];
 
+const weekdayOptions = [
+  { value: "MONDAY", label: "Monday" },
+  { value: "TUESDAY", label: "Tuesday" },
+  { value: "WEDNESDAY", label: "Wednesday" },
+  { value: "THURSDAY", label: "Thursday" },
+  { value: "FRIDAY", label: "Friday" },
+  { value: "SATURDAY", label: "Saturday" },
+  { value: "SUNDAY", label: "Sunday" }
+];
+
 const emptyPromotion = (): CreateEnterprisePromotionRequest => ({
   promotionCode: "",
   name: "",
@@ -195,6 +205,69 @@ function DialogCheckbox({
   );
 }
 
+function DialogCheckboxGroup({
+  label,
+  allLabel,
+  options,
+  value,
+  onChange,
+  className = ""
+}: {
+  label: string;
+  allLabel: string;
+  options: Array<{ value: string; label: string }>;
+  value: string[] | string | null | undefined;
+  onChange: (nextValue: string[]) => void;
+  className?: string;
+}) {
+  const selectedValues = Array.isArray(value) ? value : splitListValue(value ?? "");
+  const selected = new Set(selectedValues.map((entry) => entry.toUpperCase()));
+  const knownValues = new Set(options.map((option) => option.value.toUpperCase()));
+  const visibleOptions = [
+    ...options,
+    ...selectedValues
+      .filter((entry) => !knownValues.has(entry.toUpperCase()))
+      .map((entry) => ({ value: entry, label: entry }))
+  ];
+
+  function toggleValue(optionValue: string, checked: boolean) {
+    const normalizedValue = optionValue.toUpperCase();
+    const nextValues = checked
+      ? [...selectedValues.filter((entry) => entry.toUpperCase() !== normalizedValue), optionValue]
+      : selectedValues.filter((entry) => entry.toUpperCase() !== normalizedValue);
+    onChange(nextValues);
+  }
+
+  return (
+    <fieldset className={`space-y-2 rounded-2xl border border-stone-200 bg-stone-50/70 p-3 ${className}`}>
+      <legend className="px-1 text-sm font-semibold text-stone-900">{label}</legend>
+      <div className="grid max-h-40 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+        <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
+          <input
+            checked={selectedValues.length === 0}
+            onChange={() => onChange([])}
+            type="checkbox"
+          />
+          {allLabel}
+        </label>
+        {visibleOptions.map((option) => (
+          <label
+            className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700"
+            key={option.value}
+          >
+            <input
+              checked={selected.has(option.value.toUpperCase())}
+              onChange={(event) => toggleValue(option.value, event.target.checked)}
+              type="checkbox"
+            />
+            <span className="min-w-0 truncate">{option.label}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function toDateTimeLocalValue(value: string | null | undefined) {
   if (!value) {
     return "";
@@ -260,6 +333,24 @@ export function EnterprisePromotionPanel({
       }))
     ],
     [workspace.availableProducts]
+  );
+
+  const storeOptions = useMemo(
+    () =>
+      workspace.availableStores.map((store) => ({
+        value: store.storeCode,
+        label: `${store.name} (${store.storeCode})${store.status === "ACTIVE" ? "" : ` - ${store.status}`}`
+      })),
+    [workspace.availableStores]
+  );
+
+  const customerTypeOptions = useMemo(
+    () =>
+      workspace.availableCustomerTypes.map((customerType) => ({
+        value: customerType,
+        label: customerType.replaceAll("_", " ")
+      })),
+    [workspace.availableCustomerTypes]
   );
 
   const promotionColumns = useMemo<ColumnDef<PromotionRow>[]>(
@@ -600,25 +691,30 @@ export function EnterprisePromotionPanel({
               type="datetime-local"
               value={promotionDraft.endAt ?? ""}
             />
-            <DialogTextInput
+            <DialogCheckboxGroup
+              allLabel="All shops"
+              className="md:col-span-2"
               label="Eligible shop codes"
               onChange={(value) =>
                 setPromotionDraft((current) => ({
                   ...current,
-                  eligibleStoreCodes: splitListValue(value)
+                  eligibleStoreCodes: value
                 }))
               }
-              value={joinListValue(promotionDraft.eligibleStoreCodes)}
+              options={storeOptions}
+              value={promotionDraft.eligibleStoreCodes}
             />
-            <DialogTextInput
+            <DialogCheckboxGroup
+              allLabel="All customer types"
               label="Customer types"
               onChange={(value) =>
                 setPromotionDraft((current) => ({
                   ...current,
-                  eligibleCustomerTypes: splitListValue(value)
+                  eligibleCustomerTypes: value
                 }))
               }
-              value={joinListValue(promotionDraft.eligibleCustomerTypes)}
+              options={customerTypeOptions}
+              value={promotionDraft.eligibleCustomerTypes}
             />
             <DialogTextInput
               label="Loyalty tiers"
@@ -630,15 +726,18 @@ export function EnterprisePromotionPanel({
               }
               value={joinListValue(promotionDraft.eligibleLoyaltyTiers)}
             />
-            <DialogTextInput
+            <DialogCheckboxGroup
+              allLabel="Every day"
+              className="md:col-span-2 xl:col-span-3"
               label="Active weekdays"
               onChange={(value) =>
                 setPromotionDraft((current) => ({
                   ...current,
-                  activeDaysOfWeek: splitListValue(value)
+                  activeDaysOfWeek: value
                 }))
               }
-              value={joinListValue(promotionDraft.activeDaysOfWeek)}
+              options={weekdayOptions}
+              value={promotionDraft.activeDaysOfWeek}
             />
             <DialogTextInput
               label="Active from minute"
