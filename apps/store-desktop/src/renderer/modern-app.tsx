@@ -15613,6 +15613,12 @@ function POSWorkspace(props: {
   const permissionCodes =
     props.snapshot?.activeOperatorSession?.permissionCodes ?? [];
   const canCreateLayaway = permissionCodes.includes("pos.layaway.create");
+  const layawayModeDisabledReason =
+    props.snapshot?.optionSettings.layawaySettings.enabled !== true
+      ? "Layaway is disabled in the store settings. Sync the latest HQ company settings."
+      : !canCreateLayaway
+        ? "The signed-in operator role needs the Create layaways permission."
+        : undefined;
   const canReceiveLayawayPayment = permissionCodes.includes(
     "pos.layaway.payment.receive",
   );
@@ -16910,6 +16916,7 @@ function POSWorkspace(props: {
               !canCreateLayaway
             }
             onClick={props.activateLayawayMode}
+            title={layawayModeDisabledReason}
             type="button"
           >
             Layaway mode

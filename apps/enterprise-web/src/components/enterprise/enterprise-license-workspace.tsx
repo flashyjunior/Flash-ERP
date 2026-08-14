@@ -779,6 +779,19 @@ export function EnterpriseLicenseWorkspace({
                     </div>
                     <div className="flex gap-2">
                       <button
+                        className="inline-flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-semibold text-stone-700 disabled:opacity-50"
+                        disabled={!activeStoreCode}
+                        onClick={() =>
+                          router.push(
+                            `/stores/${encodeURIComponent(activeStoreCode)}?tab=topology`,
+                          )
+                        }
+                        type="button"
+                      >
+                        <MonitorSmartphone className="h-3.5 w-3.5" />
+                        Manage terminals
+                      </button>
+                      <button
                         className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-semibold text-stone-700"
                         onClick={selectActiveStoreTerminals}
                         type="button"

@@ -964,6 +964,25 @@ export type ProvisionEnterpriseStoreTopologyRequest = {
   primaryLocationType?: string | null;
 };
 
+export type CreateEnterpriseStoreTerminalRequest = {
+  terminalCode: string;
+  terminalName: string;
+  status?: string | null;
+  nodeCode?: string | null;
+  nodeName?: string | null;
+};
+
+export type CreateEnterpriseStoreTerminalResponse = {
+  storeCode: string;
+  terminalCode: string;
+  terminalName: string;
+  terminalStatus: string;
+  licenseStatus: string;
+  nodeCode: string | null;
+  message: string;
+  serverProcessedAt: string;
+};
+
 export type UpdateEnterpriseStoreRequest = {
   storeName: string;
   shortName?: string | null;
@@ -2244,6 +2263,176 @@ export async function provisionEnterpriseStoreTopology(
   }
 }
 
+export async function createEnterpriseStoreTerminal(
+  storeCodeInput: string,
+  input: CreateEnterpriseStoreTerminalRequest,
+): Promise<CreateEnterpriseStoreTerminalResponse> {
+  const storeCode = normalizeStoreCode(storeCodeInput);
+  const terminalCode = normalizeCode(input.terminalCode, "terminal code");
+  const terminalName = normalizeRequiredText(input.terminalName, "terminal name");
+  const terminalStatus = normalizeRecordStatus(input.status ?? RecordStatus.ACTIVE);
+  const nodeCode = normalizeOptionalCode(input.nodeCode);
+  const requestedNodeName = normalizeOptionalText(input.nodeName);
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const enterpriseNode = await tx.syncNode.findFirst({
+        where: {
+          nodeType: SyncNodeType.ENTERPRISE,
+          isPrimary: true,
+          status: RecordStatus.ACTIVE,
+        },
+        select: {
+          code: true,
+          retailOrgId: true,
+        },
+      });
+
+      if (!enterpriseNode) {
+        throw new Error(
+          "No primary enterprise node is available for terminal registration.",
+        );
+      }
+
+      const store = await tx.store.findFirst({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          code: storeCode,
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+        },
+      });
+
+      if (!store) {
+        throw new Error(`Flash ERP could not find store "${storeCode}".`);
+      }
+
+      const existingTerminal = await tx.terminal.findUnique({
+        where: {
+          storeId_code: {
+            storeId: store.id,
+            code: terminalCode,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (existingTerminal) {
+        throw new Error(
+          `Terminal "${terminalCode}" is already registered for ${store.name}.`,
+        );
+      }
+
+      if (nodeCode) {
+        const existingNode = await tx.syncNode.findUnique({
+          where: {
+            code: nodeCode,
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        if (existingNode) {
+          throw new Error(`Sync node "${nodeCode}" already exists.`);
+        }
+      }
+
+      const terminal = await tx.terminal.create({
+        data: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          storeId: store.id,
+          code: terminalCode,
+          name: terminalName,
+          status: terminalStatus,
+          licenseStatus: "UNLICENSED",
+          licenseKey: null,
+          licensedUntil: null,
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          status: true,
+          licenseStatus: true,
+        },
+      });
+
+      let createdNodeCode: string | null = null;
+
+      if (nodeCode) {
+        const existingPrimaryNode = await tx.syncNode.findFirst({
+          where: {
+            retailOrgId: enterpriseNode.retailOrgId,
+            storeId: store.id,
+            nodeType: SyncNodeType.STORE_DESKTOP,
+            status: RecordStatus.ACTIVE,
+            isPrimary: true,
+          },
+          select: {
+            id: true,
+          },
+        });
+        const syncNode = await tx.syncNode.create({
+          data: {
+            retailOrgId: enterpriseNode.retailOrgId,
+            storeId: store.id,
+            terminalId: terminal.id,
+            code: nodeCode,
+            name: requestedNodeName ?? `${store.name} - ${terminalName}`,
+            nodeType: SyncNodeType.STORE_DESKTOP,
+            direction: "BIDIRECTIONAL",
+            isPrimary: !existingPrimaryNode,
+            status: RecordStatus.ACTIVE,
+          },
+          select: {
+            id: true,
+            code: true,
+          },
+        });
+
+        await tx.syncInboxCheckpoint.upsert({
+          where: {
+            syncNodeId_remoteNodeCode: {
+              syncNodeId: syncNode.id,
+              remoteNodeCode: enterpriseNode.code,
+            },
+          },
+          update: {},
+          create: {
+            syncNodeId: syncNode.id,
+            remoteNodeCode: enterpriseNode.code,
+          },
+        });
+        createdNodeCode = syncNode.code;
+      }
+
+      return {
+        storeCode: store.code,
+        terminalCode: terminal.code,
+        terminalName: terminal.name,
+        terminalStatus: terminal.status,
+        licenseStatus: terminal.licenseStatus,
+        nodeCode: createdNodeCode,
+        message: createdNodeCode
+          ? `Flash ERP added ${terminal.name} and bound desktop node ${createdNodeCode}. License the terminal before it begins store sync.`
+          : `Flash ERP added ${terminal.name}. It is ready for licensing and optional desktop-node binding.`,
+        serverProcessedAt: new Date().toISOString(),
+      };
+    });
+  } catch (error) {
+    throw toStoreMutationError(
+      error,
+      "Flash ERP could not register that terminal.",
+    );
+  }
+}
+
 export async function updateEnterpriseStore(
   storeCode: string,
   input: UpdateEnterpriseStoreRequest,
@@ -3064,8 +3253,11 @@ export type EnterpriseStoreDetailData = {
   terminalRows: Array<{
     terminalCode: string;
     terminalName: string;
+    terminalStatus: string;
     licenseStatus: string;
     licensedUntil: string | null;
+    registeredAt: string;
+    nodeCodes: string[];
     lastHeartbeatAt: string | null;
     lastHeartbeatAtLabel: string;
   }>;
@@ -3233,9 +3425,23 @@ export async function getEnterpriseStoreDetail(
         select: {
           code: true,
           name: true,
+          status: true,
           licenseStatus: true,
           licensedUntil: true,
+          registeredAt: true,
           lastHeartbeatAt: true,
+          syncNodes: {
+            where: {
+              nodeType: SyncNodeType.STORE_DESKTOP,
+              status: RecordStatus.ACTIVE,
+            },
+            orderBy: {
+              code: "asc",
+            },
+            select: {
+              code: true,
+            },
+          },
         },
       },
       warehouses: {
@@ -3518,8 +3724,11 @@ export async function getEnterpriseStoreDetail(
     terminalRows: store.terminals.map((terminal) => ({
       terminalCode: terminal.code,
       terminalName: terminal.name,
+      terminalStatus: terminal.status,
       licenseStatus: terminal.licenseStatus,
       licensedUntil: toIsoString(terminal.licensedUntil),
+      registeredAt: terminal.registeredAt.toISOString(),
+      nodeCodes: terminal.syncNodes.map((node) => node.code),
       lastHeartbeatAt: toIsoString(terminal.lastHeartbeatAt),
       lastHeartbeatAtLabel: formatRelativeTime(terminal.lastHeartbeatAt),
     })),
