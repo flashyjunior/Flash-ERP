@@ -26,6 +26,9 @@ BEGIN
       CONSTRAINT [InterStoreTransfer_baseUnitOfMeasure_df] DEFAULT N'EA';
 END;
 
+-- Compile references to the newly-added columns only after the ALTER statements
+-- have completed; SQL Server otherwise validates the whole outer batch first.
+EXEC sp_executesql N'
 UPDATE [dbo].[InterStoreTransfer]
 SET [requestedUnitQuantity] = [requestedQuantity]
 WHERE [requestedUnitQuantity] <= 0;
@@ -35,6 +38,7 @@ SET [requestedUnitOfMeasure] = product.[unitOfMeasure],
     [baseUnitOfMeasure] = product.[unitOfMeasure]
 FROM [dbo].[InterStoreTransfer] AS transferRow
 INNER JOIN [dbo].[Product] AS product ON product.[id] = transferRow.[productId]
-WHERE transferRow.[requestedUnitOfMeasure] = N'EA'
-  AND transferRow.[baseUnitOfMeasure] = N'EA'
-  AND product.[unitOfMeasure] <> N'EA';
+WHERE transferRow.[requestedUnitOfMeasure] = N''EA''
+  AND transferRow.[baseUnitOfMeasure] = N''EA''
+  AND product.[unitOfMeasure] <> N''EA'';
+';
