@@ -1,4 +1,4 @@
-import type { RetailEntityKey } from "@flash-erp/domain";
+import type { LayawaySettings, RetailEntityKey } from "@flash-erp/domain";
 
 export type SyncBatchDirection = "upstream" | "downstream";
 
@@ -448,6 +448,7 @@ export type EnterpriseStoreSettingsPublishedPayload = {
   productSizes: string[];
   posDiscountRates: number[];
   posExpressChargeRates: number[];
+  layawaySettings?: LayawaySettings | null;
   documentNumberFormats: Record<
     string,
     {
@@ -950,6 +951,10 @@ export type EnterpriseInterStoreTransferPublishedPayload = {
   isSerialized: boolean;
   trackExpiry: boolean;
   requestedQuantity: number;
+  requestedUnitOfMeasure: string;
+  requestedUnitQuantity: number;
+  uomConversionFactor: number;
+  baseUnitOfMeasure: string;
   issuedQuantity: number;
   receivedQuantity: number;
   outstandingIssueQuantity: number;
@@ -1362,6 +1367,7 @@ export type CreateInterStoreTransferRequest = {
   productCode: string;
   destinationLocationCode: string;
   quantity: number;
+  unitOfMeasure?: string | null;
   externalReference?: string | null;
   note?: string | null;
   operatorName?: string;
@@ -1389,6 +1395,7 @@ export type CreateInterStoreTransferResponse = {
 export type CreateInterStoreTransferBatchLineRequest = {
   productCode: string;
   quantity: number;
+  unitOfMeasure?: string | null;
   externalReference?: string | null;
   note?: string | null;
 };
@@ -1455,6 +1462,7 @@ export type StoreRemoteInterStoreRequestInput = {
   destinationLocationCode?: string | null;
   productCode: string;
   quantity: number;
+  unitOfMeasure?: string | null;
   externalReference?: string | null;
   note?: string | null;
   operatorName?: string;
@@ -1597,6 +1605,7 @@ export type StoreInterStoreTransferRequestedPayload = {
   destinationLocationCode: string;
   productCode: string;
   quantity: number;
+  unitOfMeasure?: string | null;
   externalReference: string | null;
   operatorName: string;
   note: string | null;

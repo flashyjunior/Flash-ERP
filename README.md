@@ -56,6 +56,18 @@ Read these in order:
 6. Run `npm run bootstrap:enterprise-admin`
 7. Run `npm run dev:enterprise`
 
+## Public ecommerce extension
+
+The public customer storefront is served at `/shop/{store-code-or-slug}` by the enterprise web application. It extends the existing authenticated Online Store POS; it does not replace it. Ecommerce orders create the existing sales-order and parked POS records, while customer accounts, OTP sessions, delivery tracking, payments, and refund requests use dedicated ecommerce records.
+
+Before enabling a storefront:
+
+1. Apply the latest Prisma migration and run the database-readiness gate.
+2. Set `FLASH_ERP_ECOMMERCE_PUBLIC_URL` to the public HTTPS origin.
+3. Configure enterprise SMTP/SMS delivery and keep `FLASH_ERP_ECOMMERCE_EXPOSE_OTP=false` outside local development.
+4. Configure Paystack or Flutterwave tenders and provide the matching server-side secret environment variables.
+5. Sign in as an Online Store supervisor and open `/online-store/ecommerce` to publish products and enable the storefront.
+
 ## Important note
 
 This workspace is now the Flash ERP fork. Keep `D:\DEVELOPMENTS\FLASH_DEVS\RMS` untouched unless an RMS-specific task explicitly asks for changes there.

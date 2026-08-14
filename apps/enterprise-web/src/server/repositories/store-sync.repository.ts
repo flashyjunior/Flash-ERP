@@ -4,6 +4,7 @@ import { readJsonObject, readJsonStringArray, serializeJsonField, serializeRequi
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   CustomerAccountEntryType,
+  normalizeLayawaySettings,
   deriveInventoryBatchStatus,
   validateInventoryBatchReceipt,
   type EntityOwnershipRule,
@@ -347,6 +348,10 @@ function readPosExpressChargeRates(value: Prisma.JsonValue | null | undefined) {
   }
 
   return rates;
+}
+
+function readLayawaySettings(value: Prisma.JsonValue | null | undefined) {
+  return normalizeLayawaySettings(readCompanySettingsObject(value).layawaySettings);
 }
 
 function readShiftFloatPromptAmount(
@@ -960,6 +965,64 @@ function toMoneyString(value: number) {
 
 function toQuantityString(value: number) {
   return value.toFixed(3);
+}
+
+type TransferUomProduct = {
+  unitOfMeasure: string;
+  baseUnitOfMeasure: { code: string } | null;
+  uomSchedule: {
+    baseUnitOfMeasure: { code: string };
+    lines: Array<{
+      conversionFactor: Prisma.Decimal;
+      unitOfMeasure: { code: string };
+    }>;
+  } | null;
+};
+
+function resolveTransferUom(
+  product: TransferUomProduct,
+  requestedUnitQuantity: number,
+  requestedUnitOfMeasure?: string | null,
+) {
+  const baseUnitOfMeasure = (
+    product.baseUnitOfMeasure?.code ??
+    product.uomSchedule?.baseUnitOfMeasure.code ??
+    product.unitOfMeasure ??
+    "EA"
+  ).trim().toUpperCase();
+  const unitOfMeasure = (
+    requestedUnitOfMeasure?.trim() || product.unitOfMeasure || baseUnitOfMeasure
+  ).toUpperCase();
+  const scheduleLine = product.uomSchedule?.lines.find(
+    (line) => line.unitOfMeasure.code.toUpperCase() === unitOfMeasure,
+  );
+  const conversionFactor =
+    unitOfMeasure === baseUnitOfMeasure
+      ? 1
+      : Number(scheduleLine?.conversionFactor ?? Number.NaN);
+
+  if (!Number.isFinite(conversionFactor) || conversionFactor <= 0) {
+    throw new Error(
+      `Unit ${unitOfMeasure} is not configured on this product's UOM schedule.`,
+    );
+  }
+
+  const requestedQuantity = Number(
+    (requestedUnitQuantity * conversionFactor).toFixed(3),
+  );
+
+  if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
+    throw new Error("The converted base quantity must be greater than zero.");
+  }
+
+  return {
+    requestedQuantity,
+    baseQuantity: requestedQuantity,
+    requestedUnitOfMeasure: unitOfMeasure,
+    requestedUnitQuantity: Number(requestedUnitQuantity.toFixed(3)),
+    uomConversionFactor: Number(conversionFactor.toFixed(6)),
+    baseUnitOfMeasure,
+  };
 }
 
 function toWholeNumber(value: number) {
@@ -3020,6 +3083,9 @@ async function queueAutomaticStoreMasterDataPublications(
       productSizes: readProductSizes(storeSettings.retailOrg.companySettingsJson),
       posDiscountRates: readPosDiscountRates(storeSettings.retailOrg.companySettingsJson),
       posExpressChargeRates: readPosExpressChargeRates(
+        storeSettings.retailOrg.companySettingsJson,
+      ),
+      layawaySettings: readLayawaySettings(
         storeSettings.retailOrg.companySettingsJson,
       ),
       storeCode: storeSettings.code,
@@ -6061,6 +6127,7 @@ function parseStoreInterStoreTransferRequestedPayload(
       event.aggregateType,
       event.eventType,
     ),
+    unitOfMeasure: readOptionalString(payload, "unitOfMeasure"),
     externalReference: readOptionalString(payload, "externalReference"),
     operatorName: readRequiredString(
       payload,
@@ -7571,6 +7638,10 @@ export async function queueInterStoreTransferPublication(
       origin: true,
       status: true,
       requestedQuantity: true,
+      requestedUnitOfMeasure: true,
+      requestedUnitQuantity: true,
+      uomConversionFactor: true,
+      baseUnitOfMeasure: true,
       issuedQuantity: true,
       receivedQuantity: true,
       unitCost: true,
@@ -7724,6 +7795,14 @@ export async function queueInterStoreTransferPublication(
       isSerialized: transfer.product.isSerialized,
       trackExpiry: transfer.product.trackExpiry,
       requestedQuantity,
+      requestedUnitOfMeasure: transfer.requestedUnitOfMeasure,
+      requestedUnitQuantity: Number(
+        Number(transfer.requestedUnitQuantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        Number(transfer.uomConversionFactor).toFixed(6),
+      ),
+      baseUnitOfMeasure: transfer.baseUnitOfMeasure,
       issuedQuantity,
       receivedQuantity,
       outstandingIssueQuantity: Number(
@@ -10740,6 +10819,21 @@ async function projectStoreInterStoreTransferRequest(
       name: true,
       isSerialized: true,
       baseCostPrice: true,
+      unitOfMeasure: true,
+      baseUnitOfMeasure: {
+        select: { code: true },
+      },
+      uomSchedule: {
+        select: {
+          baseUnitOfMeasure: { select: { code: true } },
+          lines: {
+            select: {
+              conversionFactor: true,
+              unitOfMeasure: { select: { code: true } },
+            },
+          },
+        },
+      },
     },
   });
 
@@ -10751,7 +10845,13 @@ async function projectStoreInterStoreTransferRequest(
     );
   }
 
-  if (product.isSerialized && !Number.isInteger(payload.quantity)) {
+  const transferUom = resolveTransferUom(
+    product,
+    payload.quantity,
+    payload.unitOfMeasure,
+  );
+
+  if (product.isSerialized && !Number.isInteger(transferUom.baseQuantity)) {
     throw new StoreProjectionError(
       "INVALID_PAYLOAD",
       `Serialized product "${product.code}" needs a whole-number requested quantity.`,
@@ -10779,14 +10879,20 @@ async function projectStoreInterStoreTransferRequest(
       externalReference: payload.externalReference?.trim() || payload.requestNo,
       origin: InterStoreTransferOrigin.STORE_REQUEST,
       status: InterStoreTransferStatus.REQUESTED,
-      requestedQuantity: toQuantityString(payload.quantity),
+      requestedQuantity: toQuantityString(transferUom.baseQuantity),
+      requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+      requestedUnitQuantity: toQuantityString(
+        transferUom.requestedUnitQuantity,
+      ),
+      uomConversionFactor: transferUom.uomConversionFactor.toFixed(6),
+      baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
       issuedQuantity: toQuantityString(0),
       receivedQuantity: toQuantityString(0),
       unitCost: product.baseCostPrice?.toString() ?? null,
       requestOperatorName: payload.operatorName,
       requestNote:
         payload.note?.trim() ||
-        `${target.storeNode.store.code} requested ${payload.quantity.toFixed(3)} unit(s) of ${product.name} from ${sourceLocation.store.name} / ${sourceLocation.name}.`,
+        `${target.storeNode.store.code} requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.baseQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.store.name} / ${sourceLocation.name}.`,
       requestedByNodeCode: target.storeNode.code,
       requestedAt: occurredAt,
     },
@@ -15695,9 +15801,9 @@ export async function createInterStoreTransfer(
   input: CreateInterStoreTransferRequest,
 ): Promise<CreateInterStoreTransferResponse> {
   return prisma.$transaction(async (tx) => {
-    const requestedQuantity = Number(input.quantity);
+    const requestedUnitQuantity = Number(input.quantity);
 
-    if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
+    if (!Number.isFinite(requestedUnitQuantity) || requestedUnitQuantity <= 0) {
       throw new Error("Transfer quantity must be greater than zero.");
     }
 
@@ -15791,6 +15897,19 @@ export async function createInterStoreTransfer(
         name: true,
         isSerialized: true,
         baseCostPrice: true,
+        unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
+          select: {
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              select: {
+                conversionFactor: true,
+                unitOfMeasure: { select: { code: true } },
+              },
+            },
+          },
+        },
       },
     });
 
@@ -15800,7 +15919,13 @@ export async function createInterStoreTransfer(
       );
     }
 
-    if (product.isSerialized && !Number.isInteger(requestedQuantity)) {
+    const transferUom = resolveTransferUom(
+      product,
+      requestedUnitQuantity,
+      input.unitOfMeasure,
+    );
+
+    if (product.isSerialized && !Number.isInteger(transferUom.requestedQuantity)) {
       throw new Error(
         `Serialized product "${product.code}" needs a whole-number requested quantity.`,
       );
@@ -15828,14 +15953,18 @@ export async function createInterStoreTransfer(
         externalReference: input.externalReference?.trim() || null,
         origin: InterStoreTransferOrigin.ENTERPRISE,
         status: InterStoreTransferStatus.REQUESTED,
-        requestedQuantity: toQuantityString(requestedQuantity),
+        requestedQuantity: toQuantityString(transferUom.requestedQuantity),
+        requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+        requestedUnitQuantity: toQuantityString(transferUom.requestedUnitQuantity),
+        uomConversionFactor: transferUom.uomConversionFactor.toFixed(6),
+        baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
         issuedQuantity: toQuantityString(0),
         receivedQuantity: toQuantityString(0),
         unitCost: product.baseCostPrice?.toString() ?? null,
         requestOperatorName: audit.operatorName,
         requestNote:
           input.note?.trim() ||
-          `HQ instructed ${requestedQuantity.toFixed(3)} units of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+          `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
         requestedAt: now,
       },
     });
@@ -15875,6 +16004,7 @@ export async function createInterStoreTransferBatch(
         lineNo: index + 1,
         productCode: line.productCode?.trim(),
         quantity: Number(line.quantity),
+        unitOfMeasure: line.unitOfMeasure?.trim() || null,
         externalReference:
           line.externalReference?.trim() ||
           input.externalReference?.trim() ||
@@ -16017,6 +16147,19 @@ export async function createInterStoreTransferBatch(
         name: true,
         isSerialized: true,
         baseCostPrice: true,
+        unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
+          select: {
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              select: {
+                conversionFactor: true,
+                unitOfMeasure: { select: { code: true } },
+              },
+            },
+          },
+        },
       },
     });
     const productsByCode = new Map(
@@ -16053,7 +16196,13 @@ export async function createInterStoreTransferBatch(
         );
       }
 
-      if (product.isSerialized && !Number.isInteger(line.quantity)) {
+      const transferUom = resolveTransferUom(
+        product,
+        line.quantity,
+        line.unitOfMeasure,
+      );
+
+      if (product.isSerialized && !Number.isInteger(transferUom.requestedQuantity)) {
         throw new Error(
           `Serialized product "${product.code}" needs a whole-number requested quantity.`,
         );
@@ -16082,14 +16231,18 @@ export async function createInterStoreTransferBatch(
           status: saveAsDraft
             ? InterStoreTransferStatus.DRAFT
             : InterStoreTransferStatus.REQUESTED,
-          requestedQuantity: toQuantityString(line.quantity),
+          requestedQuantity: toQuantityString(transferUom.requestedQuantity),
+          requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+          requestedUnitQuantity: toQuantityString(transferUom.requestedUnitQuantity),
+          uomConversionFactor: transferUom.uomConversionFactor.toFixed(6),
+          baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
           issuedQuantity: toQuantityString(0),
           receivedQuantity: toQuantityString(0),
           unitCost: product.baseCostPrice?.toString() ?? null,
           requestOperatorName: audit.operatorName,
           requestNote:
             line.note ||
-            `HQ instructed ${line.quantity.toFixed(3)} units of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+            `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
           requestedAt,
           requiredAt,
         },
@@ -16198,6 +16351,7 @@ export async function updateInterStoreTransferBatch(
         lineNo: index + 1,
         productCode: line.productCode?.trim(),
         quantity: Number(line.quantity),
+        unitOfMeasure: line.unitOfMeasure?.trim() || null,
         externalReference:
           line.externalReference?.trim() ||
           input.externalReference?.trim() ||
@@ -16339,6 +16493,19 @@ export async function updateInterStoreTransferBatch(
         name: true,
         isSerialized: true,
         baseCostPrice: true,
+        unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
+          select: {
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              select: {
+                conversionFactor: true,
+                unitOfMeasure: { select: { code: true } },
+              },
+            },
+          },
+        },
       },
     });
     const productsByCode = new Map(
@@ -16440,7 +16607,13 @@ export async function updateInterStoreTransferBatch(
         );
       }
 
-      if (product.isSerialized && !Number.isInteger(line.quantity)) {
+      const transferUom = resolveTransferUom(
+        product,
+        line.quantity,
+        line.unitOfMeasure,
+      );
+
+      if (product.isSerialized && !Number.isInteger(transferUom.requestedQuantity)) {
         throw new Error(
           `Serialized product "${product.code}" needs a whole-number requested quantity.`,
         );
@@ -16464,6 +16637,12 @@ export async function updateInterStoreTransferBatch(
         );
       }
 
+      const transferUom = resolveTransferUom(
+        product,
+        line.quantity,
+        line.unitOfMeasure,
+      );
+
       const requestedAt = new Date(now.getTime() + line.lineNo);
       const transferNo = `${existingBatchNo}-L${String(line.lineNo).padStart(2, "0")}`;
       const transfer = await tx.interStoreTransfer.create({
@@ -16485,14 +16664,18 @@ export async function updateInterStoreTransferBatch(
           deliveryNoteNo,
           origin: InterStoreTransferOrigin.ENTERPRISE,
           status: InterStoreTransferStatus.DRAFT,
-          requestedQuantity: toQuantityString(line.quantity),
+          requestedQuantity: toQuantityString(transferUom.requestedQuantity),
+          requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+          requestedUnitQuantity: toQuantityString(transferUom.requestedUnitQuantity),
+          uomConversionFactor: transferUom.uomConversionFactor.toFixed(6),
+          baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
           issuedQuantity: toQuantityString(0),
           receivedQuantity: toQuantityString(0),
           unitCost: product.baseCostPrice?.toString() ?? null,
           requestOperatorName: audit.operatorName,
           requestNote:
             line.note ||
-            `HQ instructed ${line.quantity.toFixed(3)} units of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+            `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
           requestedAt,
           requiredAt,
         },

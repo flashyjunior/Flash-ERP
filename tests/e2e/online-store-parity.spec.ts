@@ -922,7 +922,7 @@ test.describe("online store desktop parity", () => {
         .locator(".rms-receipt-drawer .rms-list-row")
         .filter({ hasText: savedOrder.orderNo })
         .first();
-      await expect(fulfilledOrderRow).toContainText("FULFILLED");
+      await expect(fulfilledOrderRow).toHaveCount(0);
       await closeActiveDrawer(page);
 
       await openWorkspace(page, "Inventory");

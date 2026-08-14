@@ -7,6 +7,7 @@
     "build": "prisma generate --schema ../../prisma/schema.prisma && next build",
     "build:deploy": "node ../../scripts/build-enterprise-web-deploy.mjs",
     "start": "node ../../scripts/start-enterprise-web.mjs",
+    "start:cluster": "node ../../scripts/start-enterprise-web-cluster.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -21,6 +22,8 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.8.1",
+    "redis": "^5.12.1",
+    "sanitize-html": "^2.17.6",
     "tailwind-merge": "^3.3.1",
     "tinymce": "^8.4.0",
     "write-excel-file": "^4.1.1"
@@ -31,6 +34,7 @@
     "@types/nodemailer": "^8.0.0",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
+    "@types/sanitize-html": "^2.16.1",
     "postcss": "^8.5.6",
     "tailwindcss": "4.2.1",
     "typescript": "^5.9.3"

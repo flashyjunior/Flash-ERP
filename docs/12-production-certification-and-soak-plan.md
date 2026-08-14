@@ -24,6 +24,7 @@ npm run cert:security-providers
 npm run cert:hardware-execution
 npm run acceptance:functional-uat
 npm run cert:database-readiness
+npm run acceptance:capacity-hardening
 npm run acceptance:production-hardening
 npm run e2e:certification
 npm run typecheck
@@ -31,6 +32,8 @@ npm run build
 ```
 
 `npm run acceptance:rms` proves seeded HQ data depth and advanced promotion scenarios. `npm run smoke:desktop` checks packaged-runtime readiness. `npm run soak:desktop` checks release, support, updater, tray sync, and runtime diagnostics coverage. `npm run cert:hardware` checks that printer, scanner, drawer, and peripheral certification anchors remain wired. `npm run acceptance:parity` checks that the committed parity matrix, security hardening, external-service validation, and production-readiness artifacts are present. `npm run acceptance:sync-hardening` checks sync run id correlation, retry windows, invalid acknowledgement rejection, upstream transport failure handling, and downstream redelivery backoff. `npm run acceptance:desktop-stability` checks sign-in stall protection, renderer watchdog status, stale heartbeat recovery, persisted maximize/resize posture, and black-screen recovery wiring. `npm run acceptance:e2e` checks the repository anchors for MFA sign-in, step-up verification, security alerts, and desktop open/close/checkout/sync journeys. `npm run acceptance:sync-chaos` checks the interruption, duplicate resend, stale version, wrong-node ACK, dead-letter, replay, resend, and reconciliation evidence anchors. `npm run cert:installed-soak` checks that the installed-desktop trading-day soak evidence pack remains wired to packaged runtime, support logs, tray sync, watchdog, and recovery behavior. `npm run cert:security-providers` checks LDAP, SMTP, SMS, MFA, step-up, lockout, unlock, and alert-escalation certification anchors. `npm run cert:hardware-execution` checks the physical hardware execution evidence anchors for printers, scanners, drawer, payment terminal, display, and scale workflows. `npm run acceptance:functional-uat` checks the business UAT scripts for sale-to-GL, returns, EOD, receiving, stock count, transfers, settings sync, and security journeys. `npm run cert:database-readiness` checks the live enterprise database for the migrations, tables, and columns required by this build before HQ or desktop sync run. `npm run acceptance:production-hardening` runs those hardening gates together. `npm run e2e:certification` runs the live Playwright browser and Electron workflows when the required `FLASH_ERP_E2E_*` environment values are provided.
+
+`npm run acceptance:capacity-hardening` checks that the shared enterprise cache, request correlation, SQL pool controls, overload protection, runtime telemetry, load runner, and capacity plan remain wired. It is a code gate, not a 200-user certificate. The live certification procedure and workload matrix are in `docs/16-enterprise-capacity-and-performance-plan.md`.
 
 Record command output, screenshots, traces, and any manual exceptions in `docs/14-uat-evidence-log.md`.
 

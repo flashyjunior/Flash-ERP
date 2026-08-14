@@ -8,6 +8,7 @@ import {
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
   inventoryBatchDaysUntilExpiry,
+  normalizeLayawaySettings,
   InterStoreTransferOrigin,
   InterStoreTransferStatus,
   InventoryMovementType,
@@ -949,6 +950,53 @@ function readOnlinePosDiscountRates(value: Prisma.JsonValue | null | undefined) 
   return rates;
 }
 
+function resolveOnlineTransferUom(
+  product: {
+    unitOfMeasure: string;
+    baseUnitOfMeasure: { code: string } | null;
+    uomSchedule: {
+      baseUnitOfMeasure: { code: string };
+      lines: Array<{
+        conversionFactor: Prisma.Decimal;
+        unitOfMeasure: { code: string };
+      }>;
+    } | null;
+  },
+  enteredQuantity: number,
+  enteredUnitOfMeasure?: string | null
+) {
+  const baseUnitOfMeasure = (
+    product.baseUnitOfMeasure?.code ??
+    product.uomSchedule?.baseUnitOfMeasure.code ??
+    product.unitOfMeasure ??
+    "EA"
+  ).trim().toUpperCase();
+  const requestedUnitOfMeasure = (
+    enteredUnitOfMeasure?.trim() || product.unitOfMeasure || baseUnitOfMeasure
+  ).toUpperCase();
+  const scheduleLine = product.uomSchedule?.lines.find(
+    (line) => line.unitOfMeasure.code.toUpperCase() === requestedUnitOfMeasure
+  );
+  const uomConversionFactor =
+    requestedUnitOfMeasure === baseUnitOfMeasure
+      ? 1
+      : Number(scheduleLine?.conversionFactor ?? Number.NaN);
+
+  if (!Number.isFinite(uomConversionFactor) || uomConversionFactor <= 0) {
+    throw new Error(
+      `Unit ${requestedUnitOfMeasure} is not configured on this product's UOM schedule.`
+    );
+  }
+
+  return {
+    requestedUnitOfMeasure,
+    requestedUnitQuantity: Number(enteredQuantity.toFixed(3)),
+    uomConversionFactor: Number(uomConversionFactor.toFixed(6)),
+    baseUnitOfMeasure,
+    baseQuantity: Number((enteredQuantity * uomConversionFactor).toFixed(3))
+  };
+}
+
 function readOnlinePosExpressChargeRates(value: Prisma.JsonValue | null | undefined) {
   const payload = readJsonObject(value);
   const rawRates = Array.isArray(payload.posExpressChargeRates)
@@ -1096,7 +1144,8 @@ const defaultOnlineOptionSettings = {
   expiryCriticalDays: 7,
   productSizes: [] as string[],
   posDiscountRates: [] as number[],
-  posExpressChargeRates: [] as number[]
+  posExpressChargeRates: [] as number[],
+  layawaySettings: normalizeLayawaySettings(null)
 };
 
 const defaultOnlineSalesOrderRouting = {
@@ -1874,6 +1923,7 @@ export type OnlineStoreWorkspaceData = {
     loginId: string;
   };
   capabilities: {
+    canAccessEcommerceConsole: boolean;
     hasFuelOperationsVisibility: boolean;
     canManageFuelTanks: boolean;
     canCaptureFuelDips: boolean;
@@ -1932,6 +1982,7 @@ export type OnlineStoreWorkspaceData = {
     productSizes: string[];
     posDiscountRates: number[];
     posExpressChargeRates: number[];
+    layawaySettings: ReturnType<typeof normalizeLayawaySettings>;
   };
   salesOrderRouting: {
     fulfilmentStoreId: string | null;
@@ -2001,6 +2052,15 @@ export type OnlineStoreWorkspaceData = {
     productName: string;
     productType: string;
     unitOfMeasure: string;
+    baseUnitOfMeasure: string;
+    uomConversions: Array<{
+      uomCode: string;
+      uomName: string;
+      conversionFactor: number;
+      isBaseUnit: boolean;
+      allowSale: boolean;
+      allowPurchase: boolean;
+    }>;
     price: number;
     unitCost: number | null;
     department: string | null;
@@ -2629,6 +2689,9 @@ const emptyOnlineStoreCollections = {
 
 function mapOnlineStoreCapabilities(capabilities: ReturnType<typeof deriveRetailUserCapabilities>) {
   return {
+    canAccessEcommerceConsole: capabilities.normalizedPermissionCodes.includes(
+      "ecommerce.console.access"
+    ),
     hasFuelOperationsVisibility: capabilities.hasFuelOperationsVisibility,
     canManageFuelTanks: capabilities.canManageFuelTanks,
     canCaptureFuelDips: capabilities.canCaptureFuelDips,
@@ -3316,6 +3379,155 @@ async function prepareOnlinePayments(
   };
 }
 
+export async function getOnlineStorePendingSalesOrders(): Promise<
+  OnlineStoreWorkspaceData["salesOrders"]
+> {
+  const assignment = await getOnlineStoreAssignment({ redirectOnMissingSession: false });
+
+  if (!assignment.user?.homeStore) {
+    throw new Error("Assign your user profile to a home store before refreshing pending orders.");
+  }
+
+  if (!assignment.store) {
+    throw new Error("Your home store must be an Online Store before refreshing pending orders.");
+  }
+
+  const currentStoreId = assignment.store.id;
+  const fulfilmentStoreId = readOnlineSalesOrderFulfilmentStoreId(
+    assignment.store.retailOrg.companySettingsJson
+  );
+  const isSalesOrderFulfilmentStore = fulfilmentStoreId === currentStoreId;
+  const orders = await prisma.salesOrder.findMany({
+    where: {
+      retailOrgId: assignment.session.retailOrgId,
+      status: SalesOrderStatus.OPEN,
+      AND: [
+        {
+          OR: [
+            { storeId: currentStoreId },
+            ...(isSalesOrderFulfilmentStore
+              ? [{ storeId: { not: currentStoreId } }]
+              : [])
+          ]
+        },
+        {
+          OR: [
+            { ecommerceOrder: { is: null } },
+            { ecommerceOrder: { is: { status: { not: "PLACED" } } } }
+          ]
+        }
+      ]
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    take: isSalesOrderFulfilmentStore ? 100 : 30,
+    select: {
+      id: true,
+      orderNo: true,
+      sourceTransactionId: true,
+      sourceTransactionNo: true,
+      customerId: true,
+      customerNoSnapshot: true,
+      customerNameSnapshot: true,
+      status: true,
+      totalAmount: true,
+      depositAmount: true,
+      balanceAmount: true,
+      depositTenderMethodCodeSnapshot: true,
+      depositTenderMethodNameSnapshot: true,
+      depositPaymentMethodSnapshot: true,
+      depositReference: true,
+      depositPaidAt: true,
+      operatorName: true,
+      note: true,
+      fulfilledTransactionNo: true,
+      createdAt: true,
+      fulfilledAt: true,
+      cancelledAt: true,
+      store: { select: { id: true, code: true, name: true } }
+    }
+  });
+  const sourceTransactionIds = orders.map((order) => order.sourceTransactionId);
+  const sourceLines = sourceTransactionIds.length
+    ? await prisma.posTransactionLine.findMany({
+        where: { posTransactionId: { in: sourceTransactionIds } },
+        orderBy: { createdAt: "asc" },
+        select: {
+          posTransactionId: true,
+          productId: true,
+          productCodeSnapshot: true,
+          productNameSnapshot: true,
+          variantSizeSnapshot: true,
+          variantColorSnapshot: true,
+          quantity: true,
+          unitPrice: true,
+          discountAmount: true,
+          appliedPromotionNameSnapshot: true,
+          taxAmount: true,
+          lineTotal: true,
+          lineNote: true
+        }
+      })
+    : [];
+  const linesByTransactionId = new Map<
+    string,
+    OnlineStoreWorkspaceData["salesOrders"][number]["lines"]
+  >();
+
+  for (const line of sourceLines) {
+    const lines = linesByTransactionId.get(line.posTransactionId) ?? [];
+    lines.push({
+      productId: line.productId,
+      productCode: line.productCodeSnapshot,
+      productName: line.productNameSnapshot,
+      variantSize: line.variantSizeSnapshot,
+      variantColor: line.variantColorSnapshot,
+      lineNote: line.lineNote,
+      quantity: Number(line.quantity),
+      unitPrice: Number(line.unitPrice),
+      discountAmount: Number(line.discountAmount),
+      taxAmount: Number(line.taxAmount),
+      lineTotal: Number(line.lineTotal),
+      appliedPromotionName: line.appliedPromotionNameSnapshot
+    });
+    linesByTransactionId.set(line.posTransactionId, lines);
+  }
+
+  return orders.map((order) => {
+    const lines = linesByTransactionId.get(order.sourceTransactionId) ?? [];
+    return {
+      orderId: order.id,
+      orderNo: order.orderNo,
+      sourceTransactionId: order.sourceTransactionId,
+      sourceTransactionNo: order.sourceTransactionNo,
+      customerId: order.customerId,
+      customerNo: order.customerNoSnapshot,
+      customerName: order.customerNameSnapshot ?? "Customer",
+      originStoreId: order.store.id,
+      originStoreCode: order.store.code,
+      originStoreName: order.store.name,
+      isFulfilmentOrder: isSalesOrderFulfilmentStore && order.store.id !== currentStoreId,
+      status: order.status,
+      totalAmount: Number(order.totalAmount),
+      depositAmount: Number(order.depositAmount),
+      balanceAmount: Number(order.balanceAmount),
+      depositTenderMethodCode: order.depositTenderMethodCodeSnapshot,
+      depositTenderMethodName: order.depositTenderMethodNameSnapshot,
+      depositPaymentMethod: order.depositPaymentMethodSnapshot,
+      depositReference: order.depositReference,
+      depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+      itemCount: toQuantity(lines.reduce((sum, line) => sum + line.quantity, 0)),
+      lineCount: lines.length,
+      operatorName: order.operatorName,
+      note: order.note,
+      fulfilledTransactionNo: order.fulfilledTransactionNo,
+      createdAt: order.createdAt.toISOString(),
+      fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
+      cancelledAt: order.cancelledAt?.toISOString() ?? null,
+      lines
+    };
+  });
+}
+
 export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceData> {
   await Promise.all([
     ensureInventoryLocationSalesOrderSchemaCompatibility(),
@@ -3420,6 +3632,9 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     posDiscountRates: readOnlinePosDiscountRates(assignment.store.retailOrg.companySettingsJson),
     posExpressChargeRates: readOnlinePosExpressChargeRates(
       assignment.store.retailOrg.companySettingsJson
+    ),
+    layawaySettings: normalizeLayawaySettings(
+      readJsonObject(assignment.store.retailOrg.companySettingsJson).layawaySettings
     )
   };
   const salesOrderFulfilmentStoreId = readOnlineSalesOrderFulfilmentStoreId(
@@ -3490,6 +3705,22 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         category: true,
         primaryImageUrl: true,
         unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
+          select: {
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              orderBy: [{ isBaseUnit: "desc" }, { sortOrder: "asc" }],
+              select: {
+                conversionFactor: true,
+                isBaseUnit: true,
+                allowSale: true,
+                allowPurchase: true,
+                unitOfMeasure: { select: { code: true, name: true } },
+              },
+            },
+          },
+        },
         baseUnitPrice: true,
         baseCostPrice: true,
         storeProductPrices: {
@@ -3772,18 +4003,28 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     prisma.salesOrder.findMany({
       where: {
         retailOrgId: assignment.session.retailOrgId,
-        OR: [
-          { storeId: assignment.store.id },
-          ...(isSalesOrderFulfilmentStore
-            ? [
-                {
-                  storeId: {
-                    not: assignment.store.id
-                  },
-                  status: SalesOrderStatus.OPEN
-                }
-              ]
-            : [])
+        AND: [
+          {
+            OR: [
+              { storeId: assignment.store.id },
+              ...(isSalesOrderFulfilmentStore
+                ? [
+                    {
+                      storeId: {
+                        not: assignment.store.id
+                      },
+                      status: SalesOrderStatus.OPEN
+                    }
+                  ]
+                : [])
+            ]
+          },
+          {
+            OR: [
+              { ecommerceOrder: { is: null } },
+              { ecommerceOrder: { is: { status: { not: "PLACED" } } } }
+            ]
+          }
         ]
       },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
@@ -4555,6 +4796,19 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       productName: product.name,
       productType: product.productType,
       unitOfMeasure: product.unitOfMeasure,
+      baseUnitOfMeasure:
+        product.baseUnitOfMeasure?.code ??
+        product.uomSchedule?.baseUnitOfMeasure.code ??
+        product.unitOfMeasure,
+      uomConversions:
+        product.uomSchedule?.lines.map((line) => ({
+          uomCode: line.unitOfMeasure.code,
+          uomName: line.unitOfMeasure.name,
+          conversionFactor: Number(line.conversionFactor),
+          isBaseUnit: line.isBaseUnit,
+          allowSale: line.allowSale,
+          allowPurchase: line.allowPurchase,
+        })) ?? [],
       price: product.productType === "MATRIX" ? matrixPrice : productPrice,
       unitCost: product.baseCostPrice === null ? null : Number(product.baseCostPrice),
       department: product.department,
@@ -5206,6 +5460,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       productName: product.productName,
       productType: product.productType,
       unitOfMeasure: product.unitOfMeasure,
+      baseUnitOfMeasure: product.baseUnitOfMeasure,
+      uomConversions: product.uomConversions,
       price: product.price,
       unitCost: product.unitCost,
       department: product.department,
@@ -6309,6 +6565,7 @@ export type CreateOnlineStoreTransferRequest = {
   lines?: Array<{
     productId: string;
     quantity: number;
+    unitOfMeasure?: string | null;
   }> | null;
   externalReference?: string | null;
   requiredAt?: string | null;
@@ -7362,7 +7619,13 @@ async function completeOnlineStoreParkedTransaction(
               unitOfMeasure: true,
               baseCostPrice: true,
               trackInventory: true,
-              trackExpiry: true
+              trackExpiry: true,
+              taxProfile: {
+                select: {
+                  ratePercent: true,
+                  isTaxInclusive: true
+                }
+              }
             }
           }
         }
@@ -7374,14 +7637,11 @@ async function completeOnlineStoreParkedTransaction(
     throw new Error("Flash ERP could not find that held sale or open sales order basket.");
   }
 
+  const promotions = await getOnlinePromotionPolicies(tx, session.retailOrgId);
   const promotionPolicyByCode = new Map(
-    sourceTransaction.lines.some((line) => line.appliedPromotionCodeSnapshot)
-      ? (await getOnlinePromotionPolicies(tx, session.retailOrgId)).map(
-          (promotion) => [promotion.promotionCode, promotion] as const
-        )
-      : []
+    promotions.map((promotion) => [promotion.promotionCode, promotion] as const)
   );
-  const preparedLines = sourceTransaction.lines.map((line) => ({
+  const persistedLines = sourceTransaction.lines.map((line) => ({
     product: {
       id: line.productId,
       code: line.product.code ?? line.productCodeSnapshot,
@@ -7395,7 +7655,8 @@ async function completeOnlineStoreParkedTransaction(
       unitOfMeasure: line.product.unitOfMeasure,
       baseCostPrice: line.product.baseCostPrice,
       trackInventory: line.product.trackInventory,
-      trackExpiry: line.product.trackExpiry
+      trackExpiry: line.product.trackExpiry,
+      taxProfile: line.product.taxProfile
     },
     sourceLineId: line.id,
     productVariant: line.productVariant,
@@ -7415,13 +7676,22 @@ async function completeOnlineStoreParkedTransaction(
         : promotionPolicyByCode.get(line.appliedPromotionCodeSnapshot)?.allowWithLoyalty ?? true,
     taxAmount: Number(line.taxAmount),
     lineTotal: Number(line.lineTotal),
-    lineNote: line.lineNote ?? null
+    lineNote: line.lineNote ?? null,
+    skipAutomaticPromotion:
+      Number(line.discountAmount) > 0 || Boolean(line.appliedPromotionCodeSnapshot)
   }));
   const sourceCustomer = await findOnlineStoreCustomer(
     tx,
     session.retailOrgId,
     sourceTransaction.customerId
   );
+  const preparedLines = applyOnlineAutomaticPromotions({
+    lines: persistedLines,
+    promotions,
+    storeCode: store.code,
+    customer: sourceCustomer
+  });
+  const sourceTotals = summarizeOnlineStoreSaleLines(preparedLines);
   const salesLocation = await resolveOnlineStoreLocation({
     retailOrgId: session.retailOrgId,
     storeId: store.id,
@@ -7512,12 +7782,12 @@ async function completeOnlineStoreParkedTransaction(
   });
   const loyaltyRedemption = resolveOnlineLoyaltyRedemption({
     customer: sourceCustomer,
-    totalAmount: Number(sourceTransaction.totalAmount),
+    totalAmount: sourceTotals.totalAmount,
     loyaltyPolicy,
     requestedPoints: input.loyaltyPointsRedeemed,
     requestedAmount: input.loyaltyRedemptionAmount
   });
-  const payableTotalAmount = toMoney(Number(sourceTransaction.totalAmount) - loyaltyRedemption.amount);
+  const payableTotalAmount = toMoney(sourceTotals.totalAmount - loyaltyRedemption.amount);
   const depositCreditAmount = openSalesOrder
     ? Math.min(Number(openSalesOrder.depositAmount), payableTotalAmount)
     : 0;
@@ -7575,6 +7845,9 @@ async function completeOnlineStoreParkedTransaction(
       transactionNo,
       status: PosTransactionStatus.COMPLETED,
       cashierCodeSnapshot: user.loginId,
+      subtotalAmount: sourceTotals.subtotalAmount,
+      discountAmount: sourceTotals.discountAmount,
+      taxAmount: sourceTotals.taxAmount,
       paidAmount,
       changeAmount: preparedPayments.changeAmount,
       totalAmount: payableTotalAmount,
@@ -7599,6 +7872,56 @@ async function completeOnlineStoreParkedTransaction(
       completedAt: true
     }
   });
+
+  const updatedSalesOrderLineIds = new Set<string>();
+
+  for (const line of preparedLines) {
+    await tx.posTransactionLine.update({
+      where: { id: line.sourceLineId },
+      data: {
+        discountAmount: line.discountAmount,
+        taxAmount: line.taxAmount,
+        lineTotal: line.lineTotal,
+        appliedPromotionCodeSnapshot: line.appliedPromotionCode,
+        appliedPromotionNameSnapshot: line.appliedPromotionName
+      }
+    });
+
+    if (!openSalesOrder) {
+      continue;
+    }
+
+    const salesOrderLine = await tx.salesOrderLine.findFirst({
+      where: {
+        salesOrderId: openSalesOrder.id,
+        ...(updatedSalesOrderLineIds.size > 0
+          ? { id: { notIn: [...updatedSalesOrderLineIds] } }
+          : {}),
+        productCodeSnapshot: line.productCodeSnapshot,
+        productVariantCodeSnapshot: line.productVariant?.code ?? null,
+        variantSizeSnapshot: line.variantSize,
+        variantColorSnapshot: line.variantColor,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice
+      },
+      orderBy: { id: "asc" },
+      select: { id: true }
+    });
+
+    if (salesOrderLine) {
+      updatedSalesOrderLineIds.add(salesOrderLine.id);
+      await tx.salesOrderLine.update({
+        where: { id: salesOrderLine.id },
+        data: {
+          discountAmount: line.discountAmount,
+          taxAmount: line.taxAmount,
+          lineTotal: line.lineTotal,
+          appliedPromotionCode: line.appliedPromotionCode,
+          appliedPromotionName: line.appliedPromotionName
+        }
+      });
+    }
+  }
 
   await tx.posTransactionLine.updateMany({
     where: {
@@ -7738,6 +8061,7 @@ async function completeOnlineStoreParkedTransaction(
       },
       data: {
         status: SalesOrderStatus.FULFILLED,
+        totalAmount: sourceTotals.totalAmount,
         balanceAmount: 0,
         fulfilledTransactionId: transaction.id,
         fulfilledTransactionNo: transaction.transactionNo,
@@ -13213,7 +13537,8 @@ export async function createOnlineStoreTransferRequest(
         : [];
   const preparedLineInputs = lineInputs.map((line) => ({
     productId: optionalText(line.productId),
-    quantity: normalizeQuantity(line.quantity)
+    quantity: normalizeQuantity(line.quantity),
+    unitOfMeasure: optionalText(line.unitOfMeasure)
   }));
   const productIds = [...new Set(preparedLineInputs.map((line) => line.productId).filter((value): value is string => Boolean(value)))];
 
@@ -13271,7 +13596,20 @@ export async function createOnlineStoreTransferRequest(
         department: true,
         category: true,
         subcategory: true,
-        baseCostPrice: true
+        baseCostPrice: true,
+        unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
+          select: {
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              select: {
+                conversionFactor: true,
+                unitOfMeasure: { select: { code: true } }
+              }
+            }
+          }
+        }
       }
     }),
     resolveOnlineStoreLocation({
@@ -13309,6 +13647,12 @@ export async function createOnlineStoreTransferRequest(
         throw new Error("Choose active products for every transfer request line.");
       }
 
+      const transferUom = resolveOnlineTransferUom(
+        product,
+        lineInput.quantity,
+        lineInput.unitOfMeasure
+      );
+
       const transferNo = `${transferBatchNo}-${index + 1}`;
       const transfer = await tx.interStoreTransfer.create({
         data: {
@@ -13325,7 +13669,11 @@ export async function createOnlineStoreTransferRequest(
           workflowType: isFuelTransferProduct(product) ? "FUEL_TRANSFER" : null,
           origin: InterStoreTransferOrigin.STORE_REQUEST,
           status: InterStoreTransferStatus.REQUESTED,
-          requestedQuantity: lineInput.quantity,
+          requestedQuantity: transferUom.baseQuantity,
+          requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+          requestedUnitQuantity: transferUom.requestedUnitQuantity,
+          uomConversionFactor: transferUom.uomConversionFactor,
+          baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
           unitCost: product.baseCostPrice ? Number(product.baseCostPrice) : null,
           transporterName: optionalText(input.transporterName),
           vehicleRegistrationNo: optionalText(input.vehicleRegistrationNo),

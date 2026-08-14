@@ -40,6 +40,7 @@ type CompanySettingsTab =
   | "discounts"
   | "express-charges"
   | "sales-orders"
+  | "layaway"
   | "options"
   | "sms";
 
@@ -370,6 +371,7 @@ const companySettingsTabs: Array<{ key: CompanySettingsTab; label: string }> = [
   { key: "discounts", label: "POS discounts" },
   { key: "express-charges", label: "Express charges" },
   { key: "sales-orders", label: "Sales orders" },
+  { key: "layaway", label: "Layaway" },
   { key: "options", label: "Options" },
   { key: "sms", label: "Sale SMS" }
 ];
@@ -1297,6 +1299,140 @@ export function EnterpriseSettingsWorkspace({
                       ))}
                     </select>
                   </label>
+                </div>
+              </SettingsFormCard>
+            ) : null}
+
+            {companyTab === "layaway" ? (
+              <SettingsFormCard
+                actionLabel="Save layaway policy"
+                actionToneClassName="bg-[linear-gradient(135deg,var(--brand),var(--brand-deep))]"
+                mutationState={companyState}
+                onSave={() =>
+                  void saveSection(
+                    "/api/settings/company-profile",
+                    companyDraft,
+                    setCompanyState,
+                    () => router.refresh(),
+                    "Flash ERP could not update the layaway policy."
+                  )
+                }
+                title="Layaway policy"
+              >
+                <div className="grid gap-2 md:grid-cols-2">
+                  <Check
+                    checked={companyDraft.layawaySettings.enabled}
+                    label="Enable layaway"
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: { ...current.layawaySettings, enabled: value }
+                      }))
+                    }
+                  />
+                  <Check
+                    checked={companyDraft.layawaySettings.reserveStockOnDeposit}
+                    label="Reserve stock when deposit is accepted"
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: {
+                          ...current.layawaySettings,
+                          reserveStockOnDeposit: value
+                        }
+                      }))
+                    }
+                  />
+                  <Check
+                    checked={companyDraft.layawaySettings.requireFullPaymentBeforeFulfilment}
+                    label="Require full payment before fulfilment"
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: {
+                          ...current.layawaySettings,
+                          requireFullPaymentBeforeFulfilment: value
+                        }
+                      }))
+                    }
+                  />
+                  <Check
+                    checked={companyDraft.layawaySettings.refundPaymentsOnCancellation}
+                    label="Refund payments on cancellation"
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: {
+                          ...current.layawaySettings,
+                          refundPaymentsOnCancellation: value
+                        }
+                      }))
+                    }
+                  />
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
+                  <Field
+                    label="Minimum deposit (%)"
+                    max={100}
+                    min={0}
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: {
+                          ...current.layawaySettings,
+                          minimumDepositPercent: Number(value)
+                        }
+                      }))
+                    }
+                    step={0.01}
+                    type="number"
+                    value={companyDraft.layawaySettings.minimumDepositPercent}
+                  />
+                  <SelectField
+                    disabled={!companyDraft.layawaySettings.refundPaymentsOnCancellation}
+                    label="Cancellation fee method"
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: {
+                          ...current.layawaySettings,
+                          cancellationFeeType:
+                            value === "FIXED_AMOUNT" ? "FIXED_AMOUNT" : "PERCENTAGE"
+                        }
+                      }))
+                    }
+                    options={[
+                      { label: "Percentage of payments", value: "PERCENTAGE" },
+                      { label: "Fixed amount", value: "FIXED_AMOUNT" }
+                    ]}
+                    value={companyDraft.layawaySettings.cancellationFeeType}
+                  />
+                  <Field
+                    disabled={!companyDraft.layawaySettings.refundPaymentsOnCancellation}
+                    label={
+                      companyDraft.layawaySettings.cancellationFeeType === "PERCENTAGE"
+                        ? "Cancellation fee (%)"
+                        : `Cancellation fee (${companyDraft.baseCurrencyCode})`
+                    }
+                    max={
+                      companyDraft.layawaySettings.cancellationFeeType === "PERCENTAGE"
+                        ? 100
+                        : undefined
+                    }
+                    min={0}
+                    onChange={(value) =>
+                      setCompanyDraft((current) => ({
+                        ...current,
+                        layawaySettings: {
+                          ...current.layawaySettings,
+                          cancellationFeeValue: Number(value)
+                        }
+                      }))
+                    }
+                    step={0.01}
+                    type="number"
+                    value={companyDraft.layawaySettings.cancellationFeeValue}
+                  />
                 </div>
               </SettingsFormCard>
             ) : null}

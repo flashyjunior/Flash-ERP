@@ -49,6 +49,10 @@ export async function POST(
           : null,
       productCode: payload.productCode.trim(),
       quantity,
+      unitOfMeasure:
+        typeof payload.unitOfMeasure === "string"
+          ? payload.unitOfMeasure.trim()
+          : undefined,
       externalReference:
         typeof payload.externalReference === "string" ? payload.externalReference : undefined,
       note: typeof payload.note === "string" ? payload.note : undefined,

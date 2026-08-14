@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { readJsonStringArray, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
+import { invalidateEnterpriseReadCache } from "@/server/performance/enterprise-read-cache";
 import {
   CustomerType,
   PromotionDiscountType,
@@ -689,7 +690,7 @@ export async function createEnterprisePromotion(
   const normalized = normalizePromotionInput(input);
 
   try {
-    return await prisma.$transaction(async (tx) => {
+    const response = await prisma.$transaction(async (tx) => {
       const enterpriseNode = await getWritableEnterpriseNode(tx);
 
       await tx.promotionCampaign.create({
@@ -733,6 +734,9 @@ export async function createEnterprisePromotion(
         serverProcessedAt: new Date().toISOString()
       };
     });
+    invalidateEnterpriseReadCache("ecommerce:promotions:");
+    invalidateEnterpriseReadCache("ecommerce:storefront:");
+    return response;
   } catch (error) {
     throw toPromotionMutationError(error, "Flash ERP could not create that promotion.");
   }
@@ -749,7 +753,7 @@ export async function updateEnterprisePromotion(
   });
 
   try {
-    return await prisma.$transaction(async (tx) => {
+    const response = await prisma.$transaction(async (tx) => {
       const enterpriseNode = await getWritableEnterpriseNode(tx);
       const promotion = await tx.promotionCampaign.findFirst({
         where: {
@@ -810,6 +814,9 @@ export async function updateEnterprisePromotion(
         serverProcessedAt: new Date().toISOString()
       };
     });
+    invalidateEnterpriseReadCache("ecommerce:promotions:");
+    invalidateEnterpriseReadCache("ecommerce:storefront:");
+    return response;
   } catch (error) {
     throw toPromotionMutationError(error, "Flash ERP could not update that promotion.");
   }

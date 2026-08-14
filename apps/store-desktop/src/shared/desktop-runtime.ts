@@ -12,6 +12,7 @@ import type {
   SyncPromotionDiscountType,
   SyncPromotionTargetScope
 } from "@flash-erp/sync-core";
+import type { LayawaySettings } from "@flash-erp/domain";
 
 export type StoreInventoryBatchAllocation = InventoryBatchAllocationPayload;
 
@@ -354,6 +355,59 @@ export function computeNextStoreSyncAt(input: {
   const next = new Date(safeBaseAt.getTime() + delayMs + jitterMs);
 
   return applyActiveWindow(next, policy).toISOString();
+}
+
+export function resolveInventoryTransferUom(input: {
+  enteredQuantity: number;
+  requestedUnitOfMeasure?: string | null;
+  unitOfMeasure?: string | null;
+  baseUnitOfMeasure?: string | null;
+  uomConversions?: StoreCatalogBrowseItem["uomConversions"];
+}) {
+  const requestedUnitQuantity = Number(Number(input.enteredQuantity).toFixed(3));
+  if (!Number.isFinite(requestedUnitQuantity) || requestedUnitQuantity <= 0) {
+    throw new Error("Enter a transfer quantity greater than zero.");
+  }
+
+  const baseUnitOfMeasure = (
+    input.baseUnitOfMeasure?.trim() ||
+    input.unitOfMeasure?.trim() ||
+    "EA"
+  ).toUpperCase();
+  const requestedUnitOfMeasure = (
+    input.requestedUnitOfMeasure?.trim() ||
+    input.unitOfMeasure?.trim() ||
+    baseUnitOfMeasure
+  ).toUpperCase();
+  const conversion = (input.uomConversions ?? []).find(
+    (item) => item.uomCode.trim().toUpperCase() === requestedUnitOfMeasure,
+  );
+
+  if (!conversion && requestedUnitOfMeasure !== baseUnitOfMeasure) {
+    throw new Error(
+      `Unit ${requestedUnitOfMeasure} is not configured for this product. Pull the latest product setup and try again.`,
+    );
+  }
+
+  const uomConversionFactor =
+    requestedUnitOfMeasure === baseUnitOfMeasure
+      ? 1
+      : Number(conversion?.conversionFactor ?? 0);
+  if (!Number.isFinite(uomConversionFactor) || uomConversionFactor <= 0) {
+    throw new Error(
+      `Unit ${requestedUnitOfMeasure} has an invalid base-unit conversion.`,
+    );
+  }
+
+  return {
+    requestedUnitOfMeasure,
+    requestedUnitQuantity,
+    uomConversionFactor: Number(uomConversionFactor.toFixed(6)),
+    baseUnitOfMeasure,
+    baseQuantity: Number(
+      (requestedUnitQuantity * uomConversionFactor).toFixed(3),
+    ),
+  };
 }
 
 export type StoreSyncRunOptions = {
@@ -956,6 +1010,15 @@ export type StoreCatalogBrowseItem = {
   categoryName: string | null;
   subcategory: string | null;
   unitOfMeasure?: string;
+  baseUnitOfMeasure?: string;
+  uomConversions?: Array<{
+    uomCode: string;
+    uomName: string;
+    conversionFactor: number;
+    isBaseUnit: boolean;
+    allowSale: boolean;
+    allowPurchase: boolean;
+  }>;
   taxable?: boolean;
   taxProfileCode?: string | null;
   trackInventory?: boolean;
@@ -1345,6 +1408,10 @@ export type StoreInterStoreTransferSummary = {
   isSerialized: boolean;
   trackExpiry: boolean;
   requestedQuantity: number;
+  requestedUnitOfMeasure: string;
+  requestedUnitQuantity: number;
+  uomConversionFactor: number;
+  baseUnitOfMeasure: string;
   issuedQuantity: number;
   receivedQuantity: number;
   outstandingIssueQuantity: number;
@@ -1419,6 +1486,10 @@ export type StoreInterStoreTransferRequestDraftSummary = {
   subcategory: string | null;
   isSerialized: boolean;
   quantity: number;
+  requestedUnitOfMeasure: string;
+  requestedUnitQuantity: number;
+  uomConversionFactor: number;
+  baseUnitOfMeasure: string;
   externalReference: string | null;
   note: string | null;
   operatorName: string;
@@ -1431,6 +1502,7 @@ export type StoreInterStoreTransferRequestDraftInput = {
   destinationLocationCode: string;
   productCode: string;
   quantity: number;
+  unitOfMeasure?: string | null;
   externalReference?: string | null;
   note?: string | null;
   operatorName?: string;
@@ -1631,6 +1703,7 @@ export type StoreOptionSettingsSummary = {
   productSizes: string[];
   posDiscountRates: number[];
   posExpressChargeRates: number[];
+  layawaySettings: LayawaySettings;
 };
 
 export type StoreReceiptSettingsSummary = {
@@ -2059,6 +2132,7 @@ export type StoreStandaloneSettingsInput = {
   productSizes?: string[] | null;
   posDiscountRates?: number[] | null;
   posExpressChargeRates?: number[] | null;
+  layawaySettings?: Partial<LayawaySettings> | null;
   companyLogoUrl?: string | null;
   loginBackgroundImageUrl?: string | null;
   receiptHeader?: string | null;

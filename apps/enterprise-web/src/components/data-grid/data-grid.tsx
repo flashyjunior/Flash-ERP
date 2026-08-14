@@ -39,6 +39,8 @@ import {
 
 import { cn } from "@/lib/utils/cn";
 
+const numberFormatter = new Intl.NumberFormat("en-US");
+
 type GridColumnMeta = {
   headerClassName?: string;
   cellClassName?: string;
@@ -62,6 +64,16 @@ type SharedDataGridProps<TData> = {
   exportFileName?: string;
   getRowHref?: (row: TData) => string | null;
   onRowSelect?: (row: TData) => void;
+  serverPagination?: {
+    page: number;
+    pageSize: number;
+    totalRows: number;
+    totalPages: number;
+    searchValue: string;
+    onPageChange: (page: number) => void;
+    onPageSizeChange: (pageSize: number) => void;
+    onSearchChange: (searchValue: string) => void;
+  };
 };
 
 type GridRowAction = {
@@ -239,7 +251,8 @@ export function SharedDataGrid<TData>({
   toolbarActions,
   exportFileName = "grid-export",
   getRowHref,
-  onRowSelect
+  onRowSelect,
+  serverPagination
 }: SharedDataGridProps<TData>) {
   const router = useRouter();
   const columnPanelRef = useRef<HTMLDivElement | null>(null);
@@ -254,26 +267,71 @@ export function SharedDataGrid<TData>({
   const [searchValue, setSearchValue] = useState(initialSearchValue);
   const [isColumnPanelOpen, setIsColumnPanelOpen] = useState(false);
   const deferredSearchValue = useDeferredValue(searchValue);
+  const serverSearchValue = serverPagination?.searchValue;
+  const onServerSearchChange = serverPagination?.onSearchChange;
+  const effectivePagination = serverPagination
+    ? {
+        pageIndex: Math.max(0, serverPagination.page - 1),
+        pageSize: serverPagination.pageSize
+      }
+    : pagination;
 
   const table = useReactTable({
     data,
     columns,
     state: {
       sorting,
-      globalFilter: deferredSearchValue,
+      globalFilter: serverPagination ? "" : deferredSearchValue,
       columnVisibility,
-      pagination
+      pagination: effectivePagination
     },
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
-    onPaginationChange: setPagination,
+    onPaginationChange: (updater) => {
+      const next = typeof updater === "function" ? updater(effectivePagination) : updater;
+
+      if (serverPagination) {
+        if (next.pageSize !== serverPagination.pageSize) {
+          serverPagination.onPageSizeChange(next.pageSize);
+        } else if (next.pageIndex !== effectivePagination.pageIndex) {
+          serverPagination.onPageChange(next.pageIndex + 1);
+        }
+        return;
+      }
+
+      setPagination(next);
+    },
     globalFilterFn,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
-    autoResetPageIndex: true
+    autoResetPageIndex: !serverPagination,
+    enableSorting: !serverPagination,
+    manualPagination: Boolean(serverPagination),
+    pageCount: serverPagination?.totalPages
   });
+
+  useEffect(() => {
+    if (serverSearchValue !== undefined) {
+      setSearchValue(serverSearchValue);
+    }
+  }, [serverSearchValue]);
+
+  useEffect(() => {
+    if (serverSearchValue === undefined || !onServerSearchChange) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const normalizedSearch = searchValue.trim();
+      if (normalizedSearch !== serverSearchValue) {
+        onServerSearchChange(normalizedSearch);
+      }
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [onServerSearchChange, searchValue, serverSearchValue]);
 
   useEffect(() => {
     if (!isColumnPanelOpen) {
@@ -298,7 +356,8 @@ export function SharedDataGrid<TData>({
     () => table.getAllLeafColumns().filter((column) => column.getCanHide()),
     [table]
   );
-  const visibleCount = table.getFilteredRowModel().rows.length;
+  const visibleCount = serverPagination?.totalRows ?? table.getFilteredRowModel().rows.length;
+  const loadedCount = table.getFilteredRowModel().rows.length;
   const exportableColumns = useMemo(() => table.getVisibleLeafColumns(), [table]);
 
   function sanitizeExportValue(value: unknown): string {
@@ -416,12 +475,14 @@ export function SharedDataGrid<TData>({
 
           <div className="flex flex-wrap items-center gap-2">
             <div className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-semibold text-stone-700">
-              {visibleCount} visible
+              {serverPagination
+                ? `${numberFormatter.format(loadedCount)} of ${numberFormatter.format(visibleCount)} visible`
+                : `${numberFormatter.format(visibleCount)} visible`}
             </div>
 
             {toolbarActions}
 
-            {exportableColumns.length > 0 && visibleCount > 0 ? (
+            {exportableColumns.length > 0 && loadedCount > 0 ? (
               <button
                 className="inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-semibold text-stone-700 transition hover:border-stone-400 hover:text-stone-950"
                 onClick={exportExcel}
@@ -578,7 +639,7 @@ export function SharedDataGrid<TData>({
       <div className="flex flex-col gap-3 rounded-[1.1rem] border border-[color:var(--line)] bg-white/90 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2 text-sm text-stone-600">
           <span>
-            Page {table.getPageCount() === 0 ? 0 : table.getState().pagination.pageIndex + 1} of{" "}
+            Page {table.getPageCount() === 0 ? 0 : effectivePagination.pageIndex + 1} of{" "}
             {table.getPageCount()}
           </span>
           <span className="text-stone-300">•</span>
@@ -590,13 +651,19 @@ export function SharedDataGrid<TData>({
             <span>Rows</span>
             <select
               className="bg-transparent outline-none"
-              onChange={(event) =>
+              onChange={(event) => {
+                const pageSize = Number(event.target.value);
+                if (serverPagination) {
+                  serverPagination.onPageSizeChange(pageSize);
+                  return;
+                }
+
                 setPagination({
                   pageIndex: 0,
-                  pageSize: Number(event.target.value)
-                })
-              }
-              value={pagination.pageSize}
+                  pageSize
+                });
+              }}
+              value={effectivePagination.pageSize}
             >
               {pageSizeOptions.map((option) => (
                 <option key={option} value={option}>

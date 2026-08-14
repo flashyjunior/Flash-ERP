@@ -37,6 +37,15 @@ const rendererStyles = requireFile(
 );
 const runtimeSource = requireFile("apps/store-desktop/src/shared/desktop-runtime.ts");
 const serviceSource = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
+const localSchemaSource = requireFile(
+  "apps/store-desktop/src/main/offline/local-store-schema.ts",
+);
+const postgresSchemaSource = requireFile(
+  "apps/store-desktop/src/main/postgres/store-postgres-schema.sql",
+);
+const mssqlSchemaSource = requireFile(
+  "apps/store-desktop/src/main/mssql/store-mssql-schema.sql",
+);
 const companyLogoUploadSource = requireFile(
   "apps/enterprise-web/src/app/api/settings/company-logo/route.ts",
 );
@@ -110,5 +119,47 @@ requireIncludes(
 requireIncludes(runtimeSource, "runSyncCycle", "desktop runtime contract exposes manual sync");
 requireIncludes(serviceSource, "promotion_snapshot", "offline schema keeps promotion snapshots");
 requireIncludes(serviceSource, "eligible_store_codes_json", "advanced promotion eligibility syncs locally");
+requireIncludes(
+  runtimeSource,
+  "resolveInventoryTransferUom",
+  "desktop transfer requests convert entered UOM quantities to base quantities",
+);
+requireIncludes(
+  rendererSource,
+  'className="rms-dialog rms-wide-dialog rms-stock-request-dialog"',
+  "stock request uses the full-size document dialog",
+);
+requireIncludes(
+  rendererStyles,
+  ".rms-stock-request-dialog > .rms-workspace-tabs",
+  "stock request tabs retain normal control height",
+);
+requireIncludes(
+  rendererStyles,
+  "grid-template-rows: auto minmax(0, 1fr) auto",
+  "desktop sidebar reserves a scrollable navigation track",
+);
+requireIncludes(
+  rendererStyles,
+  "scrollbar-gutter: stable",
+  "desktop navigation exposes a stable vertical scrollbar",
+);
+
+for (const [schemaSource, provider] of [
+  [localSchemaSource, "SQLite"],
+  [postgresSchemaSource, "PostgreSQL"],
+  [mssqlSchemaSource, "SQL Server"],
+] as const) {
+  requireIncludes(
+    schemaSource,
+    "requested_unit_of_measure",
+    `${provider} transfer schema stores the requested UOM`,
+  );
+  requireIncludes(
+    schemaSource,
+    "uom_conversion_factor",
+    `${provider} transfer schema stores the base-unit conversion`,
+  );
+}
 
 console.log("Desktop smoke check passed.");

@@ -3,7 +3,7 @@
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
 import { AlertTriangle, Bot, FileText, PackageCheck, Plus, Printer, Send, Truck } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
@@ -264,6 +264,33 @@ export function EnterprisePurchasesWorkspace({
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const serializedSearchParams = searchParams.toString();
+  const updatePurchaseOrderQuery = useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(serializedSearchParams);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value) params.set(key, value);
+        else params.delete(key);
+      }
+      const query = params.toString();
+      router.push(query ? `/purchases/purchase-orders?${query}` : "/purchases/purchase-orders", {
+        scroll: false
+      });
+    },
+    [router, serializedSearchParams]
+  );
+  const changePurchaseOrderPage = useCallback(
+    (page: number) => updatePurchaseOrderQuery({ p: String(page) }),
+    [updatePurchaseOrderQuery]
+  );
+  const changePurchaseOrderPageSize = useCallback(
+    (pageSize: number) => updatePurchaseOrderQuery({ p: null, ps: String(pageSize) }),
+    [updatePurchaseOrderQuery]
+  );
+  const changePurchaseOrderSearch = useCallback(
+    (search: string) => updatePurchaseOrderQuery({ p: null, q: search || null }),
+    [updatePurchaseOrderQuery]
+  );
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [hqReceiptDialogOpen, setHqReceiptDialogOpen] = useState(false);
   const [activeCreateTab, setActiveCreateTab] = useState<"header" | "details">("header");
@@ -1518,6 +1545,17 @@ export function EnterprisePurchasesWorkspace({
             initialPageSize={25}
             pageSizeOptions={[25, 50, 100]}
             searchPlaceholder="Search PO, supplier, receiving shop, status, or reference"
+            serverPagination={
+              dedicatedView && defaultView === "purchase-orders"
+                ? {
+                    ...workspace.purchaseOrderPage,
+                    searchValue: workspace.purchaseOrderPage.search,
+                    onPageChange: changePurchaseOrderPage,
+                    onPageSizeChange: changePurchaseOrderPageSize,
+                    onSearchChange: changePurchaseOrderSearch
+                  }
+                : undefined
+            }
             toolbarActions={
               <ActionDialog
                 description="Supplier is mandatory. Header captures supplier, receiving shop, freight, shipping, and charges; Details captures ordered items."
@@ -1939,9 +1977,7 @@ export function EnterprisePurchasesWorkspace({
               </div>
               <SharedDataGrid
                 columns={purchaseOrderColumns}
-                data={workspace.purchaseOrderRows.filter(
-                  (row) => ["COMMITTED", "PART_RECEIVED"].includes(row.status) && row.outstandingQuantity > 0
-                )}
+                data={workspace.receivablePurchaseOrderRows}
                 emptyLabel="No open purchase orders are waiting for HQ goods receipt."
                 exportFileName="flash-erp-open-purchase-orders-for-grn"
                 globalFilterFn={purchaseOrderFilter}

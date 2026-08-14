@@ -29,6 +29,8 @@ BEGIN
     [category_code] nvarchar(100) NULL,
     [subcategory] nvarchar(150) NULL,
     [unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_uom] DEFAULT N'EA',
+    [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_base_uom] DEFAULT N'EA',
+    [uom_conversions_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_uom_conversions] DEFAULT N'[]',
     [taxable] int NOT NULL CONSTRAINT [DF_product_snapshot_taxable] DEFAULT 1,
     [tax_profile_code] nvarchar(100) NULL,
     [tax_profile_name] nvarchar(200) NULL,
@@ -109,6 +111,11 @@ BEGIN
   ADD [track_color] int NOT NULL
     CONSTRAINT [DF_product_snapshot_track_color_existing] DEFAULT 0;
 END;
+
+IF COL_LENGTH(N'[dbo].[product_snapshot]', N'base_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[product_snapshot] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_base_uom_existing] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[product_snapshot]', N'uom_conversions_json') IS NULL
+  ALTER TABLE [dbo].[product_snapshot] ADD [uom_conversions_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_uom_conversions_existing] DEFAULT N'[]';
 
 IF OBJECT_ID(N'[dbo].[product_department_snapshot]', N'U') IS NULL
 BEGIN
@@ -583,6 +590,10 @@ BEGIN
     [subcategory] nvarchar(150) NULL,
     [is_serialized] int NOT NULL CONSTRAINT [DF_inter_store_transfer_serialized] DEFAULT 0,
     [requested_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_inter_store_transfer_requested] DEFAULT 0,
+    [requested_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_inter_store_transfer_requested_uom] DEFAULT N'EA',
+    [requested_unit_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_inter_store_transfer_requested_uom_qty] DEFAULT 0,
+    [uom_conversion_factor] decimal(18, 6) NOT NULL CONSTRAINT [DF_inter_store_transfer_uom_factor] DEFAULT 1,
+    [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_inter_store_transfer_base_uom] DEFAULT N'EA',
     [issued_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_inter_store_transfer_issued] DEFAULT 0,
     [received_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_inter_store_transfer_received] DEFAULT 0,
     [outstanding_issue_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_inter_store_transfer_outstanding_issue] DEFAULT 0,
@@ -630,6 +641,10 @@ BEGIN
     [subcategory] nvarchar(150) NULL,
     [is_serialized] int NOT NULL CONSTRAINT [DF_inter_store_transfer_request_draft_serialized] DEFAULT 0,
     [quantity] decimal(18, 3) NOT NULL,
+    [requested_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_inter_store_transfer_draft_requested_uom] DEFAULT N'EA',
+    [requested_unit_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_inter_store_transfer_draft_requested_uom_qty] DEFAULT 0,
+    [uom_conversion_factor] decimal(18, 6) NOT NULL CONSTRAINT [DF_inter_store_transfer_draft_uom_factor] DEFAULT 1,
+    [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_inter_store_transfer_draft_base_uom] DEFAULT N'EA',
     [external_reference] nvarchar(200) NULL,
     [note] nvarchar(max) NULL,
     [operator_name] nvarchar(200) NOT NULL,
@@ -1356,6 +1371,22 @@ IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'issued_batch_allocatio
   ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [issued_batch_allocations_json] nvarchar(max) NULL;
 IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'received_batch_allocations_json') IS NULL
   ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [received_batch_allocations_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'requested_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [requested_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_snapshot_requested_uom] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'requested_unit_quantity') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [requested_unit_quantity] decimal(18,3) NOT NULL CONSTRAINT [DF_transfer_snapshot_requested_uom_qty] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'uom_conversion_factor') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_transfer_snapshot_uom_factor] DEFAULT 1;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'base_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_snapshot_base_uom] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'requested_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [requested_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_draft_requested_uom] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'requested_unit_quantity') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [requested_unit_quantity] decimal(18,3) NOT NULL CONSTRAINT [DF_transfer_draft_requested_uom_qty] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'uom_conversion_factor') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_transfer_draft_uom_factor] DEFAULT 1;
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'base_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_draft_base_uom] DEFAULT N'EA';
 IF COL_LENGTH(N'[dbo].[stock_count_session]', N'previous_batch_quantities_json') IS NULL
   ALTER TABLE [dbo].[stock_count_session] ADD [previous_batch_quantities_json] nvarchar(max) NULL;
 IF COL_LENGTH(N'[dbo].[stock_count_session]', N'counted_batch_quantities_json') IS NULL

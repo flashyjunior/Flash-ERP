@@ -392,6 +392,15 @@ const catalog: SecurityPermissionDefinition[] = [
     sortOrder: 320
   },
   {
+    code: "ecommerce.console.access",
+    name: "Access ecommerce staff console",
+    description: "Open and operate customer orders, catalog publication, payment options, and storefront setup.",
+    domain: "Operations",
+    group: "Ecommerce",
+    surface: "store",
+    sortOrder: 321
+  },
+  {
     code: "pos.shift.open",
     name: "Open shift",
     description: "Open a POS shift and start a branch till session.",

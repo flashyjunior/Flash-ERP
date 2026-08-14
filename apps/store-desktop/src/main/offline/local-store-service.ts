@@ -73,12 +73,14 @@ import {
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
   inventoryBatchDaysUntilExpiry,
+  normalizeLayawaySettings,
   validateInventoryBatchReceipt,
 } from "@flash-erp/domain";
 
 import {
   computeNextStoreSyncAt,
   readStoreSyncPolicyFromMetadata,
+  resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
 } from "../../shared/desktop-runtime.js";
 import {
@@ -418,6 +420,8 @@ const productSnapshotColumns = [
   "category_code",
   "subcategory",
   "unit_of_measure",
+  "base_unit_of_measure",
+  "uom_conversions_json",
   "taxable",
   "tax_profile_code",
   "tax_profile_name",
@@ -924,6 +928,8 @@ type ProductRow = {
   category_code: string | null;
   subcategory: string | null;
   unit_of_measure: string;
+  base_unit_of_measure: string;
+  uom_conversions_json: string;
   taxable: number | string;
   tax_profile_code: string | null;
   tax_profile_name: string | null;
@@ -1280,6 +1286,10 @@ type InterStoreTransferSnapshotRow = {
   is_serialized: number | string;
   track_expiry: number | string;
   requested_quantity: number | string;
+  requested_unit_of_measure: string;
+  requested_unit_quantity: number | string;
+  uom_conversion_factor: number | string;
+  base_unit_of_measure: string;
   issued_quantity: number | string;
   received_quantity: number | string;
   outstanding_issue_quantity: number | string;
@@ -1344,6 +1354,10 @@ type InterStoreTransferRequestDraftRow = {
   subcategory: string | null;
   is_serialized: number | string;
   quantity: number | string;
+  requested_unit_of_measure: string;
+  requested_unit_quantity: number | string;
+  uom_conversion_factor: number | string;
+  base_unit_of_measure: string;
   external_reference: string | null;
   note: string | null;
   operator_name: string;
@@ -2042,6 +2056,34 @@ function readStringArray(value: string | null | undefined) {
   } catch {
     return [] as string[];
   }
+}
+
+function parseProductUomConversions(
+  value: string | null | undefined,
+  baseUnitOfMeasure: string,
+): NonNullable<StoreCatalogBrowseItem["uomConversions"]> {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (Array.isArray(parsed)) {
+      const rows = parsed.filter(
+        (item): item is NonNullable<StoreCatalogBrowseItem["uomConversions"]>[number] =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as { uomCode?: unknown }).uomCode === "string" &&
+          Number.isFinite(Number((item as { conversionFactor?: unknown }).conversionFactor)),
+      );
+      if (rows.length) return rows;
+    }
+  } catch {}
+
+  return [{
+    uomCode: baseUnitOfMeasure,
+    uomName: baseUnitOfMeasure,
+    conversionFactor: 1,
+    isBaseUnit: true,
+    allowSale: true,
+    allowPurchase: true,
+  }];
 }
 
 function writeStringArray(values: string[]) {
@@ -3732,6 +3774,23 @@ export class LocalStoreService {
           "pos_express_charge_rates_json",
           JSON.stringify(optionalSetupNumberList(input.posExpressChargeRates) ?? []),
         );
+      }
+
+      if (input.layawaySettings) {
+        const layawaySettings = normalizeLayawaySettings(input.layawaySettings);
+        const layawayEntries = [
+          ["layaway_enabled", layawaySettings.enabled ? "1" : "0"],
+          ["layaway_reserve_stock_on_deposit", layawaySettings.reserveStockOnDeposit ? "1" : "0"],
+          ["layaway_minimum_deposit_percent", layawaySettings.minimumDepositPercent.toFixed(2)],
+          ["layaway_require_full_payment_before_fulfilment", layawaySettings.requireFullPaymentBeforeFulfilment ? "1" : "0"],
+          ["layaway_refund_payments_on_cancellation", layawaySettings.refundPaymentsOnCancellation ? "1" : "0"],
+          ["layaway_cancellation_fee_type", layawaySettings.cancellationFeeType],
+          ["layaway_cancellation_fee_value", layawaySettings.cancellationFeeValue.toFixed(2)],
+        ] as const;
+
+        for (const [key, value] of layawayEntries) {
+          this.setMetadata(key, value);
+        }
       }
 
       if (companyLogoUrl) {
@@ -5883,6 +5942,11 @@ export class LocalStoreService {
           categoryName: row.category_name,
           subcategory: row.subcategory,
           unitOfMeasure: row.unit_of_measure,
+          baseUnitOfMeasure: row.base_unit_of_measure,
+          uomConversions: parseProductUomConversions(
+            row.uom_conversions_json,
+            row.base_unit_of_measure,
+          ),
           taxable: asBooleanFlag(row.taxable),
           taxProfileCode: row.tax_profile_code,
           trackInventory: asBooleanFlag(row.track_inventory),
@@ -6842,6 +6906,10 @@ export class LocalStoreService {
           transfer.is_serialized AS is_serialized,
           transfer.track_expiry AS track_expiry,
           transfer.requested_quantity AS requested_quantity,
+          transfer.requested_unit_of_measure AS requested_unit_of_measure,
+          transfer.requested_unit_quantity AS requested_unit_quantity,
+          transfer.uom_conversion_factor AS uom_conversion_factor,
+          transfer.base_unit_of_measure AS base_unit_of_measure,
           transfer.issued_quantity AS issued_quantity,
           transfer.received_quantity AS received_quantity,
           transfer.outstanding_issue_quantity AS outstanding_issue_quantity,
@@ -6913,6 +6981,14 @@ export class LocalStoreService {
         isSerialized: asBooleanFlag(row.is_serialized),
         trackExpiry: asBooleanFlag(row.track_expiry),
         requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
+        requestedUnitOfMeasure: row.requested_unit_of_measure,
+        requestedUnitQuantity: Number(
+          asNumber(row.requested_unit_quantity).toFixed(3),
+        ),
+        uomConversionFactor: Number(
+          asNumber(row.uom_conversion_factor).toFixed(6),
+        ),
+        baseUnitOfMeasure: row.base_unit_of_measure,
         issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
         receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
         outstandingIssueQuantity: Number(
@@ -8183,9 +8259,23 @@ export class LocalStoreService {
         );
       }
 
-      if (asBooleanFlag(product.is_serialized) && !Number.isInteger(quantity)) {
+      const transferUom = resolveInventoryTransferUom({
+        enteredQuantity: quantity,
+        requestedUnitOfMeasure: input.unitOfMeasure,
+        unitOfMeasure: product.unit_of_measure,
+        baseUnitOfMeasure: product.base_unit_of_measure,
+        uomConversions: parseProductUomConversions(
+          product.uom_conversions_json,
+          product.base_unit_of_measure,
+        ),
+      });
+
+      if (
+        asBooleanFlag(product.is_serialized) &&
+        !Number.isInteger(transferUom.baseQuantity)
+      ) {
         throw new Error(
-          `Serialized product "${product.product_code}" needs a whole-number requested quantity.`,
+          `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
         );
       }
 
@@ -8225,12 +8315,16 @@ export class LocalStoreService {
             is_serialized,
             track_expiry,
             quantity,
+            requested_unit_of_measure,
+            requested_unit_quantity,
+            uom_conversion_factor,
+            base_unit_of_measure,
             external_reference,
             note,
             operator_name,
             submitted_at,
             updated_at
-          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+          ) VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
         )
         .run(
           draftId,
@@ -8249,7 +8343,12 @@ export class LocalStoreService {
           product.category_code,
           product.subcategory,
           asBooleanFlag(product.is_serialized) ? 1 : 0,
-          quantity,
+          asBooleanFlag(product.track_expiry) ? 1 : 0,
+          transferUom.baseQuantity,
+          transferUom.requestedUnitOfMeasure,
+          transferUom.requestedUnitQuantity,
+          transferUom.uomConversionFactor,
+          transferUom.baseUnitOfMeasure,
           externalReference,
           note,
           operatorName,
@@ -8318,6 +8417,10 @@ export class LocalStoreService {
             draft.subcategory,
             draft.is_serialized,
             draft.quantity,
+            draft.requested_unit_of_measure,
+            draft.requested_unit_quantity,
+            draft.uom_conversion_factor,
+            draft.base_unit_of_measure,
             draft.external_reference,
             draft.note,
             draft.operator_name,
@@ -8353,7 +8456,8 @@ export class LocalStoreService {
         sourceLocationCode: draft.source_location_code,
         destinationLocationCode: draft.destination_location_code,
         productCode: draft.product_code,
-        quantity: Number(asNumber(draft.quantity).toFixed(3)),
+        quantity: Number(asNumber(draft.requested_unit_quantity).toFixed(3)),
+        unitOfMeasure: draft.requested_unit_of_measure,
         externalReference: draft.external_reference,
         operatorName: draft.operator_name,
         note: draft.note,
@@ -18184,6 +18288,10 @@ export class LocalStoreService {
             is_serialized,
             track_expiry,
             requested_quantity,
+            requested_unit_of_measure,
+            requested_unit_quantity,
+            uom_conversion_factor,
+            base_unit_of_measure,
             issued_quantity,
             received_quantity,
             outstanding_issue_quantity,
@@ -20810,6 +20918,20 @@ export class LocalStoreService {
           ),
         ),
       );
+      const layawaySettings = normalizeLayawaySettings(storePayload.layawaySettings);
+      const layawayEntries = [
+        ["layaway_enabled", layawaySettings.enabled ? "1" : "0"],
+        ["layaway_reserve_stock_on_deposit", layawaySettings.reserveStockOnDeposit ? "1" : "0"],
+        ["layaway_minimum_deposit_percent", layawaySettings.minimumDepositPercent.toFixed(2)],
+        ["layaway_require_full_payment_before_fulfilment", layawaySettings.requireFullPaymentBeforeFulfilment ? "1" : "0"],
+        ["layaway_refund_payments_on_cancellation", layawaySettings.refundPaymentsOnCancellation ? "1" : "0"],
+        ["layaway_cancellation_fee_type", layawaySettings.cancellationFeeType],
+        ["layaway_cancellation_fee_value", layawaySettings.cancellationFeeValue.toFixed(2)],
+      ] as const;
+
+      for (const [key, value] of layawayEntries) {
+        this.setMetadata(key, value);
+      }
       this.setMetadata(
         "loyalty_program_enabled",
         storePayload.loyaltyProgramEnabled ? "1" : "0",
@@ -21212,7 +21334,7 @@ export class LocalStoreService {
 
       this.db
         .prepare(
-          "INSERT INTO product_snapshot (id, product_code, product_name, product_type, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, track_expiry, shelf_life_days, is_serialized, track_size, track_color, must_enter_price_at_pos, min_stock_level, reorder_point, safety_stock_level, catalog_membership_active, catalog_sort_order, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(product_code) DO UPDATE SET product_name = excluded.product_name, product_type = excluded.product_type, short_name = excluded.short_name, description = excluded.description, primary_image_url = excluded.primary_image_url, department_code = excluded.department_code, category_code = excluded.category_code, subcategory = excluded.subcategory, unit_of_measure = excluded.unit_of_measure, taxable = excluded.taxable, tax_profile_code = excluded.tax_profile_code, tax_profile_name = excluded.tax_profile_name, tax_rate_percent = excluded.tax_rate_percent, tax_inclusive = excluded.tax_inclusive, track_inventory = excluded.track_inventory, track_expiry = excluded.track_expiry, shelf_life_days = excluded.shelf_life_days, is_serialized = excluded.is_serialized, track_size = excluded.track_size, track_color = excluded.track_color, must_enter_price_at_pos = excluded.must_enter_price_at_pos, min_stock_level = excluded.min_stock_level, reorder_point = excluded.reorder_point, safety_stock_level = excluded.safety_stock_level, catalog_membership_active = excluded.catalog_membership_active, catalog_sort_order = excluded.catalog_sort_order, unit_price = excluded.unit_price, quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
+          "INSERT INTO product_snapshot (id, product_code, product_name, product_type, short_name, description, primary_image_url, department_code, category_code, subcategory, unit_of_measure, base_unit_of_measure, uom_conversions_json, taxable, tax_profile_code, tax_profile_name, tax_rate_percent, tax_inclusive, track_inventory, track_expiry, shelf_life_days, is_serialized, track_size, track_color, must_enter_price_at_pos, min_stock_level, reorder_point, safety_stock_level, catalog_membership_active, catalog_sort_order, unit_price, quantity_on_hand, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(product_code) DO UPDATE SET product_name = excluded.product_name, product_type = excluded.product_type, short_name = excluded.short_name, description = excluded.description, primary_image_url = excluded.primary_image_url, department_code = excluded.department_code, category_code = excluded.category_code, subcategory = excluded.subcategory, unit_of_measure = excluded.unit_of_measure, base_unit_of_measure = excluded.base_unit_of_measure, uom_conversions_json = excluded.uom_conversions_json, taxable = excluded.taxable, tax_profile_code = excluded.tax_profile_code, tax_profile_name = excluded.tax_profile_name, tax_rate_percent = excluded.tax_rate_percent, tax_inclusive = excluded.tax_inclusive, track_inventory = excluded.track_inventory, track_expiry = excluded.track_expiry, shelf_life_days = excluded.shelf_life_days, is_serialized = excluded.is_serialized, track_size = excluded.track_size, track_color = excluded.track_color, must_enter_price_at_pos = excluded.must_enter_price_at_pos, min_stock_level = excluded.min_stock_level, reorder_point = excluded.reorder_point, safety_stock_level = excluded.safety_stock_level, catalog_membership_active = excluded.catalog_membership_active, catalog_sort_order = excluded.catalog_sort_order, unit_price = excluded.unit_price, quantity_on_hand = excluded.quantity_on_hand, updated_at = excluded.updated_at",
         )
         .run(
           event.aggregateId,
@@ -21242,6 +21364,10 @@ export class LocalStoreService {
           typeof productPayload.unitOfMeasure === "string"
             ? productPayload.unitOfMeasure
             : "EA",
+          typeof productPayload.baseUnitOfMeasure === "string"
+            ? productPayload.baseUnitOfMeasure
+            : productPayload.unitOfMeasure ?? "EA",
+          JSON.stringify(productPayload.uomConversions ?? []),
           productPayload.taxable === false ? 0 : 1,
           typeof productPayload.taxProfileCode === "string"
             ? productPayload.taxProfileCode
@@ -22125,7 +22251,7 @@ export class LocalStoreService {
             received_at,
             closed_at,
             updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             transfer_no = excluded.transfer_no,
             transfer_batch_no = excluded.transfer_batch_no,
@@ -22150,6 +22276,10 @@ export class LocalStoreService {
             is_serialized = excluded.is_serialized,
             track_expiry = excluded.track_expiry,
             requested_quantity = excluded.requested_quantity,
+            requested_unit_of_measure = excluded.requested_unit_of_measure,
+            requested_unit_quantity = excluded.requested_unit_quantity,
+            uom_conversion_factor = excluded.uom_conversion_factor,
+            base_unit_of_measure = excluded.base_unit_of_measure,
             issued_quantity = excluded.issued_quantity,
             received_quantity = excluded.received_quantity,
             outstanding_issue_quantity = excluded.outstanding_issue_quantity,
@@ -22212,6 +22342,11 @@ export class LocalStoreService {
           transferPayload.isSerialized ? 1 : 0,
           transferPayload.trackExpiry ? 1 : 0,
           transferPayload.requestedQuantity,
+          transferPayload.requestedUnitOfMeasure ?? "EA",
+          transferPayload.requestedUnitQuantity ??
+            transferPayload.requestedQuantity,
+          transferPayload.uomConversionFactor ?? 1,
+          transferPayload.baseUnitOfMeasure ?? "EA",
           transferPayload.issuedQuantity,
           transferPayload.receivedQuantity,
           transferPayload.outstandingIssueQuantity,
@@ -24421,6 +24556,44 @@ export class LocalStoreService {
     );
     this.ensureColumn("inter_store_transfer_snapshot", "required_at", "TEXT");
     this.ensureColumn(
+      "product_snapshot",
+      "base_unit_of_measure",
+      "TEXT NOT NULL DEFAULT 'EA'",
+    );
+    this.ensureColumn(
+      "product_snapshot",
+      "uom_conversions_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    for (const tableName of [
+      "inter_store_transfer_snapshot",
+      "inter_store_transfer_request_draft",
+    ]) {
+      this.ensureColumn(
+        tableName,
+        "requested_unit_of_measure",
+        "TEXT NOT NULL DEFAULT 'EA'",
+      );
+      this.ensureColumn(
+        tableName,
+        "requested_unit_quantity",
+        "NUMERIC NOT NULL DEFAULT 0",
+      );
+      this.ensureColumn(
+        tableName,
+        "uom_conversion_factor",
+        "NUMERIC NOT NULL DEFAULT 1",
+      );
+      this.ensureColumn(
+        tableName,
+        "base_unit_of_measure",
+        "TEXT NOT NULL DEFAULT 'EA'",
+      );
+    }
+    this.db.exec(
+      "UPDATE inter_store_transfer_snapshot SET requested_unit_quantity = requested_quantity WHERE requested_unit_quantity <= 0; UPDATE inter_store_transfer_request_draft SET requested_unit_quantity = quantity WHERE requested_unit_quantity <= 0;",
+    );
+    this.ensureColumn(
       "customer",
       "customer_type",
       "TEXT NOT NULL DEFAULT 'INDIVIDUAL'",
@@ -25088,6 +25261,10 @@ export class LocalStoreService {
           draft.subcategory,
           draft.is_serialized,
           draft.quantity,
+          draft.requested_unit_of_measure,
+          draft.requested_unit_quantity,
+          draft.uom_conversion_factor,
+          draft.base_unit_of_measure,
           draft.external_reference,
           draft.note,
           draft.operator_name,
@@ -25125,6 +25302,14 @@ export class LocalStoreService {
       subcategory: row.subcategory,
       isSerialized: asBooleanFlag(row.is_serialized),
       quantity: Number(asNumber(row.quantity).toFixed(3)),
+      requestedUnitOfMeasure: row.requested_unit_of_measure,
+      requestedUnitQuantity: Number(
+        asNumber(row.requested_unit_quantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        asNumber(row.uom_conversion_factor).toFixed(6),
+      ),
+      baseUnitOfMeasure: row.base_unit_of_measure,
       externalReference: row.external_reference,
       note: row.note,
       operatorName: row.operator_name,
@@ -26318,6 +26503,17 @@ export class LocalStoreService {
       posExpressChargeRates: readPosDiscountRatesMetadata(
         metadata.pos_express_charge_rates_json,
       ),
+      layawaySettings: normalizeLayawaySettings({
+        enabled: metadata.layaway_enabled === "1",
+        reserveStockOnDeposit: metadata.layaway_reserve_stock_on_deposit !== "0",
+        minimumDepositPercent: metadata.layaway_minimum_deposit_percent,
+        requireFullPaymentBeforeFulfilment:
+          metadata.layaway_require_full_payment_before_fulfilment !== "0",
+        refundPaymentsOnCancellation:
+          metadata.layaway_refund_payments_on_cancellation !== "0",
+        cancellationFeeType: metadata.layaway_cancellation_fee_type,
+        cancellationFeeValue: metadata.layaway_cancellation_fee_value,
+      }),
     };
   }
 

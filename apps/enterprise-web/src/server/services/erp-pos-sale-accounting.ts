@@ -657,30 +657,35 @@ export async function postPosTransactionAccountingInTransaction(
       );
     }
 
-    const salesJournal = await postAccountingDocumentInTransaction(tx, {
-      retailOrgId: input.retailOrgId,
-      companyId: context.companyId,
-      documentType: journalDocumentType,
-      batchSourceType: posSaleSourceType,
-      journalType: posSaleSourceType,
-      sourceType: posSaleSourceType,
-      sourceId: transaction.id,
-      sourceReference: transaction.transactionNo,
-      postingDate,
-      description: `${transaction.transactionNo} POS sale from ${transaction.store.name}`,
-      postedBy,
-      lines
-    });
-    salesJournalCreated = true;
-    cashbookEntryCount = await createPosSaleCashbookEntries({
-      tx,
-      context,
-      transaction,
-      journalEntryId: salesJournal.journalEntryId,
-      postedBy,
-      cashbookPayments,
-      positiveSale
-    });
+    const isZeroValueSale = Math.abs(Number(transaction.totalAmount)) <= 0.005;
+    const hasNoSalesPosting = lines.length === 0 && cashbookPayments.length === 0;
+
+    if (!isZeroValueSale || !hasNoSalesPosting) {
+      const salesJournal = await postAccountingDocumentInTransaction(tx, {
+        retailOrgId: input.retailOrgId,
+        companyId: context.companyId,
+        documentType: journalDocumentType,
+        batchSourceType: posSaleSourceType,
+        journalType: posSaleSourceType,
+        sourceType: posSaleSourceType,
+        sourceId: transaction.id,
+        sourceReference: transaction.transactionNo,
+        postingDate,
+        description: `${transaction.transactionNo} POS sale from ${transaction.store.name}`,
+        postedBy,
+        lines
+      });
+      salesJournalCreated = true;
+      cashbookEntryCount = await createPosSaleCashbookEntries({
+        tx,
+        context,
+        transaction,
+        journalEntryId: salesJournal.journalEntryId,
+        postedBy,
+        cashbookPayments,
+        positiveSale
+      });
+    }
   }
 
   const cogsJournalCount = await postPosTransactionCogsInTransaction(tx, {

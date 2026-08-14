@@ -22,7 +22,7 @@ export default defineConfig({
   projects: [
     {
       name: "enterprise-browser",
-      testMatch: /(enterprise-auth|online-store-parity)\.spec\.ts/,
+      testMatch: /(enterprise-auth|enterprise-capacity-hydration|online-store-parity|public-ecommerce)\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         launchOptions: browserExecutablePath

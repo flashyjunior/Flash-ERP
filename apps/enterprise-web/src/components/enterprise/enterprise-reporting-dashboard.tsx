@@ -17,7 +17,8 @@ import {
   WalletCards
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
@@ -813,13 +814,16 @@ const managementExceptionFilter: FilterFn<ManagementExceptionRow> = (
 
 export function EnterpriseReportingDashboard({
   canViewHrReports = false,
+  catalogOnly = false,
   dashboard,
   initialReportId
 }: {
   canViewHrReports?: boolean;
+  catalogOnly?: boolean;
   dashboard: EnterpriseReportingDashboardData;
   initialReportId?: string | null;
 }) {
+  const router = useRouter();
   const currencyFormatter = useMemo(
     () =>
       new Intl.NumberFormat("en-US", {
@@ -834,6 +838,14 @@ export function EnterpriseReportingDashboard({
   const [reportFilters, setReportFilters] = useState<
     Partial<Record<ReportId, ReportRuntimeFilters>>
   >({});
+
+  useEffect(() => {
+    const requestedReportId = coerceReportId(initialReportId);
+
+    if (requestedReportId) {
+      setSelectedReportId(requestedReportId);
+    }
+  }, [initialReportId]);
 
   const selectedShop = dashboard.shopOptions.find(
     (shop) =>
@@ -3542,6 +3554,16 @@ export function EnterpriseReportingDashboard({
     .find((report) => report.id === selectedReportId);
 
   function openReport(reportId: ReportId) {
+    if (catalogOnly) {
+      const params = new URLSearchParams();
+      params.set("report", reportId);
+      if (dashboard.filters.storeCode) params.set("shop", dashboard.filters.storeCode);
+      if (dashboard.filters.dateFrom) params.set("from", dashboard.filters.dateFrom);
+      if (dashboard.filters.dateTo) params.set("to", dashboard.filters.dateTo);
+      router.push(`/reports?${params.toString()}`);
+      return;
+    }
+
     setSelectedReportId(reportId);
   }
 
@@ -4223,7 +4245,7 @@ export function EnterpriseReportingDashboard({
         eyebrow="HQ reporting"
         heading="Reports"
       >
-        <section className="rounded-lg border border-stone-200 bg-white px-4 py-3 shadow-sm">
+        {!catalogOnly ? <section className="rounded-lg border border-stone-200 bg-white px-4 py-3 shadow-sm">
           <dl className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
             {[
               ["Posted revenue", currencyFormatter.format(dashboard.metrics.postedRevenue)],
@@ -4239,7 +4261,7 @@ export function EnterpriseReportingDashboard({
               </div>
             ))}
           </dl>
-        </section>
+        </section> : null}
 
         <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
           <div className="grid gap-x-8 gap-y-5 lg:grid-cols-2 2xl:grid-cols-3">
@@ -4286,7 +4308,7 @@ export function EnterpriseReportingDashboard({
                         <FileText className="h-4 w-4 shrink-0 fill-stone-900 text-stone-900" />
                         <span className="min-w-0 flex-1 truncate">{report.label}</span>
                         <span className="shrink-0 rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-semibold text-stone-600 group-hover:bg-white">
-                          {numberFormatter.format(report.rowCount)}
+                          {catalogOnly ? "Open" : numberFormatter.format(report.rowCount)}
                         </span>
                       </button>
                     </li>

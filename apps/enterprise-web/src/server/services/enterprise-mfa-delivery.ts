@@ -48,6 +48,7 @@ type EnterpriseMfaDeliveryInput = {
   phone?: string | null;
   code: string;
   expiresAt: Date;
+  experience?: "ENTERPRISE" | "ECOMMERCE";
 };
 
 const defaultSmtpSettings: SmtpSettings = {
@@ -174,6 +175,10 @@ function maskPhone(phone: string | null | undefined) {
 }
 
 function buildMfaMessage(input: EnterpriseMfaDeliveryInput) {
+  if (input.experience === "ECOMMERCE") {
+    return `Your Flash ERP shop verification code is ${input.code}. It expires at ${input.expiresAt.toISOString()}.`;
+  }
+
   return `Your Flash ERP enterprise MFA code is ${input.code}. It expires at ${input.expiresAt.toISOString()}.`;
 }
 
@@ -200,7 +205,7 @@ async function writeMfaDeliveryLog(
             ? "auth.mfa.delivery.skipped"
             : "auth.mfa.delivery.failed",
       actorLabel: input.loginId,
-      targetType: "Retail user",
+      targetType: input.experience === "ECOMMERCE" ? "Ecommerce customer" : "Retail user",
       targetRef: input.loginId,
       sourceNodeCode: input.sourceNodeCode,
       message: result.message,
@@ -246,19 +251,26 @@ async function sendEmailMfaCode(
     from: `"${fromName.replace(/"/g, "'")}" <${settings.fromAddress}>`,
     to: input.email,
     replyTo,
-    subject: "Your Flash ERP MFA code",
+    subject:
+      input.experience === "ECOMMERCE"
+        ? "Your Flash ERP shop verification code"
+        : "Your Flash ERP MFA code",
     text: [
       `Hello ${input.displayName || input.loginId},`,
       "",
       buildMfaMessage(input),
       "",
-      "If you did not request this sign-in, contact your Flash ERP administrator immediately."
+      input.experience === "ECOMMERCE"
+        ? "If you did not request this code, you can safely ignore this message."
+        : "If you did not request this sign-in, contact your Flash ERP administrator immediately."
     ].join("\n"),
     html: [
       `<p>Hello ${escapeHtml(input.displayName || input.loginId)},</p>`,
-      `<p>Your Flash ERP enterprise MFA code is <strong>${input.code}</strong>.</p>`,
+      `<p>${input.experience === "ECOMMERCE" ? "Your Flash ERP shop verification code" : "Your Flash ERP enterprise MFA code"} is <strong>${input.code}</strong>.</p>`,
       `<p>It expires at ${input.expiresAt.toISOString()}.</p>`,
-      "<p>If you did not request this sign-in, contact your Flash ERP administrator immediately.</p>"
+      input.experience === "ECOMMERCE"
+        ? "<p>If you did not request this code, you can safely ignore this message.</p>"
+        : "<p>If you did not request this sign-in, contact your Flash ERP administrator immediately.</p>"
     ].join("")
   });
 

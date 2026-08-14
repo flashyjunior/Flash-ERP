@@ -418,6 +418,10 @@ function calculateBonusBuyDiscount(promotion: AutomaticPromotionPolicy, line: Pr
   }
 }
 
+function isBonusBuyPromotion(promotion: AutomaticPromotionPolicy) {
+  return Number(promotion.buyQuantity ?? 0) > 0 && Number(promotion.rewardQuantity ?? 0) > 0;
+}
+
 function calculateLinePromotionDiscount(
   promotion: AutomaticPromotionPolicy,
   line: PricingCandidate
@@ -428,10 +432,8 @@ function calculateLinePromotionDiscount(
     return 0;
   }
 
-  const bonusBuyDiscount = calculateBonusBuyDiscount(promotion, line);
-
-  if (bonusBuyDiscount > 0) {
-    return bonusBuyDiscount;
+  if (isBonusBuyPromotion(promotion)) {
+    return calculateBonusBuyDiscount(promotion, line);
   }
 
   switch (promotion.discountType) {
@@ -596,10 +598,11 @@ export function applyAutomaticPromotions(input: {
       continue;
     }
 
-    const isBonusBuyPromotion =
-      Number(promotion.buyQuantity ?? 0) > 0 && Number(promotion.rewardQuantity ?? 0) > 0;
-
-    if (promotion.discountType !== "FIXED_PRICE" && promotion.applyOncePerBasket && !isBonusBuyPromotion) {
+    if (
+      promotion.discountType !== "FIXED_PRICE" &&
+      promotion.applyOncePerBasket &&
+      !isBonusBuyPromotion(promotion)
+    ) {
       const basketDiscountAmount = calculateBasketPromotionDiscount(promotion, eligibleLines);
 
       if (basketDiscountAmount <= 0) {

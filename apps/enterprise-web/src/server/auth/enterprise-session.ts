@@ -13,11 +13,43 @@ import {
   SyncNodeType
 } from "@flash-erp/domain";
 import { prisma } from "@/lib/db/prisma";
+import {
+  getEnterpriseCachedRead,
+  invalidateEnterpriseReadCache
+} from "@/server/performance/enterprise-read-cache";
 import { readPasswordPolicy } from "@/server/repositories/enterprise-security.repository";
 import { deliverEnterpriseMfaCode } from "@/server/services/enterprise-mfa-delivery";
 
 const sessionCookieName = "flash_rms_session";
 const sessionTokenBytes = 48;
+const sessionTouchCache = new Map<string, number>();
+
+function positiveRuntimeInteger(value: string | undefined, fallback: number) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function shouldTouchEnterpriseSession(sessionId: string, lastSeenAt: Date | null, now: Date) {
+  const intervalMs = positiveRuntimeInteger(
+    process.env.FLASH_ERP_SESSION_TOUCH_INTERVAL_MS,
+    60_000
+  );
+  const touchBefore = now.getTime() - intervalMs;
+  const locallyDeferredUntil = sessionTouchCache.get(sessionId) ?? 0;
+
+  if (locallyDeferredUntil > now.getTime() || (lastSeenAt?.getTime() ?? 0) > touchBefore) {
+    return null;
+  }
+
+  sessionTouchCache.set(sessionId, now.getTime() + intervalMs);
+  if (sessionTouchCache.size > 10_000) {
+    for (const [cachedSessionId, deferredUntil] of sessionTouchCache) {
+      if (deferredUntil <= now.getTime()) sessionTouchCache.delete(cachedSessionId);
+    }
+  }
+
+  return new Date(touchBefore);
+}
 const passwordResetTokenLifetimeMinutes = 20;
 const passwordResetTokenVersion = 1;
 const mfaChallengeTokenLifetimeMinutes = 5;
@@ -1247,6 +1279,7 @@ export async function clearEnterpriseSession() {
         revokedAt: new Date()
       }
     });
+    invalidateEnterpriseReadCache(`auth-session:${tokenHash}`);
   }
 
   cookieStore.delete(sessionCookieName);
@@ -1674,7 +1707,7 @@ export async function getEnterpriseSession(
   }
 
   const tokenHash = hashSessionToken(token);
-  const session = await prisma.retailUserSession.findFirst({
+  const loadSession = () => prisma.retailUserSession.findFirst({
     where: {
       tokenHash,
       revokedAt: null,
@@ -1731,6 +1764,13 @@ export async function getEnterpriseSession(
       }
     }
   });
+  const session = options.refreshExpiresAt
+    ? await loadSession()
+    : await getEnterpriseCachedRead(`auth-session:${tokenHash}`, loadSession, {
+        ttlMs: positiveRuntimeInteger(process.env.FLASH_ERP_SESSION_READ_CACHE_MS, 1_000),
+        staleWhileRevalidateMs: 0,
+        maxEntries: 10_000
+      });
 
   if (!session || !session.retailUser) {
     return null;
@@ -1741,6 +1781,7 @@ export async function getEnterpriseSession(
       where: { id: session.id },
       data: { revokedAt: new Date() }
     });
+    invalidateEnterpriseReadCache(`auth-session:${tokenHash}`);
     return null;
   }
 
@@ -1756,7 +1797,8 @@ export async function getEnterpriseSession(
   const isOnlineStoreUser =
     session.retailUser.homeStore?.storeMode === "ONLINE_DIRECT" &&
     session.retailUser.homeStore.status === RecordStatus.ACTIVE &&
-    roles.some((role) => onlineStoreRoleCodes.has(role.code));
+    (roles.some((role) => onlineStoreRoleCodes.has(role.code)) ||
+      permissions.permissionCodes.includes("ecommerce.console.access"));
   const refreshedExpiresAt = options.refreshExpiresAt
     ? new Date(
         now.getTime() +
@@ -1764,15 +1806,41 @@ export async function getEnterpriseSession(
       )
     : session.expiresAt;
 
-  await prisma.retailUserSession.update({
-    where: {
-      id: session.id
-    },
-    data: {
-      lastSeenAt: now,
-      ...(options.refreshExpiresAt ? { expiresAt: refreshedExpiresAt } : {})
+  if (options.refreshExpiresAt) {
+    sessionTouchCache.set(
+      session.id,
+      now.getTime() +
+        positiveRuntimeInteger(process.env.FLASH_ERP_SESSION_TOUCH_INTERVAL_MS, 60_000)
+    );
+    await prisma.retailUserSession.update({
+      where: {
+        id: session.id
+      },
+      data: {
+        lastSeenAt: now,
+        expiresAt: refreshedExpiresAt
+      }
+    });
+    invalidateEnterpriseReadCache(`auth-session:${tokenHash}`);
+  } else {
+    const touchBefore = shouldTouchEnterpriseSession(session.id, session.lastSeenAt, now);
+    if (touchBefore) {
+      try {
+        await prisma.retailUserSession.updateMany({
+          where: {
+            id: session.id,
+            lastSeenAt: { lte: touchBefore }
+          },
+          data: {
+            lastSeenAt: now
+          }
+        });
+      } catch (error) {
+        sessionTouchCache.delete(session.id);
+        throw error;
+      }
     }
-  });
+  }
 
   if (options.refreshExpiresAt) {
     cookieStore.set(sessionCookieName, token, {

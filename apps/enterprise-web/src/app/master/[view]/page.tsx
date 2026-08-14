@@ -33,6 +33,7 @@ import {
   enterpriseMasterPageMeta,
   type EnterpriseMasterView
 } from "@/lib/navigation/enterprise-navigation";
+import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 
 export const dynamic = "force-dynamic";
 
@@ -80,7 +81,10 @@ export default async function MasterSubmenuPage({
   await requireEnterprisePermission([permissionByView[view]]);
 
   if (view === "customers") {
-    const workspace = await getEnterpriseCustomerWorkspace().catch((error: unknown) =>
+    const workspace = await runEnterpriseOperation(
+      "AUTHENTICATED_READ",
+      getEnterpriseCustomerWorkspace
+    ).catch((error: unknown) =>
       buildUnavailableEnterpriseCustomerWorkspace(
         error instanceof Error
           ? `Unable to load live Flash ERP customer policy: ${error.message}`
@@ -92,7 +96,10 @@ export default async function MasterSubmenuPage({
   }
 
   if (view === "suppliers") {
-    const workspace = await getEnterpriseSupplierWorkspace().catch((error: unknown) =>
+    const workspace = await runEnterpriseOperation(
+      "AUTHENTICATED_READ",
+      getEnterpriseSupplierWorkspace
+    ).catch((error: unknown) =>
       buildUnavailableEnterpriseSupplierWorkspace(
         error instanceof Error
           ? `Unable to load live Flash ERP supplier policy: ${error.message}`
@@ -104,7 +111,10 @@ export default async function MasterSubmenuPage({
   }
 
   if (view === "promotions") {
-    const workspace = await getEnterprisePromotionWorkspace().catch((error: unknown) =>
+    const workspace = await runEnterpriseOperation(
+      "AUTHENTICATED_READ",
+      getEnterprisePromotionWorkspace
+    ).catch((error: unknown) =>
       buildUnavailableEnterprisePromotionWorkspace(
         error instanceof Error
           ? `Unable to load live Flash ERP promotion policy: ${error.message}`
@@ -116,7 +126,10 @@ export default async function MasterSubmenuPage({
   }
 
   if (view === "uom") {
-    const workspace = await getEnterpriseCatalogWorkspace().catch((error: unknown) =>
+    const workspace = await runEnterpriseOperation(
+      "AUTHENTICATED_READ",
+      getEnterpriseCatalogWorkspace
+    ).catch((error: unknown) =>
       buildUnavailableEnterpriseCatalogWorkspace(
         error instanceof Error
           ? `Unable to load live Flash ERP unit-of-measure policy: ${error.message}`
@@ -127,7 +140,10 @@ export default async function MasterSubmenuPage({
     return <EnterpriseUomWorkspace workspace={workspace} />;
   }
 
-  const workspace = await getEnterpriseSetupWorkspace().catch((error: unknown) =>
+  const workspace = await runEnterpriseOperation(
+    "AUTHENTICATED_READ",
+    getEnterpriseSetupWorkspace
+  ).catch((error: unknown) =>
     buildUnavailableEnterpriseSetupWorkspace(
       error instanceof Error
         ? `Unable to load live Flash ERP master policy: ${error.message}`

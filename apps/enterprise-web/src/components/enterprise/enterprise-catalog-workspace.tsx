@@ -9,8 +9,8 @@ import {
   ScanBarcode,
   Store,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { startTransition, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { startTransition, useCallback, useMemo, useState } from "react";
 
 import { ActionDialog } from "@/components/dialogs/action-dialog";
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
@@ -228,6 +228,32 @@ export function EnterpriseCatalogWorkspace({
   workspace: EnterpriseCatalogWorkspaceData;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const serializedSearchParams = searchParams.toString();
+  const updateProductQuery = useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(serializedSearchParams);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value) params.set(key, value);
+        else params.delete(key);
+      }
+      const query = params.toString();
+      router.push(query ? `/catalog?${query}` : "/catalog", { scroll: false });
+    },
+    [router, serializedSearchParams],
+  );
+  const changeProductPage = useCallback(
+    (page: number) => updateProductQuery({ p: String(page) }),
+    [updateProductQuery],
+  );
+  const changeProductPageSize = useCallback(
+    (pageSize: number) => updateProductQuery({ p: null, ps: String(pageSize) }),
+    [updateProductQuery],
+  );
+  const changeProductSearch = useCallback(
+    (search: string) => updateProductQuery({ p: null, q: search || null }),
+    [updateProductQuery],
+  );
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = useState(false);
   const [isUnitDialogOpen, setIsUnitDialogOpen] = useState(false);
@@ -736,9 +762,7 @@ export function EnterpriseCatalogWorkspace({
     setCatalogName("");
     setCatalogDescription("");
     setCatalogStatus("ACTIVE");
-    setCatalogProductCodes(
-      workspace.productRows.map((product) => product.productCode).join("\n"),
-    );
+    setCatalogProductCodes("");
     setCatalogStoreCodes(
       workspace.availableStores.map((store) => store.storeCode).join("\n"),
     );
@@ -1984,6 +2008,13 @@ export function EnterpriseCatalogWorkspace({
             }
             globalFilterFn={productFilter}
             searchPlaceholder="Search products by code, SKU, or name"
+            serverPagination={{
+              ...workspace.productPage,
+              searchValue: workspace.productPage.search,
+              onPageChange: changeProductPage,
+              onPageSizeChange: changeProductPageSize,
+              onSearchChange: changeProductSearch,
+            }}
             toolbarActions={
               <button
                 className="inline-flex items-center gap-2 rounded-xl border border-[var(--brand)]/25 bg-[color:rgba(37,99,235,0.08)] px-3 py-2 text-sm font-semibold text-[color:var(--brand-deep)] transition hover:border-[var(--brand)]"

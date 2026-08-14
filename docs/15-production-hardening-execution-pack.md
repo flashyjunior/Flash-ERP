@@ -15,8 +15,11 @@ npm run cert:security-providers
 npm run cert:hardware-execution
 npm run acceptance:functional-uat
 npm run cert:database-readiness
+npm run acceptance:capacity-hardening
 npm run acceptance:production-hardening
 ```
+
+Enterprise/HQ capacity work and its 200-concurrent-user certification matrix are tracked in `docs/16-enterprise-capacity-and-performance-plan.md`. Capacity is not certified by this repository gate alone; run `npm run capacity:load` against a production build and production-like SQL Server infrastructure, then record the result in the UAT evidence log.
 
 ## Slice 1: Sync Chaos And Reconciliation
 

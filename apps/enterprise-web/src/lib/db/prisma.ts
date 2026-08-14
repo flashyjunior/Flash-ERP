@@ -2,17 +2,28 @@ import path from "node:path";
 
 import dotenv from "dotenv";
 import { PrismaMssql } from "@prisma/adapter-mssql";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
+
+import {
+  recordEnterpriseDatabaseError,
+  recordEnterpriseDatabaseQuery
+} from "@/server/performance/enterprise-runtime-capacity";
 
 const globalForPrisma = globalThis as unknown as {
   prisma?: PrismaClient;
 };
 
-function resolveDatasourceUrl() {
+function readDatasourceUrl() {
   if (!process.env.DATABASE_URL) {
-    dotenv.config({
-      path: path.resolve(process.cwd(), "..", "..", ".env")
-    });
+    const environmentFiles = [
+      path.resolve(process.cwd(), ".env"),
+      path.resolve(process.cwd(), "..", "..", ".env")
+    ];
+
+    for (const environmentFile of environmentFiles) {
+      dotenv.config({ path: environmentFile });
+      if (process.env.DATABASE_URL) break;
+    }
   }
 
   const datasourceUrl = process.env.DATABASE_URL;
@@ -21,7 +32,21 @@ function resolveDatasourceUrl() {
     throw new Error("DATABASE_URL must be set before starting Flash ERP enterprise.");
   }
 
-  return normalizeMssqlConnectionString(datasourceUrl);
+  return datasourceUrl;
+}
+
+export function isEnterpriseSqlServerDatabase() {
+  if (!/^sqlserver:\/\//i.test(readDatasourceUrl().trim())) {
+    throw new Error(
+      "Flash ERP Enterprise requires a SQL Server DATABASE_URL; refusing to execute schema compatibility SQL for another provider."
+    );
+  }
+
+  return true;
+}
+
+function resolveDatasourceUrl() {
+  return withEnterpriseDatabaseRuntimeOptions(normalizeMssqlConnectionString(readDatasourceUrl()));
 }
 
 function splitMssqlConnectionString(value: string) {
@@ -88,15 +113,69 @@ function normalizeMssqlConnectionString(datasourceUrl: string) {
     .join(";");
 }
 
+function positiveInteger(value: string | undefined, fallback: number) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function withEnterpriseDatabaseRuntimeOptions(datasourceUrl: string) {
+  if (!/^sqlserver:\/\//i.test(datasourceUrl)) return datasourceUrl;
+
+  const existingKeys = new Set(
+    splitMssqlConnectionString(datasourceUrl)
+      .slice(1)
+      .map((part) => part.split("=", 1)[0]?.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const options = [
+    ["connectionLimit", String(positiveInteger(process.env.FLASH_ERP_DB_POOL_MAX, 20))],
+    ["poolTimeout", String(positiveInteger(process.env.FLASH_ERP_DB_POOL_ACQUIRE_TIMEOUT_SECONDS, 15))],
+    ["connectionTimeout", String(positiveInteger(process.env.FLASH_ERP_DB_CONNECTION_TIMEOUT_MS, 15_000))],
+    ["socketTimeout", String(positiveInteger(process.env.FLASH_ERP_DB_REQUEST_TIMEOUT_MS, 30_000))],
+    ["applicationName", process.env.FLASH_ERP_DB_APPLICATION_NAME?.trim() || "Flash ERP Enterprise"]
+  ] as const;
+  let configured = datasourceUrl.replace(/;+$/, "");
+
+  for (const [key, value] of options) {
+    if (!existingKeys.has(key.toLowerCase())) {
+      configured += `;${key}=${braceMssqlValue(value)}`;
+    }
+  }
+
+  return configured;
+}
+
 function createPrismaClient() {
-  return new PrismaClient({
-    adapter: new PrismaMssql(resolveDatasourceUrl()),
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+  const log: Prisma.LogDefinition[] = [
+    { emit: "event", level: "query" },
+    { emit: "stdout", level: "error" },
+    ...(process.env.NODE_ENV === "development"
+      ? ([{ emit: "stdout", level: "warn" }] satisfies Prisma.LogDefinition[])
+      : [])
+  ];
+  const client = new PrismaClient({
+    adapter: new PrismaMssql(resolveDatasourceUrl(), {
+      onPoolError(error) {
+        recordEnterpriseDatabaseError("POOL");
+        console.error("Flash ERP enterprise database pool error.", error);
+      },
+      onConnectionError(error) {
+        recordEnterpriseDatabaseError("CONNECTION");
+        console.error("Flash ERP enterprise database connection error.", error);
+      }
+    }),
+    log,
     transactionOptions: {
       maxWait: 60_000,
       timeout: 60_000
     }
   });
+
+  client.$on("query", (event: Prisma.QueryEvent) => {
+    recordEnterpriseDatabaseQuery(event.duration, event.target);
+  });
+
+  return client;
 }
 
 function getPrismaClient() {

@@ -340,6 +340,33 @@ export function EnterpriseInventoryWorkspace({
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const serializedSearchParams = searchParams.toString();
+  const updateProductQuery = useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(serializedSearchParams);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value) params.set(key, value);
+        else params.delete(key);
+      }
+      const query = params.toString();
+      router.push(query ? `/inventory/products?${query}` : "/inventory/products", {
+        scroll: false
+      });
+    },
+    [router, serializedSearchParams]
+  );
+  const changeProductPage = useCallback(
+    (page: number) => updateProductQuery({ p: String(page) }),
+    [updateProductQuery]
+  );
+  const changeProductPageSize = useCallback(
+    (pageSize: number) => updateProductQuery({ p: null, ps: String(pageSize) }),
+    [updateProductQuery]
+  );
+  const changeProductSearch = useCallback(
+    (search: string) => updateProductQuery({ p: null, q: search || null }),
+    [updateProductQuery]
+  );
   const [stockShopFilter, setStockShopFilter] = useState("");
   const [stockProductFilter, setStockProductFilter] = useState("");
   const [poLocationCode, setPoLocationCode] = useState("");
@@ -362,6 +389,7 @@ export function EnterpriseInventoryWorkspace({
   const [transferDestinationLocation, setTransferDestinationLocation] = useState("");
   const [transferProductCode, setTransferProductCode] = useState("");
   const [transferQuantity, setTransferQuantity] = useState("1");
+  const [transferUnitOfMeasure, setTransferUnitOfMeasure] = useState("");
   const [transferReference, setTransferReference] = useState("");
   const [transferNote, setTransferNote] = useState("");
   const [transferRequiredAt, setTransferRequiredAt] = useState("");
@@ -376,7 +404,15 @@ export function EnterpriseInventoryWorkspace({
     "header"
   );
   const [transferLines, setTransferLines] = useState<
-    Array<{ id: string; productCode: string; productName: string; quantity: number }>
+    Array<{
+      id: string;
+      productCode: string;
+      productName: string;
+      quantity: number;
+      unitOfMeasure: string;
+      conversionFactor: number;
+      baseUnitOfMeasure: string;
+    }>
   >([]);
   const [transferStatus, setTransferStatus] = useState<{
     tone: "idle" | "success" | "error";
@@ -595,7 +631,9 @@ export function EnterpriseInventoryWorkspace({
         .map((row) => ({
           value: row.productCode,
           label: `${row.productName} (${row.productCode}${row.sku ? ` / ${row.sku}` : ""})`,
-          productName: row.productName
+          productName: row.productName,
+          baseUnitOfMeasure: row.baseUnitOfMeasure,
+          uomConversions: row.uomConversions
         }))
         .sort((left, right) => left.label.localeCompare(right.label)),
     [workspace.transferProductOptions]
@@ -645,6 +683,9 @@ export function EnterpriseInventoryWorkspace({
   const canSavePurchaseOrder = poLocationCode.length > 0 && poLines.length > 0 && !poSubmitting;
   const selectedTransferProduct = interStoreProductOptions.find(
     (option) => option.value === transferProductCode
+  );
+  const selectedTransferUom = selectedTransferProduct?.uomConversions.find(
+    (option) => option.uomCode === transferUnitOfMeasure
   );
   const selectedSourceLocation = interStoreLocationOptions.find(
     (option) => option.value === transferSourceLocation
@@ -779,6 +820,7 @@ export function EnterpriseInventoryWorkspace({
     setTransferDestinationLocation("");
     setTransferProductCode("");
     setTransferQuantity("1");
+    setTransferUnitOfMeasure("");
     setTransferReference("");
     setTransferNote("");
     setTransferRequiredAt("");
@@ -816,12 +858,16 @@ export function EnterpriseInventoryWorkspace({
     setTransferDeliveryNoteNo(row.deliveryNoteNo ?? "");
     setTransferProductCode("");
     setTransferQuantity("1");
+    setTransferUnitOfMeasure("");
     setTransferLines(
       batchLines.map((line) => ({
         id: line.transferId,
         productCode: line.productCode,
         productName: line.productName,
-        quantity: line.requestedQuantity
+        quantity: line.requestedUnitQuantity,
+        unitOfMeasure: line.requestedUnitOfMeasure,
+        conversionFactor: line.uomConversionFactor,
+        baseUnitOfMeasure: line.baseUnitOfMeasure
       }))
     );
     setActiveTransferEntryTab("header");
@@ -980,17 +1026,35 @@ export function EnterpriseInventoryWorkspace({
       return;
     }
 
+    const unit =
+      selectedTransferUom ??
+      selectedTransferProduct.uomConversions.find(
+        (option) => option.uomCode === selectedTransferProduct.baseUnitOfMeasure
+      );
+
+    if (!unit) {
+      setTransferStatus({
+        tone: "error",
+        message: "Choose a configured unit of measure before adding this line."
+      });
+      return;
+    }
+
     setTransferLines((currentLines) => [
       ...currentLines,
       {
         id: `${transferProductCode}-${Date.now()}-${currentLines.length}`,
         productCode: transferProductCode,
         productName: selectedTransferProduct.productName,
-        quantity
+        quantity,
+        unitOfMeasure: unit.uomCode,
+        conversionFactor: unit.conversionFactor,
+        baseUnitOfMeasure: selectedTransferProduct.baseUnitOfMeasure
       }
     ]);
     setTransferProductCode("");
     setTransferQuantity("1");
+    setTransferUnitOfMeasure("");
     setTransferStatus({ tone: "idle", message: "" });
   }
 
@@ -1031,7 +1095,8 @@ export function EnterpriseInventoryWorkspace({
           saveAsDraft: editingTransferBatchNo ? true : saveAsDraft,
           lines: transferLines.map((line) => ({
             productCode: line.productCode,
-            quantity: line.quantity
+            quantity: line.quantity,
+            unitOfMeasure: line.unitOfMeasure
           }))
         })
       });
@@ -2053,17 +2118,43 @@ export function EnterpriseInventoryWorkspace({
               </div>
             ) : activeTransferEntryTab === "details" ? (
               <div className="space-y-4">
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_8rem_auto]">
+                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_10rem_8rem_auto]">
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
                     disabled={isTransferLineLocked}
-                    onChange={(event) => setTransferProductCode(event.target.value)}
+                    onChange={(event) => {
+                      const productCode = event.target.value;
+                      const product = interStoreProductOptions.find(
+                        (option) => option.value === productCode
+                      );
+                      setTransferProductCode(productCode);
+                      setTransferUnitOfMeasure(
+                        product?.uomConversions.find(
+                          (unit) => unit.uomCode === product.baseUnitOfMeasure
+                        )?.uomCode ??
+                          product?.uomConversions[0]?.uomCode ??
+                          ""
+                      );
+                    }}
                     value={transferProductCode}
                   >
                     <option value="">Item</option>
                     {interStoreProductOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
+                    disabled={isTransferLineLocked || !selectedTransferProduct}
+                    onChange={(event) => setTransferUnitOfMeasure(event.target.value)}
+                    value={transferUnitOfMeasure}
+                  >
+                    <option value="">Unit</option>
+                    {selectedTransferProduct?.uomConversions.map((unit) => (
+                      <option key={unit.uomCode} value={unit.uomCode}>
+                        {unit.uomName} ({unit.uomCode})
                       </option>
                     ))}
                   </select>
@@ -2097,7 +2188,13 @@ export function EnterpriseInventoryWorkspace({
                           <p className="truncate text-xs text-stone-500">{line.productCode}</p>
                         </div>
                         <span className="text-right text-sm font-semibold text-stone-800">
-                          {quantityFormatter.format(line.quantity)}
+                          {quantityFormatter.format(line.quantity)} {line.unitOfMeasure}
+                          {line.unitOfMeasure !== line.baseUnitOfMeasure ? (
+                            <small className="block font-normal text-stone-500">
+                              {quantityFormatter.format(line.quantity * line.conversionFactor)}{" "}
+                              {line.baseUnitOfMeasure}
+                            </small>
+                          ) : null}
                         </span>
                         <button
                           className="rounded-lg border border-stone-200 px-3 py-1.5 text-xs font-semibold text-stone-700"
@@ -2372,9 +2469,12 @@ export function EnterpriseInventoryWorkspace({
                 <span>{numberFormatter.format(transferLines.length)} line(s)</span>
                 <span>
                   {quantityFormatter.format(
-                    transferLines.reduce((sum, line) => sum + line.quantity, 0)
+                    transferLines.reduce(
+                      (sum, line) => sum + line.quantity * line.conversionFactor,
+                      0
+                    )
                   )}{" "}
-                  requested
+                  base units requested
                 </span>
               </div>
               <div className="flex flex-wrap gap-3">
@@ -2560,6 +2660,17 @@ export function EnterpriseInventoryWorkspace({
             getRowHref={(row) => `/catalog/products/${encodeURIComponent(row.productCode)}`}
             globalFilterFn={productFilter}
             searchPlaceholder="Search stocked products by code, SKU, name, or status"
+            serverPagination={
+              dedicatedView
+                ? {
+                    ...workspace.productPage,
+                    searchValue: workspace.productPage.search,
+                    onPageChange: changeProductPage,
+                    onPageSizeChange: changeProductPageSize,
+                    onSearchChange: changeProductSearch
+                  }
+                : undefined
+            }
           />
         </WorkspaceTabsContent>
 

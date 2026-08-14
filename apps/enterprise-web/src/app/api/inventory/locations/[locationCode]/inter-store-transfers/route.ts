@@ -52,6 +52,10 @@ export async function POST(request: Request, context: RouteContext) {
       productCode: payload.productCode.trim(),
       destinationLocationCode: payload.destinationLocationCode.trim(),
       quantity,
+      unitOfMeasure:
+        typeof payload.unitOfMeasure === "string"
+          ? payload.unitOfMeasure.trim()
+          : undefined,
       externalReference:
         typeof payload.externalReference === "string" ? payload.externalReference : undefined,
       operatorName: typeof payload.operatorName === "string" ? payload.operatorName : undefined,

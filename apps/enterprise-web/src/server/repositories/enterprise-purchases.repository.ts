@@ -30,6 +30,12 @@ import {
 } from "@/server/repositories/inventory-stock-policy.repository";
 import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
 import {
+  buildEnterprisePageInfo,
+  normalizeEnterprisePageInput,
+  type EnterprisePageInfo,
+  type EnterprisePageInput
+} from "@/server/performance/enterprise-pagination";
+import {
   InventoryMovementType,
   PurchaseOrderStatus,
   RecordStatus,
@@ -286,6 +292,7 @@ export type EnterprisePurchasesWorkspaceData = {
   currencyCode: string;
   retailOrgName: string;
   companyLogoUrl: string | null;
+  purchaseOrderPage: EnterprisePageInfo;
   documentTemplates: {
     purchaseOrder: {
       code: string;
@@ -372,6 +379,7 @@ export type EnterprisePurchasesWorkspaceData = {
       lineTotal: number;
     }>;
   }>;
+  receivablePurchaseOrderRows: EnterprisePurchasesWorkspaceData["purchaseOrderRows"];
   goodsReceiptRows: Array<{
     goodsReceiptId: string;
     goodsReceiptNo: string;
@@ -423,12 +431,16 @@ export type EnterprisePurchasesWorkspaceData = {
 
 export function buildUnavailableEnterprisePurchasesWorkspace(
   reason: string,
-  currencyCode = "USD"
+  currencyCode = "USD",
+  input?: EnterprisePageInput
 ): EnterprisePurchasesWorkspaceData {
+  const purchaseOrderPage = normalizeEnterprisePageInput(input);
+
   return {
     currencyCode,
     retailOrgName: "Flash ERP",
     companyLogoUrl: null,
+    purchaseOrderPage: buildEnterprisePageInfo(purchaseOrderPage, 0),
     documentTemplates: {
       purchaseOrder: {
         code: "a4-purchase-order-starter",
@@ -456,6 +468,7 @@ export function buildUnavailableEnterprisePurchasesWorkspace(
     locationOptions: [],
     productOptions: [],
     purchaseOrderRows: [],
+    receivablePurchaseOrderRows: [],
     goodsReceiptRows: [],
     predictiveRows: [],
     postureMessages: [
@@ -1282,7 +1295,9 @@ export async function createHqGoodsReceiptFromPurchaseOrder(
   });
 }
 
-export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurchasesWorkspaceData> {
+export async function getEnterprisePurchasesWorkspace(
+  input?: EnterprisePageInput
+): Promise<EnterprisePurchasesWorkspaceData> {
   const enterpriseNode = await prisma.syncNode.findFirst({
     where: {
       nodeType: SyncNodeType.ENTERPRISE,
@@ -1303,9 +1318,35 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
 
   if (!enterpriseNode) {
     return buildUnavailableEnterprisePurchasesWorkspace(
-      "No primary enterprise sync node is provisioned yet."
+      "No primary enterprise sync node is provisioned yet.",
+      "USD",
+      input
     );
   }
+
+  const purchaseOrderPage = normalizeEnterprisePageInput(input);
+  const purchaseOrderPagingEnabled = Boolean(input);
+  const purchaseOrderBaseWhere: Prisma.PurchaseOrderWhereInput = {
+    retailOrgId: enterpriseNode.retailOrgId
+  };
+  const purchaseOrderListWhere: Prisma.PurchaseOrderWhereInput = {
+    ...purchaseOrderBaseWhere,
+    ...(purchaseOrderPage.search
+      ? {
+          OR: [
+            { purchaseOrderNo: { contains: purchaseOrderPage.search } },
+            { status: { contains: purchaseOrderPage.search } },
+            { externalReference: { contains: purchaseOrderPage.search } },
+            { supplier: { supplierNo: { contains: purchaseOrderPage.search } } },
+            { supplier: { name: { contains: purchaseOrderPage.search } } },
+            { inventoryLocation: { code: { contains: purchaseOrderPage.search } } },
+            { inventoryLocation: { name: { contains: purchaseOrderPage.search } } },
+            { inventoryLocation: { store: { code: { contains: purchaseOrderPage.search } } } },
+            { inventoryLocation: { store: { name: { contains: purchaseOrderPage.search } } } }
+          ]
+        }
+      : {})
+  };
 
   await ensureEnterpriseGoodsReceiptTemplate(prisma, enterpriseNode.retailOrgId);
   await ensureEnterprisePurchaseOrderTemplate(prisma, enterpriseNode.retailOrgId);
@@ -1316,6 +1357,10 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
     locations,
     products,
     purchaseOrders,
+    receivablePurchaseOrders,
+    purchaseOrderTotal,
+    purchaseOrderStatusGroups,
+    openPurchaseOrderValue,
     goodsReceipts,
     predictiveSnapshot,
     documentTemplates
@@ -1386,11 +1431,11 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
       }
     }),
     prisma.purchaseOrder.findMany({
-      where: {
-        retailOrgId: enterpriseNode.retailOrgId
-      },
+      where: purchaseOrderListWhere,
       orderBy: [{ updatedAt: "desc" }, { purchaseOrderNo: "desc" }],
-      take: 160,
+      ...(purchaseOrderPagingEnabled
+        ? { skip: purchaseOrderPage.skip, take: purchaseOrderPage.pageSize }
+        : { skip: 0, take: 160 }),
       select: {
         id: true,
         purchaseOrderNo: true,
@@ -1445,6 +1490,69 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
           }
         }
       }
+    }),
+    prisma.purchaseOrder.findMany({
+      where: {
+        ...purchaseOrderBaseWhere,
+        status: { in: ["COMMITTED", "PART_RECEIVED"] },
+        lines: {
+          some: {
+            orderedQuantity: { gt: 0 }
+          }
+        }
+      },
+      orderBy: [{ updatedAt: "desc" }, { purchaseOrderNo: "desc" }],
+      take: 200,
+      select: {
+        id: true,
+        purchaseOrderNo: true,
+        status: true,
+        externalReference: true,
+        note: true,
+        operatorName: true,
+        subtotalAmount: true,
+        discountAmount: true,
+        shippingAmount: true,
+        freightAmount: true,
+        otherChargesAmount: true,
+        taxAmount: true,
+        grandTotalAmount: true,
+        committedAt: true,
+        updatedAt: true,
+        supplier: { select: { supplierNo: true, name: true } },
+        inventoryLocation: {
+          select: {
+            code: true,
+            name: true,
+            store: { select: { code: true, name: true } }
+          }
+        },
+        lines: {
+          orderBy: { lineNo: "asc" },
+          select: {
+            id: true,
+            lineNo: true,
+            orderedQuantity: true,
+            receivedQuantity: true,
+            exceptionQuantity: true,
+            unitCost: true,
+            product: { select: { code: true, name: true } }
+          }
+        }
+      }
+    }),
+    prisma.purchaseOrder.count({ where: purchaseOrderListWhere }),
+    prisma.purchaseOrder.groupBy({
+      by: ["status"],
+      where: purchaseOrderBaseWhere,
+      _count: { _all: true }
+    }),
+    prisma.purchaseOrder.aggregate({
+      where: {
+        ...purchaseOrderBaseWhere,
+        status: { in: ["DRAFT", "COMMITTED", "PART_RECEIVED"] }
+      },
+      _sum: { grandTotalAmount: true }
     }),
     prisma.goodsReceipt.findMany({
       where: {
@@ -1571,7 +1679,7 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
     }
   }
 
-  const purchaseOrderRows = purchaseOrders.map((purchaseOrder) => {
+  const mapPurchaseOrder = (purchaseOrder: (typeof purchaseOrders)[number]) => {
     const lines = purchaseOrder.lines.map((line) => {
       const orderedQuantity = Number(Number(line.orderedQuantity).toFixed(3));
       const receivedQuantity = Number(Number(line.receivedQuantity).toFixed(3));
@@ -1638,7 +1746,11 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
       updatedAtLabel: formatRelativeTime(purchaseOrder.updatedAt),
       lines
     };
-  });
+  };
+  const purchaseOrderRows = purchaseOrders.map(mapPurchaseOrder);
+  const receivablePurchaseOrderRows = receivablePurchaseOrders
+    .map(mapPurchaseOrder)
+    .filter((row) => row.outstandingQuantity > 0);
 
   const goodsReceiptRows = goodsReceipts.map((receipt) => {
     const apInvoice = goodsReceiptInvoiceByReceiptNo.get(receipt.receiptNo) ?? null;
@@ -1702,9 +1814,12 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
       lines
     };
   });
-  const openPurchaseOrders = purchaseOrderRows.filter((row) =>
-    ["COMMITTED", "PART_RECEIVED"].includes(row.status)
-  ).length;
+  const purchaseOrderCountByStatus = new Map(
+    purchaseOrderStatusGroups.map((group) => [group.status, group._count._all] as const)
+  );
+  const openPurchaseOrders =
+    (purchaseOrderCountByStatus.get("COMMITTED") ?? 0) +
+    (purchaseOrderCountByStatus.get("PART_RECEIVED") ?? 0);
   const currencyCode = resolveEnterpriseCurrencyCode(enterpriseNode.retailOrg);
   const companySettings = readObject(enterpriseNode.retailOrg.companySettingsJson);
   const companyLogoUrl = readOptionalString(companySettings, "companyLogoUrl");
@@ -1722,6 +1837,7 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
     currencyCode,
     retailOrgName: enterpriseNode.retailOrg.name,
     companyLogoUrl,
+    purchaseOrderPage: buildEnterprisePageInfo(purchaseOrderPage, purchaseOrderTotal),
     documentTemplates: {
       purchaseOrder: {
         code: purchaseOrderTemplate?.code ?? "a4-purchase-order-starter",
@@ -1736,15 +1852,10 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
     },
     metrics: {
       openPurchaseOrders,
-      draftPurchaseOrders: purchaseOrderRows.filter((row) => row.status === "DRAFT").length,
-      receivedPurchaseOrders: purchaseOrderRows.filter((row) => row.status === "RECEIVED").length,
+      draftPurchaseOrders: purchaseOrderCountByStatus.get("DRAFT") ?? 0,
+      receivedPurchaseOrders: purchaseOrderCountByStatus.get("RECEIVED") ?? 0,
       goodsReceipts: goodsReceiptRows.length,
-      openOrderValue: Number(
-        purchaseOrderRows
-          .filter((row) => ["DRAFT", "COMMITTED", "PART_RECEIVED"].includes(row.status))
-          .reduce((sum, row) => sum + row.grandTotalAmount, 0)
-          .toFixed(2)
-      ),
+      openOrderValue: Number(openPurchaseOrderValue._sum.grandTotalAmount ?? 0),
       receivedQuantity: Number(
         goodsReceiptRows.reduce((sum, row) => sum + row.totalQuantity, 0).toFixed(3)
       ),
@@ -1780,10 +1891,11 @@ export async function getEnterprisePurchasesWorkspace(): Promise<EnterprisePurch
       unitCost: product.baseCostPrice === null ? null : Number(product.baseCostPrice)
     })),
     purchaseOrderRows,
+    receivablePurchaseOrderRows,
     goodsReceiptRows,
     predictiveRows: predictiveSnapshot.rows,
     postureMessages: [
-      `${purchaseOrderRows.length} purchase order(s), ${openPurchaseOrders} open PO(s), and ${goodsReceiptRows.length} synced goods receipt(s) are visible across ${enterpriseNode.retailOrg.name}.`,
+      `${purchaseOrderStatusGroups.reduce((sum, group) => sum + group._count._all, 0)} purchase order(s), ${openPurchaseOrders} open PO(s), and ${goodsReceiptRows.length} synced goods receipt(s) are visible across ${enterpriseNode.retailOrg.name}.`,
       selectableSuppliers.length > 0
         ? `${selectableSuppliers.length} supplier(s) are available for mandatory PO selection.`
         : "Create active suppliers before raising purchase orders."

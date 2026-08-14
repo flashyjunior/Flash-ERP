@@ -12,6 +12,11 @@ import {
 import { ensureOperatingExpenseSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 import {
+  buildEnterprisePageInfo,
+  normalizeEnterprisePageInput,
+  type EnterprisePageInfo
+} from "@/server/performance/enterprise-pagination";
+import {
   GlAccountType,
   GlJournalStatus,
   GlNormalBalance,
@@ -36,6 +41,15 @@ type EnterpriseFinanceWorkspaceInput = {
   dateTo?: string | null;
   storeCode?: string | null;
   retailOrgId?: string | null;
+  journalPage?: number | string | null;
+  journalPageSize?: number | string | null;
+  journalSearch?: string | null;
+  journalLinePage?: number | string | null;
+  journalLinePageSize?: number | string | null;
+  journalLineSearch?: string | null;
+  expensePage?: number | string | null;
+  expensePageSize?: number | string | null;
+  expenseSearch?: string | null;
 };
 
 type GlAccountDefinition = {
@@ -135,6 +149,9 @@ export type EnterpriseFinanceWorkspaceData = {
   currencyCode: string;
   retailOrgName: string;
   filters: FinanceFilters;
+  journalPage: EnterprisePageInfo;
+  journalLinePage: EnterprisePageInfo;
+  expensePage: EnterprisePageInfo;
   metrics: {
     accounts: number;
     postedJournals: number;
@@ -409,13 +426,41 @@ export function buildUnavailableEnterpriseFinanceWorkspace(
     dateFrom?: string | null;
     dateTo?: string | null;
     storeCode?: string | null;
+    journalPage?: number | string | null;
+    journalPageSize?: number | string | null;
+    journalSearch?: string | null;
+    journalLinePage?: number | string | null;
+    journalLinePageSize?: number | string | null;
+    journalLineSearch?: string | null;
+    expensePage?: number | string | null;
+    expensePageSize?: number | string | null;
+    expenseSearch?: string | null;
   },
   currencyCode = "USD"
 ): EnterpriseFinanceWorkspaceData {
+  const journalPage = normalizeEnterprisePageInput({
+    page: input?.journalPage,
+    pageSize: input?.journalPageSize,
+    search: input?.journalSearch
+  });
+  const expensePage = normalizeEnterprisePageInput({
+    page: input?.expensePage,
+    pageSize: input?.expensePageSize,
+    search: input?.expenseSearch
+  });
+  const journalLinePage = normalizeEnterprisePageInput({
+    page: input?.journalLinePage,
+    pageSize: input?.journalLinePageSize,
+    search: input?.journalLineSearch
+  });
+
   return {
     currencyCode,
     retailOrgName: "Flash ERP",
     filters: defaultFinanceFilters(input),
+    journalPage: buildEnterprisePageInfo(journalPage, 0),
+    journalLinePage: buildEnterprisePageInfo(journalLinePage, 0),
+    expensePage: buildEnterprisePageInfo(expensePage, 0),
     metrics: {
       accounts: 0,
       postedJournals: 0,
@@ -497,25 +542,41 @@ async function getEnterpriseContext(preferredRetailOrgId?: string | null): Promi
 }
 
 async function ensureStandardChartOfAccounts(retailOrgId: string) {
-  await Promise.all(
-    standardChartOfAccounts.map((definition) =>
-      prisma.glAccount.upsert({
-        where: {
-          retailOrgId_code: {
+  let accounts = await prisma.glAccount.findMany({ where: { retailOrgId } });
+  const accountsByCode = new Map(accounts.map((account) => [account.code, account]));
+  const changes = standardChartOfAccounts.flatMap((definition) => {
+    const existing = accountsByCode.get(definition.code);
+
+    if (!existing) {
+      return [
+        prisma.glAccount.create({
+          data: {
             retailOrgId,
-            code: definition.code
+            code: definition.code,
+            name: definition.name,
+            accountType: definition.accountType,
+            normalBalance: definition.normalBalance,
+            description: definition.description,
+            status: RecordStatus.ACTIVE
           }
-        },
-        update: {
-          name: definition.name,
-          accountType: definition.accountType,
-          normalBalance: definition.normalBalance,
-          description: definition.description,
-          status: RecordStatus.ACTIVE
-        },
-        create: {
-          retailOrgId,
-          code: definition.code,
+        })
+      ];
+    }
+
+    if (
+      existing.name === definition.name &&
+      existing.accountType === definition.accountType &&
+      existing.normalBalance === definition.normalBalance &&
+      existing.description === definition.description &&
+      existing.status === RecordStatus.ACTIVE
+    ) {
+      return [];
+    }
+
+    return [
+      prisma.glAccount.update({
+        where: { id: existing.id },
+        data: {
           name: definition.name,
           accountType: definition.accountType,
           normalBalance: definition.normalBalance,
@@ -523,16 +584,50 @@ async function ensureStandardChartOfAccounts(retailOrgId: string) {
           status: RecordStatus.ACTIVE
         }
       })
-    )
-  );
-  const accounts = await prisma.glAccount.findMany({
-    where: {
-      retailOrgId,
-      status: RecordStatus.ACTIVE
-    }
+    ];
   });
 
-  return new Map(accounts.map((account) => [account.code, account]));
+  if (changes.length > 0) {
+    await Promise.all(changes);
+    accounts = await prisma.glAccount.findMany({ where: { retailOrgId } });
+  }
+
+  return new Map(
+    accounts
+      .filter((account) => account.status === RecordStatus.ACTIVE)
+      .map((account) => [account.code, account])
+  );
+}
+
+async function getPostedSourceIds(input: {
+  retailOrgId: string;
+  sourceType: string;
+  sourceIds: string[];
+}) {
+  const postedSourceIds = new Set<string>();
+  const chunkSize = 500;
+
+  for (let offset = 0; offset < input.sourceIds.length; offset += chunkSize) {
+    const sourceIds = input.sourceIds.slice(offset, offset + chunkSize);
+    const rows = await prisma.glJournalEntry.findMany({
+      where: {
+        retailOrgId: input.retailOrgId,
+        sourceType: input.sourceType,
+        sourceId: { in: sourceIds }
+      },
+      select: { sourceId: true }
+    });
+
+    for (const row of rows) postedSourceIds.add(row.sourceId);
+  }
+
+  return postedSourceIds;
+}
+
+function inventoryJournalSourceType(movementType: string) {
+  if (cogsMovementTypes.includes(movementType)) return "INVENTORY_COGS";
+  if (receiptMovementTypes.includes(movementType)) return "INVENTORY_RECEIPT";
+  return "INVENTORY_ADJUSTMENT";
 }
 
 async function createJournalEntryIfMissing(input: {
@@ -624,10 +719,15 @@ async function materializeSalesJournals(input: {
       id: true
     }
   });
+  const postedSourceIds = await getPostedSourceIds({
+    retailOrgId: input.retailOrgId,
+    sourceType: "POS_SALE",
+    sourceIds: transactions.map((transaction) => transaction.id)
+  });
 
   let created = 0;
 
-  for (const transaction of transactions) {
+  for (const transaction of transactions.filter(({ id }) => !postedSourceIds.has(id))) {
     const result = await prisma
       .$transaction((tx) =>
         postPosTransactionAccountingInTransaction(tx, {
@@ -705,10 +805,30 @@ async function materializeInventoryJournals(input: {
       }
     }
   });
+  const postedBySourceType = new Map<string, Set<string>>();
+
+  for (const sourceType of ["INVENTORY_COGS", "INVENTORY_RECEIPT", "INVENTORY_ADJUSTMENT"]) {
+    const sourceIds = ledgerEntries
+      .filter((entry) => inventoryJournalSourceType(entry.movementType) === sourceType)
+      .map((entry) => entry.id);
+    postedBySourceType.set(
+      sourceType,
+      await getPostedSourceIds({
+        retailOrgId: input.retailOrgId,
+        sourceType,
+        sourceIds
+      })
+    );
+  }
 
   let created = 0;
 
   for (const entry of ledgerEntries) {
+    const postedSourceIds = postedBySourceType.get(
+      inventoryJournalSourceType(entry.movementType)
+    );
+    if (postedSourceIds?.has(entry.id)) continue;
+
     const quantity = Number(entry.quantity);
     const unitCost = Number(entry.unitCost ?? entry.product.baseCostPrice ?? 0);
     const amount = roundMoney(Math.abs(quantity) * unitCost);
@@ -720,11 +840,10 @@ async function materializeInventoryJournals(input: {
     const locationLabel = entry.inventoryLocation.store?.name ?? entry.inventoryLocation.name;
     const memo = `${locationLabel} ${formatEnumLabel(entry.movementType)} ${entry.product.code}`;
     const lines: JournalDraftLine[] = [];
-    let sourceType = "INVENTORY_ADJUSTMENT";
+    const sourceType = inventoryJournalSourceType(entry.movementType);
     let description = `${formatEnumLabel(entry.movementType)} ${entry.product.name}`;
 
     if (entry.movementType === InventoryMovementType.SALE) {
-      sourceType = "INVENTORY_COGS";
       buildSignedPair({
         lines,
         debitAccountCode: "5000",
@@ -735,7 +854,6 @@ async function materializeInventoryJournals(input: {
       });
       description = `COGS for ${entry.product.name}`;
     } else if (entry.movementType === InventoryMovementType.RETURN) {
-      sourceType = "INVENTORY_COGS";
       buildSignedPair({
         lines,
         debitAccountCode: "5000",
@@ -746,7 +864,6 @@ async function materializeInventoryJournals(input: {
       });
       description = `COGS reversal for ${entry.product.name}`;
     } else if (entry.movementType === InventoryMovementType.GOODS_RECEIPT) {
-      sourceType = "INVENTORY_RECEIPT";
       buildSignedPair({
         lines,
         debitAccountCode: "1200",
@@ -757,7 +874,6 @@ async function materializeInventoryJournals(input: {
       });
       description = `Goods receipt for ${entry.product.name}`;
     } else if (entry.movementType === InventoryMovementType.RETURN_TO_VENDOR) {
-      sourceType = "INVENTORY_RECEIPT";
       buildSignedPair({
         lines,
         debitAccountCode: "2000",
@@ -838,10 +954,15 @@ async function materializeOperatingExpenseJournals(input: {
       financePaymentAccountCode: true
     }
   });
+  const postedSourceIds = await getPostedSourceIds({
+    retailOrgId: input.retailOrgId,
+    sourceType: "OPERATING_EXPENSE",
+    sourceIds: expenses.map((expense) => expense.id)
+  });
 
   let created = 0;
 
-  for (const expense of expenses) {
+  for (const expense of expenses.filter(({ id }) => !postedSourceIds.has(id))) {
     const amount = roundMoney(Number(expense.amount));
     const taxAmount = roundMoney(Number(expense.taxAmount));
     const totalAmount = roundMoney(amount + taxAmount);
@@ -946,6 +1067,23 @@ async function materializeGlPostings(input: {
     inventoryCreated,
     expenseCreated
   };
+}
+
+export async function reconcileEnterpriseFinancePostings(
+  input?: EnterpriseFinanceWorkspaceInput
+) {
+  await assertEnterpriseDatabaseReady();
+  await ensureOperatingExpenseSchemaCompatibility();
+
+  const context = await getEnterpriseContext(input?.retailOrgId);
+  if (!context) {
+    throw new Error("Flash ERP needs an active enterprise node before reconciling finance postings.");
+  }
+
+  return materializeGlPostings({
+    retailOrgId: context.retailOrgId,
+    filters: defaultFinanceFilters(input)
+  });
 }
 
 export async function assignAndPostOperatingExpenseAccounts(
@@ -1205,6 +1343,21 @@ export async function getEnterpriseFinanceWorkspace(
   input?: EnterpriseFinanceWorkspaceInput
 ): Promise<EnterpriseFinanceWorkspaceData> {
   const filters = defaultFinanceFilters(input);
+  const journalPage = normalizeEnterprisePageInput({
+    page: input?.journalPage,
+    pageSize: input?.journalPageSize,
+    search: input?.journalSearch
+  });
+  const expensePage = normalizeEnterprisePageInput({
+    page: input?.expensePage,
+    pageSize: input?.expensePageSize,
+    search: input?.expenseSearch
+  });
+  const journalLinePage = normalizeEnterprisePageInput({
+    page: input?.journalLinePage,
+    pageSize: input?.journalLinePageSize,
+    search: input?.journalLineSearch
+  });
 
   try {
     await assertEnterpriseDatabaseReady();
@@ -1232,17 +1385,65 @@ export async function getEnterpriseFinanceWorkspace(
     );
   }
 
-  const materialized = await materializeGlPostings({
-    retailOrgId: context.retailOrgId,
-    filters
-  });
   const journalWhere = buildJournalWhere({
     retailOrgId: context.retailOrgId,
     filters
   });
+  const journalListWhere: Prisma.GlJournalEntryWhereInput = {
+    ...journalWhere,
+    ...(journalPage.search
+      ? {
+          OR: [
+            { journalNo: { contains: journalPage.search } },
+            { sourceType: { contains: journalPage.search } },
+            { sourceReference: { contains: journalPage.search } },
+            { description: { contains: journalPage.search } },
+            { status: { contains: journalPage.search } }
+          ]
+        }
+      : {})
+  };
+  const expenseDateFilter = buildDateRangeFilter(filters.dateFrom, filters.dateTo);
+  const expenseWhere: Prisma.OperatingExpenseWhereInput = {
+    retailOrgId: context.retailOrgId,
+    ...(expenseDateFilter ? { expenseDate: expenseDateFilter } : {}),
+    ...buildStoreRelationFilter(filters.storeCode),
+    ...(expensePage.search
+      ? {
+          OR: [
+            { expenseNo: { contains: expensePage.search } },
+            { category: { contains: expensePage.search } },
+            { description: { contains: expensePage.search } },
+            { supplierName: { contains: expensePage.search } },
+            { externalReference: { contains: expensePage.search } },
+            { status: { contains: expensePage.search } }
+          ]
+        }
+      : {})
+  };
+  const journalLineWhere: Prisma.GlJournalLineWhereInput = {
+    journalEntry: journalWhere,
+    ...(journalLinePage.search
+      ? {
+          OR: [
+            { journalEntry: { journalNo: { contains: journalLinePage.search } } },
+            { account: { code: { contains: journalLinePage.search } } },
+            { account: { name: { contains: journalLinePage.search } } },
+            { store: { code: { contains: journalLinePage.search } } },
+            { store: { name: { contains: journalLinePage.search } } },
+            { memo: { contains: journalLinePage.search } }
+          ]
+        }
+      : {})
+  };
   const [
     accounts,
     journalEntries,
+    journalTotal,
+    journalScopeTotal,
+    journalAmounts,
+    journalLines,
+    journalLineTotal,
     salesExpected,
     cogsExpected,
     receiptsExpected,
@@ -1253,7 +1454,8 @@ export async function getEnterpriseFinanceWorkspace(
     adjustmentsPosted,
     expenseExpected,
     expensePosted,
-    expenses
+    expenses,
+    expenseTotal
   ] = await Promise.all([
     prisma.glAccount.findMany({
       where: {
@@ -1283,11 +1485,10 @@ export async function getEnterpriseFinanceWorkspace(
       }
     }),
     prisma.glJournalEntry.findMany({
-      where: journalWhere,
-      orderBy: {
-        postingDate: "desc"
-      },
-      take: 500,
+      where: journalListWhere,
+      orderBy: [{ postingDate: "desc" }, { id: "desc" }],
+      skip: journalPage.skip,
+      take: journalPage.pageSize,
       select: {
         id: true,
         journalNo: true,
@@ -1321,6 +1522,53 @@ export async function getEnterpriseFinanceWorkspace(
         }
       }
     }),
+    prisma.glJournalEntry.count({ where: journalListWhere }),
+    prisma.glJournalEntry.count({ where: journalWhere }),
+    prisma.glJournalLine.aggregate({
+      where: {
+        journalEntry: journalWhere
+      },
+      _sum: {
+        debitAmount: true,
+        creditAmount: true
+      }
+    }),
+    prisma.glJournalLine.findMany({
+      where: journalLineWhere,
+      orderBy: [
+        { journalEntry: { postingDate: "desc" } },
+        { journalEntryId: "desc" },
+        { createdAt: "asc" },
+        { id: "asc" }
+      ],
+      skip: journalLinePage.skip,
+      take: journalLinePage.pageSize,
+      select: {
+        id: true,
+        debitAmount: true,
+        creditAmount: true,
+        memo: true,
+        journalEntry: {
+          select: {
+            journalNo: true,
+            postingDate: true
+          }
+        },
+        account: {
+          select: {
+            code: true,
+            name: true
+          }
+        },
+        store: {
+          select: {
+            code: true,
+            name: true
+          }
+        }
+      }
+    }),
+    prisma.glJournalLine.count({ where: journalLineWhere }),
     countExpectedSources({ retailOrgId: context.retailOrgId, filters }),
     countExpectedSources({
       retailOrgId: context.retailOrgId,
@@ -1363,17 +1611,10 @@ export async function getEnterpriseFinanceWorkspace(
       sourceType: "OPERATING_EXPENSE"
     }),
     prisma.operatingExpense.findMany({
-      where: {
-        retailOrgId: context.retailOrgId,
-        ...(buildDateRangeFilter(filters.dateFrom, filters.dateTo)
-          ? { expenseDate: buildDateRangeFilter(filters.dateFrom, filters.dateTo)! }
-          : {}),
-        ...buildStoreRelationFilter(filters.storeCode)
-      },
-      orderBy: {
-        expenseDate: "desc"
-      },
-      take: 500,
+      where: expenseWhere,
+      orderBy: [{ expenseDate: "desc" }, { id: "desc" }],
+      skip: expensePage.skip,
+      take: expensePage.pageSize,
       select: {
         id: true,
         expenseNo: true,
@@ -1405,7 +1646,8 @@ export async function getEnterpriseFinanceWorkspace(
           }
         }
       }
-    })
+    }),
+    prisma.operatingExpense.count({ where: expenseWhere })
   ]);
 
   const journalRows = journalEntries.map((journal) => {
@@ -1429,20 +1671,18 @@ export async function getEnterpriseFinanceWorkspace(
       lineCount: journal.lines.length
     };
   });
-  const journalLineRows = journalEntries.flatMap((journal) =>
-    journal.lines.map((line) => ({
-      journalLineId: line.id,
-      journalNo: journal.journalNo,
-      postingDate: journal.postingDate.toISOString(),
-      accountCode: line.account.code,
-      accountName: line.account.name,
-      storeCode: line.store?.code ?? null,
-      storeName: line.store?.name ?? null,
-      debitAmount: roundMoney(Number(line.debitAmount)),
-      creditAmount: roundMoney(Number(line.creditAmount)),
-      memo: line.memo
-    }))
-  );
+  const journalLineRows = journalLines.map((line) => ({
+    journalLineId: line.id,
+    journalNo: line.journalEntry.journalNo,
+    postingDate: line.journalEntry.postingDate.toISOString(),
+    accountCode: line.account.code,
+    accountName: line.account.name,
+    storeCode: line.store?.code ?? null,
+    storeName: line.store?.name ?? null,
+    debitAmount: roundMoney(Number(line.debitAmount)),
+    creditAmount: roundMoney(Number(line.creditAmount)),
+    memo: line.memo
+  }));
   const accountRows = accounts.map((account) => {
     const debitAmount = roundMoney(
       account.journalLines.reduce((sum, line) => sum + Number(line.debitAmount), 0)
@@ -1541,17 +1781,17 @@ export async function getEnterpriseFinanceWorkspace(
     financeAssignedAt: expense.financeAssignedAt?.toISOString() ?? null,
     postedAt: expense.postedAt?.toISOString() ?? null
   }));
-  const postedDebit = roundMoney(journalRows.reduce((sum, row) => sum + row.debitAmount, 0));
-  const postedCredit = roundMoney(journalRows.reduce((sum, row) => sum + row.creditAmount, 0));
+  const postedDebit = roundMoney(Number(journalAmounts._sum.debitAmount ?? 0));
+  const postedCredit = roundMoney(Number(journalAmounts._sum.creditAmount ?? 0));
   const missingPostings = postingCoverageRows.reduce((sum, row) => sum + row.missingCount, 0);
   const salesJournals = salesPosted;
   const inventoryJournals = cogsPosted + receiptsPosted + adjustmentsPosted;
   const statusMessage =
     missingPostings > 0
-      ? `HQ finance posted ${journalRows.length} journal(s), with ${missingPostings} source fact(s) still needing cost or posting review.`
+      ? `HQ finance posted ${journalScopeTotal} journal(s), with ${missingPostings} source fact(s) still needing cost or posting review.`
       : `HQ finance posted balanced journals for sales, receipts, COGS, and stock adjustments in the selected scope.`;
   const postureMessages = [
-    `${materialized.salesCreated + materialized.inventoryCreated + materialized.expenseCreated} new source posting(s) were materialized during this refresh.`,
+    "Operational postings are written transactionally; legacy posting repair runs separately from this read-only workspace.",
     `${salesJournals} POS sales journal(s), ${inventoryJournals} inventory journal(s), and ${expensePosted} expense journal(s) are available for export.`,
     `${postedDebit.toFixed(2)} ${context.currencyCode} debits and ${postedCredit.toFixed(2)} ${context.currencyCode} credits are in scope.`
   ];
@@ -1569,16 +1809,19 @@ export async function getEnterpriseFinanceWorkspace(
     currencyCode: context.currencyCode,
     retailOrgName: context.retailOrgName,
     filters,
+    journalPage: buildEnterprisePageInfo(journalPage, journalTotal),
+    journalLinePage: buildEnterprisePageInfo(journalLinePage, journalLineTotal),
+    expensePage: buildEnterprisePageInfo(expensePage, expenseTotal),
     metrics: {
       accounts: accounts.length,
-      postedJournals: journalRows.length,
+      postedJournals: journalScopeTotal,
       postedDebit,
       postedCredit,
       imbalanceAmount: roundMoney(postedDebit - postedCredit),
       missingPostings,
       salesJournals,
       inventoryJournals,
-      operatingExpenses: expenseRows.length
+      operatingExpenses: expenseExpected
     },
     accountRows,
     journalRows,

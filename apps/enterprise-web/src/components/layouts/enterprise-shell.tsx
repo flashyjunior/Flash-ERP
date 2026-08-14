@@ -296,6 +296,7 @@ const navigationChildIconByKey: Record<string, LucideIcon> = {
   "online-fuel-reconciliation": Scale,
   "online-fuel-supplier-receipts": PackageCheck,
   "online-fuel-tanks": Warehouse,
+  "online-store-ecommerce": Store,
   "online-store-pos": ShoppingCart,
   "online-users": Activity,
   "operating-foundation": Building2,
