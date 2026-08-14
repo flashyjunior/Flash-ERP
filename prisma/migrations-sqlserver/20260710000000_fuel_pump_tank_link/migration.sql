@@ -7,11 +7,14 @@ BEGIN
     ALTER TABLE [dbo].[ErpFuelPump] ADD [tankId] NVARCHAR(1000);
 END;
 
+-- SQL Server compiles the full batch before executing the ALTER above. Keep
+-- references to the newly-added column in a separately compiled dynamic batch.
+EXEC sp_executesql N'
 IF NOT EXISTS (
     SELECT 1
     FROM sys.indexes
-    WHERE name = 'ErpFuelPump_tankId_status_idx'
-      AND object_id = OBJECT_ID('dbo.ErpFuelPump')
+    WHERE name = N''ErpFuelPump_tankId_status_idx''
+      AND object_id = OBJECT_ID(N''dbo.ErpFuelPump'')
 )
 BEGIN
     CREATE NONCLUSTERED INDEX [ErpFuelPump_tankId_status_idx] ON [dbo].[ErpFuelPump]([tankId], [status]);
@@ -40,6 +43,7 @@ INNER JOIN PumpTankChoice choice
 INNER JOIN [dbo].[ErpFuelTank] tank
     ON tank.[id] = choice.[tankId]
 WHERE pump.[tankId] IS NULL;
+';
 
 COMMIT TRAN;
 
