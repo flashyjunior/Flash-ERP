@@ -2692,8 +2692,9 @@ export function EnterpriseInventoryLocationDetail({
               <div className="space-y-4">
                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm leading-6 text-emerald-900">
                   Flash ERP will publish this instruction downstream to the source and destination
-                  shop desktops. The source shop will issue the stock locally, then the destination
-                  shop will receive it locally when the physical goods arrive.
+                  shop desktops. The source shop will choose the dispatch location and issue the
+                  stock locally, then the destination shop will receive it when the physical goods
+                  arrive.
                 </div>
                 <InventoryTaskProductPicker
                   availableCategories={detail.availableCategories}
@@ -2756,12 +2757,13 @@ export function EnterpriseInventoryLocationDetail({
                       {quantityFormatter.format(
                         Number.isFinite(effectiveTransferQuantity) ? effectiveTransferQuantity : 0
                       )}{" "}
-                      units of {selectedProduct.productName} from {detail.location.name} to{" "}
+                      units of {selectedProduct.productName} from the source shop to{" "}
                       {selectedTransferTarget.name}
                       {selectedTransferTarget.storeName
                         ? ` in ${selectedTransferTarget.storeName}`
-                        : ""}. The source node will sync the issue first, then the destination node
-                      will sync the receipt when goods are physically received.
+                        : ""}. The source shop will select the dispatch location before syncing the
+                      issue, then the destination node will sync the receipt when goods are
+                      physically received.
                     </p>
                     <p className="mt-2 text-xs text-stone-500">
                       {selectedProductHierarchy || "No department/category assigned yet"}

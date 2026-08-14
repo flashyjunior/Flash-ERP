@@ -25,6 +25,7 @@ import {
   Store,
   Trash2,
   Truck,
+  WalletCards,
   X,
   ZoomIn,
   ZoomOut
@@ -38,6 +39,7 @@ import styles from "./public-storefront.module.css";
 
 type Product = PublicStorefrontData["products"][number];
 type Variant = Product["variants"][number];
+type SellingUnit = Product["sellingUnits"][number];
 type ProductPromotion = NonNullable<Product["promotion"]>;
 type DrawerView = "cart" | "checkout" | "orders" | null;
 type CheckoutPaymentOption = {
@@ -55,6 +57,10 @@ type CartLine = {
   imageUrl: string | null;
   variantCode: string | null;
   variantName: string | null;
+  sellingUnitOfMeasure: string;
+  sellingUnitName: string;
+  baseUnitOfMeasure: string;
+  uomConversionFactor: number;
   unitPrice: number;
   quantity: number;
 };
@@ -70,6 +76,10 @@ type EcommerceQuote = {
     productId: string;
     variantCode: string | null;
     quantity: number;
+    sellingUnitOfMeasure: string;
+    baseUnitOfMeasure: string;
+    uomConversionFactor: number;
+    baseQuantity: number;
     unitPrice: number;
     subtotalAmount: number;
     discountAmount: number;
@@ -93,6 +103,7 @@ type CustomerSession = {
 type CustomerOrder = {
   id: string;
   orderNo: string;
+  orderType: "SALES_ORDER" | "LAYAWAY";
   status: string;
   paymentStatus: string;
   deliveryStatus: string;
@@ -104,6 +115,9 @@ type CustomerOrder = {
   totalAmount: number;
   paidAmount: number;
   balanceAmount: number;
+  minimumDepositAmount: number;
+  reservationStatus: string;
+  layawayExpiresAt: string | null;
   placedAt: string;
   deliveryAddress: string;
   trackingReference: string | null;
@@ -202,6 +216,31 @@ function getProductPromotion(product: Product, variant: Variant | null = null) {
   return variant?.promotion ?? product.promotion;
 }
 
+function getProductSellingUnits(product: Product, variant: Variant | null) {
+  return variant?.sellingUnits ?? product.sellingUnits;
+}
+
+function resolveProductSellingUnit(
+  product: Product,
+  variant: Variant | null,
+  selectedUnitOfMeasure?: string | null
+): SellingUnit | null {
+  const sellingUnits = getProductSellingUnits(product, variant);
+  const normalizedSelected = selectedUnitOfMeasure?.trim().toUpperCase() ?? "";
+
+  return (
+    sellingUnits.find(
+      (sellingUnit) => sellingUnit.unitOfMeasureCode.toUpperCase() === normalizedSelected
+    ) ??
+    sellingUnits.find((sellingUnit) => sellingUnit.isDefault) ??
+    sellingUnits.find(
+      (sellingUnit) =>
+        sellingUnit.unitOfMeasureCode.toUpperCase() === product.baseUnitOfMeasure.toUpperCase()
+    ) ??
+    null
+  );
+}
+
 function getProductPrice(product: Product, variant: Variant | null = null) {
   const unitPrice = variant?.unitPrice ?? product.unitPrice;
   return getProductPromotion(product, variant)?.promotionalUnitPrice ?? unitPrice;
@@ -220,8 +259,13 @@ function getProductOriginalPrice(product: Product, variant: Variant | null = nul
     : null;
 }
 
-function getProductPreviewTotal(product: Product, variant: Variant | null, quantity: number) {
-  const unitPrice = variant?.unitPrice ?? product.unitPrice;
+function getProductPreviewTotal(
+  product: Product,
+  variant: Variant | null,
+  quantity: number,
+  unitPriceOverride?: number
+) {
+  const unitPrice = unitPriceOverride ?? variant?.unitPrice ?? product.unitPrice;
   const grossTotal = toCartMoney(unitPrice * quantity);
   const promotion = getProductPromotion(product, variant);
 
@@ -387,6 +431,7 @@ export function PublicStorefront({
     storefront.products.find((product) => product.code === initialProductCode) ?? null
   );
   const [quickVariant, setQuickVariant] = useState<Variant | null>(null);
+  const [quickSellingUnitOfMeasure, setQuickSellingUnitOfMeasure] = useState("");
   const [quickQuantity, setQuickQuantity] = useState(1);
   const [quickImageUrl, setQuickImageUrl] = useState<string | null>(null);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
@@ -433,7 +478,11 @@ export function PublicStorefront({
     paymentMethodCode: string;
     paymentMethodName: string;
     paymentTiming: "ON_DELIVERY" | "PREPAY";
+    orderType: "SALES_ORDER" | "LAYAWAY";
+    paymentAmountDueNow: number;
   } | null>(null);
+  const [checkoutOrderType, setCheckoutOrderType] = useState<"SALES_ORDER" | "LAYAWAY">("SALES_ORDER");
+  const [layawayDepositAmount, setLayawayDepositAmount] = useState(0);
   const [selectedPaymentCode, setSelectedPaymentCode] = useState(
     storefront.store.payOnDeliveryEnabled
       ? "PAY_ON_DELIVERY"
@@ -475,6 +524,12 @@ export function PublicStorefront({
     ],
     [storefront.paymentMethods, storefront.store.payOnDeliveryEnabled]
   );
+  const effectiveCheckoutPaymentOptions = useMemo(
+    () => checkoutOrderType === "LAYAWAY"
+      ? checkoutPaymentOptions.filter((method) => method.timing === "PREPAY")
+      : checkoutPaymentOptions,
+    [checkoutOrderType, checkoutPaymentOptions],
+  );
   const whatsappDigits = storefront.store.whatsappPhone?.replace(/\D/g, "") ?? "";
   const publicStoreCode = storefront.store.slug || storefront.store.code;
   const publicStoreHref = `/shop/${encodeURIComponent(publicStoreCode)}`;
@@ -495,7 +550,33 @@ export function PublicStorefront({
       if (stored) {
         const parsed = JSON.parse(stored) as CartLine[];
         if (Array.isArray(parsed)) {
-          setCart(parsed);
+          setCart(parsed.flatMap((line) => {
+            const product = storefront.products.find((candidate) => candidate.id === line.productId);
+
+            if (!product) {
+              return [];
+            }
+
+            const variant = line.variantCode
+              ? product.variants.find((candidate) => candidate.code === line.variantCode) ?? null
+              : null;
+            const sellingUnit = resolveProductSellingUnit(
+              product,
+              variant,
+              line.sellingUnitOfMeasure
+            );
+            const unitOfMeasure = sellingUnit?.unitOfMeasureCode ?? product.baseUnitOfMeasure;
+
+            return [{
+              ...line,
+              key: `${product.id}:${variant?.code ?? "base"}:${unitOfMeasure}`,
+              sellingUnitOfMeasure: unitOfMeasure,
+              sellingUnitName: sellingUnit?.unitOfMeasureName ?? unitOfMeasure,
+              baseUnitOfMeasure: product.baseUnitOfMeasure,
+              uomConversionFactor: sellingUnit?.conversionFactor ?? 1,
+              unitPrice: sellingUnit?.unitPrice ?? variant?.unitPrice ?? product.unitPrice
+            }];
+          }));
         }
       }
     } finally {
@@ -556,8 +637,12 @@ export function PublicStorefront({
 
   useEffect(() => {
     const product = storefront.products.find((entry) => entry.code === initialProductCode) ?? null;
+    const variant = product?.variants.length === 1 ? product.variants[0] : null;
     setQuickProduct(product);
-    setQuickVariant(product?.variants.length === 1 ? product.variants[0] : null);
+    setQuickVariant(variant);
+    setQuickSellingUnitOfMeasure(
+      product ? resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? "" : ""
+    );
     setQuickQuantity(1);
     setQuickImageUrl(product ? product.galleryImageUrls[0] ?? product.imageUrl : null);
     setImageViewerOpen(false);
@@ -608,23 +693,31 @@ export function PublicStorefront({
   const selectedProductPromotion = quickProduct
     ? getProductPromotion(quickProduct, quickVariant)
     : null;
+  const selectedProductSellingUnit = quickProduct
+    ? resolveProductSellingUnit(quickProduct, quickVariant, quickSellingUnitOfMeasure)
+    : null;
   const selectedProductPrice = quickProduct
-    ? getProductPrice(quickProduct, quickVariant)
+    ? selectedProductSellingUnit?.unitPrice ?? getProductPrice(quickProduct, quickVariant)
     : 0;
   const selectedProductOriginalPrice = quickProduct
     ? getProductOriginalPrice(quickProduct, quickVariant)
     : null;
   const quickQuoteKey = quickProduct
-    ? JSON.stringify([quickProduct.id, quickVariant?.code ?? null, quickQuantity])
+    ? JSON.stringify([
+        quickProduct.id,
+        quickVariant?.code ?? null,
+        selectedProductSellingUnit?.unitOfMeasureCode ?? null,
+        quickQuantity
+      ])
     : "";
   const selectedProductTotal = quickProduct
     ? quickQuote?.key === quickQuoteKey
       ? quickQuote.value.totalAmount
-      : getProductPreviewTotal(quickProduct, quickVariant, quickQuantity)
+      : getProductPreviewTotal(quickProduct, quickVariant, quickQuantity, selectedProductPrice)
     : 0;
   const cartQuantity = cart.reduce((sum, line) => sum + line.quantity, 0);
   const cartQuoteKey = JSON.stringify(
-    cart.map((line) => [line.productId, line.variantCode, line.quantity])
+    cart.map((line) => [line.productId, line.variantCode, line.sellingUnitOfMeasure, line.quantity])
   );
   const fallbackCartSubtotal = toCartMoney(
     cart.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0)
@@ -633,6 +726,9 @@ export function PublicStorefront({
   const cartSubtotal = currentCartQuote?.subtotalAmount ?? fallbackCartSubtotal;
   const cartDiscount = currentCartQuote?.discountAmount ?? 0;
   const checkoutTotal = currentCartQuote?.totalAmount ?? fallbackCartSubtotal;
+  const minimumLayawayDeposit = toCartMoney(
+    checkoutTotal * (storefront.store.layawayOffer.minimumDepositPercent / 100),
+  );
 
   useEffect(() => {
     if (!quickProduct || (quickProduct.variants.length > 0 && !quickVariant)) {
@@ -653,6 +749,7 @@ export function PublicStorefront({
               lines: [{
                 productId: quickProduct.id,
                 variantCode: quickVariant?.code ?? null,
+                sellingUnitOfMeasure: selectedProductSellingUnit?.unitOfMeasureCode ?? null,
                 quantity: quickQuantity
               }]
             }),
@@ -673,7 +770,7 @@ export function PublicStorefront({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [quickProduct, quickVariant, quickQuantity, quickQuoteKey, storefront.store.code]);
+  }, [quickProduct, quickVariant, selectedProductSellingUnit, quickQuantity, quickQuoteKey, storefront.store.code]);
 
   useEffect(() => {
     if (cart.length === 0) {
@@ -694,6 +791,7 @@ export function PublicStorefront({
               lines: cart.map((line) => ({
                 productId: line.productId,
                 variantCode: line.variantCode,
+                sellingUnitOfMeasure: line.sellingUnitOfMeasure,
                 quantity: line.quantity
               }))
             }),
@@ -730,8 +828,12 @@ export function PublicStorefront({
   }
 
   function openProduct(product: Product) {
+    const variant = product.variants.length === 1 ? product.variants[0] : null;
     setQuickProduct(product);
-    setQuickVariant(product.variants.length === 1 ? product.variants[0] : null);
+    setQuickVariant(variant);
+    setQuickSellingUnitOfMeasure(
+      resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? ""
+    );
     setQuickQuantity(1);
     setQuickImageUrl(product.galleryImageUrls[0] ?? product.imageUrl);
     setProductDetailTab("DESCRIPTION");
@@ -795,8 +897,14 @@ export function PublicStorefront({
     setImageViewerZoomed(false);
   }
 
-  function addProduct(product: Product, variant: Variant | null, quantity: number) {
-    const key = `${product.id}:${variant?.code ?? "base"}`;
+  function addProduct(
+    product: Product,
+    variant: Variant | null,
+    quantity: number,
+    sellingUnit: SellingUnit | null = resolveProductSellingUnit(product, variant)
+  ) {
+    const unitOfMeasure = sellingUnit?.unitOfMeasureCode ?? product.baseUnitOfMeasure;
+    const key = `${product.id}:${variant?.code ?? "base"}:${unitOfMeasure}`;
     setCart((current) => {
       const existing = current.find((line) => line.key === key);
       if (existing) {
@@ -814,7 +922,11 @@ export function PublicStorefront({
           imageUrl: product.imageUrl,
           variantCode: variant?.code ?? null,
           variantName: variant?.name ?? null,
-          unitPrice: variant?.unitPrice ?? product.unitPrice,
+          sellingUnitOfMeasure: unitOfMeasure,
+          sellingUnitName: sellingUnit?.unitOfMeasureName ?? unitOfMeasure,
+          baseUnitOfMeasure: product.baseUnitOfMeasure,
+          uomConversionFactor: sellingUnit?.conversionFactor ?? 1,
+          unitPrice: sellingUnit?.unitPrice ?? variant?.unitPrice ?? product.unitPrice,
           quantity
         }
       ];
@@ -912,7 +1024,26 @@ export function PublicStorefront({
       setAuthOpen(true);
       return;
     }
-    if (!selectedPaymentCode || !checkoutPaymentOptions.some((method) => method.code === selectedPaymentCode)) {
+    const availablePaymentOptions = checkoutOrderType === "LAYAWAY"
+      ? checkoutPaymentOptions.filter((method) => method.timing === "PREPAY")
+      : checkoutPaymentOptions;
+    if (!selectedPaymentCode || !availablePaymentOptions.some((method) => method.code === selectedPaymentCode)) {
+      const fallbackPaymentCode = availablePaymentOptions[0]?.code ?? "";
+      if (fallbackPaymentCode) {
+        setSelectedPaymentCode(fallbackPaymentCode);
+      } else {
+        setToast("This shop has no available ecommerce payment option.");
+        return;
+      }
+    }
+    if (checkoutOrderType === "LAYAWAY" && !storefront.store.layawayOffer.enabled) {
+      setToast("Layaway is not currently available from this shop.");
+      return;
+    }
+    if (checkoutOrderType === "LAYAWAY" && layawayDepositAmount <= 0) {
+      setLayawayDepositAmount(minimumLayawayDeposit);
+    }
+    if (availablePaymentOptions.length === 0) {
       setToast("This shop has no available ecommerce payment option.");
       return;
     }
@@ -935,6 +1066,8 @@ export function PublicStorefront({
         paymentMethodCode: string;
         paymentMethodName: string;
         paymentTiming: "ON_DELIVERY" | "PREPAY";
+        orderType: "SALES_ORDER" | "LAYAWAY";
+        paymentAmountDueNow: number;
       }>(
         await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/orders`, {
           method: "POST",
@@ -946,6 +1079,7 @@ export function PublicStorefront({
             lines: cart.map((line) => ({
               productId: line.productId,
               variantCode: line.variantCode,
+              sellingUnitOfMeasure: line.sellingUnitOfMeasure,
               quantity: line.quantity
             })),
             delivery: {
@@ -960,7 +1094,12 @@ export function PublicStorefront({
               deliveryNote,
               saveAddress
             },
-            paymentMethodCode: selectedPaymentCode
+            paymentMethodCode: selectedPaymentCode,
+            orderType: checkoutOrderType,
+            layawayDepositAmount:
+              checkoutOrderType === "LAYAWAY"
+                ? layawayDepositAmount || minimumLayawayDeposit
+                : null,
           })
         })
       );
@@ -975,8 +1114,12 @@ export function PublicStorefront({
     }
   }
 
-  async function startPayment(tenderMethodCode: string) {
-    if (!createdOrder) {
+  async function startPayment(
+    tenderMethodCode: string,
+    orderNo = createdOrder?.orderNo,
+    amount = createdOrder?.paymentAmountDueNow,
+  ) {
+    if (!orderNo) {
       return;
     }
     setPaymentBusy(true);
@@ -985,14 +1128,14 @@ export function PublicStorefront({
       paymentRequestKeyRef.current ??= crypto.randomUUID();
       const result = await readJson<{ checkoutUrl: string }>(
         await fetch(
-          `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/orders/${encodeURIComponent(createdOrder.orderNo)}/payments`,
+          `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/orders/${encodeURIComponent(orderNo)}/payments`,
           {
             method: "POST",
             headers: {
               "content-type": "application/json",
               "idempotency-key": paymentRequestKeyRef.current
             },
-            body: JSON.stringify({ tenderMethodCode, receiptEmail })
+            body: JSON.stringify({ tenderMethodCode, receiptEmail, amount })
           }
         )
       );
@@ -1209,8 +1352,28 @@ export function PublicStorefront({
               {quickProduct.variants.length > 0 ? (
                 <div className={styles.variantGrid}>
                   {quickProduct.variants.map((variant) => (
-                    <button className={quickVariant?.code === variant.code ? styles.variantActive : undefined} key={variant.code} onClick={() => setQuickVariant(variant)} type="button">
+                    <button className={quickVariant?.code === variant.code ? styles.variantActive : undefined} key={variant.code} onClick={() => {
+                      setQuickVariant(variant);
+                      setQuickSellingUnitOfMeasure(
+                        resolveProductSellingUnit(quickProduct, variant)?.unitOfMeasureCode ?? ""
+                      );
+                    }} type="button">
                       <span>{variant.name}</span><strong>{money.format(variant.unitPrice)}</strong>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {getProductSellingUnits(quickProduct, quickVariant).length > 0 ? (
+                <div className={styles.variantGrid} aria-label="Selling unit">
+                  {getProductSellingUnits(quickProduct, quickVariant).map((sellingUnit) => (
+                    <button
+                      className={selectedProductSellingUnit?.unitOfMeasureCode === sellingUnit.unitOfMeasureCode ? styles.variantActive : undefined}
+                      key={sellingUnit.unitOfMeasureCode}
+                      onClick={() => setQuickSellingUnitOfMeasure(sellingUnit.unitOfMeasureCode)}
+                      type="button"
+                    >
+                      <span>{sellingUnit.unitOfMeasureName}</span>
+                      <strong>{money.format(sellingUnit.unitPrice)}</strong>
                     </button>
                   ))}
                 </div>
@@ -1218,7 +1381,7 @@ export function PublicStorefront({
               <div className={styles.purchaseAssurance}><BadgeCheck size={17} /><span>Secure order tracking</span><CreditCard size={17} /><span>{checkoutPaymentOptions.length} payment option{checkoutPaymentOptions.length === 1 ? "" : "s"}</span></div>
               <div className={styles.modalPurchase}>
                 <QuantityStepper onChange={setQuickQuantity} value={quickQuantity} />
-                <button className={styles.primaryButton} disabled={quickProduct.variants.length > 0 && !quickVariant} onClick={() => addProduct(quickProduct, quickVariant, quickQuantity)} type="button">
+                <button className={styles.primaryButton} disabled={quickProduct.variants.length > 0 && !quickVariant} onClick={() => addProduct(quickProduct, quickVariant, quickQuantity, selectedProductSellingUnit)} type="button">
                   <ShoppingCart size={19} /> Add · {money.format(selectedProductTotal)}
                 </button>
               </div>
@@ -1432,13 +1595,25 @@ export function PublicStorefront({
             onRegion={setRegion}
             onSaveAddress={setSaveAddress}
             onSelectedPaymentCode={setSelectedPaymentCode}
+            onOrderType={(value) => {
+              setCheckoutOrderType(value);
+              if (value === "LAYAWAY") {
+                setLayawayDepositAmount(minimumLayawayDeposit);
+                setSelectedPaymentCode(
+                  checkoutPaymentOptions.find((method) => method.timing === "PREPAY")?.code ?? "",
+                );
+              }
+            }}
+            onLayawayDepositAmount={setLayawayDepositAmount}
             paymentBusy={paymentBusy}
-            paymentOptions={checkoutPaymentOptions}
+            paymentOptions={effectiveCheckoutPaymentOptions}
             receiptEmail={receiptEmail}
             recipientName={recipientName}
             region={region}
             saveAddress={saveAddress}
             selectedPaymentCode={selectedPaymentCode}
+            orderType={checkoutOrderType}
+            layawayDepositAmount={layawayDepositAmount || minimumLayawayDeposit}
             store={storefront.store}
             discount={cartDiscount}
             subtotal={cartSubtotal}
@@ -1451,6 +1626,15 @@ export function PublicStorefront({
             onClose={() => setDrawerView(null)}
             onRefresh={openOrders}
             onRefund={requestRefund}
+            onPay={(order, amount) => startPayment(
+              order.selectedPaymentMethodCode ?? "",
+              order.orderNo,
+              amount,
+            )}
+            paymentBusy={paymentBusy}
+            paymentOptions={checkoutPaymentOptions.filter((method) => method.timing === "PREPAY")}
+            receiptEmail={receiptEmail}
+            onReceiptEmail={setReceiptEmail}
             onSelect={setSelectedOrder}
             onSignOut={signOut}
             orders={orders}
@@ -1626,7 +1810,7 @@ function CartPanel({ cart, money, quote, subtotal, discount, total, onClose, onQ
             {cart.map((line, index) => (
               <article className={styles.cartLine} key={line.key}>
                 <div className={styles.cartThumb}>{line.imageUrl ? <img alt="" src={line.imageUrl} /> : productInitials(line.name)}</div>
-                <div className={styles.cartLineMain}><strong>{line.name}</strong><span>{line.variantName ?? line.productCode}</span><small>{quote?.lines[index]?.appliedPromotionName ? `${quote.lines[index].appliedPromotionName} · ` : ""}{money.format(quote?.lines[index]?.totalAmount ?? line.unitPrice * line.quantity)}</small></div>
+                <div className={styles.cartLineMain}><strong>{line.name}</strong><span>{line.variantName ?? line.productCode} · {line.sellingUnitName}{line.uomConversionFactor !== 1 ? ` (${line.uomConversionFactor} ${line.baseUnitOfMeasure})` : ""}</span><small>{quote?.lines[index]?.appliedPromotionName ? `${quote.lines[index].appliedPromotionName} · ` : ""}{money.format(quote?.lines[index]?.totalAmount ?? line.unitPrice * line.quantity)}</small></div>
                 <div className={styles.cartLineActions}>
                   <QuantityStepper onChange={(quantity) => onQuantity(line.key, quantity)} value={line.quantity} />
                   <button className={styles.deleteButton} onClick={() => onQuantity(line.key, 0)} title="Remove item" type="button"><Trash2 size={17} /></button>
@@ -1670,11 +1854,15 @@ function CheckoutPanel(props: {
     paymentMethodCode: string;
     paymentMethodName: string;
     paymentTiming: "ON_DELIVERY" | "PREPAY";
+    orderType: "SALES_ORDER" | "LAYAWAY";
+    paymentAmountDueNow: number;
   } | null;
   paymentOptions: CheckoutPaymentOption[];
   selectedPaymentCode: string;
   receiptEmail: string;
   paymentBusy: boolean;
+  orderType: "SALES_ORDER" | "LAYAWAY";
+  layawayDepositAmount: number;
   onClose: () => void;
   onBack: () => void;
   onDeliveryMethod: (value: "DELIVERY" | "PICKUP") => void;
@@ -1687,6 +1875,8 @@ function CheckoutPanel(props: {
   onDeliveryNote: (value: string) => void;
   onSaveAddress: (value: boolean) => void;
   onSelectedPaymentCode: (value: string) => void;
+  onOrderType: (value: "SALES_ORDER" | "LAYAWAY") => void;
+  onLayawayDepositAmount: (value: number) => void;
   onPlaceOrder: () => void;
   onReceiptEmail: (value: string) => void;
   onPay: (tenderMethodCode: string) => void;
@@ -1694,19 +1884,20 @@ function CheckoutPanel(props: {
   if (props.createdOrder) {
     return (
       <div className={styles.drawerContent}>
-        <DrawerHeader onClose={props.onClose} title="Order placed" />
+        <DrawerHeader onClose={props.onClose} title={props.createdOrder.orderType === "LAYAWAY" ? "Layaway created" : "Order placed"} />
         <div className={styles.orderSuccess}>
           <span><BadgeCheck size={42} /></span>
-          <h2>Thank you</h2>
+          <h2>{props.createdOrder.orderType === "LAYAWAY" ? "Complete your deposit" : "Thank you"}</h2>
           <p>{props.createdOrder.orderNo}</p>
           <strong>{props.money.format(props.createdOrder.totalAmount)}</strong>
+          {props.createdOrder.orderType === "LAYAWAY" ? <small>Deposit due now: {props.money.format(props.createdOrder.paymentAmountDueNow)}</small> : null}
         </div>
         <div className={styles.paymentSection}>
           {props.createdOrder.paymentTiming === "PREPAY" ? (
             <>
               <label className={styles.field}><span>Payment receipt email</span><input autoComplete="email" inputMode="email" onChange={(event) => props.onReceiptEmail(event.target.value)} value={props.receiptEmail} /></label>
               <div className={styles.paymentMethods}>
-                <button disabled={props.paymentBusy} onClick={() => props.onPay(props.createdOrder?.paymentMethodCode ?? "")} type="button"><CreditCard size={20} /><span><strong>Pay now with {props.createdOrder.paymentMethodName}</strong><small>Complete payment securely before delivery.</small></span><ChevronRight size={19} /></button>
+                <button disabled={props.paymentBusy} onClick={() => props.onPay(props.createdOrder?.paymentMethodCode ?? "")} type="button"><CreditCard size={20} /><span><strong>{props.createdOrder.orderType === "LAYAWAY" ? `Pay ${props.money.format(props.createdOrder.paymentAmountDueNow)} deposit` : `Pay now with ${props.createdOrder.paymentMethodName}`}</strong><small>{props.createdOrder.orderType === "LAYAWAY" ? `Secure payment with ${props.createdOrder.paymentMethodName}.` : "Complete payment securely before delivery."}</small></span><ChevronRight size={19} /></button>
               </div>
             </>
           ) : (
@@ -1722,6 +1913,12 @@ function CheckoutPanel(props: {
     <div className={styles.drawerContent}>
       <DrawerHeader onBack={props.onBack} onClose={props.onClose} title="Checkout" />
       <div className={styles.checkoutScroll}>
+        {props.store.layawayOffer.enabled ? (
+          <div className={styles.segmented}>
+            <button className={props.orderType === "SALES_ORDER" ? styles.segmentedActive : undefined} onClick={() => props.onOrderType("SALES_ORDER")} type="button"><ShoppingBag size={18} />Buy now</button>
+            <button className={props.orderType === "LAYAWAY" ? styles.segmentedActive : undefined} onClick={() => props.onOrderType("LAYAWAY")} type="button"><WalletCards size={18} />Layaway</button>
+          </div>
+        ) : null}
         <div className={styles.segmented}>
           {props.store.allowDelivery ? <button className={props.deliveryMethod === "DELIVERY" ? styles.segmentedActive : undefined} onClick={() => props.onDeliveryMethod("DELIVERY")} type="button"><Truck size={18} />Delivery</button> : null}
           {props.store.allowPickup ? <button className={props.deliveryMethod === "PICKUP" ? styles.segmentedActive : undefined} onClick={() => props.onDeliveryMethod("PICKUP")} type="button"><Store size={18} />Pickup</button> : null}
@@ -1750,6 +1947,12 @@ function CheckoutPanel(props: {
         )}
         <section className={styles.checkoutSection}>
           <h3>Payment</h3>
+          {props.orderType === "LAYAWAY" ? (
+            <>
+              <div className={styles.pendingPayment}><Clock3 size={22} /><div><strong>{props.store.layawayOffer.minimumDepositPercent}% minimum deposit</strong><p>{props.store.layawayOffer.reserveStockOnDeposit ? "Stock is reserved after the deposit is verified." : "Stock is allocated when the Layaway is fulfilled."} {props.store.layawayOffer.requireFullPaymentBeforeFulfilment ? "Full payment is required before fulfilment." : "The shop may fulfil with an approved balance."}</p></div></div>
+              <label className={styles.field}><span>Deposit to pay now</span><input inputMode="decimal" max={props.checkoutTotal} min={props.checkoutTotal * (props.store.layawayOffer.minimumDepositPercent / 100)} onChange={(event) => props.onLayawayDepositAmount(Number(event.target.value))} step="0.01" type="number" value={props.layawayDepositAmount} /></label>
+            </>
+          ) : null}
           <div className={styles.checkoutPaymentOptions}>
             {props.paymentOptions.map((method) => (
               <label className={props.selectedPaymentCode === method.code ? styles.checkoutPaymentSelected : undefined} key={method.code}>
@@ -1769,7 +1972,7 @@ function CheckoutPanel(props: {
       </div>
       <div className={styles.drawerDock}>
         <button className={styles.primaryButton} disabled={props.busy || !props.selectedPaymentCode} onClick={props.onPlaceOrder} type="button">
-          {props.busy ? <LoaderCircle className={styles.spin} size={19} /> : <ShoppingBag size={19} />} Place order · {props.money.format(props.checkoutTotal)}
+          {props.busy ? <LoaderCircle className={styles.spin} size={19} /> : props.orderType === "LAYAWAY" ? <WalletCards size={19} /> : <ShoppingBag size={19} />} {props.orderType === "LAYAWAY" ? `Start Layaway · ${props.money.format(props.layawayDepositAmount)}` : `Place order · ${props.money.format(props.checkoutTotal)}`}
         </button>
       </div>
     </div>
@@ -1786,8 +1989,19 @@ function OrdersPanel(props: {
   onRefresh: () => void;
   onSelect: (order: CustomerOrder | null) => void;
   onRefund: (order: CustomerOrder) => void;
+  onPay: (order: CustomerOrder, amount: number) => void;
+  paymentBusy: boolean;
+  paymentOptions: CheckoutPaymentOption[];
+  receiptEmail: string;
+  onReceiptEmail: (value: string) => void;
   onSignOut: () => void;
 }) {
+  const [paymentAmount, setPaymentAmount] = useState(0);
+
+  useEffect(() => {
+    setPaymentAmount(props.selectedOrder?.balanceAmount ?? 0);
+  }, [props.selectedOrder?.id, props.selectedOrder?.balanceAmount]);
+
   if (props.selectedOrder) {
     const order = props.selectedOrder;
     return (
@@ -1800,7 +2014,7 @@ function OrdersPanel(props: {
           title={order.orderNo}
         />
         <div className={styles.orderDetailScroll}>
-          <div className={styles.orderStatusHero}><span>{order.status.replace(/_/g, " ")}</span><h2>{props.money.format(order.totalAmount)}</h2><p>{formatFriendlyDateTime(order.placedAt)}</p></div>
+          <div className={styles.orderStatusHero}><span>{order.orderType === "LAYAWAY" ? `LAYAWAY · ${order.status.replace(/_/g, " ")}` : order.status.replace(/_/g, " ")}</span><h2>{props.money.format(order.totalAmount)}</h2><p>{formatFriendlyDateTime(order.placedAt)}</p></div>
           <div className={styles.orderTimeline}>
             {order.timeline.map((event, index) => (
               <div key={event.id}><span className={index === order.timeline.length - 1 ? styles.timelineCurrent : undefined}><Check size={14} /></span><div><strong>{event.label}</strong>{event.note ? <p>{event.note}</p> : null}<small>{formatFriendlyDateTime(event.createdAt)}</small></div></div>
@@ -1811,6 +2025,15 @@ function OrdersPanel(props: {
             {order.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant ?? `${line.quantity} item(s)`}</small></span><b>{props.money.format(line.lineTotal)}</b></div>)}
           </section>
           {order.deliveryAddress ? <div className={styles.pickupInfo}><Truck size={21} /><div><strong>Delivery</strong><p>{order.deliveryAddress}</p>{order.trackingReference ? <small>{order.trackingReference}</small> : null}</div></div> : null}
+          {order.orderType === "LAYAWAY" && order.balanceAmount > 0 && order.selectedPaymentMethodCode ? (
+            <section className={styles.checkoutSection}>
+              <h3>Pay Layaway balance</h3>
+              <p>Paid {props.money.format(order.paidAmount)} · Balance {props.money.format(order.balanceAmount)} · Reservation {order.reservationStatus.replace(/_/g, " ").toLowerCase()}</p>
+              <label className={styles.field}><span>Payment amount</span><input inputMode="decimal" max={order.balanceAmount} min={order.paidAmount <= 0 ? order.minimumDepositAmount : 0.01} onChange={(event) => setPaymentAmount(Number(event.target.value))} step="0.01" type="number" value={paymentAmount} /></label>
+              <label className={styles.field}><span>Payment receipt email</span><input autoComplete="email" inputMode="email" onChange={(event) => props.onReceiptEmail(event.target.value)} value={props.receiptEmail} /></label>
+              <button className={styles.primaryButton} disabled={props.paymentBusy || paymentAmount <= 0 || paymentAmount > order.balanceAmount} onClick={() => props.onPay(order, paymentAmount)} type="button"><CreditCard size={19} />Pay with {order.selectedPaymentMethodName ?? props.paymentOptions[0]?.name ?? "online payment"}</button>
+            </section>
+          ) : null}
           {order.paidAmount > 0 && order.refundRequests.length === 0 && !["REFUNDED", "CANCELLED"].includes(order.status) ? <button className={styles.secondaryButton} onClick={() => props.onRefund(order)} type="button">Request refund</button> : null}
         </div>
       </div>

@@ -449,6 +449,7 @@ export type EnterpriseInventoryWorkspaceData = {
     status: string;
     statusLabel: string;
     origin: string;
+    sourceStoreCode: string;
     sourceStoreName: string;
     sourceLocationCode: string;
     sourceLocationName: string;
@@ -1003,6 +1004,7 @@ export async function getEnterpriseInventoryWorkspace(
         requiredAt: true,
         sourceStore: {
           select: {
+            code: true,
             name: true
           }
         },
@@ -1567,9 +1569,14 @@ export async function getEnterpriseInventoryWorkspace(
       status: transfer.status,
       statusLabel: formatEnumLabel(transfer.status),
       origin: formatEnumLabel(transfer.origin),
+      sourceStoreCode: transfer.sourceStore.code,
       sourceStoreName: transfer.sourceStore.name,
-      sourceLocationCode: transfer.sourceInventoryLocation.code,
-      sourceLocationName: transfer.sourceInventoryLocation.name,
+      sourceLocationCode:
+        issuedQuantity > 0 ? transfer.sourceInventoryLocation.code : "",
+      sourceLocationName:
+        issuedQuantity > 0
+          ? transfer.sourceInventoryLocation.name
+          : "Selected by source shop on issue",
       destinationStoreName: transfer.destinationStore.name,
       destinationLocationCode: transfer.destinationInventoryLocation.code,
       destinationLocationName: transfer.destinationInventoryLocation.name,

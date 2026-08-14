@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { useRouter } from "next/navigation";
+import { calculatePosBaseQuantity } from "@flash-erp/domain";
 import { applyAutomaticPromotions, calculateLoyaltyRedemption } from "@flash-erp/sync-core";
 import { FileSpreadsheet, Trash2 } from "lucide-react";
 import type { SheetData } from "write-excel-file/browser";
@@ -34,6 +35,7 @@ import type {
   ProcessOnlineStoreTransferResponse,
   BrowseOnlineStoreReportsResponse,
   OnlineStoreRemoteInventoryLookupResponse,
+  OnlineStoreLayawayActionResponse,
   OnlineStoreTransactionReferenceSummary,
   OnlineStoreWorkspaceData,
   OnlineStoreUnlockResponse,
@@ -54,14 +56,28 @@ type AccountPaymentReceipt = RecordOnlineStoreAccountPaymentResponse["receipt"];
 type OnlineShift = NonNullable<OnlineStoreWorkspaceData["shift"]>;
 type WorkspaceId = "dashboard" | "pos" | "ecommerce" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
 type ManagerTab = "shift" | "eod" | "banking" | "summary";
-type ReportId = "sales" | "products" | "orders" | "tenders" | "inventory" | "banking" | "shifts";
+type ReportId =
+  | "sales"
+  | "products"
+  | "orders"
+  | "layaways"
+  | "layawayPayments"
+  | "tenders"
+  | "inventory"
+  | "banking"
+  | "shifts";
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
 type InventoryStockSection = "inventory-browser" | "batch-register";
 type InventoryReceivingSection = "purchase-orders" | "goods-receipts" | "supplier-returns";
 type TransferEntryTab = "header" | "details";
 type CountEntryTab = "header" | "sheet" | "variance";
 type PosDrawer = "details" | "held" | "orders" | "account" | "receipts" | "report" | null;
-type SaleMode = "SALE" | "SALES_ORDER";
+type SaleMode = "SALE" | "SALES_ORDER" | "LAYAWAY";
+type LayawayActionKind = "PAYMENT" | "CANCEL" | "RELEASE" | "EXPIRE";
+type LayawayActionDraft = {
+  kind: LayawayActionKind;
+  order: SalesOrder;
+};
 type ReceiptHistoryKind = "SALES" | "SALES_ORDER" | "ACCOUNT_PAYMENT";
 type ShiftReportKind = "X" | "Z";
 type PurchaseOrderDialogMode = "view" | "receive" | null;
@@ -131,17 +147,28 @@ type TransferDocumentGroup = {
   updatedAt: string;
   lines: TransferRequest[];
 };
+
+function getRemoteInventoryRowKey(row: RemoteInventoryRow) {
+  return `${row.storeCode}::${row.productCode}`;
+}
 type StockCountUploadRow = {
+  sessionId?: string | null;
+  sheetNo?: string | null;
   productId: string;
   productCode: string;
   productName: string;
   systemQuantity: number;
   countedQuantity: number | null;
   varianceQuantity: number | null;
+  batchCounts?: Array<{ batchId: string; countedQuantity: number }>;
 };
 type StockCountConfirmation =
-  | { action: "COMMIT"; sessionId: string; sessionNo: string }
+  | { action: "COMMIT"; sessionIds: string[]; sessionNo: string }
   | { action: "SAVE_CALCULATED"; rowCount: number };
+
+function stockCountSheetNo(sessionNo: string) {
+  return sessionNo.replace(/-L\d{3}$/i, "");
+}
 type ExpenseConfirmation = {
   expenseId: string;
   expenseNo: string;
@@ -177,6 +204,10 @@ type InventorySerialDraft = {
 type BasketLine = {
   product: Product;
   quantity: number;
+  sellingUnitOfMeasure: string;
+  baseUnitOfMeasure: string;
+  uomConversionFactor: number;
+  baseQuantity: number;
   unitPrice: number;
   configuredDiscountRate: number | null;
   productVariantCode: string | null;
@@ -206,6 +237,7 @@ type OpenPriceDraft = {
   quantity: string;
   unitPrice: string;
   productVariantCode: string;
+  sellingUnitOfMeasure: string;
   variantSize: string;
   variantColor: string;
   variantSearch: string;
@@ -286,15 +318,61 @@ function paymentDraftId() {
   return `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId">) {
+function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "sellingUnitOfMeasure" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId">) {
   return [
     line.product.productId,
     line.productVariantCode ?? "",
+    line.sellingUnitOfMeasure,
     line.variantSize ?? "",
     line.variantColor ?? "",
     line.lineNote ?? "",
     line.preferredBatchId ?? ""
   ].join(":");
+}
+
+function sellingUnitsForProduct(product: Product, productVariantCode?: string | null) {
+  const selectedVariant = productVariantCode
+    ? product.matrixVariants.find((variant) => variant.code === productVariantCode) ?? null
+    : null;
+
+  return product.sellingUnits.filter(
+    (sellingUnit) =>
+      sellingUnit.productVariantId === null ||
+      sellingUnit.productVariantId === selectedVariant?.variantId
+  );
+}
+
+function resolveProductSellingUnit(
+  product: Product,
+  productVariantCode?: string | null,
+  selectedUnitOfMeasure?: string | null
+) {
+  const sellingUnits = sellingUnitsForProduct(product, productVariantCode);
+  const normalizedSelected = selectedUnitOfMeasure?.trim().toUpperCase() ?? "";
+  const selected =
+    sellingUnits.find(
+      (sellingUnit) => sellingUnit.unitOfMeasureCode.toUpperCase() === normalizedSelected
+    ) ??
+    sellingUnits.find((sellingUnit) => sellingUnit.isDefault) ??
+    sellingUnits.find(
+      (sellingUnit) =>
+        sellingUnit.unitOfMeasureCode.toUpperCase() === product.baseUnitOfMeasure.toUpperCase()
+    );
+  const matrixVariant = productVariantCode
+    ? product.matrixVariants.find((variant) => variant.code === productVariantCode) ?? null
+    : null;
+
+  return selected ?? {
+    productVariantId: matrixVariant?.variantId ?? null,
+    unitOfMeasureCode: product.baseUnitOfMeasure,
+    unitOfMeasureName: product.baseUnitOfMeasure,
+    conversionFactor: 1,
+    unitPrice: matrixVariant?.unitPrice ?? product.price,
+    barcode: null,
+    isDefault: true,
+    allowFractionalSale: false,
+    decimalPrecision: 0
+  };
 }
 
 function createPaymentDraft(tenderMethodCode: string, amount = "0.00"): PaymentDraft {
@@ -1086,6 +1164,10 @@ function renderReceiptTemplateItemTable(
     .map((line) => {
       const friendlyColour = formatFriendlyColour(line.variantColor);
       const variants = [
+        `Unit ${line.sellingUnitOfMeasure}`,
+        line.uomConversionFactor !== 1
+          ? `Base ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}`
+          : null,
         line.variantSize ? `Size ${line.variantSize}` : null,
         friendlyColour ? `Colour ${friendlyColour}` : null,
         line.lineNote ? `Note ${line.lineNote}` : null,
@@ -1099,7 +1181,7 @@ function renderReceiptTemplateItemTable(
           <div style="font-weight:600; color:#111827;">${escapeHtml(line.productName)}</div>
           <div style="font-size:0.69rem; color:#78716c;">${escapeHtml(["@ " + lineMoney(line.unitPrice), ...variants].join(" · "))}</div>
         </td>
-        <td style="padding:0.28rem 0.2rem 0.24rem 0; border-top:1px dashed #e7e5e4; text-align:right; white-space:nowrap;">${formatNumber.format(line.quantity)}</td>
+        <td style="padding:0.28rem 0.2rem 0.24rem 0; border-top:1px dashed #e7e5e4; text-align:right; white-space:nowrap;">${formatNumber.format(line.quantity)} ${escapeHtml(line.sellingUnitOfMeasure)}</td>
         <td style="padding:0.28rem 0 0.24rem 0.42rem; border-top:1px dashed #e7e5e4; text-align:right; white-space:nowrap;">${escapeHtml(lineMoney(line.lineTotal))}</td>
       </tr>`;
     })
@@ -2340,6 +2422,12 @@ export function OnlineStoreWorkspace({
   const [salesOrders, setSalesOrders] = useState<SalesOrder[]>(workspace.salesOrders);
   const [accountPayments, setAccountPayments] = useState<AccountPayment[]>(workspace.accountPayments);
   const [saleMode, setSaleMode] = useState<SaleMode>("SALE");
+  const [layawayExpiresAt, setLayawayExpiresAt] = useState("");
+  const [layawayPolicyOverrideApproved, setLayawayPolicyOverrideApproved] = useState(false);
+  const [layawayActionDraft, setLayawayActionDraft] = useState<LayawayActionDraft | null>(null);
+  const [layawayActionPayments, setLayawayActionPayments] = useState<PaymentDraft[]>([]);
+  const [layawayActionReason, setLayawayActionReason] = useState("");
+  const [expandedLayawayOrderId, setExpandedLayawayOrderId] = useState<string | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerQuery, setCustomerQuery] = useState("");
   const [activeDrawer, setActiveDrawer] = useState<PosDrawer>(null);
@@ -2463,7 +2551,6 @@ export function OnlineStoreWorkspace({
   const [receiptExpiryDate, setReceiptExpiryDate] = useState("");
   const [receiptNote, setReceiptNote] = useState("");
   const [transferSourceStoreId, setTransferSourceStoreId] = useState(workspace.transferStores[0]?.storeId ?? "");
-  const [transferSourceLocationId, setTransferSourceLocationId] = useState(workspace.transferStores[0]?.defaultLocationId ?? "");
   const [transferDestinationLocationId, setTransferDestinationLocationId] = useState(defaultReceivingLocationId);
   const [transferQuantity, setTransferQuantity] = useState("1");
   const [transferUnitOfMeasure, setTransferUnitOfMeasure] = useState("");
@@ -2476,6 +2563,7 @@ export function OnlineStoreWorkspace({
   const [transferDriverContact, setTransferDriverContact] = useState("");
   const [transferNote, setTransferNote] = useState("");
   const [transferRequestDialogOpen, setTransferRequestDialogOpen] = useState(false);
+  const [activeTransferDraftBatchNo, setActiveTransferDraftBatchNo] = useState("");
   const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<TransferEntryTab>("header");
   const [transferRequestLines, setTransferRequestLines] = useState<Array<{
     id: string;
@@ -2490,6 +2578,11 @@ export function OnlineStoreWorkspace({
   const [selectedTransferDocumentKey, setSelectedTransferDocumentKey] = useState<string | null>(null);
   const [transferReceiptQuantities, setTransferReceiptQuantities] = useState<Record<string, string>>({});
   const [transferActionNote, setTransferActionNote] = useState("");
+  const [transferIssueLocationId, setTransferIssueLocationId] = useState(
+    workspace.inventoryLocations.find((location) => location.useForSalesDefault)?.locationId ??
+      workspace.inventoryLocations[0]?.locationId ??
+      ""
+  );
   const [selectedTransferFeedbackKey, setSelectedTransferFeedbackKey] = useState<string | null>(null);
   const [transferFeedbackWaterTest, setTransferFeedbackWaterTest] = useState("");
   const [transferFeedbackQuantityBefore, setTransferFeedbackQuantityBefore] = useState("");
@@ -2525,10 +2618,12 @@ export function OnlineStoreWorkspace({
   const [pendingStockCountConfirmation, setPendingStockCountConfirmation] =
     useState<StockCountConfirmation | null>(null);
   const [remoteInventoryRows, setRemoteInventoryRows] = useState<RemoteInventoryRow[]>([]);
+  const [selectedRemoteInventoryKeys, setSelectedRemoteInventoryKeys] = useState<Set<string>>(
+    () => new Set()
+  );
   const [remoteInventoryQuery, setRemoteInventoryQuery] = useState("");
   const [remoteInventoryStoreFilter, setRemoteInventoryStoreFilter] = useState("");
   const [remoteInventoryItemFilter, setRemoteInventoryItemFilter] = useState("");
-  const [remoteInventoryLocationFilter, setRemoteInventoryLocationFilter] = useState("");
   const [remoteLookupOpen, setRemoteLookupOpen] = useState(false);
   const [isLoadingRemoteInventory, setIsLoadingRemoteInventory] = useState(false);
   const [inventoryMessage, setInventoryMessage] = useState("");
@@ -2712,7 +2807,7 @@ export function OnlineStoreWorkspace({
           .values.join(", ")
       : "#d6e0d6 0 100%";
   const modeProducts =
-    saleMode === "SALES_ORDER"
+    saleMode !== "SALE"
       ? workspace.products
       : workspace.products.filter(isSellableCatalogProduct);
   const filteredProducts = modeProducts.filter((product) => {
@@ -2731,8 +2826,11 @@ export function OnlineStoreWorkspace({
     const matrixSearch = product.matrixVariants
       .map((variant) => `${variant.code} ${variant.sku ?? ""} ${variant.barcode ?? ""} ${variant.displayName ?? ""}`)
       .join(" ");
+    const sellingUnitSearch = product.sellingUnits
+      .map((sellingUnit) => `${sellingUnit.unitOfMeasureCode} ${sellingUnit.unitOfMeasureName} ${sellingUnit.barcode ?? ""}`)
+      .join(" ");
 
-    return `${product.productName} ${product.productCode} ${product.department ?? ""} ${product.category ?? ""} ${matrixSearch}`
+    return `${product.productName} ${product.productCode} ${product.department ?? ""} ${product.category ?? ""} ${matrixSearch} ${sellingUnitSearch}`
       .toLowerCase()
       .includes(query);
   });
@@ -2748,6 +2846,16 @@ export function OnlineStoreWorkspace({
       openPriceDraft.product.productType === "MATRIX" &&
       openPriceDraft.product.matrixVariants.length > 0
   );
+  const openPriceSellingUnits = openPriceDraft
+    ? sellingUnitsForProduct(openPriceDraft.product, openPriceDraft.productVariantCode || null)
+    : [];
+  const openPriceSelectedSellingUnit = openPriceDraft
+    ? resolveProductSellingUnit(
+        openPriceDraft.product,
+        openPriceDraft.productVariantCode || null,
+        openPriceDraft.sellingUnitOfMeasure
+      )
+    : null;
   const openPriceExpressEligible = Boolean(
     openPriceDraft &&
       openPriceDraft.product.trackSize &&
@@ -2771,7 +2879,7 @@ export function OnlineStoreWorkspace({
     : [];
   const openPriceBatchUnavailable =
     Boolean(openPriceDraft?.product.trackExpiry) &&
-    saleMode !== "SALES_ORDER" &&
+    saleMode === "SALE" &&
     openPriceAvailableBatches.length === 0;
   const configuredProductSizes = workspace.optionSettings?.productSizes ?? [];
   const configuredPosDiscountRates = workspace.optionSettings?.posDiscountRates ?? [];
@@ -3165,10 +3273,6 @@ export function OnlineStoreWorkspace({
     transferDocumentGroups.find((group) => group.key === selectedTransferFeedbackKey) ?? null;
   const selectedTransferSourceStore =
     workspace.transferStores.find((store) => store.storeId === transferSourceStoreId) ?? workspace.transferStores[0] ?? null;
-  const selectedTransferSourceLocation =
-    selectedTransferSourceStore?.sourceLocations.find((location) => location.locationId === transferSourceLocationId) ??
-    selectedTransferSourceStore?.sourceLocations[0] ??
-    null;
   const selectedTransferDestinationLocation =
     workspace.inventoryLocations.find((location) => location.locationId === transferDestinationLocationId) ??
     workspace.inventoryLocations.find((location) => location.locationId === defaultReceivingLocationId) ??
@@ -3192,6 +3296,26 @@ export function OnlineStoreWorkspace({
 
     return queryMatch && varianceMatch;
   });
+  const stockCountSheetGroups = Array.from(
+    stockCountRows.reduce((groups, session) => {
+      const sheetNo = stockCountSheetNo(session.sessionNo);
+      groups.set(sheetNo, [...(groups.get(sheetNo) ?? []), session]);
+      return groups;
+    }, new Map<string, typeof stockCountRows>()),
+  ).map(([sheetNo, sessions]) => ({
+    sheetNo,
+    sessions,
+    status: sessions.every((session) => session.status === "COMMITTED")
+      ? "COMMITTED"
+      : sessions.every((session) => session.status === "SUBMITTED")
+        ? "SUBMITTED"
+        : sessions[0]?.status ?? "DRAFT",
+    varianceQuantity: roundQuantity(
+      sessions.reduce((sum, session) => sum + session.varianceQuantity, 0),
+    ),
+    submittedAt: sessions[0]?.submittedAt ?? new Date().toISOString(),
+    locationName: sessions[0]?.locationName ?? "",
+  }));
   const activeReportBundle = reportResult?.reports ?? workspace.reports;
   const activeReporting = reportResult?.reporting ?? workspace.reporting;
   const activeReportDefinition =
@@ -3213,6 +3337,8 @@ export function OnlineStoreWorkspace({
   const reportSalesRows = activeReportBundle.salesRows;
   const reportProductRows = activeReportBundle.productRows;
   const reportSalesOrderRows = activeReportBundle.salesOrderRows;
+  const reportLayawayRows = activeReportBundle.layawayRows;
+  const reportLayawayPaymentRows = activeReportBundle.layawayPaymentRows;
   const reportTenderRows = activeReportBundle.tenderRows;
   const reportInventoryRows = activeReportBundle.inventoryRows;
   const reportBankingRows = activeReportBundle.bankingRows;
@@ -3224,13 +3350,17 @@ export function OnlineStoreWorkspace({
         ? reportProductRows.length
         : activeReport === "orders"
           ? reportSalesOrderRows.length
-          : activeReport === "tenders"
-            ? reportTenderRows.length
-            : activeReport === "inventory"
-              ? reportInventoryRows.length
-              : activeReport === "banking"
-                ? reportBankingRows.length
-                : reportShiftRows.length;
+          : activeReport === "layaways"
+            ? reportLayawayRows.length
+            : activeReport === "layawayPayments"
+              ? reportLayawayPaymentRows.length
+              : activeReport === "tenders"
+                ? reportTenderRows.length
+                : activeReport === "inventory"
+                  ? reportInventoryRows.length
+                  : activeReport === "banking"
+                    ? reportBankingRows.length
+                    : reportShiftRows.length;
   const selectedManagerShiftRow =
     workspace.reports.shiftRows.find((shift) => shift.shiftId === selectedEodShiftId) ?? null;
   const managerExpectedCash = selectedManagerShiftRow?.expectedCashAmount ?? currentShift?.expectedCashAmount ?? 0;
@@ -3474,7 +3604,7 @@ export function OnlineStoreWorkspace({
     loyaltyRedemptionAmount
   });
   const payableTotal = activeSalesOrder
-    ? Math.max(0, total - (activeSalesOrder.depositAmount ?? 0))
+    ? Math.max(0, total - (activeSalesOrder.paidAmount ?? activeSalesOrder.depositAmount ?? 0))
     : total;
   const paymentTotal = paymentDrafts.reduce((sum, draft) => sum + parseAmount(draft.amount), 0);
   const amountDue = Math.max(0, payableTotal - paymentTotal);
@@ -3505,10 +3635,16 @@ export function OnlineStoreWorkspace({
 
     return parseAmount(draft.amount) > 0 && Boolean(tender?.requiresReference) && !draft.reference.trim();
   });
-  const isCreatingSalesOrder = saleMode === "SALES_ORDER" && !activeSalesOrder;
-  const salesOrderDepositOver = isCreatingSalesOrder && paymentTotal - total > 0.005;
+  const isCreatingOrder = saleMode !== "SALE" && !activeSalesOrder;
+  const isCreatingLayaway = saleMode === "LAYAWAY" && !activeSalesOrder;
+  const layawayMinimumDepositAmount = roundMoney(
+    total * ((workspace.optionSettings.layawaySettings.minimumDepositPercent ?? 0) / 100)
+  );
+  const layawayDepositShort =
+    isCreatingLayaway && paymentTotal + 0.005 < layawayMinimumDepositAmount;
+  const salesOrderDepositOver = isCreatingOrder && paymentTotal - total > 0.005;
   const salesOrderHasInvalidTender =
-    isCreatingSalesOrder &&
+    isCreatingOrder &&
     paymentDrafts.some((draft) => {
       const amount = parseAmount(draft.amount);
 
@@ -3533,15 +3669,50 @@ export function OnlineStoreWorkspace({
             ? `Store Credit exceeds ${selectedCustomer.fullName}'s remaining limit by ${formatMoney(storeCreditLimitExceededBy, currencyCode)}.`
             : "";
   const canSaveSalesOrder =
-    isCreatingSalesOrder &&
+    isCreatingOrder &&
     basket.length > 0 &&
     Boolean(selectedCustomer) &&
     hasOpenShift &&
     !isPostingPosAction &&
+    (!isCreatingLayaway ||
+      (workspace.optionSettings.layawaySettings.enabled &&
+        workspace.capabilities.canCreateLayaway)) &&
+    (!layawayDepositShort ||
+      (workspace.capabilities.canOverrideLayawayPolicy && layawayPolicyOverrideApproved)) &&
     !salesOrderDepositOver &&
     !salesOrderHasInvalidTender &&
     !missingBankAccountTender &&
     !missingReferenceTender;
+  const layawayActionExpectedAmount = layawayActionDraft
+    ? layawayActionDraft.kind === "PAYMENT"
+      ? layawayActionDraft.order.balanceAmount
+      : layawayActionDraft.kind === "CANCEL"
+        ? estimateLayawayRefund(layawayActionDraft.order)
+        : 0
+    : 0;
+  const layawayActionPaymentTotal = layawayActionPayments.reduce(
+    (sum, payment) => sum + parseAmount(payment.amount),
+    0
+  );
+  const layawayActionNeedsPayment =
+    layawayActionDraft?.kind === "PAYMENT" ||
+    (layawayActionDraft?.kind === "CANCEL" && layawayActionExpectedAmount > 0.005);
+  const layawayActionPaymentInvalid =
+    layawayActionDraft?.kind === "PAYMENT"
+      ? layawayActionPaymentTotal <= 0 ||
+        layawayActionPaymentTotal - layawayActionExpectedAmount > 0.005
+      : layawayActionNeedsPayment &&
+        Math.abs(layawayActionPaymentTotal - layawayActionExpectedAmount) > 0.005;
+  const layawayActionMissingBankAccount = layawayActionPayments.some((payment) => {
+    const tender = tenderForDraft(payment);
+    return parseAmount(payment.amount) > 0 && Boolean(tender?.requiresBankAccount) && !payment.bankAccountId;
+  });
+  const layawayActionMissingReference = layawayActionPayments.some((payment) => {
+    const tender = tenderForDraft(payment);
+    return parseAmount(payment.amount) > 0 && Boolean(tender?.requiresReference) && !payment.reference.trim();
+  });
+  const layawayActionReasonMissing =
+    layawayActionDraft?.kind === "RELEASE" && !layawayActionReason.trim();
   const canCheckout =
     basket.length > 0 &&
     hasOpenShift &&
@@ -3673,19 +3844,6 @@ export function OnlineStoreWorkspace({
       setInventoryLocationId(nextLocationId);
     }
   }, [defaultReceivingLocationId, defaultSalesLocationId, inventoryTab]);
-
-  useEffect(() => {
-    if (!selectedTransferSourceStore) {
-      return;
-    }
-
-    if (
-      !transferSourceLocationId ||
-      !selectedTransferSourceStore.sourceLocations.some((location) => location.locationId === transferSourceLocationId)
-    ) {
-      setTransferSourceLocationId(selectedTransferSourceStore.defaultLocationId ?? selectedTransferSourceStore.sourceLocations[0]?.locationId ?? "");
-    }
-  }, [selectedTransferSourceStore, transferSourceLocationId]);
 
   useEffect(() => {
     if (catalogCategory && !categories.includes(catalogCategory)) {
@@ -3982,6 +4140,8 @@ export function OnlineStoreWorkspace({
 
   function activateSalesOrderMode() {
     setSaleMode("SALES_ORDER");
+    setLayawayExpiresAt("");
+    setLayawayPolicyOverrideApproved(false);
 
     const otherCustomer = customers.find(
       (customer) => customer.customerType.trim().toUpperCase() === "OTHER"
@@ -3993,6 +4153,24 @@ export function OnlineStoreWorkspace({
     } else {
       setCheckoutMessage("Sales order mode is on, but no customer with type Other was found.");
     }
+  }
+
+  function activateLayawayMode() {
+    if (!workspace.optionSettings.layawaySettings.enabled) {
+      setCheckoutMessage("Layaway is not enabled in Company Settings.");
+      return;
+    }
+
+    if (!workspace.capabilities.canCreateLayaway) {
+      setCheckoutMessage("Your role is not allowed to create layaways.");
+      return;
+    }
+
+    setSaleMode("LAYAWAY");
+    setLayawayPolicyOverrideApproved(false);
+    setCheckoutMessage(
+      `Layaway mode is ready. Attach a registered customer and collect at least ${workspace.optionSettings.layawaySettings.minimumDepositPercent}% as the opening deposit.`
+    );
   }
 
   function resetTransactionDetails() {
@@ -4013,6 +4191,8 @@ export function OnlineStoreWorkspace({
     resetTransactionDetails();
     setLoyaltyPointsToRedeem("0");
     setSaleMode("SALE");
+    setLayawayExpiresAt("");
+    setLayawayPolicyOverrideApproved(false);
     setPaymentDrafts([createPaymentDraft(defaultTenderCode, "0.00")]);
   }
 
@@ -4106,6 +4286,7 @@ export function OnlineStoreWorkspace({
     return basket.map((line) => ({
       productId: line.product.productId,
       quantity: line.quantity,
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
       unitPrice: line.unitPrice,
       configuredDiscountRate: resolveConfiguredPosDiscountRate(line.configuredDiscountRate),
       productVariantCode: line.productVariantCode,
@@ -4128,6 +4309,10 @@ export function OnlineStoreWorkspace({
     variantSize?: string | null;
     variantColor?: string | null;
     lineNote?: string | null;
+    sellingUnitOfMeasure?: string | null;
+    baseUnitOfMeasure?: string | null;
+    uomConversionFactor?: number | null;
+    baseQuantity?: number | null;
     discountAmount?: number | null;
     appliedPromotionName?: string | null;
     configuredDiscountRate?: number | null;
@@ -4146,11 +4331,24 @@ export function OnlineStoreWorkspace({
         line.productVariantCode && product.matrixVariants.length > 0
           ? product.matrixVariants.find((variant) => variant.code === line.productVariantCode)
           : null;
+      const sellingUnit = resolveProductSellingUnit(
+        product,
+        matrixVariant?.code ?? line.productVariantCode ?? null,
+        line.sellingUnitOfMeasure
+      );
+      const quantity = Math.max(0.001, line.quantity);
+      const conversionFactor = Number(line.uomConversionFactor ?? sellingUnit.conversionFactor);
 
       return [
         {
           product,
-          quantity: Math.max(1, line.quantity),
+          quantity,
+          sellingUnitOfMeasure: line.sellingUnitOfMeasure ?? sellingUnit.unitOfMeasureCode,
+          baseUnitOfMeasure: line.baseUnitOfMeasure ?? product.baseUnitOfMeasure,
+          uomConversionFactor: conversionFactor,
+          baseQuantity: Number(
+            line.baseQuantity ?? calculatePosBaseQuantity(quantity, conversionFactor)
+          ),
           unitPrice: line.unitPrice,
           configuredDiscountRate: inferConfiguredPosDiscountRate({
             quantity: line.quantity,
@@ -4219,34 +4417,47 @@ export function OnlineStoreWorkspace({
   }
 
   async function saveSalesOrder() {
+    const orderLabel = saleMode === "LAYAWAY" ? "layaway" : "sales order";
+
     if (!basket.length) {
-      setCheckoutMessage("Add at least one item before saving a sales order.");
+      setCheckoutMessage(`Add at least one item before saving the ${orderLabel}.`);
       return;
     }
 
     if (!selectedCustomer) {
-      setCheckoutMessage("Attach a customer before saving a sales order.");
+      setCheckoutMessage(`Attach a customer before saving the ${orderLabel}.`);
       setActiveDrawer("details");
       return;
     }
 
     if (!hasOpenShift) {
-      setCheckoutMessage("Open a shift before saving a sales order.");
+      setCheckoutMessage(`Open a shift before saving the ${orderLabel}.`);
       return;
     }
 
     if (paymentTotal > 0.005 && nonCreditTenderMethods.length === 0) {
-      setCheckoutMessage("Configure at least one non-credit tender before taking a sales order deposit.");
+      setCheckoutMessage(`Configure at least one non-credit tender before taking a ${orderLabel} deposit.`);
       return;
     }
 
     if (salesOrderHasInvalidTender) {
-      setCheckoutMessage("Choose an active non-credit tender for each sales order deposit row.");
+      setCheckoutMessage(`Choose an active non-credit tender for each ${orderLabel} deposit row.`);
       return;
     }
 
     if (salesOrderDepositOver) {
-      setCheckoutMessage("A sales order deposit cannot be greater than the order total.");
+      setCheckoutMessage(`A ${orderLabel} deposit cannot be greater than the order total.`);
+      return;
+    }
+
+    if (
+      saleMode === "LAYAWAY" &&
+      layawayDepositShort &&
+      !(workspace.capabilities.canOverrideLayawayPolicy && layawayPolicyOverrideApproved)
+    ) {
+      setCheckoutMessage(
+        `The opening deposit must be at least ${formatMoney(layawayMinimumDepositAmount, currencyCode)}.`
+      );
       return;
     }
 
@@ -4261,7 +4472,7 @@ export function OnlineStoreWorkspace({
     }
 
     setIsPostingPosAction(true);
-    setCheckoutMessage("Saving sales order...");
+    setCheckoutMessage(`Saving ${orderLabel}...`);
 
     try {
       const payments = paymentPayload(paymentDrafts);
@@ -4275,12 +4486,19 @@ export function OnlineStoreWorkspace({
         body: JSON.stringify({
           customerId: selectedCustomer.customerId,
           lines: basketPayload(),
+          orderType: saleMode,
           payments,
           depositAmount,
           depositTenderMethodCode: depositAmount > 0 ? firstPayment?.tenderMethodCode ?? null : null,
           depositReference: depositAmount > 0 ? firstPayment?.reference ?? null : null,
           serviceType: transactionServiceType,
-          note: transactionNotePayload()
+          note: transactionNotePayload(),
+          layawayExpiresAt:
+            saleMode === "LAYAWAY" && layawayExpiresAt
+              ? new Date(layawayExpiresAt).toISOString()
+              : null,
+          policyOverrideApproved:
+            saleMode === "LAYAWAY" && layawayPolicyOverrideApproved
         })
       });
       const payload = (await response.json()) as Partial<CreateOnlineStoreSalesOrderResponse> & {
@@ -4288,7 +4506,7 @@ export function OnlineStoreWorkspace({
       };
 
       if (!response.ok || !payload.salesOrder) {
-        throw new Error(payload.message ?? "Flash ERP could not save this sales order.");
+        throw new Error(payload.message ?? `Flash ERP could not save this ${orderLabel}.`);
       }
 
       setSalesOrders((rows) => [payload.salesOrder as SalesOrder, ...rows.filter((row) => row.orderId !== payload.salesOrder?.orderId)]);
@@ -4299,7 +4517,7 @@ export function OnlineStoreWorkspace({
       setActiveDrawer("orders");
       setCheckoutMessage(payload.message ?? `${payload.salesOrder.orderNo} was saved.`);
     } catch (error) {
-      setCheckoutMessage(error instanceof Error ? error.message : "Flash ERP could not save this sales order.");
+      setCheckoutMessage(error instanceof Error ? error.message : `Flash ERP could not save this ${orderLabel}.`);
     } finally {
       setIsPostingPosAction(false);
     }
@@ -4333,6 +4551,22 @@ export function OnlineStoreWorkspace({
 
     if (order.status !== "OPEN") {
       setCheckoutMessage(`${order.orderNo} is not open for fulfilment.`);
+      return;
+    }
+
+    if (order.orderType === "LAYAWAY" && !workspace.capabilities.canFulfilLayaway) {
+      setCheckoutMessage("Your role is not allowed to fulfil layaways.");
+      return;
+    }
+
+    if (
+      order.orderType === "LAYAWAY" &&
+      order.layawayPolicy?.requireFullPaymentBeforeFulfilment !== false &&
+      order.balanceAmount > 0.005
+    ) {
+      setCheckoutMessage(
+        `${order.orderNo} still has a balance of ${formatMoney(order.balanceAmount, currencyCode)}.`
+      );
       return;
     }
 
@@ -4580,6 +4814,10 @@ export function OnlineStoreWorkspace({
         variantColor: line.variantColor,
         lineNote: line.lineNote,
         quantity: line.quantity,
+        sellingUnitOfMeasure: line.sellingUnitOfMeasure ?? line.baseUnitOfMeasure ?? "EA",
+        baseUnitOfMeasure: line.baseUnitOfMeasure ?? line.sellingUnitOfMeasure ?? "EA",
+        uomConversionFactor: line.uomConversionFactor,
+        baseQuantity: line.baseQuantity,
         unitPrice: line.unitPrice,
         discountAmount: line.discountAmount,
         taxAmount: line.taxAmount,
@@ -4639,6 +4877,10 @@ export function OnlineStoreWorkspace({
         variantColor: line.variantColor,
         lineNote: line.lineNote,
         quantity: line.quantity,
+        sellingUnitOfMeasure: line.sellingUnitOfMeasure ?? line.baseUnitOfMeasure ?? "EA",
+        baseUnitOfMeasure: line.baseUnitOfMeasure ?? line.sellingUnitOfMeasure ?? "EA",
+        uomConversionFactor: line.uomConversionFactor,
+        baseQuantity: line.baseQuantity,
         unitPrice: line.unitPrice,
         discountAmount: line.discountAmount,
         taxAmount: line.taxAmount,
@@ -4854,11 +5096,14 @@ export function OnlineStoreWorkspace({
 
     if (activeReport === "products") {
       downloadCsv(baseName, [
-        ["Product", "Code", "Quantity", "Gross", "Discount", "Tax", "Net"],
+        ["Product", "Code", "Selling unit", "Selling quantity", "Base unit", "Base quantity", "Gross", "Discount", "Tax", "Net"],
         ...reportProductRows.map((row) => [
           row.productName,
           row.productCode,
+          row.sellingUnitOfMeasure,
           row.quantity,
+          row.baseUnitOfMeasure,
+          row.baseQuantity,
           row.grossAmount,
           row.discountAmount,
           row.taxAmount,
@@ -4882,6 +5127,48 @@ export function OnlineStoreWorkspace({
           row.depositReference,
           row.createdAt,
           row.fulfilledAt
+        ])
+      ]);
+      return;
+    }
+
+    if (activeReport === "layaways") {
+      downloadCsv(baseName, [
+        ["Layaway", "Status", "Customer", "Total", "Paid", "Outstanding", "Age days", "Ageing", "Reservation", "Reserved base qty", "Cancellation fee", "Refunded", "Created", "Expires"],
+        ...reportLayawayRows.map((row) => [
+          row.orderNo,
+          row.status,
+          row.customerName,
+          row.totalAmount,
+          row.paidAmount,
+          row.balanceAmount,
+          row.ageDays,
+          row.ageingBucket,
+          row.reservationStatus,
+          row.reservedBaseQuantity,
+          row.cancellationFeeAmount,
+          row.refundedAmount,
+          row.createdAt,
+          row.expiresAt
+        ])
+      ]);
+      return;
+    }
+
+    if (activeReport === "layawayPayments") {
+      downloadCsv(baseName, [
+        ["Layaway", "Customer", "Purpose", "Tender", "Amount", "Reference", "Shift", "Terminal", "Cashier", "Received"],
+        ...reportLayawayPaymentRows.map((row) => [
+          row.orderNo,
+          row.customerName,
+          row.paymentPurpose,
+          row.tenderName,
+          row.amount,
+          row.reference,
+          row.shiftNo,
+          row.terminalCode,
+          row.cashierCode,
+          row.receivedAt
         ])
       ]);
       return;
@@ -4972,13 +5259,15 @@ export function OnlineStoreWorkspace({
           }
           : activeReport === "products"
             ? {
-                headers: ["Product", "Code", "Qty", "Gross", "Tax", "Net"],
+                headers: ["Product", "Code", "Unit", "Qty", "Base qty", "Gross", "Tax", "Net"],
                 rows: reportProductRows.map((row) => [
                   row.productName,
-                row.productCode,
-                formatNumber.format(row.quantity),
-                formatMoney(row.grossAmount, currencyCode),
-                formatMoney(row.taxAmount, currencyCode),
+                  row.productCode,
+                  row.sellingUnitOfMeasure,
+                  formatNumber.format(row.quantity),
+                  `${formatNumber.format(row.baseQuantity)} ${row.baseUnitOfMeasure}`,
+                  formatMoney(row.grossAmount, currencyCode),
+                  formatMoney(row.taxAmount, currencyCode),
                   formatMoney(row.netAmount, currencyCode)
                 ])
               }
@@ -4994,16 +5283,42 @@ export function OnlineStoreWorkspace({
                     formatMoney(row.balanceAmount, currencyCode)
                   ])
                 }
-          : activeReport === "tenders"
-            ? {
-                headers: ["Tender", "Method", "Txn", "Net"],
-                rows: reportTenderRows.map((row) => [
-                  row.tenderMethodName ?? row.paymentMethod,
-                  row.paymentMethod,
-                  String(row.transactionCount),
-                  formatMoney(row.netAmount, currencyCode)
-                ])
-              }
+              : activeReport === "layaways"
+                ? {
+                    headers: ["Layaway", "Status", "Customer", "Outstanding", "Ageing", "Reservation", "Refunded"],
+                    rows: reportLayawayRows.map((row) => [
+                      row.orderNo,
+                      row.status,
+                      row.customerName,
+                      formatMoney(row.balanceAmount, currencyCode),
+                      `${row.ageingBucket} (${row.ageDays}d)`,
+                      `${row.reservationStatus} / ${formatNumber.format(row.reservedBaseQuantity)} base`,
+                      formatMoney(row.refundedAmount, currencyCode)
+                    ])
+                  }
+                : activeReport === "layawayPayments"
+                  ? {
+                      headers: ["Layaway", "Purpose", "Tender", "Amount", "Shift", "Cashier", "Received"],
+                      rows: reportLayawayPaymentRows.map((row) => [
+                        row.orderNo,
+                        row.paymentPurpose,
+                        row.tenderName,
+                        formatMoney(row.amount, currencyCode),
+                        row.shiftNo ?? "-",
+                        row.cashierCode ?? "-",
+                        new Date(row.receivedAt).toLocaleString()
+                      ])
+                    }
+                  : activeReport === "tenders"
+                    ? {
+                        headers: ["Tender", "Method", "Txn", "Net"],
+                        rows: reportTenderRows.map((row) => [
+                          row.tenderMethodName ?? row.paymentMethod,
+                          row.paymentMethod,
+                          String(row.transactionCount),
+                          formatMoney(row.netAmount, currencyCode)
+                        ])
+                      }
             : activeReport === "inventory"
               ? {
                   headers: ["Product", "Code", "Location", "On hand", "Value"],
@@ -5082,7 +5397,8 @@ export function OnlineStoreWorkspace({
     variantSize?: string | null,
     variantColor?: string | null,
     lineNote?: string | null,
-    preferredBatchId?: string | null
+    preferredBatchId?: string | null,
+    sellingUnitOfMeasure?: string | null
   ) {
     if (isRecalledBasket) {
       setCheckoutMessage("Complete or clear the recalled basket before adding new items.");
@@ -5095,21 +5411,31 @@ export function OnlineStoreWorkspace({
       productVariantCode && product.matrixVariants.length > 0
         ? product.matrixVariants.find((variant) => variant.code === productVariantCode)
         : null;
+    const selectedSellingUnit = resolveProductSellingUnit(
+      product,
+      matrixVariant?.code ?? productVariantCode ?? null,
+      sellingUnitOfMeasure
+    );
     const requiresMatrixSelection = product.productType === "MATRIX" && product.matrixVariants.length > 0;
     const requiresTrackedOptionSelection = !requiresMatrixSelection && (product.trackSize || product.trackColor);
-    const requiresBatchSelection = product.trackExpiry && saleMode !== "SALES_ORDER";
-    const requiresLineOptions = product.mustEnterPriceAtPos || requiresMatrixSelection || requiresTrackedOptionSelection || requiresBatchSelection;
+    const requiresBatchSelection = product.trackExpiry && saleMode === "SALE";
+    const requiresSellingUnitSelection = sellingUnitsForProduct(
+      product,
+      matrixVariant?.code ?? productVariantCode ?? null
+    ).length > 0;
+    const requiresLineOptions = product.mustEnterPriceAtPos || requiresMatrixSelection || requiresTrackedOptionSelection || requiresBatchSelection || requiresSellingUnitSelection;
 
     if (
       requiresLineOptions &&
       unitPrice === undefined &&
-      (!productVariantCode || requiresBatchSelection)
+      (!productVariantCode || requiresBatchSelection || requiresSellingUnitSelection)
     ) {
       setOpenPriceDraft({
         product,
         quantity: normalizedQuantity.toFixed(3).replace(/\.?0+$/, ""),
-        unitPrice: product.mustEnterPriceAtPos ? "" : (matrixVariant?.unitPrice ?? product.price).toFixed(2),
+        unitPrice: product.mustEnterPriceAtPos ? "" : selectedSellingUnit.unitPrice.toFixed(2),
         productVariantCode: matrixVariant?.code ?? "",
+        sellingUnitOfMeasure: selectedSellingUnit.unitOfMeasureCode,
         variantSize: "",
         variantColor: "#111827",
         variantSearch: "",
@@ -5126,10 +5452,22 @@ export function OnlineStoreWorkspace({
       return;
     }
 
+    let baseQuantity: number;
+
+    try {
+      baseQuantity = calculatePosBaseQuantity(
+        normalizedQuantity,
+        selectedSellingUnit.conversionFactor
+      );
+    } catch (error) {
+      setCheckoutMessage(error instanceof Error ? error.message : "Enter a valid selling quantity.");
+      return;
+    }
+
     if (
-      saleMode !== "SALES_ORDER" &&
+      saleMode === "SALE" &&
       matrixVariant &&
-      normalizedQuantity > matrixVariant.quantityOnHand
+      baseQuantity > matrixVariant.quantityOnHand
     ) {
       setCheckoutMessage(`Only ${formatNumber.format(matrixVariant.quantityOnHand)} unit(s) of ${matrixVariant.displayName ?? matrixVariant.code} are available.`);
       return;
@@ -5137,7 +5475,7 @@ export function OnlineStoreWorkspace({
 
     const normalizedUnitPrice =
       unitPrice === undefined
-        ? matrixVariant?.unitPrice ?? product.price
+        ? selectedSellingUnit.unitPrice
         : Math.max(0, Number(unitPrice) || 0);
     const normalizedVariantSize = variantSize?.trim() ?? "";
     const normalizedVariantColor = variantColor?.trim() ?? "";
@@ -5159,6 +5497,7 @@ export function OnlineStoreWorkspace({
         (line) =>
           line.product.productId === product.productId &&
           line.productVariantCode === (matrixVariant?.code ?? null) &&
+          line.sellingUnitOfMeasure === selectedSellingUnit.unitOfMeasureCode &&
           line.variantSize === (normalizedVariantSize || null) &&
           line.variantColor === (normalizedVariantColor || null) &&
           line.lineNote === (normalizedLineNote || null) &&
@@ -5169,11 +5508,20 @@ export function OnlineStoreWorkspace({
         return lines.map((line) =>
           line.product.productId === product.productId &&
           line.productVariantCode === (matrixVariant?.code ?? null) &&
+          line.sellingUnitOfMeasure === selectedSellingUnit.unitOfMeasureCode &&
           line.variantSize === (normalizedVariantSize || null) &&
           line.variantColor === (normalizedVariantColor || null) &&
           line.lineNote === (normalizedLineNote || null) &&
           line.preferredBatchId === (normalizedPreferredBatchId || null)
-            ? { ...line, quantity: line.quantity + normalizedQuantity, unitPrice: normalizedUnitPrice }
+            ? {
+                ...line,
+                quantity: line.quantity + normalizedQuantity,
+                baseQuantity: calculatePosBaseQuantity(
+                  line.quantity + normalizedQuantity,
+                  line.uomConversionFactor
+                ),
+                unitPrice: normalizedUnitPrice
+              }
             : line
         );
       }
@@ -5183,6 +5531,10 @@ export function OnlineStoreWorkspace({
         {
           product,
           quantity: normalizedQuantity,
+          sellingUnitOfMeasure: selectedSellingUnit.unitOfMeasureCode,
+          baseUnitOfMeasure: product.baseUnitOfMeasure,
+          uomConversionFactor: selectedSellingUnit.conversionFactor,
+          baseQuantity,
           unitPrice: normalizedUnitPrice,
           configuredDiscountRate: null,
           productVariantCode: matrixVariant?.code ?? null,
@@ -5203,7 +5555,7 @@ export function OnlineStoreWorkspace({
 
     if (!product) {
       setCheckoutMessage(
-        saleMode === "SALES_ORDER"
+        saleMode !== "SALE"
           ? "No matching active catalog item was found for the scan/search value."
           : "No matching stocked item was found for the scan/search value."
       );
@@ -5218,8 +5570,26 @@ export function OnlineStoreWorkspace({
           variant.sku?.toUpperCase() === scanValue ||
           variant.barcode?.toUpperCase() === scanValue
       ) ?? null;
+    const scannedSellingUnit = product.sellingUnits.find(
+      (sellingUnit) => sellingUnit.barcode?.toUpperCase() === scanValue
+    ) ?? null;
+    const sellingUnitVariant = scannedSellingUnit?.productVariantId
+      ? product.matrixVariants.find(
+          (variant) => variant.variantId === scannedSellingUnit.productVariantId
+        ) ?? null
+      : null;
 
-    addProduct(product, parseAmount(scanQuantity) || 1, undefined, scannedMatrixVariant?.code ?? null);
+    addProduct(
+      product,
+      parseAmount(scanQuantity) || 1,
+      undefined,
+      scannedMatrixVariant?.code ?? sellingUnitVariant?.code ?? null,
+      null,
+      null,
+      null,
+      null,
+      scannedSellingUnit?.unitOfMeasureCode ?? null
+    );
   }
 
   function submitOpenPriceDraft() {
@@ -5294,7 +5664,8 @@ export function OnlineStoreWorkspace({
       variantSize,
       variantColor,
       lineNote,
-      draft.preferredBatchId || null
+      draft.preferredBatchId || null,
+      draft.sellingUnitOfMeasure
     );
   }
 
@@ -5632,7 +6003,7 @@ export function OnlineStoreWorkspace({
   }
 
   async function postGoodsReceipt() {
-    if (!inventoryProductId) {
+    if (!inventoryProductId || !selectedInventoryProduct) {
       setInventoryMessage("Choose a product before posting the receipt.");
       return;
     }
@@ -6188,7 +6559,7 @@ export function OnlineStoreWorkspace({
           query: remoteInventoryQuery.trim() || null,
           productCode: remoteInventoryItemFilter || null,
           storeCode: remoteInventoryStoreFilter || null,
-          locationCode: remoteInventoryLocationFilter || null,
+          locationCode: null,
           limit: 30
         })
       });
@@ -6201,6 +6572,7 @@ export function OnlineStoreWorkspace({
       }
 
       setRemoteInventoryRows(payload.rows);
+      setSelectedRemoteInventoryKeys(new Set());
       setInventoryMessage(
         payload.rows.length
           ? `Found ${payload.rows.length} HQ stock position(s) in other stores.`
@@ -6213,35 +6585,168 @@ export function OnlineStoreWorkspace({
     }
   }
 
-  function requestRemoteStock(row: RemoteInventoryRow) {
-    const sourceStore = workspace.transferStores.find((store) => store.storeCode === row.storeCode);
-    const sourceLocation = sourceStore?.sourceLocations.find((location) => location.locationCode === row.locationCode);
-    const product = workspace.inventoryProducts.find((item) => item.productCode === row.productCode);
-    const quantity = Number(transferQuantity);
+  function resetTransferRequestDraft() {
+    setActiveTransferDraftBatchNo("");
+    setTransferRequestLines([]);
+    setTransferReference("");
+    setTransferRequiredDate(activeDate);
+    setTransferDeliveryNoteNo("");
+    setTransferTransporterName("");
+    setTransferVehicleRegistrationNo("");
+    setTransferDriverName("");
+    setTransferDriverContact("");
+    setTransferQuantity("1");
+    setTransferUnitOfMeasure("");
+    setTransferNote("");
+    setActiveTransferEntryTab("header");
+  }
 
-    if (!sourceStore || !sourceLocation || !product) {
-      setInventoryMessage("Flash ERP could not stage that HQ stock row as a transfer request.");
+  function openNewTransferRequest() {
+    resetTransferRequestDraft();
+    setTransferRequestDialogOpen(true);
+  }
+
+  function openTransferRequestDraft(transfer: TransferDocumentGroup) {
+    const firstLine = transfer.lines[0];
+    const sourceStore = workspace.transferStores.find(
+      (store) => store.storeCode === firstLine?.sourceStoreCode
+    );
+
+    if (!firstLine || !sourceStore) {
+      setInventoryMessage("Flash ERP could not load that transfer request draft for amendment.");
       return;
     }
 
+    setActiveTransferDraftBatchNo(transfer.documentNo);
     setTransferSourceStoreId(sourceStore.storeId);
-    setTransferSourceLocationId(sourceLocation.locationId);
-    setInventoryProductId(product.productId);
-    setTransferQuantity(Number.isFinite(quantity) && quantity > 0 ? String(quantity) : "1");
-    setTransferRequestLines((lines) => [
-      ...lines.filter((line) => line.productId !== product.productId),
-      {
-        id: `${product.productId}-${Date.now()}`,
-        productId: product.productId,
-        productCode: product.productCode,
-        productName: product.productName,
-        quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
-        unitOfMeasure: product.baseUnitOfMeasure,
-        baseQuantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
-        baseUnitOfMeasure: product.baseUnitOfMeasure
+    setTransferDestinationLocationId(firstLine.destinationLocationId);
+    setTransferReference(firstLine.externalReference ?? "");
+    setTransferRequiredDate(firstLine.requiredAt?.slice(0, 10) ?? activeDate);
+    setTransferDeliveryNoteNo(firstLine.deliveryNoteNo ?? "");
+    setTransferTransporterName(firstLine.transporterName ?? "");
+    setTransferVehicleRegistrationNo(firstLine.vehicleRegistrationNo ?? "");
+    setTransferDriverName(firstLine.driverName ?? "");
+    setTransferDriverContact(firstLine.driverContact ?? "");
+    setTransferNote(firstLine.requestNote ?? "");
+    setTransferRequestLines(
+      transfer.lines.map((line) => ({
+        id: line.transferId,
+        productId: line.productId,
+        productCode: line.productCode,
+        productName: line.productName,
+        quantity: line.requestedUnitQuantity,
+        unitOfMeasure: line.requestedUnitOfMeasure,
+        baseQuantity: line.requestedQuantity,
+        baseUnitOfMeasure: line.baseUnitOfMeasure
+      }))
+    );
+    setActiveTransferEntryTab("details");
+    setTransferRequestDialogOpen(true);
+  }
+
+  function getRemoteRequestEligibility(row: RemoteInventoryRow) {
+    const sourceStore = workspace.transferStores.find(
+      (store) => store.storeCode === row.storeCode
+    );
+    const product = workspace.inventoryProducts.find(
+      (item) => item.productCode === row.productCode
+    );
+    const selectedSource = remoteInventoryRows.find((candidate) =>
+      selectedRemoteInventoryKeys.has(getRemoteInventoryRowKey(candidate))
+    );
+
+    if (!selectedTransferDestinationLocation) {
+      return { eligible: false, reason: "Choose the destination location first." };
+    }
+
+    if (!sourceStore) {
+      return {
+        eligible: false,
+        reason: "This shop is not available as a transfer source."
+      };
+    }
+
+    if (!product) {
+      return {
+        eligible: false,
+        reason: "This tracked product is not available in the store catalog."
+      };
+    }
+
+    if (row.quantityOnHand <= 0) {
+      return { eligible: false, reason: "No stock is available in this shop." };
+    }
+
+    if (
+      selectedSource &&
+      selectedSource.storeCode !== row.storeCode
+    ) {
+      return {
+        eligible: false,
+        reason: "One request can contain many items from one source shop."
+      };
+    }
+
+    return { eligible: true, reason: "Available for this request." };
+  }
+
+  function toggleRemoteInventorySelection(row: RemoteInventoryRow) {
+    const rowKey = getRemoteInventoryRowKey(row);
+    const selected = selectedRemoteInventoryKeys.has(rowKey);
+
+    if (!selected) {
+      const eligibility = getRemoteRequestEligibility(row);
+      if (!eligibility.eligible) {
+        setInventoryMessage(eligibility.reason);
+        return;
       }
-    ]);
-    setTransferNote(`HQ lookup found ${formatNumber.format(row.quantityOnHand)} unit(s) at ${row.storeName}.`);
+    }
+
+    setSelectedRemoteInventoryKeys((current) => {
+      const next = new Set(current);
+      if (selected) {
+        next.delete(rowKey);
+      } else {
+        next.add(rowKey);
+      }
+      return next;
+    });
+  }
+
+  function buildTransferDraftFromRemoteSelection() {
+    const selectedRows = remoteInventoryRows.filter((row) =>
+      selectedRemoteInventoryKeys.has(getRemoteInventoryRowKey(row))
+    );
+    const source = selectedRows[0];
+    const sourceStore = workspace.transferStores.find(
+      (store) => store.storeCode === source?.storeCode
+    );
+
+    if (!source || !sourceStore) {
+      setInventoryMessage("Select at least one eligible stock row before building the request.");
+      return;
+    }
+
+    resetTransferRequestDraft();
+    setTransferSourceStoreId(sourceStore.storeId);
+    setTransferRequestLines(
+      selectedRows.map((row) => {
+        const product = workspace.inventoryProducts.find(
+          (item) => item.productCode === row.productCode
+        )!;
+        return {
+          id: getRemoteInventoryRowKey(row),
+          productId: product.productId,
+          productCode: product.productCode,
+          productName: product.productName,
+          quantity: 1,
+          unitOfMeasure: product.baseUnitOfMeasure,
+          baseQuantity: 1,
+          baseUnitOfMeasure: product.baseUnitOfMeasure
+        };
+      })
+    );
+    setSelectedRemoteInventoryKeys(new Set());
     setRemoteLookupOpen(false);
     setInventoryTab("transfers");
     setTransferRequestDialogOpen(true);
@@ -6303,23 +6808,30 @@ export function OnlineStoreWorkspace({
           ? [{ productId: inventoryProductId, quantity: inlineQuantity }]
           : [];
 
-    if (!transferSourceStoreId || !selectedTransferSourceLocation || !selectedTransferDestinationLocation || !lines.length) {
+    if (!transferSourceStoreId || !selectedTransferDestinationLocation || !lines.length) {
       setInventoryMessage("Choose source, destination, and at least one item before requesting transfer.");
       return;
     }
 
     setIsPostingInventory(true);
-    setInventoryMessage("Creating transfer request...");
+    setInventoryMessage(
+      activeTransferDraftBatchNo
+        ? "Updating transfer request draft..."
+        : "Saving transfer request draft..."
+    );
 
     try {
-      const response = await fetch("/api/online-store/transfers", {
-        method: "POST",
+      const response = await fetch(
+        activeTransferDraftBatchNo
+          ? `/api/online-store/transfers/${encodeURIComponent(activeTransferDraftBatchNo)}`
+          : "/api/online-store/transfers",
+        {
+        method: activeTransferDraftBatchNo ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
           sourceStoreId: transferSourceStoreId,
-          sourceInventoryLocationId: selectedTransferSourceLocation.locationId,
           destinationInventoryLocationId: selectedTransferDestinationLocation.locationId,
           lines,
           externalReference: transferReference,
@@ -6331,7 +6843,8 @@ export function OnlineStoreWorkspace({
           driverContact: transferDriverContact,
           note: transferNote
         })
-      });
+        }
+      );
       const payload = (await response.json()) as Partial<CreateOnlineStoreTransferResponse> & {
         message?: string;
       };
@@ -6340,21 +6853,137 @@ export function OnlineStoreWorkspace({
         throw new Error(payload.message ?? "Flash ERP could not create the transfer request.");
       }
 
-      setInventoryMessage(payload.message ?? `Created ${payload.transferNo}.`);
-      setTransferRequestLines([]);
+      setInventoryMessage(payload.message ?? `Saved ${payload.transferNo}.`);
+      resetTransferRequestDraft();
       setTransferRequestDialogOpen(false);
-      setActiveTransferEntryTab("header");
-      setTransferReference("");
-      setTransferDeliveryNoteNo("");
-      setTransferTransporterName("");
-      setTransferVehicleRegistrationNo("");
-      setTransferDriverName("");
-      setTransferDriverContact("");
-      setTransferQuantity("1");
-      setTransferNote("");
       router.refresh();
     } catch (error) {
       setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not create the transfer request.");
+    } finally {
+      setIsPostingInventory(false);
+    }
+  }
+
+  function estimateLayawayRefund(order: SalesOrder) {
+    const policy = order.layawayPolicy;
+
+    if (!policy?.refundPaymentsOnCancellation) {
+      return 0;
+    }
+
+    const fee =
+      policy.cancellationFeeType === "PERCENTAGE"
+        ? order.paidAmount * (policy.cancellationFeeValue / 100)
+        : policy.cancellationFeeValue;
+
+    return roundMoney(Math.max(0, order.paidAmount - Math.min(order.paidAmount, fee)));
+  }
+
+  function openLayawayAction(kind: LayawayActionKind, order: SalesOrder) {
+    const amount =
+      kind === "PAYMENT"
+        ? order.balanceAmount
+        : kind === "CANCEL"
+          ? estimateLayawayRefund(order)
+          : 0;
+
+    setLayawayActionDraft({ kind, order });
+    setLayawayActionReason("");
+    setLayawayActionPayments(
+      amount > 0 ? [createPaymentDraft(defaultTenderCode, amount.toFixed(2))] : []
+    );
+  }
+
+  async function submitLayawayAction() {
+    if (!layawayActionDraft) {
+      return;
+    }
+
+    const { kind, order } = layawayActionDraft;
+    const payments = paymentPayload(layawayActionPayments);
+    const endpointAction =
+      kind === "PAYMENT"
+        ? "payments"
+        : kind === "RELEASE"
+          ? "release"
+          : kind === "EXPIRE"
+            ? "expire"
+            : "cancel";
+
+    setIsPostingPosAction(true);
+    setCheckoutMessage(
+      kind === "PAYMENT"
+        ? `Receiving payment for ${order.orderNo}...`
+        : `${kind === "CANCEL" ? "Cancelling" : kind === "RELEASE" ? "Releasing stock for" : "Expiring"} ${order.orderNo}...`
+    );
+
+    try {
+      const response = await fetch(
+        `/api/online-store/sales-orders/${encodeURIComponent(order.orderId)}/${endpointAction}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            kind === "PAYMENT"
+              ? { payments, note: layawayActionReason.trim() || null }
+              : kind === "CANCEL"
+                ? {
+                    refundPayments: payments,
+                    note: layawayActionReason.trim() || "Layaway cancelled from the online POS queue."
+                  }
+                : { reason: layawayActionReason.trim() || null }
+          )
+        }
+      );
+      const payload = (await response.json()) as Partial<OnlineStoreLayawayActionResponse> & {
+        salesOrder?: SalesOrder;
+        message?: string;
+      };
+
+      if (!response.ok || !payload.salesOrder) {
+        throw new Error(payload.message ?? `Flash ERP could not complete the ${kind.toLowerCase()} action.`);
+      }
+
+      setSalesOrders((rows) =>
+        rows.map((row) => (row.orderId === payload.salesOrder?.orderId ? payload.salesOrder as SalesOrder : row))
+      );
+      setLayawayActionDraft(null);
+      setLayawayActionPayments([]);
+      setLayawayActionReason("");
+      setCheckoutMessage(payload.message ?? `${order.orderNo} was updated.`);
+      router.refresh();
+    } catch (error) {
+      setCheckoutMessage(
+        error instanceof Error ? error.message : `Flash ERP could not complete the ${kind.toLowerCase()} action.`
+      );
+    } finally {
+      setIsPostingPosAction(false);
+    }
+  }
+
+  async function sendTransferRequestDraft(transferBatchNo: string) {
+    setIsPostingInventory(true);
+    setInventoryMessage(`Sending ${transferBatchNo}...`);
+
+    try {
+      const response = await fetch(
+        `/api/online-store/transfers/${encodeURIComponent(transferBatchNo)}/send`,
+        { method: "POST" }
+      );
+      const payload = (await response.json()) as Partial<CreateOnlineStoreTransferResponse> & {
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not send the transfer request.");
+      }
+
+      setInventoryMessage(payload.message ?? `${transferBatchNo} was sent.`);
+      router.refresh();
+    } catch (error) {
+      setInventoryMessage(
+        error instanceof Error ? error.message : "Flash ERP could not send the transfer request."
+      );
     } finally {
       setIsPostingInventory(false);
     }
@@ -6374,6 +7003,11 @@ export function OnlineStoreWorkspace({
       return;
     }
 
+    if (action === "issue" && !transferIssueLocationId) {
+      setInventoryMessage("Choose the dispatch location before issuing stock.");
+      return;
+    }
+
     setIsPostingInventory(true);
     setInventoryMessage(`${action === "issue" ? "Issuing" : "Receiving"} ${transfer.transferNo}...`);
 
@@ -6388,6 +7022,7 @@ export function OnlineStoreWorkspace({
           serialNumbers,
           ...(action === "issue"
             ? {
+                sourceInventoryLocationId: transferIssueLocationId,
                 transporterName: selectedTransferDocument?.transporterName ?? null,
                 vehicleRegistrationNo: selectedTransferDocument?.vehicleRegistrationNo ?? null,
                 driverName: selectedTransferDocument?.driverName ?? null,
@@ -6457,6 +7092,7 @@ export function OnlineStoreWorkspace({
             serialNumbers: [],
             ...(action === "issue"
               ? {
+                  sourceInventoryLocationId: transferIssueLocationId,
                   transporterName: transferDocument.transporterName,
                   vehicleRegistrationNo: transferDocument.vehicleRegistrationNo,
                   driverName: transferDocument.driverName,
@@ -6870,76 +7506,63 @@ export function OnlineStoreWorkspace({
   }
 
   async function postStockCount() {
-    if (!inventoryProductId) {
+    if (!inventoryProductId || !selectedInventoryProduct) {
       setInventoryMessage("Choose a product before saving the count.");
       return;
     }
 
-    setIsPostingInventory(true);
-    setInventoryMessage("Saving stock count...");
-
-    try {
-      const countLocationId = inventoryLocationId || defaultSalesLocationId || null;
-      const batchCounts = selectedInventoryProduct?.trackExpiry
+    const batchCounts = selectedInventoryProduct?.trackExpiry
         ? selectedCountBatches.map((batch) => ({
             batchId: batch.batchId,
             countedQuantity: Number(countedBatchQuantities[batch.batchId] ?? batch.quantityOnHand)
           }))
         : [];
-      const effectiveCountedQuantity = selectedInventoryProduct?.trackExpiry
+    const effectiveCountedQuantity = selectedInventoryProduct?.trackExpiry
         ? batchCounts.reduce((sum, batch) => sum + batch.countedQuantity, 0)
         : Number(countedQuantity);
-      const response = await fetch("/api/online-store/stock-counts", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          inventoryLocationId: countLocationId,
-          productId: inventoryProductId,
-          countedQuantity: effectiveCountedQuantity,
-          batchCounts,
-          commitNow: false,
-          note: countNote
-        })
-      });
-      const payload = (await response.json()) as Partial<CreateOnlineStoreStockCountResponse> & {
-        message?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(payload.message ?? "Flash ERP could not save the stock count.");
-      }
-
-      setInventoryMessage(payload.message ?? `Saved ${payload.sessionNo}.`);
-      setCountNote("");
-      setCountedQuantity("0");
-      setCountedBatchQuantities({});
-      router.refresh();
-    } catch (error) {
-      setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not save the stock count.");
-    } finally {
-      setIsPostingInventory(false);
+    if (!Number.isFinite(effectiveCountedQuantity) || effectiveCountedQuantity < 0) {
+      setInventoryMessage("Enter a counted quantity of zero or greater before adding the item.");
+      return;
     }
+
+    const systemQuantity = selectedInventoryRow?.quantityOnHand ?? selectedInventoryProduct.quantityOnHand;
+    setStockCountUploadRows((rows) => [
+      ...rows.filter((row) => row.productId !== inventoryProductId),
+      {
+        productId: inventoryProductId,
+        productCode: selectedInventoryProduct.productCode,
+        productName: selectedInventoryProduct.productName,
+        systemQuantity,
+        countedQuantity: effectiveCountedQuantity,
+        varianceQuantity: roundQuantity(effectiveCountedQuantity - systemQuantity),
+        batchCounts
+      }
+    ]);
+    setInventoryProductId("");
+    setCountedQuantity("0");
+    setCountedBatchQuantities({});
+    setInventoryMessage(`${selectedInventoryProduct.productName} was added to the count sheet.`);
   }
 
-  async function commitStockCount(sessionId: string, sessionNo: string) {
+  async function commitStockCount(sessionIds: string[], sessionNo: string) {
     setIsPostingInventory(true);
     setInventoryMessage(`Committing ${sessionNo}...`);
 
     try {
-      const response = await fetch(`/api/online-store/stock-counts/${encodeURIComponent(sessionId)}/commit`, {
-        method: "POST"
-      });
-      const payload = (await response.json()) as Partial<CommitOnlineStoreStockCountResponse> & {
-        message?: string;
-      };
+      for (const sessionId of sessionIds) {
+        const response = await fetch(`/api/online-store/stock-counts/${encodeURIComponent(sessionId)}/commit`, {
+          method: "POST"
+        });
+        const payload = (await response.json()) as Partial<CommitOnlineStoreStockCountResponse> & {
+          message?: string;
+        };
 
-      if (!response.ok) {
-        throw new Error(payload.message ?? "Flash ERP could not commit the stock count.");
+        if (!response.ok) {
+          throw new Error(payload.message ?? "Flash ERP could not commit the stock count.");
+        }
       }
 
-      setInventoryMessage(payload.message ?? `Committed ${sessionNo}.`);
+      setInventoryMessage(`Committed ${sessionNo}.`);
       router.refresh();
     } catch (error) {
       setInventoryMessage(error instanceof Error ? error.message : "Flash ERP could not commit the stock count.");
@@ -6948,11 +7571,24 @@ export function OnlineStoreWorkspace({
     }
   }
 
-  function requestStockCountCommit(sessionId: string, sessionNo: string) {
-    setPendingStockCountConfirmation({ action: "COMMIT", sessionId, sessionNo });
+  function requestStockCountCommit(sessionIds: string[], sessionNo: string) {
+    setPendingStockCountConfirmation({ action: "COMMIT", sessionIds, sessionNo });
   }
 
   function exportCountSheet() {
+    if (stockCountUploadRows.length) {
+      downloadCsv(`flash-erp-count-sheet-${stockCountUploadRows[0]?.sheetNo ?? (inventoryLocationId || "draft")}.csv`, [
+        ["productCode", "productName", "countedQuantity", "systemQuantity"],
+        ...stockCountUploadRows.map((row) => [
+          row.productCode,
+          row.productName,
+          row.countedQuantity ?? "",
+          row.systemQuantity
+        ])
+      ]);
+      return;
+    }
+
     const rows = countLocationItems.length ? countLocationItems : inventoryBrowserRows;
 
     downloadCsv(`flash-erp-count-sheet-${inventoryLocationId || "all"}.csv`, [
@@ -7019,10 +7655,14 @@ export function OnlineStoreWorkspace({
     }
 
     setIsPostingInventory(true);
-    setInventoryMessage("Saving uploaded count rows...");
+    setInventoryMessage("Saving count sheet...");
 
     try {
-      for (const row of rows) {
+      const sheetNo =
+        rows.find((row) => row.sheetNo)?.sheetNo ??
+        `WEB-CNT-SHEET-${Date.now()}`;
+
+      for (const [index, row] of rows.entries()) {
         const response = await fetch("/api/online-store/stock-counts", {
           method: "POST",
           headers: {
@@ -7032,6 +7672,9 @@ export function OnlineStoreWorkspace({
             inventoryLocationId: inventoryLocationId || defaultSalesLocationId || null,
             productId: row.productId,
             countedQuantity: row.countedQuantity,
+            batchCounts: row.batchCounts ?? [],
+            sheetNo,
+            lineNo: index + 1,
             commitNow: false,
             note: countNote
           })
@@ -7043,7 +7686,7 @@ export function OnlineStoreWorkspace({
         }
       }
 
-      setInventoryMessage(`Saved ${rows.length} uploaded count row(s).`);
+      setInventoryMessage(`${sheetNo} was saved with ${rows.length} item(s).`);
       setStockCountUploadRows([]);
       router.refresh();
     } catch (error) {
@@ -7076,7 +7719,7 @@ export function OnlineStoreWorkspace({
     setPendingStockCountConfirmation(null);
 
     if (pendingAction.action === "COMMIT") {
-      void commitStockCount(pendingAction.sessionId, pendingAction.sessionNo);
+      void commitStockCount(pendingAction.sessionIds, pendingAction.sessionNo);
       return;
     }
 
@@ -7272,7 +7915,7 @@ export function OnlineStoreWorkspace({
               {issuableLineCount > 0 ? (
                 <button
                   className="rms-button is-primary"
-                  disabled={isPostingInventory}
+                  disabled={isPostingInventory || !transferIssueLocationId}
                   onClick={() => void processTransferDocumentActionAll(selectedTransferDocument, "issue")}
                   type="button"
                 >
@@ -7315,6 +7958,22 @@ export function OnlineStoreWorkspace({
               value={selectedTransferDocument.feedbackStatus}
             />
           </div>
+          {issuableLineCount > 0 ? (
+            <label className="rms-note-field rms-transfer-note">
+              <span>Dispatch location</span>
+              <select
+                onChange={(event) => setTransferIssueLocationId(event.target.value)}
+                value={transferIssueLocationId}
+              >
+                <option value="">Select source location</option>
+                {workspace.inventoryLocations.map((location) => (
+                  <option key={location.locationId} value={location.locationId}>
+                    {location.locationName}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="rms-note-field rms-transfer-note">
             <span>Action note</span>
             <input onChange={(event) => setTransferActionNote(event.target.value)} value={transferActionNote} />
@@ -7349,7 +8008,14 @@ export function OnlineStoreWorkspace({
               return (
                 <div className="rms-table-row" key={transfer.transferId}>
                   <div><strong>{transfer.productName}</strong><small>{transfer.productCode}{transfer.trackExpiry ? ` · ${transfer.issuedBatchAllocations.length} batch allocation(s)` : ""}</small></div>
-                  <div><strong>{transfer.sourceLocationName}</strong><small>{transfer.destinationLocationName}</small></div>
+                  <div>
+                    <strong>
+                      {transfer.issuedQuantity > 0
+                        ? transfer.sourceLocationName
+                        : "Source shop selects location"}
+                    </strong>
+                    <small>{transfer.destinationLocationName}</small>
+                  </div>
                   <strong>{formatNumber.format(transfer.requestedQuantity)}</strong>
                   <span>{formatNumber.format(transfer.issuedQuantity)}</span>
                   <span>{formatNumber.format(transfer.receivedQuantity)}</span>
@@ -7370,7 +8036,7 @@ export function OnlineStoreWorkspace({
                       />
                       <button
                         className="rms-row-button is-add"
-                        disabled={isPostingInventory}
+                        disabled={isPostingInventory || (action === "issue" && !transferIssueLocationId)}
                         onClick={() =>
                           transfer.isSerialized
                             ? openTransferSerialDialog(transfer, action)
@@ -7566,39 +8232,6 @@ export function OnlineStoreWorkspace({
     const remoteItemOptions = Array.from(
       new Map(remoteInventoryRows.map((row) => [row.productCode, row.productName] as const))
     ).sort((left, right) => left[1].localeCompare(right[1]));
-    const remoteLocationOptions = Array.from(
-      new Map(
-        [
-          ...workspace.transferStores
-            .filter((store) => !remoteInventoryStoreFilter || store.storeCode === remoteInventoryStoreFilter)
-            .flatMap((store) =>
-              store.sourceLocations.map(
-                (location) =>
-                  [
-                    location.locationCode,
-                    {
-                      locationName: location.locationName,
-                      storeName: store.storeName
-                    }
-                  ] as const
-              )
-            ),
-          ...remoteInventoryRows
-            .filter((row) => !remoteInventoryStoreFilter || row.storeCode === remoteInventoryStoreFilter)
-            .map(
-              (row) =>
-                [
-                  row.locationCode,
-                  {
-                    locationName: row.locationName,
-                    storeName: row.storeName
-                  }
-                ] as const
-            )
-        ]
-      )
-    ).sort((left, right) => left[1].locationName.localeCompare(right[1].locationName));
-
     return (
       <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
         <section className="rms-dialog rms-wide-dialog rms-remote-inventory-dialog">
@@ -7619,36 +8252,52 @@ export function OnlineStoreWorkspace({
               placeholder="Product, category, barcode"
               value={remoteInventoryQuery}
             />
-            <select onChange={(event) => setRemoteInventoryStoreFilter(event.target.value)} value={remoteInventoryStoreFilter}>
+            <select onChange={(event) => { setRemoteInventoryStoreFilter(event.target.value); setSelectedRemoteInventoryKeys(new Set()); }} value={remoteInventoryStoreFilter}>
               <option value="">All stores</option>
               {remoteStoreOptions.map(([storeCode, storeName]) => <option key={storeCode} value={storeCode}>{storeName}</option>)}
             </select>
-            <select onChange={(event) => setRemoteInventoryItemFilter(event.target.value)} value={remoteInventoryItemFilter}>
+            <select onChange={(event) => { setRemoteInventoryItemFilter(event.target.value); setSelectedRemoteInventoryKeys(new Set()); }} value={remoteInventoryItemFilter}>
               <option value="">All items</option>
               {remoteItemOptions.map(([productCode, productName]) => <option key={productCode} value={productCode}>{productName}</option>)}
             </select>
-            <select onChange={(event) => setRemoteInventoryLocationFilter(event.target.value)} value={remoteInventoryLocationFilter}>
-              <option value="">All locations</option>
-              {remoteLocationOptions.map(([locationCode, { locationName, storeName }]) => (
-                <option key={locationCode} value={locationCode}>{locationName} - {storeName}</option>
+            <select onChange={(event) => setTransferDestinationLocationId(event.target.value)} value={selectedTransferDestinationLocation?.locationId ?? transferDestinationLocationId}>
+              <option value="">Request into location</option>
+              {workspace.inventoryLocations.map((location) => (
+                <option key={location.locationId} value={location.locationId}>Into {location.locationName}</option>
               ))}
             </select>
             <button className="rms-button is-primary" disabled={isLoadingRemoteInventory} onClick={() => void lookupRemoteInventory()} type="button">
               {isLoadingRemoteInventory ? "Searching..." : "Search HQ"}
             </button>
+            <button className="rms-button is-primary" disabled={isLoadingRemoteInventory || selectedRemoteInventoryKeys.size === 0} onClick={buildTransferDraftFromRemoteSelection} type="button">
+              Build request ({selectedRemoteInventoryKeys.size})
+            </button>
           </div>
           <div className="rms-table rms-remote-inventory-table">
-            <div className="rms-table-head"><span>Product</span><span>Shop</span><span>Location</span><span>On hand</span><span>Updated</span><span>Request</span></div>
-            {remoteInventoryRows.map((row) => (
-              <div className="rms-table-row" key={`${row.storeCode}:${row.locationCode}:${row.productCode}`}>
-                <div><strong>{row.productName}</strong><small>{row.productCode}</small></div>
-                <div><strong>{row.storeName}</strong><small>{row.storeCode}</small></div>
-                <div><strong>{row.locationName}</strong><small>{row.locationCode}</small></div>
-                <strong>{formatNumber.format(row.quantityOnHand)}</strong>
-                <span>{formatRelative(row.updatedAt)}</span>
-                <button className="rms-row-button" onClick={() => requestRemoteStock(row)} type="button">Request</button>
-              </div>
-            ))}
+            <div className="rms-table-head"><span>Select</span><span>Product</span><span>Shop</span><span>Total on hand</span><span>Updated</span><span>Request eligibility</span></div>
+            {remoteInventoryRows.map((row) => {
+              const rowKey = getRemoteInventoryRowKey(row);
+              const eligibility = getRemoteRequestEligibility(row);
+              const selected = selectedRemoteInventoryKeys.has(rowKey);
+
+              return (
+                <div className="rms-table-row" key={rowKey}>
+                  <input
+                    aria-label={`Select ${row.productName} from ${row.storeName}`}
+                    checked={selected}
+                    disabled={!selected && !eligibility.eligible}
+                    onChange={() => toggleRemoteInventorySelection(row)}
+                    title={eligibility.reason}
+                    type="checkbox"
+                  />
+                  <div><strong>{row.productName}</strong><small>{row.productCode}</small></div>
+                  <div><strong>{row.storeName}</strong><small>{row.storeCode}</small></div>
+                  <strong>{formatNumber.format(row.quantityOnHand)}</strong>
+                  <span>{formatRelative(row.updatedAt)}</span>
+                  <small title={eligibility.reason}>{eligibility.eligible ? "Eligible" : eligibility.reason}</small>
+                </div>
+              );
+            })}
             {!remoteInventoryRows.length ? <EmptyState title="No remote stock loaded" detail="Search HQ for stock across other stores." /> : null}
           </div>
         </section>
@@ -8049,7 +8698,7 @@ export function OnlineStoreWorkspace({
             <section className="rms-panel rms-pos-cart">
               <div className="rms-pos-head">
                 <div>
-                  <span>{saleMode === "SALES_ORDER" ? "Sales order customer" : "Customer"}</span>
+                  <span>{saleMode === "LAYAWAY" ? "Layaway customer" : saleMode === "SALES_ORDER" ? "Sales order customer" : "Customer"}</span>
                   <strong>{selectedCustomer?.fullName ?? activeSalesOrder?.customerName ?? "Walk-in customer"}</strong>
                   <small>
                     {activeSalesOrder
@@ -8059,13 +8708,13 @@ export function OnlineStoreWorkspace({
                         : "No customer account"}
                   </small>
                 </div>
-                <StatusPill tone={saleMode === "SALES_ORDER" || activeSalesOrder ? "warning" : "good"}>
+                <StatusPill tone={saleMode !== "SALE" || activeSalesOrder ? "warning" : "good"}>
                   {activeSalesOrder ? "FULFIL ORDER" : saleMode}
                 </StatusPill>
               </div>
               {activeSalesOrder ? (
                 <div className="rms-banner is-warn">
-                  <strong>{activeSalesOrder.orderNo}</strong> is locked for fulfilment. Deposit {formatMoney(activeSalesOrder.depositAmount, currencyCode)} · Balance {formatMoney(activeSalesOrder.balanceAmount, currencyCode)}
+                  <strong>{activeSalesOrder.orderNo}</strong> is locked for fulfilment. Paid {formatMoney(activeSalesOrder.paidAmount, currencyCode)} · Balance {formatMoney(activeSalesOrder.balanceAmount, currencyCode)}
                 </div>
               ) : null}
               <div className="rms-customer-strip">
@@ -8155,7 +8804,7 @@ export function OnlineStoreWorkspace({
                       <strong className="rms-cart-index">{index + 1}</strong>
                       <div className="rms-cart-item">
                         <strong>{line.product.productName}</strong>
-                        <small>{line.product.productCode}{variantLabel ? ` · ${variantLabel}` : ""}{preferredBatch ? ` · Batch ${preferredBatch.batchNo}` : line.product.trackExpiry ? " · Batch FEFO" : ""}{promotionLabel ? ` · ${promotionLabel}` : ""}</small>
+                        <small>{line.product.productCode}{variantLabel ? ` · ${variantLabel}` : ""} · {line.sellingUnitOfMeasure}{line.uomConversionFactor !== 1 ? ` × ${formatNumber.format(line.uomConversionFactor)} = ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}` : ""}{preferredBatch ? ` · Batch ${preferredBatch.batchNo}` : line.product.trackExpiry ? " · Batch FEFO" : ""}{promotionLabel ? ` · ${promotionLabel}` : ""}</small>
                         <label className="rms-pos-discount-select is-line">
                           <span>Disc</span>
                           <select
@@ -8185,15 +8834,29 @@ export function OnlineStoreWorkspace({
                       <input
                         className="rms-qty-input"
                         disabled={isRecalledBasket}
-                        onChange={(event) =>
-                          setBasket((lines) =>
-                            lines.map((item) =>
-                              basketLineKey(item) === lineKey
-                                ? { ...item, quantity: Math.max(1, Number(event.target.value) || 1) }
-                                : item
-                            )
-                          )
-                        }
+                        min="0.001"
+                        onChange={(event) => {
+                          const nextQuantity = Math.max(0.001, Number(event.target.value) || 1);
+
+                          try {
+                            const nextBaseQuantity = calculatePosBaseQuantity(
+                              nextQuantity,
+                              line.uomConversionFactor
+                            );
+                            setBasket((lines) =>
+                              lines.map((item) =>
+                                basketLineKey(item) === lineKey
+                                  ? { ...item, quantity: nextQuantity, baseQuantity: nextBaseQuantity }
+                                  : item
+                              )
+                            );
+                          } catch (error) {
+                            setCheckoutMessage(
+                              error instanceof Error ? error.message : "Enter a valid selling quantity."
+                            );
+                          }
+                        }}
+                        step="0.001"
                         type="number"
                         value={line.quantity}
                       />
@@ -8255,14 +8918,14 @@ export function OnlineStoreWorkspace({
                   ) : null}
                 </div>
               ) : null}
-              {saleMode === "SALES_ORDER" && !activeSalesOrder ? (
+              {saleMode !== "SALE" && !activeSalesOrder ? (
                 <div className="rms-payment-panel is-order-mode">
                   <div className="rms-payment-toolbar">
                     <div>
                       <strong>Deposit payments</strong>
                       <span>
                         {nonCreditTenderMethods.length
-                          ? "Add one or more payment methods for this sales order."
+                          ? `Add one or more payment methods for this ${saleMode === "LAYAWAY" ? "layaway" : "sales order"}.`
                           : "No non-credit tender methods have synced for deposits."}
                       </span>
                     </div>
@@ -8278,12 +8941,39 @@ export function OnlineStoreWorkspace({
                   <div className="rms-payment-summary">
                     <strong>{formatMoney(paymentTotal, currencyCode)}</strong>
                     <span>
-                      {selectedCustomer ? `Order customer ${selectedCustomer.fullName}` : "Attach a customer before saving the order"}
+                      {selectedCustomer ? `${saleMode === "LAYAWAY" ? "Layaway" : "Order"} customer ${selectedCustomer.fullName}` : `Attach a customer before saving the ${saleMode === "LAYAWAY" ? "layaway" : "order"}`}
                       {" · "}
                       Balance {formatMoney(Math.max(0, total - paymentTotal), currencyCode)}
                     </span>
-                    <button className="rms-button is-primary" disabled={!canSaveSalesOrder} onClick={() => void saveSalesOrder()} type="button">Save order</button>
+                    <button className="rms-button is-primary" disabled={!canSaveSalesOrder} onClick={() => void saveSalesOrder()} type="button">{saleMode === "LAYAWAY" ? "Save layaway" : "Save order"}</button>
                   </div>
+                  {saleMode === "LAYAWAY" ? (
+                    <div className="rms-layaway-opening-options">
+                      <label>
+                        <span>Expiry date and time (optional)</span>
+                        <input
+                          min={new Date().toISOString().slice(0, 16)}
+                          onChange={(event) => setLayawayExpiresAt(event.target.value)}
+                          type="datetime-local"
+                          value={layawayExpiresAt}
+                        />
+                      </label>
+                      <div>
+                        <strong>Minimum opening deposit</strong>
+                        <span>{formatMoney(layawayMinimumDepositAmount, currencyCode)} ({workspace.optionSettings.layawaySettings.minimumDepositPercent}%)</span>
+                      </div>
+                      {workspace.capabilities.canOverrideLayawayPolicy ? (
+                        <label className="rms-checkbox-field">
+                          <input
+                            checked={layawayPolicyOverrideApproved}
+                            onChange={(event) => setLayawayPolicyOverrideApproved(event.target.checked)}
+                            type="checkbox"
+                          />
+                          <span>Approve deposit policy override</span>
+                        </label>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {paymentDrafts.map((draft, index) => {
                     const tender = tenderForDraft(draft);
                     return (
@@ -8326,7 +9016,8 @@ export function OnlineStoreWorkspace({
                       </div>
                     );
                   })}
-                  {salesOrderDepositOver ? <p className="rms-inline-message">Sales order deposits cannot be greater than the order total.</p> : null}
+                  {salesOrderDepositOver ? <p className="rms-inline-message">Deposits cannot be greater than the order total.</p> : null}
+                  {layawayDepositShort && !(workspace.capabilities.canOverrideLayawayPolicy && layawayPolicyOverrideApproved) ? <p className="rms-inline-message">The layaway opening deposit must be at least {formatMoney(layawayMinimumDepositAmount, currencyCode)}.</p> : null}
                   {!nonCreditTenderMethods.length ? <p className="rms-inline-message">Sync at least one active non-credit tender from HQ before adding sales order deposits.</p> : null}
                   {salesOrderHasInvalidTender ? <p className="rms-inline-message">Choose an active non-credit tender for each deposit row.</p> : null}
                   {missingBankAccountTender ? <p className="rms-inline-message">Select the bank, branch, and account number for bank-backed deposit tenders.</p> : null}
@@ -8337,7 +9028,7 @@ export function OnlineStoreWorkspace({
               <div className="rms-payment-panel">
                 <div className="rms-payment-summary">
                   <strong>{formatMoney(payableTotal, currencyCode)}</strong>
-                  <span>{activeSalesOrder ? `Deposit ${formatMoney(activeSalesOrder.depositAmount, currencyCode)} · ` : ""}Due {formatMoney(amountDue, currencyCode)} · Change {formatMoney(changeDue, currencyCode)}</span>
+                  <span>{activeSalesOrder ? `Paid ${formatMoney(activeSalesOrder.paidAmount, currencyCode)} · ` : ""}Due {formatMoney(amountDue, currencyCode)} · Change {formatMoney(changeDue, currencyCode)}</span>
                   <button className="rms-row-button is-add" onClick={() => addPaymentDraft(setPaymentDrafts)} type="button">Add</button>
                 </div>
                 {paymentDrafts.map((draft, index) => {
@@ -8425,7 +9116,7 @@ export function OnlineStoreWorkspace({
                   </button>
                 )) : (
                   <div className="rms-empty-catalog">
-                    {saleMode === "SALES_ORDER"
+                    {saleMode !== "SALE"
                       ? "No active catalog items are available for this online store."
                       : "No stock or service items are available for this online store location."}
                   </div>
@@ -8436,6 +9127,7 @@ export function OnlineStoreWorkspace({
               <div className="rms-action-mode">
                 <button className={`rms-action-button ${saleMode === "SALE" && !activeSalesOrder ? "is-selected" : ""}`} disabled={isRecalledBasket} onClick={() => setSaleMode("SALE")} type="button">Sale mode</button>
                 <button className={`rms-action-button is-order ${saleMode === "SALES_ORDER" ? "is-selected" : ""}`} disabled={isRecalledBasket} onClick={activateSalesOrderMode} type="button">Sales order mode</button>
+                <button className={`rms-action-button is-order ${saleMode === "LAYAWAY" ? "is-selected" : ""}`} disabled={isRecalledBasket || !workspace.optionSettings.layawaySettings.enabled || !workspace.capabilities.canCreateLayaway} onClick={activateLayawayMode} type="button">Layaway mode</button>
               </div>
               <button className="rms-action-button is-clear" disabled={!hasSaleScreenState} onClick={clearSaleScreen} type="button">{activeSalesOrder ? "Exit fulfilment" : "Clear screen"}</button>
               <button className="rms-action-button is-hold" disabled={isPostingPosAction || isRecalledBasket || !hasOpenShift || !basket.length} onClick={() => void holdSale()} type="button">Hold sale</button>
@@ -8611,38 +9303,164 @@ export function OnlineStoreWorkspace({
                   </div>
                 ) : null}
                 <div className="rms-list rms-receipt-list">
-                  {salesOrderRows.length ? salesOrderRows.map((order) => (
-                    <div className="rms-list-row rms-receipt-row" key={order.orderId}>
-                      {order.isFulfilmentOrder ? (
-                        <input
-                          aria-label={`Select ${order.orderNo}`}
-                          checked={selectedFulfilmentSalesOrderIds.includes(order.orderId)}
-                          disabled={isPostingPosAction || order.status !== "OPEN"}
-                          onChange={(event) =>
-                            setSelectedFulfilmentSalesOrderIds((current) =>
-                              event.target.checked
-                                ? [...new Set([...current, order.orderId])]
-                                : current.filter((orderId) => orderId !== order.orderId)
-                            )
-                          }
-                          type="checkbox"
-                        />
-                      ) : null}
-                      <div>
-                        <strong>{order.orderNo}</strong>
-                        <span>{order.customerName} · {order.sourceTransactionNo} · {order.originStoreName}</span>
-                        <small>{formatNumber.format(order.itemCount)} item(s) · {new Date(order.createdAt).toLocaleString()}</small>
+                  {salesOrderRows.length ? salesOrderRows.map((order) => {
+                    const isLayaway = order.orderType === "LAYAWAY";
+                    const paymentRows = isLayaway
+                      ? workspace.reports.layawayPaymentRows.filter((payment) => payment.orderNo === order.orderNo)
+                      : [];
+                    const canFulfil =
+                      !isLayaway ||
+                      (workspace.capabilities.canFulfilLayaway &&
+                        (order.layawayPolicy?.requireFullPaymentBeforeFulfilment === false || order.balanceAmount <= 0.005));
+                    const detailsOpen = expandedLayawayOrderId === order.orderId;
+
+                    return (
+                      <div className="rms-sales-order-entry" key={order.orderId}>
+                        <div className="rms-list-row rms-receipt-row">
+                          {order.isFulfilmentOrder ? (
+                            <input
+                              aria-label={`Select ${order.orderNo}`}
+                              checked={selectedFulfilmentSalesOrderIds.includes(order.orderId)}
+                              disabled={isPostingPosAction || order.status !== "OPEN"}
+                              onChange={(event) =>
+                                setSelectedFulfilmentSalesOrderIds((current) =>
+                                  event.target.checked
+                                    ? [...new Set([...current, order.orderId])]
+                                    : current.filter((orderId) => orderId !== order.orderId)
+                                )
+                              }
+                              type="checkbox"
+                            />
+                          ) : null}
+                          <div>
+                            <strong>{order.orderNo}</strong>
+                            <span>{order.customerName} · {order.sourceTransactionNo} · {order.originStoreName}</span>
+                            <small>
+                              {isLayaway ? "Layaway" : "Sales order"} · {formatNumber.format(order.itemCount)} item(s) · {new Date(order.createdAt).toLocaleString()}
+                              {isLayaway ? ` · Reservation ${order.reservationStatus}` : ""}
+                            </small>
+                          </div>
+                          <div className="rms-order-money-summary">
+                            <strong>{formatMoney(order.totalAmount, currencyCode)}</strong>
+                            {isLayaway ? <small>Paid {formatMoney(order.paidAmount, currencyCode)} · Due {formatMoney(order.balanceAmount, currencyCode)}</small> : null}
+                          </div>
+                          <div className="rms-receipt-actions">
+                            <StatusPill tone={order.status === "OPEN" ? "warning" : order.status === "FULFILLED" ? "good" : "neutral"}>{order.status}</StatusPill>
+                            {isLayaway ? (
+                              <button className="rms-row-button" onClick={() => setExpandedLayawayOrderId(detailsOpen ? null : order.orderId)} type="button">{detailsOpen ? "Hide" : "Details"}</button>
+                            ) : null}
+                            <button className="rms-row-button" disabled={isPostingPosAction || Boolean(basket.length) || order.status !== "OPEN" || order.isFulfilmentOrder || !canFulfil} onClick={() => fulfilSalesOrder(order)} type="button">Fulfil</button>
+                            {isLayaway && order.balanceAmount > 0.005 ? (
+                              <button className="rms-row-button" disabled={isPostingPosAction || !workspace.capabilities.canReceiveLayawayPayment} onClick={() => openLayawayAction("PAYMENT", order)} type="button">Payment</button>
+                            ) : null}
+                            {isLayaway && order.reservationStatus === "ACTIVE" ? (
+                              <button className="rms-row-button" disabled={isPostingPosAction || !workspace.capabilities.canReleaseLayawayReservation} onClick={() => openLayawayAction("RELEASE", order)} type="button">Release stock</button>
+                            ) : null}
+                            {isLayaway && order.layawayExpiresAt && Date.parse(order.layawayExpiresAt) <= Date.now() ? (
+                              <button className="rms-row-button" disabled={isPostingPosAction || !workspace.capabilities.canReleaseLayawayReservation} onClick={() => openLayawayAction("EXPIRE", order)} type="button">Expire</button>
+                            ) : null}
+                            <button className="rms-row-button is-danger" disabled={isPostingPosAction || order.status !== "OPEN" || order.isFulfilmentOrder || (isLayaway && !workspace.capabilities.canCancelLayaway)} onClick={() => isLayaway ? openLayawayAction("CANCEL", order) : void cancelSalesOrder(order)} type="button">Cancel</button>
+                          </div>
+                        </div>
+                        {isLayaway && detailsOpen ? (
+                          <div className="rms-layaway-order-details">
+                            <div className="rms-layaway-detail-grid">
+                              <div><span>Minimum deposit</span><strong>{formatMoney(order.minimumDepositAmount, currencyCode)}</strong></div>
+                              <div><span>Reservation</span><strong>{order.reservationStatus}</strong></div>
+                              <div><span>Expires</span><strong>{order.layawayExpiresAt ? new Date(order.layawayExpiresAt).toLocaleString() : "No expiry"}</strong></div>
+                              <div><span>Created by</span><strong>{order.operatorName ?? "Online cashier"}</strong></div>
+                            </div>
+                            <div className="rms-layaway-line-grid">
+                              {order.lines.map((line) => (
+                                <div key={`${order.orderId}-${line.productId}-${line.variantSize ?? ""}-${line.variantColor ?? ""}`}>
+                                  <span>{line.productName}</span>
+                                  <strong>{formatNumber.format(line.quantity)} {line.sellingUnitOfMeasure ?? line.baseUnitOfMeasure ?? "EA"} · {formatMoney(line.lineTotal, currencyCode)}</strong>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="rms-layaway-payment-history">
+                              <strong>Payment history</strong>
+                              {paymentRows.length ? paymentRows.map((payment) => (
+                                <div key={payment.paymentId}>
+                                  <span>{new Date(payment.receivedAt).toLocaleString()} · {payment.tenderName}{payment.reference ? ` · ${payment.reference}` : ""}</span>
+                                  <strong>{formatMoney(payment.amount, currencyCode)}</strong>
+                                </div>
+                              )) : <small>No payment rows are available yet.</small>}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
-                      <strong>{formatMoney(order.totalAmount, currencyCode)}</strong>
-                      <div className="rms-receipt-actions">
-                        <StatusPill tone={order.status === "OPEN" ? "warning" : order.status === "FULFILLED" ? "good" : "neutral"}>{order.status}</StatusPill>
-                        <button className="rms-row-button" disabled={isPostingPosAction || Boolean(basket.length) || order.status !== "OPEN" || order.isFulfilmentOrder} onClick={() => fulfilSalesOrder(order)} type="button">Fulfil</button>
-                        <button className="rms-row-button is-danger" disabled={isPostingPosAction || order.status !== "OPEN" || order.isFulfilmentOrder} onClick={() => void cancelSalesOrder(order)} type="button">Cancel</button>
-                      </div>
-                    </div>
-                  )) : <div className="rms-empty-catalog">No sales orders match the current filters.</div>}
+                    );
+                  }) : <div className="rms-empty-catalog">No sales orders match the current filters.</div>}
                 </div>
               </section>
+            ) : null}
+            {layawayActionDraft ? (
+              <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
+                <section className="rms-dialog rms-layaway-action-dialog">
+                  <div className="rms-panel-title">
+                    <div>
+                      <span>Layaway · {layawayActionDraft.order.orderNo}</span>
+                      <h2>
+                        {layawayActionDraft.kind === "PAYMENT"
+                          ? "Receive installment"
+                          : layawayActionDraft.kind === "CANCEL"
+                            ? "Cancel and refund"
+                            : layawayActionDraft.kind === "RELEASE"
+                              ? "Release reserved stock"
+                              : "Expire layaway"}
+                      </h2>
+                    </div>
+                    <button className="rms-button" disabled={isPostingPosAction} onClick={() => setLayawayActionDraft(null)} type="button">Close</button>
+                  </div>
+                  <div className="rms-layaway-detail-grid">
+                    <div><span>Order total</span><strong>{formatMoney(layawayActionDraft.order.totalAmount, currencyCode)}</strong></div>
+                    <div><span>Paid</span><strong>{formatMoney(layawayActionDraft.order.paidAmount, currencyCode)}</strong></div>
+                    <div><span>Balance</span><strong>{formatMoney(layawayActionDraft.order.balanceAmount, currencyCode)}</strong></div>
+                    <div><span>Reservation</span><strong>{layawayActionDraft.order.reservationStatus}</strong></div>
+                  </div>
+                  {layawayActionNeedsPayment ? (
+                    <div className="rms-layaway-payment-list">
+                      <div className="rms-payment-toolbar">
+                        <div>
+                          <strong>{layawayActionDraft.kind === "CANCEL" ? "Refund tenders" : "Installment tenders"}</strong>
+                          <span>{layawayActionDraft.kind === "CANCEL" ? "Refund due" : "Maximum payment"} {formatMoney(layawayActionExpectedAmount, currencyCode)}</span>
+                        </div>
+                        <button className="rms-row-button is-add" disabled={isPostingPosAction || !nonCreditTenderMethods.length} onClick={() => addPaymentDraft(setLayawayActionPayments)} type="button">Add tender</button>
+                      </div>
+                      {layawayActionPayments.map((payment, index) => {
+                        const tender = tenderForDraft(payment);
+                        return (
+                          <div className="rms-payment-row" key={payment.id}>
+                            <select disabled={isPostingPosAction} onChange={(event) => updatePaymentDraft(setLayawayActionPayments, payment.id, { tenderMethodCode: event.target.value, bankAccountId: "" })} value={payment.tenderMethodCode}>
+                              {nonCreditTenderMethods.map((method) => <option key={method.tenderMethodCode} value={method.tenderMethodCode}>{method.tenderMethodName}</option>)}
+                            </select>
+                            <select disabled={isPostingPosAction || !tender?.requiresBankAccount} onChange={(event) => updatePaymentDraft(setLayawayActionPayments, payment.id, { bankAccountId: event.target.value })} value={payment.bankAccountId}>
+                              <option value="">Bank account</option>
+                              {workspace.bankAccounts.map((account) => <option key={account.bankAccountId} value={account.bankAccountId}>{account.bankName} · {account.accountNumber}</option>)}
+                            </select>
+                            <input disabled={isPostingPosAction} min="0.01" onChange={(event) => updatePaymentDraft(setLayawayActionPayments, payment.id, { amount: event.target.value })} step="0.01" type="number" value={payment.amount} />
+                            <input disabled={isPostingPosAction} onChange={(event) => updatePaymentDraft(setLayawayActionPayments, payment.id, { reference: event.target.value })} placeholder={tender?.requiresReference ? "Reference required" : "Reference"} value={payment.reference} />
+                            <button aria-label={`Remove tender ${index + 1}`} className="rms-icon-button is-danger rms-payment-remove-button" disabled={isPostingPosAction || layawayActionPayments.length <= 1} onClick={() => removePaymentDraft(setLayawayActionPayments, payment.id)} title="Remove tender" type="button"><TrashIcon /></button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  <label className="rms-note-field">
+                    <span>{layawayActionDraft.kind === "RELEASE" ? "Reason" : "Note"}</span>
+                    <textarea disabled={isPostingPosAction} onChange={(event) => setLayawayActionReason(event.target.value)} placeholder={layawayActionDraft.kind === "RELEASE" ? "Why is the stock reservation being released?" : "Optional action note"} value={layawayActionReason} />
+                  </label>
+                  {layawayActionPaymentInvalid ? <p className="rms-inline-message">{layawayActionDraft.kind === "CANCEL" ? `Refund tenders must total ${formatMoney(layawayActionExpectedAmount, currencyCode)}.` : `Enter an installment above zero and not more than ${formatMoney(layawayActionExpectedAmount, currencyCode)}.`}</p> : null}
+                  {layawayActionMissingBankAccount ? <p className="rms-inline-message">Select a bank account for each bank-backed tender.</p> : null}
+                  {layawayActionMissingReference ? <p className="rms-inline-message">Enter the required payment reference.</p> : null}
+                  {layawayActionReasonMissing ? <p className="rms-inline-message">Enter a reason before releasing reserved stock.</p> : null}
+                  <div className="rms-dialog-actions">
+                    <button className="rms-button" disabled={isPostingPosAction} onClick={() => setLayawayActionDraft(null)} type="button">Cancel</button>
+                    <button className={`rms-button is-primary${layawayActionDraft.kind === "CANCEL" ? " is-danger" : ""}`} disabled={isPostingPosAction || layawayActionPaymentInvalid || layawayActionMissingBankAccount || layawayActionMissingReference || layawayActionReasonMissing} onClick={() => void submitLayawayAction()} type="button">{isPostingPosAction ? "Working..." : "Confirm"}</button>
+                  </div>
+                </section>
+              </div>
             ) : null}
             {activeDrawer === "account" ? (
               <section className="rms-panel rms-receipt-drawer">
@@ -8801,7 +9619,7 @@ export function OnlineStoreWorkspace({
                   <div className="rms-table rms-report-table">
                     <div className="rms-table-head"><span>Product</span><span>Qty</span><span>Gross</span><span>Net</span></div>
                     {workspace.reports.productRows.map((row) => (
-                      <div className="rms-table-row" key={row.productCode}><strong>{row.productName}<small>{row.productCode}</small></strong><span>{formatNumber.format(row.quantity)}</span><span>{formatMoney(row.grossAmount, currencyCode)}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
+                      <div className="rms-table-row" key={`${row.productCode}:${row.sellingUnitOfMeasure}`}><strong>{row.productName}<small>{row.productCode} · {row.sellingUnitOfMeasure} · base {formatNumber.format(row.baseQuantity)} {row.baseUnitOfMeasure}</small></strong><span>{formatNumber.format(row.quantity)}</span><span>{formatMoney(row.grossAmount, currencyCode)}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
                     ))}
                   </div>
                 ) : null}
@@ -8830,10 +9648,15 @@ export function OnlineStoreWorkspace({
                 {openPriceIsMatrix ? (
                   <label className="rms-variant-picker"><span>Option</span><input onChange={(event) => setOpenPriceDraft((draft) => draft ? { ...draft, variantSearch: event.target.value } : draft)} placeholder="Search code, barcode, SKU, size, colour" type="search" value={openPriceDraft.variantSearch} /><select onChange={(event) => {
                     const selectedVariant = openPriceDraft.product.matrixVariants.find((variant) => variant.code === event.target.value) ?? null;
+                    const sellingUnit = resolveProductSellingUnit(
+                      openPriceDraft.product,
+                      selectedVariant?.code ?? null
+                    );
                     setOpenPriceDraft((draft) => draft ? {
                       ...draft,
                       productVariantCode: selectedVariant?.code ?? "",
-                      unitPrice: draft.product.mustEnterPriceAtPos ? draft.unitPrice : (selectedVariant?.unitPrice ?? draft.product.price).toFixed(2)
+                      sellingUnitOfMeasure: sellingUnit.unitOfMeasureCode,
+                      unitPrice: draft.product.mustEnterPriceAtPos ? draft.unitPrice : sellingUnit.unitPrice.toFixed(2)
                     } : draft);
                   }} value={openPriceDraft.productVariantCode}>
                     <option value="">Select option</option>
@@ -8843,6 +9666,38 @@ export function OnlineStoreWorkspace({
                       </option>
                     ))}
                   </select></label>
+                ) : null}
+                {openPriceSellingUnits.length > 0 ? (
+                  <label>
+                    <span>Selling unit</span>
+                    <select
+                      onChange={(event) => {
+                        const sellingUnit = resolveProductSellingUnit(
+                          openPriceDraft.product,
+                          openPriceDraft.productVariantCode || null,
+                          event.target.value
+                        );
+                        setOpenPriceDraft((draft) =>
+                          draft
+                            ? {
+                                ...draft,
+                                sellingUnitOfMeasure: sellingUnit.unitOfMeasureCode,
+                                unitPrice: draft.product.mustEnterPriceAtPos
+                                  ? draft.unitPrice
+                                  : sellingUnit.unitPrice.toFixed(2)
+                              }
+                            : draft
+                        );
+                      }}
+                      value={openPriceSelectedSellingUnit?.unitOfMeasureCode ?? ""}
+                    >
+                      {openPriceSellingUnits.map((sellingUnit) => (
+                        <option key={`${sellingUnit.productVariantId ?? "base"}:${sellingUnit.unitOfMeasureCode}`} value={sellingUnit.unitOfMeasureCode}>
+                          {sellingUnit.unitOfMeasureName} ({formatNumber.format(sellingUnit.conversionFactor)} {openPriceDraft.product.baseUnitOfMeasure}) · {formatMoney(sellingUnit.unitPrice, currencyCode)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 ) : null}
                 {!openPriceIsMatrix && openPriceDraft.product.trackSize ? (
                   <label><span>Size</span><select onChange={(event) => setOpenPriceDraft((draft) => draft ? { ...draft, variantSize: event.target.value } : draft)} value={openPriceDraft.variantSize}>
@@ -8914,7 +9769,7 @@ export function OnlineStoreWorkspace({
                 }} placeholder="0.00" step="0.01" type="number" value={openPriceDraft.unitPrice} /></label>
                 <label className="rms-field-wide"><span>Item note</span><textarea onChange={(event) => setOpenPriceDraft((draft) => draft ? { ...draft, lineNote: event.target.value } : draft)} placeholder="Alteration, pickup note, serial remark" rows={3} value={openPriceDraft.lineNote} /></label>
               </div>
-              {openPriceDraft.product.trackExpiry && saleMode !== "SALES_ORDER" ? (
+              {openPriceDraft.product.trackExpiry && saleMode === "SALE" ? (
                 <div className="rms-batch-picker">
                   <div className="rms-batch-picker-title">
                     <div><strong>Stock batch</strong><span>Automatic FEFO uses the earliest valid expiry. Choose a batch to use it first.</span></div>
@@ -9247,13 +10102,13 @@ export function OnlineStoreWorkspace({
                         {transferStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
                       </select>
                     </div>
-                    <button className="rms-button is-primary" onClick={() => setTransferRequestDialogOpen(true)} type="button">Create new</button>
+                    <button className="rms-button is-primary" onClick={openNewTransferRequest} type="button">Create new</button>
                   </div>
                   {transferRequestDialogOpen ? (
                     <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
                       <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog">
                         <div className="rms-panel-title">
-                          <div><span>Stock request</span><h2>New transfer</h2></div>
+                          <div><span>Stock request</span><h2>{activeTransferDraftBatchNo ? "Amend transfer draft" : "New transfer"}</h2></div>
                           <button className="rms-button" onClick={() => setTransferRequestDialogOpen(false)} type="button">Close</button>
                         </div>
                         <div className="rms-workspace-tabs rms-dialog-tabs">
@@ -9264,7 +10119,6 @@ export function OnlineStoreWorkspace({
                         {activeTransferEntryTab === "header" ? (
                           <div className="rms-form-grid rms-transfer-header-grid">
                             <label><span>Source store</span><select onChange={(event) => setTransferSourceStoreId(event.target.value)} value={transferSourceStoreId}><option value="">Select source</option>{workspace.transferStores.map((store) => <option key={store.storeId} value={store.storeId}>{store.storeName}</option>)}</select></label>
-                            <label><span>Source location</span><select onChange={(event) => setTransferSourceLocationId(event.target.value)} value={selectedTransferSourceLocation?.locationId ?? transferSourceLocationId}>{(selectedTransferSourceStore?.sourceLocations ?? []).map((location) => <option key={location.locationId} value={location.locationId}>{location.locationName}</option>)}</select></label>
                             <label><span>Destination</span><select onChange={(event) => setTransferDestinationLocationId(event.target.value)} value={selectedTransferDestinationLocation?.locationId ?? transferDestinationLocationId}>{workspace.inventoryLocations.map((location) => <option key={location.locationId} value={location.locationId}>{location.locationName}</option>)}</select></label>
                             <label><span>Required date</span><input onChange={(event) => setTransferRequiredDate(event.target.value)} type="date" value={transferRequiredDate} /></label>
                             <label><span>Reference</span><input onChange={(event) => setTransferReference(event.target.value)} value={transferReference} /></label>
@@ -9289,7 +10143,21 @@ export function OnlineStoreWorkspace({
                               {transferRequestLines.map((line) => (
                                 <div className="rms-table-row" key={line.id}>
                                   <div><strong>{line.productName}</strong><small>{line.productCode}</small></div>
-                                  <strong>{formatNumber.format(line.quantity)} {line.unitOfMeasure}{line.unitOfMeasure !== line.baseUnitOfMeasure ? ` = ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}` : ""}</strong>
+                                  <strong>
+                                    <input
+                                      aria-label={`Requested quantity for ${line.productName}`}
+                                      min="0.001"
+                                      onChange={(event) => {
+                                        const quantity = Number(event.target.value);
+                                        const product = workspace.inventoryProducts.find((item) => item.productId === line.productId);
+                                        const conversionFactor = product?.uomConversions.find((unit) => unit.uomCode === line.unitOfMeasure)?.conversionFactor ?? 1;
+                                        setTransferRequestLines((lines) => lines.map((candidate) => candidate.id === line.id ? { ...candidate, quantity, baseQuantity: Number((quantity * conversionFactor).toFixed(3)) } : candidate));
+                                      }}
+                                      step="0.001"
+                                      type="number"
+                                      value={line.quantity}
+                                    /> {line.unitOfMeasure}{line.unitOfMeasure !== line.baseUnitOfMeasure ? ` = ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}` : ""}
+                                  </strong>
                                   <button
                                     aria-label={`Remove ${line.productName}`}
                                     className="rms-icon-button is-danger"
@@ -9307,7 +10175,7 @@ export function OnlineStoreWorkspace({
                         ) : null}
                         <div className="rms-dialog-actions">
                           <button className="rms-button" onClick={() => setTransferRequestDialogOpen(false)} type="button">Cancel</button>
-                          <button className="rms-button is-primary" disabled={isPostingInventory || !transferRequestLines.length} onClick={() => void postTransferRequest()} type="button">{isPostingInventory ? "Saving..." : "Save request"}</button>
+                          <button className="rms-button is-primary" disabled={isPostingInventory || !transferRequestLines.length} onClick={() => void postTransferRequest()} type="button">{isPostingInventory ? "Saving..." : "Save draft"}</button>
                         </div>
                       </section>
                     </div>
@@ -9315,10 +10183,15 @@ export function OnlineStoreWorkspace({
                   <div className="rms-table rms-stock-request-table">
                     <div className="rms-table-head"><span>Transfer</span><span>Source</span><span>Destination</span><span>Status</span><span>Requested</span><span>Outstanding</span><span>View</span><span>{transferProcessHeader}</span><span /><span /></div>
                     {transferDocumentGroups.map((transfer) => {
+                      const canEditDraft =
+                        transfer.statusLabel === "DRAFT" &&
+                        transfer.lines.every((line) => line.role === "DESTINATION");
                       const canIssueTransfer =
+                        transfer.statusLabel !== "DRAFT" &&
                         transfer.lines.some((line) => line.role === "SOURCE") &&
                         transfer.outstandingIssueQuantity > 0;
                       const canReceiveTransfer =
+                        transfer.statusLabel !== "DRAFT" &&
                         transfer.lines.some((line) => line.role === "DESTINATION") &&
                         transfer.outstandingReceiptQuantity > 0;
                       const canProcessTransfer = canIssueTransfer || canReceiveTransfer;
@@ -9348,17 +10221,25 @@ export function OnlineStoreWorkspace({
                           <StatusPill tone={statusTone}>{roleStatusLabel}</StatusPill>
                           <strong>{formatNumber.format(transfer.requestedQuantity)}</strong>
                           <span>{formatNumber.format(roleOutstandingQuantity)}</span>
-                          <ActionIconButton label={`Open ${transfer.documentNo}`} onClick={() => setSelectedTransferDocumentKey(transfer.key)}>
-                            <ViewIcon />
-                          </ActionIconButton>
-                          <ActionIconButton
-                            disabled={isPostingInventory || !canProcessTransfer}
-                            label={`${processLabel} ${transfer.documentNo}`}
-                            onClick={() => setSelectedTransferDocumentKey(transfer.key)}
-                            tone="receive"
-                          >
-                            <ReceiveIcon />
-                          </ActionIconButton>
+                          {canEditDraft ? (
+                            <button className="rms-row-button" disabled={isPostingInventory} onClick={() => openTransferRequestDraft(transfer)} type="button">Edit</button>
+                          ) : (
+                            <ActionIconButton label={`Open ${transfer.documentNo}`} onClick={() => setSelectedTransferDocumentKey(transfer.key)}>
+                              <ViewIcon />
+                            </ActionIconButton>
+                          )}
+                          {canEditDraft ? (
+                            <button className="rms-row-button" disabled={isPostingInventory} onClick={() => void sendTransferRequestDraft(transfer.documentNo)} type="button">Send</button>
+                          ) : (
+                            <ActionIconButton
+                              disabled={isPostingInventory || !canProcessTransfer}
+                              label={`${processLabel} ${transfer.documentNo}`}
+                              onClick={() => setSelectedTransferDocumentKey(transfer.key)}
+                              tone="receive"
+                            >
+                              <ReceiveIcon />
+                            </ActionIconButton>
+                          )}
                           <button
                             className="rms-row-button"
                             disabled={isPostingInventory || !canCaptureFeedback}
@@ -9408,7 +10289,7 @@ export function OnlineStoreWorkspace({
                           <label><span>Product</span><select onChange={(event) => setInventoryProductId(event.target.value)} value={inventoryProductId}><option value="">Select item</option>{workspace.inventoryProducts.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {product.productCode}</option>)}</select></label>
                           <label><span>System qty</span><input readOnly value={selectedInventoryRow?.quantityOnHand.toFixed(3) ?? selectedInventoryProduct?.quantityOnHand.toFixed(3) ?? "0.000"} /></label>
                           <label><span>Counted qty</span><input min="0" onChange={(event) => setCountedQuantity(event.target.value)} readOnly={selectedInventoryProduct?.trackExpiry} step="0.001" type="number" value={selectedInventoryProduct?.trackExpiry ? selectedCountBatches.reduce((sum, batch) => sum + Number(countedBatchQuantities[batch.batchId] ?? batch.quantityOnHand), 0).toFixed(3) : countedQuantity} /></label>
-                          <button className="rms-button is-primary" disabled={isPostingInventory} onClick={() => void postStockCount()} type="button">{isPostingInventory ? "Saving..." : "Save line"}</button>
+                          <button className="rms-button is-primary" disabled={isPostingInventory || !inventoryProductId} onClick={() => void postStockCount()} type="button">Add item</button>
                           <button className="rms-button" onClick={exportCountSheet} type="button">Export sheet</button>
                           <label className="rms-row-button rms-file-button">
                             Upload CSV
@@ -9438,26 +10319,29 @@ export function OnlineStoreWorkspace({
                             {!selectedCountBatches.length ? <EmptyState title="No batch stock" detail="Receive a valid batch before counting positive stock." /> : null}
                           </div>
                         ) : null}
-                        <div className="rms-table rms-count-sheet-table">
-                          <div className="rms-table-head"><span>Item</span><span>Location</span><span>System qty</span><span>Price</span></div>
-                          {countLocationItems.map((row) => (
-                            <div className="rms-table-row" key={`${row.productId}:${row.locationId}`}>
+                        <div className="rms-table rms-count-variance-table">
+                          <div className="rms-table-head"><span>Item</span><span>System</span><span>Counted</span><span>Remove</span></div>
+                          {stockCountUploadRows.map((row) => (
+                            <div className="rms-table-row" key={row.productCode}>
                               <div><strong>{row.productName}</strong><small>{row.productCode}</small></div>
-                              <span>{row.locationName}</span>
-                              <strong>{formatNumber.format(row.quantityOnHand)}</strong>
-                              <span>{formatMoney(row.price, currencyCode)}</span>
+                              <span>{formatNumber.format(row.systemQuantity)}</span>
+                              <input min="0" onChange={(event) => updateStockCountUploadRow(row.productCode, event.target.value)} step="0.001" type="number" value={row.countedQuantity ?? ""} />
+                              <button aria-label={`Remove ${row.productName}`} className="rms-icon-button is-danger" onClick={() => setStockCountUploadRows((rows) => rows.filter((candidate) => candidate.productCode !== row.productCode))} title={`Remove ${row.productName}`} type="button"><TrashIcon /></button>
                             </div>
                           ))}
-                          {!countLocationItems.length ? <EmptyState title="No count items" /> : null}
+                          {!stockCountUploadRows.length ? <EmptyState title="No count-sheet items" detail="Select an item, enter its count, and add it to this sheet." /> : null}
+                        </div>
+                        <div className="rms-inline-actions">
+                          <button className="rms-button" disabled={!stockCountUploadRows.length} onClick={() => setActiveCountEntryTab("variance")} type="button">Review variance</button>
+                          <button className="rms-button is-primary" disabled={isPostingInventory || !stockCountUploadRows.length} onClick={requestSaveCalculatedCountRows} type="button">{isPostingInventory ? "Saving..." : "Save count sheet"}</button>
                         </div>
                       </div>
                     ) : null}
                     {activeCountEntryTab === "variance" ? (
                       <div className="rms-count-variance-pane">
                         <div className="rms-inline-actions">
-                          <StatusPill>{`${stockCountUploadRows.length} uploaded row(s)`}</StatusPill>
-                          <button className="rms-button" disabled={!stockCountUploadRows.length} onClick={() => setStockCountUploadRows([])} type="button">Clear upload</button>
-                          <button className="rms-button is-primary" disabled={isPostingInventory || !stockCountUploadRows.length} onClick={requestSaveCalculatedCountRows} type="button">{isPostingInventory ? "Saving..." : "Save calculated rows"}</button>
+                          <StatusPill>{`${stockCountUploadRows.length} count row(s)`}</StatusPill>
+                          <button className="rms-button" disabled={!stockCountUploadRows.length} onClick={() => setStockCountUploadRows([])} type="button">Clear sheet</button>
                         </div>
                         <div className="rms-table rms-count-variance-table">
                           <div className="rms-table-head"><span>Item</span><span>System</span><span>Counted</span><span>Variance</span><span>Remove</span></div>
@@ -9486,26 +10370,27 @@ export function OnlineStoreWorkspace({
                           ))}
                           {!stockCountUploadRows.length ? <EmptyState title="No calculated rows" /> : null}
                         </div>
+                        <p className="rms-inline-message">Variance is calculated for review. Return to Count Sheet to edit or save the document.</p>
                       </div>
                     ) : null}
                   </section>
                   <div className="rms-table rms-count-history-table">
                     <div className="rms-table-head"><span>Session</span><span>Item</span><span>Status</span><span>Variance</span><span>Date</span><span>Action</span></div>
-                    {stockCountRows.map((session) => (
-                      <div className="rms-table-row" key={session.sessionId}>
-                        <strong>{session.sessionNo}<small>{session.locationName}</small></strong>
-                        <span>{session.productName}</span>
-                        <StatusPill tone={session.status === "COMMITTED" ? "good" : "warning"}>{session.status}</StatusPill>
-                        <b className={session.varianceQuantity === 0 ? "" : session.varianceQuantity < 0 ? "is-short-stock" : "is-over-stock"}>{formatNumber.format(session.varianceQuantity)}</b>
-                        <span>{new Date(session.submittedAt).toLocaleString()}</span>
-                        {session.status === "SUBMITTED" ? (
-                          <button className="rms-row-button is-add" disabled={isPostingInventory} onClick={() => requestStockCountCommit(session.sessionId, session.sessionNo)} type="button">Commit</button>
+                    {stockCountSheetGroups.map((sheet) => (
+                      <div className="rms-table-row" key={sheet.sheetNo}>
+                        <strong>{sheet.sheetNo}<small>{sheet.locationName}</small></strong>
+                        <span>{sheet.sessions.length} item(s)</span>
+                        <StatusPill tone={sheet.status === "COMMITTED" ? "good" : "warning"}>{sheet.status}</StatusPill>
+                        <b className={sheet.varianceQuantity === 0 ? "" : sheet.varianceQuantity < 0 ? "is-short-stock" : "is-over-stock"}>{formatNumber.format(sheet.varianceQuantity)}</b>
+                        <span>{new Date(sheet.submittedAt).toLocaleString()}</span>
+                        {sheet.status === "SUBMITTED" ? (
+                          <button className="rms-row-button is-add" disabled={isPostingInventory} onClick={() => requestStockCountCommit(sheet.sessions.map((session) => session.sessionId), sheet.sheetNo)} type="button">Commit</button>
                         ) : (
                           <StatusPill tone="good">Done</StatusPill>
                         )}
                       </div>
                     ))}
-                    {!stockCountRows.length ? <EmptyState title="No stock counts" detail="Committed online count sessions will appear here." /> : null}
+                    {!stockCountSheetGroups.length ? <EmptyState title="No stock counts" detail="Saved online count sheets will appear here." /> : null}
                   </div>
                 </div>
               ) : null}
@@ -9901,7 +10786,7 @@ export function OnlineStoreWorkspace({
                 <div className="rms-table rms-report-table">
                   <div className="rms-table-head"><span>Product</span><span>Qty</span><span>Gross</span><span>Tax</span><span>Net</span></div>
                   {reportProductRows.map((row) => (
-                    <div className="rms-table-row" key={row.productCode}><strong>{row.productName}<small>{row.productCode}</small></strong><span>{formatNumber.format(row.quantity)}</span><span>{formatMoney(row.grossAmount, currencyCode)}</span><span>{formatMoney(row.taxAmount, currencyCode)}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
+                    <div className="rms-table-row" key={`${row.productCode}:${row.sellingUnitOfMeasure}`}><strong>{row.productName}<small>{row.productCode} · {row.sellingUnitOfMeasure} · base {formatNumber.format(row.baseQuantity)} {row.baseUnitOfMeasure}</small></strong><span>{formatNumber.format(row.quantity)}</span><span>{formatMoney(row.grossAmount, currencyCode)}</span><span>{formatMoney(row.taxAmount, currencyCode)}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
                   ))}
                   {!reportProductRows.length ? <EmptyState title="No product rows" detail="No product movement matches the current search." /> : null}
                 </div>
@@ -9913,6 +10798,24 @@ export function OnlineStoreWorkspace({
                     <div className="rms-table-row" key={row.orderId}><strong>{row.orderNo}<small>{row.customerName}</small></strong><span>{row.status}</span><span>{formatMoney(row.totalAmount, currencyCode)}</span><span>{formatMoney(row.depositAmount, currencyCode)}</span><b>{formatMoney(row.balanceAmount, currencyCode)}</b></div>
                   ))}
                   {!reportSalesOrderRows.length ? <EmptyState title="No sales orders" detail="No sales orders match the current report filter." /> : null}
+                </div>
+              ) : null}
+              {activeReport === "layaways" ? (
+                <div className="rms-table rms-report-table">
+                  <div className="rms-table-head"><span>Layaway</span><span>Status</span><span>Outstanding</span><span>Ageing</span><span>Reservation</span></div>
+                  {reportLayawayRows.map((row) => (
+                    <div className="rms-table-row" key={row.orderId}><strong>{row.orderNo}<small>{row.customerName}</small></strong><span>{row.status}</span><b>{formatMoney(row.balanceAmount, currencyCode)}<small>Paid {formatMoney(row.paidAmount, currencyCode)}</small></b><span>{row.ageingBucket}<small>{row.ageDays} day(s)</small></span><span>{row.reservationStatus}<small>{formatNumber.format(row.reservedBaseQuantity)} base unit(s)</small></span></div>
+                  ))}
+                  {!reportLayawayRows.length ? <EmptyState title="No layaways" detail="No layaway orders match the current report filter." /> : null}
+                </div>
+              ) : null}
+              {activeReport === "layawayPayments" ? (
+                <div className="rms-table rms-report-table">
+                  <div className="rms-table-head"><span>Layaway</span><span>Purpose</span><span>Tender</span><span>Amount</span><span>Received by</span></div>
+                  {reportLayawayPaymentRows.map((row) => (
+                    <div className="rms-table-row" key={row.paymentId}><strong>{row.orderNo}<small>{row.customerName}</small></strong><span>{row.paymentPurpose}</span><span>{row.tenderName}<small>{row.reference ?? "No reference"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || new Date(row.receivedAt).toLocaleString()}</small></span></div>
+                  ))}
+                  {!reportLayawayPaymentRows.length ? <EmptyState title="No layaway payments" detail="No deposits, installments, or refunds match the current report filter." /> : null}
                 </div>
               ) : null}
               {activeReport === "tenders" ? (
@@ -9992,7 +10895,7 @@ export function OnlineStoreWorkspace({
       </section>
       <ConfirmationDialog
         confirmLabel={
-          pendingStockCountConfirmation?.action === "COMMIT" ? "Commit stock count" : "Save rows"
+          pendingStockCountConfirmation?.action === "COMMIT" ? "Commit stock count" : "Save count sheet"
         }
         description={
           pendingStockCountConfirmation?.action === "COMMIT" ? (
@@ -10004,8 +10907,8 @@ export function OnlineStoreWorkspace({
           ) : (
             <p>
               This will save{" "}
-              <strong>{pendingStockCountConfirmation?.rowCount ?? 0}</strong> calculated count
-              row(s) for supervisor commit.
+              <strong>{pendingStockCountConfirmation?.rowCount ?? 0}</strong> item(s) as one count
+              sheet for supervisor commit.
             </p>
           )
         }
@@ -10020,7 +10923,7 @@ export function OnlineStoreWorkspace({
         title={
           pendingStockCountConfirmation?.action === "COMMIT"
             ? "Commit stock count"
-            : "Save calculated rows"
+            : "Save count sheet"
         }
         tone={pendingStockCountConfirmation?.action === "COMMIT" ? "warning" : "default"}
       />

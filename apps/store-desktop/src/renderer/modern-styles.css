@@ -2382,6 +2382,56 @@ p {
   height: 72px;
 }
 
+.rms-selling-unit-editor-table {
+  grid-column: 1 / -1;
+  min-width: 0;
+  max-height: 250px;
+  overflow: auto;
+}
+
+.rms-selling-unit-editor-table .rms-table-head,
+.rms-selling-unit-editor-table .rms-table-row {
+  grid-template-columns:
+    minmax(110px, 0.75fr)
+    minmax(105px, 0.7fr)
+    minmax(105px, 0.7fr)
+    minmax(160px, 1.2fr)
+    92px
+    42px;
+  min-width: 700px;
+  align-items: center;
+}
+
+.rms-selling-unit-editor-table .rms-table-row {
+  min-height: 48px;
+  padding-block: 5px;
+}
+
+.rms-selling-unit-editor-table label {
+  min-width: 0;
+}
+
+.rms-selling-unit-editor-table input,
+.rms-selling-unit-editor-table select {
+  width: 100%;
+  min-width: 0;
+}
+
+.rms-selling-unit-editor-table .rms-check-field {
+  min-height: 34px;
+  justify-content: center;
+}
+
+.rms-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .rms-editor-tab-header {
   display: flex;
   flex-wrap: wrap;
@@ -2763,6 +2813,23 @@ p {
   justify-content: space-between;
 }
 
+.rms-layaway-expiry-field {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 0.8fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid #e4c15f;
+  border-radius: 7px;
+  background: #fff;
+  padding: 8px 10px;
+}
+
+.rms-layaway-expiry-field span {
+  color: #604d16;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .rms-payment-summary,
 .rms-payment-row {
   display: grid;
@@ -3058,7 +3125,56 @@ p {
 
 .rms-remote-inventory-table .rms-table-head,
 .rms-remote-inventory-table .rms-table-row {
-  grid-template-columns: minmax(220px, 1.25fr) minmax(170px, 0.95fr) minmax(160px, 0.85fr) 90px 120px 88px;
+  grid-template-columns:
+    48px
+    minmax(210px, 1.2fr)
+    minmax(150px, 0.8fr)
+    82px
+    104px
+    minmax(190px, 1fr);
+}
+
+.rms-remote-inventory-dialog .rms-dialog-toolbar {
+  grid-template-columns:
+    minmax(210px, 1.35fr)
+    repeat(3, minmax(145px, 1fr))
+    auto;
+  align-items: end;
+}
+
+.rms-toolbar-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rms-toolbar-field > span {
+  color: #657568;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.rms-toolbar-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.rms-toolbar-actions .rms-button {
+  white-space: nowrap;
+}
+
+.rms-remote-inventory-table input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  justify-self: center;
+}
+
+.rms-stock-request-line-table input[type="number"] {
+  width: 78px;
+  min-width: 0;
+  padding: 7px 8px;
 }
 
 .rms-count-variance-table .rms-table-head,
@@ -3911,10 +4027,38 @@ p {
   width: min(1320px, calc(100vw - 32px));
 }
 
+.rms-stock-request-header-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-content: start;
+  align-items: end;
+  align-self: start;
+  gap: 10px 12px;
+  margin-bottom: 0;
+}
+
 .rms-stock-request-details {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
+  overflow: hidden;
+}
+
+.rms-stock-request-line-form {
+  grid-template-columns:
+    minmax(260px, 1.5fr)
+    minmax(160px, 0.75fr)
+    minmax(130px, 0.6fr)
+    auto;
+  align-content: start;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 0;
+}
+
+.rms-stock-request-line-form > .rms-button {
+  min-height: 42px;
+  white-space: nowrap;
 }
 
 .rms-receipt-drawer {
@@ -4725,6 +4869,31 @@ label.rms-colour-custom-picker span {
   min-height: min(480px, calc(100vh - 32px));
 }
 
+.rms-layaway-action-dialog {
+  width: min(980px, calc(100vw - 32px));
+  min-height: min(520px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.rms-layaway-action-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rms-layaway-payment-list {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border-block: 1px solid #dce6dc;
+  padding-block: 12px;
+}
+
+.rms-layaway-payment-list .rms-payment-row {
+  grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(100px, 0.55fr) minmax(140px, 0.8fr) 44px;
+}
+
 .rms-item-dialog {
   width: min(1120px, calc(100vw - 32px));
   min-height: min(600px, calc(100vh - 32px));
@@ -5362,13 +5531,32 @@ label.rms-colour-custom-picker span {
 
   .rms-remote-inventory-table .rms-table-head,
   .rms-remote-inventory-table .rms-table-row {
-    grid-template-columns: minmax(180px, 1.2fr) minmax(140px, 1fr) 92px 92px 88px;
+    grid-template-columns: 42px minmax(180px, 1.2fr) minmax(140px, 1fr) 82px minmax(150px, 0.9fr);
   }
 
-  .rms-remote-inventory-table .rms-table-head span:nth-child(3),
-  .rms-remote-inventory-table .rms-table-row > div:nth-child(3),
-  .rms-remote-inventory-table .rms-table-head span:nth-child(6),
-  .rms-remote-inventory-table .rms-table-row > span:nth-child(6) {
+  .rms-remote-inventory-dialog .rms-dialog-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rms-remote-inventory-dialog .rms-toolbar-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .rms-stock-request-header-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rms-stock-request-line-form {
+    grid-template-columns:
+      minmax(220px, 1.4fr)
+      minmax(150px, 0.8fr)
+      minmax(120px, 0.6fr)
+      auto;
+  }
+
+  .rms-remote-inventory-table .rms-table-head span:nth-child(5),
+  .rms-remote-inventory-table .rms-table-row > span:nth-child(5) {
     display: none;
   }
 }

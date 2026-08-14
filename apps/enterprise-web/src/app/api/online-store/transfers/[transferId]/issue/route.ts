@@ -11,6 +11,7 @@ export async function POST(
     const response = await processOnlineStoreTransfer({
       transferId,
       action: "ISSUE",
+      sourceInventoryLocationId: body?.sourceInventoryLocationId ?? null,
       quantity: Number(body?.quantity ?? 0),
       serialNumbers: Array.isArray(body?.serialNumbers) ? body.serialNumbers : null,
       transporterName: body?.transporterName ?? null,

@@ -13,6 +13,7 @@ export async function POST(
     const body = (await request.json()) as {
       tenderMethodCode?: string;
       receiptEmail?: string;
+      amount?: number;
     };
     return NextResponse.json(
       await runEnterpriseOperation("TRANSACTIONAL_WRITE", () =>
@@ -21,6 +22,7 @@ export async function POST(
           orderNo,
           tenderMethodCode: body.tenderMethodCode,
           receiptEmail: body.receiptEmail,
+          amount: body.amount,
           idempotencyKey: request.headers.get("idempotency-key")
         })
       ),

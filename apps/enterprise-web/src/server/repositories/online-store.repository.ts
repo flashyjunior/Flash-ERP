@@ -5,10 +5,15 @@ import bcrypt from "bcryptjs";
 import {
   CustomerAccountEntryType,
   allocateInventoryBatchesFefo,
+  assertLayawayFulfilmentEligible,
+  calculateLayawayAvailableBaseQuantity,
+  calculateLayawayCancellationAmounts,
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
+  evaluateLayawayOpening,
   inventoryBatchDaysUntilExpiry,
   normalizeLayawaySettings,
+  resolvePosSellingUom,
   InterStoreTransferOrigin,
   InterStoreTransferStatus,
   InventoryMovementType,
@@ -51,7 +56,9 @@ import { defaultAccountPaymentReceiptTemplateHtml } from "@/lib/templates/therma
 import { getEnterpriseSession, requireEnterpriseSession } from "@/server/auth/enterprise-session";
 import { resolveStoreReceiptTemplateSelection } from "@/server/repositories/receipt-template-support";
 import {
+  ensureAlternateUomSellingSchemaCompatibility,
   ensureInventoryLocationSalesOrderSchemaCompatibility,
+  ensureLayawayLifecycleSchemaCompatibility,
   ensureOperatingExpenseSchemaCompatibility,
   ensureInventoryExpirySchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility
@@ -1638,7 +1645,9 @@ async function getOnlineStoreAssignment(
 ) {
   await Promise.all([
     ensureProductVariantSalesOrderDepositSchemaCompatibility(),
-    ensureInventoryExpirySchemaCompatibility()
+    ensureLayawayLifecycleSchemaCompatibility(),
+    ensureInventoryExpirySchemaCompatibility(),
+    ensureAlternateUomSellingSchemaCompatibility()
   ]);
 
   const session =
@@ -1752,7 +1761,16 @@ async function getOnlineStoreAssignment(
   };
 }
 
-export type OnlineStoreReportId = "sales" | "products" | "orders" | "tenders" | "inventory" | "banking" | "shifts";
+export type OnlineStoreReportId =
+  | "sales"
+  | "products"
+  | "orders"
+  | "layaways"
+  | "layawayPayments"
+  | "tenders"
+  | "inventory"
+  | "banking"
+  | "shifts";
 
 export type OnlineStoreReportCriteria = {
   reportId?: OnlineStoreReportId | null;
@@ -1825,6 +1843,20 @@ const defaultOnlineReportDefinitions: OnlineStoreReportDefinition[] = [
     group: "Sales",
     description: "Sales order deposits, outstanding balances, and fulfilment status.",
     parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "customerQuery", "productQuery", "limit"]
+  },
+  {
+    reportId: "layaways",
+    label: "Layaway ageing",
+    group: "Sales",
+    description: "Outstanding balances, reservations, ageing, cancellations, and refunds.",
+    parameterIds: ["dateFrom", "dateTo", "scope", "customerQuery", "limit"]
+  },
+  {
+    reportId: "layawayPayments",
+    label: "Layaway payments",
+    group: "Sales",
+    description: "Deposits, installments, and refunds by tender, cashier, terminal, and shift.",
+    parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "shiftId", "customerQuery", "tenderMethodCode", "limit"]
   },
   {
     reportId: "tenders",
@@ -1924,6 +1956,12 @@ export type OnlineStoreWorkspaceData = {
   };
   capabilities: {
     canAccessEcommerceConsole: boolean;
+    canCreateLayaway: boolean;
+    canReceiveLayawayPayment: boolean;
+    canCancelLayaway: boolean;
+    canReleaseLayawayReservation: boolean;
+    canOverrideLayawayPolicy: boolean;
+    canFulfilLayaway: boolean;
     hasFuelOperationsVisibility: boolean;
     canManageFuelTanks: boolean;
     canCaptureFuelDips: boolean;
@@ -2012,6 +2050,18 @@ export type OnlineStoreWorkspaceData = {
     productName: string;
     productType: string;
     unitOfMeasure: string;
+    baseUnitOfMeasure: string;
+    sellingUnits: Array<{
+      productVariantId: string | null;
+      unitOfMeasureCode: string;
+      unitOfMeasureName: string;
+      conversionFactor: number;
+      unitPrice: number;
+      barcode: string | null;
+      isDefault: boolean;
+      allowFractionalSale: boolean;
+      decimalPrecision: number;
+    }>;
     price: number;
     department: string | null;
     category: string | null;
@@ -2053,6 +2103,17 @@ export type OnlineStoreWorkspaceData = {
     productType: string;
     unitOfMeasure: string;
     baseUnitOfMeasure: string;
+    sellingUnits: Array<{
+      productVariantId: string | null;
+      unitOfMeasureCode: string;
+      unitOfMeasureName: string;
+      conversionFactor: number;
+      unitPrice: number;
+      barcode: string | null;
+      isDefault: boolean;
+      allowFractionalSale: boolean;
+      decimalPrecision: number;
+    }>;
     uomConversions: Array<{
       uomCode: string;
       uomName: string;
@@ -2312,6 +2373,10 @@ export type OnlineStoreWorkspaceData = {
     trackExpiry: boolean;
     status: string;
     requestedQuantity: number;
+    requestedUnitOfMeasure: string;
+    requestedUnitQuantity: number;
+    uomConversionFactor: number;
+    baseUnitOfMeasure: string;
     issuedQuantity: number;
     receivedQuantity: number;
     outstandingIssueQuantity: number;
@@ -2420,6 +2485,10 @@ export type OnlineStoreWorkspaceData = {
       variantColor: string | null;
       lineNote: string | null;
       quantity: number;
+      sellingUnitOfMeasure: string | null;
+      baseUnitOfMeasure: string | null;
+      uomConversionFactor: number;
+      baseQuantity: number;
       unitPrice: number;
       discountAmount: number;
       taxAmount: number;
@@ -2439,15 +2508,26 @@ export type OnlineStoreWorkspaceData = {
     originStoreCode: string;
     originStoreName: string;
     isFulfilmentOrder: boolean;
+    orderType: "SALES_ORDER" | "LAYAWAY";
     status: string;
     totalAmount: number;
     depositAmount: number;
+    paidAmount: number;
     balanceAmount: number;
     depositTenderMethodCode: string | null;
     depositTenderMethodName: string | null;
     depositPaymentMethod: string | null;
     depositReference: string | null;
     depositPaidAt: string | null;
+    minimumDepositAmount: number;
+    layawayPolicy: ReturnType<typeof normalizeLayawaySettings> | null;
+    reservationStatus: string;
+    reservationCreatedAt: string | null;
+    reservationReleasedAt: string | null;
+    layawayExpiresAt: string | null;
+    expiredAt: string | null;
+    cancellationFeeAmount: number;
+    refundedAmount: number;
     itemCount: number;
     lineCount: number;
     operatorName: string | null;
@@ -2464,6 +2544,10 @@ export type OnlineStoreWorkspaceData = {
       variantColor: string | null;
       lineNote: string | null;
       quantity: number;
+      sellingUnitOfMeasure: string | null;
+      baseUnitOfMeasure: string | null;
+      uomConversionFactor: number;
+      baseQuantity: number;
       unitPrice: number;
       discountAmount: number;
       taxAmount: number;
@@ -2511,6 +2595,10 @@ export type OnlineStoreWorkspaceData = {
       lineIntent: string;
       sourceLineId: string | null;
       quantity: number;
+      sellingUnitOfMeasure: string | null;
+      baseUnitOfMeasure: string | null;
+      uomConversionFactor: number;
+      baseQuantity: number;
       returnableQuantity: number;
       unitPrice: number;
       taxAmount: number;
@@ -2555,7 +2643,10 @@ export type OnlineStoreWorkspaceData = {
       productName: string;
       variantSize: string | null;
       variantColor: string | null;
+      sellingUnitOfMeasure: string;
+      baseUnitOfMeasure: string;
       quantity: number;
+      baseQuantity: number;
       grossAmount: number;
       discountAmount: number;
       taxAmount: number;
@@ -2580,6 +2671,36 @@ export type OnlineStoreWorkspaceData = {
       createdAt: string;
       fulfilledAt: string | null;
       cancelledAt: string | null;
+    }>;
+    layawayRows: Array<{
+      orderId: string;
+      orderNo: string;
+      status: string;
+      customerName: string;
+      totalAmount: number;
+      paidAmount: number;
+      balanceAmount: number;
+      reservationStatus: string;
+      reservedBaseQuantity: number;
+      cancellationFeeAmount: number;
+      refundedAmount: number;
+      ageDays: number;
+      ageingBucket: string;
+      createdAt: string;
+      expiresAt: string | null;
+    }>;
+    layawayPaymentRows: Array<{
+      paymentId: string;
+      orderNo: string;
+      customerName: string;
+      paymentPurpose: string;
+      tenderName: string;
+      amount: number;
+      reference: string | null;
+      shiftNo: string | null;
+      terminalCode: string | null;
+      cashierCode: string | null;
+      receivedAt: string;
     }>;
     shiftRows: Array<{
       shiftId: string;
@@ -2663,6 +2784,8 @@ const emptyOnlineStoreCollections = {
     tenderRows: [],
     productRows: [],
     salesOrderRows: [],
+    layawayRows: [],
+    layawayPaymentRows: [],
     shiftRows: [],
     inventoryRows: [],
     bankingRows: []
@@ -2688,10 +2811,16 @@ const emptyOnlineStoreCollections = {
 };
 
 function mapOnlineStoreCapabilities(capabilities: ReturnType<typeof deriveRetailUserCapabilities>) {
+  const permissionCodes = new Set(capabilities.normalizedPermissionCodes);
+
   return {
-    canAccessEcommerceConsole: capabilities.normalizedPermissionCodes.includes(
-      "ecommerce.console.access"
-    ),
+    canAccessEcommerceConsole: permissionCodes.has("ecommerce.console.access"),
+    canCreateLayaway: permissionCodes.has("pos.layaway.create"),
+    canReceiveLayawayPayment: permissionCodes.has("pos.layaway.payment.receive"),
+    canCancelLayaway: permissionCodes.has("pos.layaway.cancel-refund"),
+    canReleaseLayawayReservation: permissionCodes.has("pos.layaway.reservation.release"),
+    canOverrideLayawayPolicy: permissionCodes.has("pos.layaway.policy.override"),
+    canFulfilLayaway: permissionCodes.has("pos.layaway.fulfil"),
     hasFuelOperationsVisibility: capabilities.hasFuelOperationsVisibility,
     canManageFuelTanks: capabilities.canManageFuelTanks,
     canCaptureFuelDips: capabilities.canCaptureFuelDips,
@@ -3234,7 +3363,13 @@ async function prepareOnlinePayments(
     allowChange: boolean;
     refund?: boolean;
     settlementLabel: string;
-    paymentPurpose?: "TRANSACTION_SETTLEMENT" | "SALES_ORDER_DEPOSIT" | "SALES_ORDER_BALANCE";
+    paymentPurpose?:
+      | "TRANSACTION_SETTLEMENT"
+      | "SALES_ORDER_DEPOSIT"
+      | "SALES_ORDER_BALANCE"
+      | "LAYAWAY_DEPOSIT"
+      | "LAYAWAY_INSTALLMENT"
+      | "LAYAWAY_REFUND";
     receiptContext?: {
       shiftId: string;
       shiftNo: string;
@@ -3428,15 +3563,26 @@ export async function getOnlineStorePendingSalesOrders(): Promise<
       customerId: true,
       customerNoSnapshot: true,
       customerNameSnapshot: true,
+      orderType: true,
       status: true,
       totalAmount: true,
       depositAmount: true,
+      paidAmount: true,
       balanceAmount: true,
       depositTenderMethodCodeSnapshot: true,
       depositTenderMethodNameSnapshot: true,
       depositPaymentMethodSnapshot: true,
       depositReference: true,
       depositPaidAt: true,
+      minimumDepositAmount: true,
+      layawayPolicySnapshotJson: true,
+      reservationStatus: true,
+      reservationCreatedAt: true,
+      reservationReleasedAt: true,
+      layawayExpiresAt: true,
+      expiredAt: true,
+      cancellationFeeAmount: true,
+      refundedAmount: true,
       operatorName: true,
       note: true,
       fulfilledTransactionNo: true,
@@ -3459,6 +3605,10 @@ export async function getOnlineStorePendingSalesOrders(): Promise<
           variantSizeSnapshot: true,
           variantColorSnapshot: true,
           quantity: true,
+          sellingUnitOfMeasure: true,
+          baseUnitOfMeasure: true,
+          uomConversionFactor: true,
+          baseQuantity: true,
           unitPrice: true,
           discountAmount: true,
           appliedPromotionNameSnapshot: true,
@@ -3483,6 +3633,10 @@ export async function getOnlineStorePendingSalesOrders(): Promise<
       variantColor: line.variantColorSnapshot,
       lineNote: line.lineNote,
       quantity: Number(line.quantity),
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      uomConversionFactor: Number(line.uomConversionFactor ?? 1),
+      baseQuantity: Number(line.baseQuantity ?? line.quantity),
       unitPrice: Number(line.unitPrice),
       discountAmount: Number(line.discountAmount),
       taxAmount: Number(line.taxAmount),
@@ -3506,15 +3660,29 @@ export async function getOnlineStorePendingSalesOrders(): Promise<
       originStoreCode: order.store.code,
       originStoreName: order.store.name,
       isFulfilmentOrder: isSalesOrderFulfilmentStore && order.store.id !== currentStoreId,
+      orderType: order.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
       status: order.status,
       totalAmount: Number(order.totalAmount),
       depositAmount: Number(order.depositAmount),
+      paidAmount: Number(order.paidAmount),
       balanceAmount: Number(order.balanceAmount),
       depositTenderMethodCode: order.depositTenderMethodCodeSnapshot,
       depositTenderMethodName: order.depositTenderMethodNameSnapshot,
       depositPaymentMethod: order.depositPaymentMethodSnapshot,
       depositReference: order.depositReference,
       depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+      minimumDepositAmount: Number(order.minimumDepositAmount),
+      layawayPolicy:
+        order.orderType === "LAYAWAY"
+          ? normalizeLayawaySettings(order.layawayPolicySnapshotJson)
+          : null,
+      reservationStatus: order.reservationStatus,
+      reservationCreatedAt: order.reservationCreatedAt?.toISOString() ?? null,
+      reservationReleasedAt: order.reservationReleasedAt?.toISOString() ?? null,
+      layawayExpiresAt: order.layawayExpiresAt?.toISOString() ?? null,
+      expiredAt: order.expiredAt?.toISOString() ?? null,
+      cancellationFeeAmount: Number(order.cancellationFeeAmount),
+      refundedAmount: Number(order.refundedAmount),
       itemCount: toQuantity(lines.reduce((sum, line) => sum + line.quantity, 0)),
       lineCount: lines.length,
       operatorName: order.operatorName,
@@ -3528,11 +3696,160 @@ export async function getOnlineStorePendingSalesOrders(): Promise<
   });
 }
 
+async function getOnlineStoreSalesOrderSummaryById(input: {
+  retailOrgId: string;
+  storeId: string;
+  orderId: string;
+}): Promise<OnlineStoreWorkspaceData["salesOrders"][number]> {
+  const order = await prisma.salesOrder.findFirst({
+    where: {
+      id: input.orderId,
+      retailOrgId: input.retailOrgId,
+      storeId: input.storeId,
+    },
+    select: {
+      id: true,
+      orderNo: true,
+      sourceTransactionId: true,
+      sourceTransactionNo: true,
+      customerId: true,
+      customerNoSnapshot: true,
+      customerNameSnapshot: true,
+      orderType: true,
+      status: true,
+      totalAmount: true,
+      depositAmount: true,
+      paidAmount: true,
+      balanceAmount: true,
+      depositTenderMethodCodeSnapshot: true,
+      depositTenderMethodNameSnapshot: true,
+      depositPaymentMethodSnapshot: true,
+      depositReference: true,
+      depositPaidAt: true,
+      minimumDepositAmount: true,
+      layawayPolicySnapshotJson: true,
+      reservationStatus: true,
+      reservationCreatedAt: true,
+      reservationReleasedAt: true,
+      layawayExpiresAt: true,
+      expiredAt: true,
+      cancellationFeeAmount: true,
+      refundedAmount: true,
+      operatorName: true,
+      note: true,
+      fulfilledTransactionNo: true,
+      createdAt: true,
+      fulfilledAt: true,
+      cancelledAt: true,
+      store: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+        },
+      },
+    },
+  });
+
+  if (!order) {
+    throw new Error("Flash ERP could not reload that online-store sales order.");
+  }
+
+  const sourceLines = await prisma.posTransactionLine.findMany({
+    where: { posTransactionId: order.sourceTransactionId },
+    orderBy: { createdAt: "asc" },
+    select: {
+      productId: true,
+      productCodeSnapshot: true,
+      productNameSnapshot: true,
+      variantSizeSnapshot: true,
+      variantColorSnapshot: true,
+      lineNote: true,
+      quantity: true,
+      sellingUnitOfMeasure: true,
+      baseUnitOfMeasure: true,
+      uomConversionFactor: true,
+      baseQuantity: true,
+      unitPrice: true,
+      discountAmount: true,
+      taxAmount: true,
+      lineTotal: true,
+      appliedPromotionNameSnapshot: true,
+    },
+  });
+  const lines = sourceLines.map((line) => ({
+    productId: line.productId,
+    productCode: line.productCodeSnapshot,
+    productName: line.productNameSnapshot,
+    variantSize: line.variantSizeSnapshot,
+    variantColor: line.variantColorSnapshot,
+    lineNote: line.lineNote,
+    quantity: Number(line.quantity),
+    sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+    baseUnitOfMeasure: line.baseUnitOfMeasure,
+    uomConversionFactor: Number(line.uomConversionFactor ?? 1),
+    baseQuantity: Number(line.baseQuantity ?? line.quantity),
+    unitPrice: Number(line.unitPrice),
+    discountAmount: Number(line.discountAmount),
+    taxAmount: Number(line.taxAmount),
+    lineTotal: Number(line.lineTotal),
+    appliedPromotionName: line.appliedPromotionNameSnapshot,
+  }));
+
+  return {
+    orderId: order.id,
+    orderNo: order.orderNo,
+    sourceTransactionId: order.sourceTransactionId,
+    sourceTransactionNo: order.sourceTransactionNo,
+    customerId: order.customerId,
+    customerNo: order.customerNoSnapshot,
+    customerName: order.customerNameSnapshot ?? "Customer",
+    originStoreId: order.store.id,
+    originStoreCode: order.store.code,
+    originStoreName: order.store.name,
+    isFulfilmentOrder: false,
+    orderType: order.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
+    status: order.status,
+    totalAmount: Number(order.totalAmount),
+    depositAmount: Number(order.depositAmount),
+    paidAmount: Number(order.paidAmount),
+    balanceAmount: Number(order.balanceAmount),
+    depositTenderMethodCode: order.depositTenderMethodCodeSnapshot,
+    depositTenderMethodName: order.depositTenderMethodNameSnapshot,
+    depositPaymentMethod: order.depositPaymentMethodSnapshot,
+    depositReference: order.depositReference,
+    depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+    minimumDepositAmount: Number(order.minimumDepositAmount),
+    layawayPolicy:
+      order.orderType === "LAYAWAY"
+        ? normalizeLayawaySettings(order.layawayPolicySnapshotJson)
+        : null,
+    reservationStatus: order.reservationStatus,
+    reservationCreatedAt: order.reservationCreatedAt?.toISOString() ?? null,
+    reservationReleasedAt: order.reservationReleasedAt?.toISOString() ?? null,
+    layawayExpiresAt: order.layawayExpiresAt?.toISOString() ?? null,
+    expiredAt: order.expiredAt?.toISOString() ?? null,
+    cancellationFeeAmount: Number(order.cancellationFeeAmount),
+    refundedAmount: Number(order.refundedAmount),
+    itemCount: toQuantity(lines.reduce((sum, line) => sum + line.quantity, 0)),
+    lineCount: lines.length,
+    operatorName: order.operatorName,
+    note: order.note,
+    fulfilledTransactionNo: order.fulfilledTransactionNo,
+    createdAt: order.createdAt.toISOString(),
+    fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
+    cancelledAt: order.cancelledAt?.toISOString() ?? null,
+    lines,
+  };
+}
+
 export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceData> {
   await Promise.all([
     ensureInventoryLocationSalesOrderSchemaCompatibility(),
     ensureOperatingExpenseSchemaCompatibility(),
     ensureInventoryExpirySchemaCompatibility(),
+    ensureAlternateUomSellingSchemaCompatibility(),
+    ensureLayawayLifecycleSchemaCompatibility(),
     ensureProductVariantSalesOrderDepositSchemaCompatibility()
   ]);
 
@@ -3723,6 +4040,28 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         },
         baseUnitPrice: true,
         baseCostPrice: true,
+        storeProductSellingUnits: {
+          where: {
+            storeId: assignment.store.id,
+            status: RecordStatus.ACTIVE
+          },
+          orderBy: [{ isDefault: "desc" }, { unitOfMeasureCodeSnapshot: "asc" }],
+          select: {
+            productVariantId: true,
+            unitOfMeasureCodeSnapshot: true,
+            unitOfMeasureNameSnapshot: true,
+            conversionFactor: true,
+            unitPrice: true,
+            barcode: true,
+            isDefault: true,
+            unitOfMeasure: {
+              select: {
+                allowFractionalSale: true,
+                decimalPrecision: true
+              }
+            }
+          }
+        },
         storeProductPrices: {
           where: {
             storeId: assignment.store.id,
@@ -3940,6 +4279,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           select: {
             id: true,
             productId: true,
+            productVariantId: true,
             lineIntent: true,
             sourceLineId: true,
             productCodeSnapshot: true,
@@ -3947,6 +4287,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             variantSizeSnapshot: true,
             variantColorSnapshot: true,
             quantity: true,
+            sellingUnitOfMeasure: true,
+            baseUnitOfMeasure: true,
+            uomConversionFactor: true,
+            baseQuantity: true,
             unitPrice: true,
             discountAmount: true,
             appliedPromotionNameSnapshot: true,
@@ -3990,6 +4334,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             variantSizeSnapshot: true,
             variantColorSnapshot: true,
             quantity: true,
+            sellingUnitOfMeasure: true,
+            baseUnitOfMeasure: true,
+            uomConversionFactor: true,
+            baseQuantity: true,
             unitPrice: true,
             discountAmount: true,
             appliedPromotionNameSnapshot: true,
@@ -4037,21 +4385,38 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         customerId: true,
         customerNoSnapshot: true,
         customerNameSnapshot: true,
+        orderType: true,
         status: true,
         totalAmount: true,
         depositAmount: true,
+        paidAmount: true,
         balanceAmount: true,
         depositTenderMethodCodeSnapshot: true,
         depositTenderMethodNameSnapshot: true,
         depositPaymentMethodSnapshot: true,
         depositReference: true,
         depositPaidAt: true,
+        minimumDepositAmount: true,
+        layawayPolicySnapshotJson: true,
+        reservationStatus: true,
+        reservationCreatedAt: true,
+        reservationReleasedAt: true,
+        layawayExpiresAt: true,
+        expiredAt: true,
+        cancellationFeeAmount: true,
+        refundedAmount: true,
         operatorName: true,
         note: true,
         fulfilledTransactionNo: true,
         createdAt: true,
         fulfilledAt: true,
         cancelledAt: true,
+        inventoryReservations: {
+          select: {
+            baseQuantity: true,
+            status: true
+          }
+        },
         store: {
           select: {
             id: true,
@@ -4374,7 +4739,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         retailOrgId: assignment.session.retailOrgId,
         OR: [
           { destinationStoreId: assignment.store.id },
-          { sourceStoreId: assignment.store.id }
+          {
+            sourceStoreId: assignment.store.id,
+            status: { not: InterStoreTransferStatus.DRAFT }
+          }
         ]
       },
       orderBy: [{ requestedAt: "desc" }, { createdAt: "desc" }],
@@ -4389,6 +4757,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         status: true,
         externalReference: true,
         requestedQuantity: true,
+        requestedUnitOfMeasure: true,
+        requestedUnitQuantity: true,
+        uomConversionFactor: true,
+        baseUnitOfMeasure: true,
         issuedQuantity: true,
         receivedQuantity: true,
         unitCost: true,
@@ -4627,12 +4999,42 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             variantSizeSnapshot: true,
             variantColorSnapshot: true,
             quantity: true,
+            sellingUnitOfMeasure: true,
+            baseUnitOfMeasure: true,
+            uomConversionFactor: true,
+            baseQuantity: true,
             unitPrice: true,
             discountAmount: true,
             appliedPromotionNameSnapshot: true,
             taxAmount: true,
             lineTotal: true,
             lineNote: true
+          }
+        })
+      : [];
+  const salesOrderPaymentRows =
+    salesOrderSourceTransactionIds.length > 0
+      ? await prisma.posPayment.findMany({
+          where: {
+            posTransactionId: { in: salesOrderSourceTransactionIds },
+            paymentPurpose: {
+              in: ["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"]
+            }
+          },
+          orderBy: [{ receivedAt: "desc" }, { id: "desc" }],
+          select: {
+            id: true,
+            posTransactionId: true,
+            paymentPurpose: true,
+            tenderMethodNameSnapshot: true,
+            tenderMethodCodeSnapshot: true,
+            method: true,
+            amount: true,
+            reference: true,
+            receivedShiftNoSnapshot: true,
+            receivedTerminalCodeSnapshot: true,
+            receivedCashierCodeSnapshot: true,
+            receivedAt: true
           }
         })
       : [];
@@ -4692,6 +5094,9 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             variantSizeSnapshot: true,
             variantColorSnapshot: true,
             quantity: true,
+            sellingUnitOfMeasure: true,
+            baseUnitOfMeasure: true,
+            baseQuantity: true,
             unitPrice: true,
             discountAmount: true,
             appliedPromotionNameSnapshot: true,
@@ -4715,10 +5120,18 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       },
       orderBy: [{ receivedAt: "desc" }, { createdAt: "desc" }],
       select: {
+        id: true,
+        posTransactionId: true,
         method: true,
         tenderMethodCodeSnapshot: true,
         tenderMethodNameSnapshot: true,
         amount: true,
+        reference: true,
+        paymentPurpose: true,
+        receivedShiftNoSnapshot: true,
+        receivedTerminalCodeSnapshot: true,
+        receivedCashierCodeSnapshot: true,
+        receivedAt: true,
         posTransaction: {
           select: {
             transactionType: true,
@@ -4809,6 +5222,17 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           allowSale: line.allowSale,
           allowPurchase: line.allowPurchase,
         })) ?? [],
+      sellingUnits: product.storeProductSellingUnits.map((sellingUnit) => ({
+        productVariantId: sellingUnit.productVariantId,
+        unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+        unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+        conversionFactor: Number(sellingUnit.conversionFactor),
+        unitPrice: Number(sellingUnit.unitPrice),
+        barcode: sellingUnit.barcode,
+        isDefault: sellingUnit.isDefault,
+        allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+        decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+      })),
       price: product.productType === "MATRIX" ? matrixPrice : productPrice,
       unitCost: product.baseCostPrice === null ? null : Number(product.baseCostPrice),
       department: product.department,
@@ -4848,6 +5272,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     productName: product.productName,
     productType: product.productType,
     unitOfMeasure: product.unitOfMeasure,
+    baseUnitOfMeasure: product.baseUnitOfMeasure,
+    sellingUnits: product.sellingUnits,
     price: product.price,
     department: product.department,
     category: product.category,
@@ -5009,8 +5435,12 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       sourceStoreCode: transfer.sourceStore.code,
       sourceStoreName: transfer.sourceStore.name,
       sourceLocationId: transfer.sourceInventoryLocation.id,
-      sourceLocationCode: transfer.sourceInventoryLocation.code,
-      sourceLocationName: transfer.sourceInventoryLocation.name,
+      sourceLocationCode:
+        issuedQuantity > 0 ? transfer.sourceInventoryLocation.code : "",
+      sourceLocationName:
+        issuedQuantity > 0
+          ? transfer.sourceInventoryLocation.name
+          : "Selected by source shop on issue",
       destinationStoreCode: transfer.destinationStore.code,
       destinationStoreName: transfer.destinationStore.name,
       destinationLocationId: transfer.destinationInventoryLocation.id,
@@ -5023,6 +5453,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       trackExpiry: transfer.product.trackExpiry,
       status: transfer.status,
       requestedQuantity,
+      requestedUnitOfMeasure: transfer.requestedUnitOfMeasure,
+      requestedUnitQuantity: toQuantity(transfer.requestedUnitQuantity),
+      uomConversionFactor: Number(transfer.uomConversionFactor),
+      baseUnitOfMeasure: transfer.baseUnitOfMeasure,
       issuedQuantity,
       receivedQuantity,
       outstandingIssueQuantity: toQuantity(Math.max(0, requestedQuantity - issuedQuantity)),
@@ -5130,6 +5564,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       variantColor: line.variantColorSnapshot,
       lineNote: line.lineNote ?? null,
       quantity: Number(line.quantity),
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      uomConversionFactor: Number(line.uomConversionFactor ?? 1),
+      baseQuantity: Number(line.baseQuantity ?? line.quantity),
       unitPrice: Number(line.unitPrice),
       discountAmount: Number(line.discountAmount),
       taxAmount: Number(line.taxAmount),
@@ -5177,9 +5615,13 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         productName: line.productNameSnapshot,
         variantSize: line.variantSizeSnapshot,
         variantColor: line.variantColorSnapshot,
-        lineNote: line.lineNote ?? null,
-        quantity: Number(line.quantity),
-        unitPrice: Number(line.unitPrice),
+      lineNote: line.lineNote ?? null,
+      quantity: Number(line.quantity),
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      uomConversionFactor: Number(line.uomConversionFactor ?? 1),
+      baseQuantity: Number(line.baseQuantity ?? line.quantity),
+      unitPrice: Number(line.unitPrice),
         discountAmount: Number(line.discountAmount),
         taxAmount: Number(line.taxAmount),
         lineTotal: Number(line.lineTotal),
@@ -5201,15 +5643,29 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       originStoreCode: order.store.code,
       originStoreName: order.store.name,
       isFulfilmentOrder: isSalesOrderFulfilmentStore && order.store.id !== currentStoreId,
+      orderType: order.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
       status: order.status,
       totalAmount: Number(order.totalAmount),
       depositAmount: Number(order.depositAmount),
+      paidAmount: Number(order.paidAmount),
       balanceAmount: Number(order.balanceAmount),
       depositTenderMethodCode: order.depositTenderMethodCodeSnapshot,
       depositTenderMethodName: order.depositTenderMethodNameSnapshot,
       depositPaymentMethod: order.depositPaymentMethodSnapshot,
       depositReference: order.depositReference,
       depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+      minimumDepositAmount: Number(order.minimumDepositAmount),
+      layawayPolicy:
+        order.orderType === "LAYAWAY"
+          ? normalizeLayawaySettings(order.layawayPolicySnapshotJson)
+          : null,
+      reservationStatus: order.reservationStatus,
+      reservationCreatedAt: order.reservationCreatedAt?.toISOString() ?? null,
+      reservationReleasedAt: order.reservationReleasedAt?.toISOString() ?? null,
+      layawayExpiresAt: order.layawayExpiresAt?.toISOString() ?? null,
+      expiredAt: order.expiredAt?.toISOString() ?? null,
+      cancellationFeeAmount: Number(order.cancellationFeeAmount),
+      refundedAmount: Number(order.refundedAmount),
       itemCount: toQuantity(orderLines.reduce((sum, line) => sum + line.quantity, 0)),
       lineCount: orderLines.length,
       operatorName: order.operatorName,
@@ -5267,13 +5723,18 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     for (const line of transaction.lines) {
       const variantSize = line.variantSizeSnapshot ?? null;
       const variantColor = line.variantColorSnapshot ?? null;
-      const key = `${line.productCodeSnapshot}:${line.productNameSnapshot}:${variantSize ?? ""}:${variantColor ?? ""}`;
+      const sellingUnitOfMeasure = line.sellingUnitOfMeasure ?? line.baseUnitOfMeasure ?? "EA";
+      const baseUnitOfMeasure = line.baseUnitOfMeasure ?? sellingUnitOfMeasure;
+      const key = `${line.productCodeSnapshot}:${line.productNameSnapshot}:${variantSize ?? ""}:${variantColor ?? ""}:${sellingUnitOfMeasure}`;
       const current = reportProductMap.get(key) ?? {
         productCode: line.productCodeSnapshot,
         productName: line.productNameSnapshot,
         variantSize,
         variantColor,
+        sellingUnitOfMeasure,
+        baseUnitOfMeasure,
         quantity: 0,
+        baseQuantity: 0,
         grossAmount: 0,
         discountAmount: 0,
         taxAmount: 0,
@@ -5282,6 +5743,9 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       const direction = line.lineIntent === PosTransactionLineIntent.RETURN ? -1 : 1;
 
       current.quantity = toQuantity(current.quantity + Number(line.quantity) * direction);
+      current.baseQuantity = toQuantity(
+        current.baseQuantity + Number(line.baseQuantity ?? line.quantity) * direction
+      );
       current.grossAmount = toMoney(current.grossAmount + Number(line.unitPrice) * Number(line.quantity) * direction);
       current.discountAmount = toMoney(current.discountAmount + Number(line.discountAmount) * direction);
       current.taxAmount = toMoney(current.taxAmount + Number(line.taxAmount) * direction);
@@ -5325,6 +5789,72 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     .filter((row): row is NonNullable<typeof row> => row !== null)
     .sort((left, right) => Math.abs(right.stockValue) - Math.abs(left.stockValue));
   const reportNetSalesAmount = toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.totalAmount), 0));
+  const layawayOrders = salesOrders.filter((order) => order.orderType === "LAYAWAY");
+  const layawayOrderBySourceTransactionId = new Map(
+    layawayOrders.map((order) => [order.sourceTransactionId, order] as const)
+  );
+  const layawayAgeingNow = new Date();
+  const reportLayawayRows: OnlineStoreWorkspaceData["reports"]["layawayRows"] = layawayOrders.map((order) => {
+    const ageingEnd = order.fulfilledAt ?? order.cancelledAt ?? order.expiredAt ?? layawayAgeingNow;
+    const ageDays = Math.max(
+      0,
+      Math.floor((ageingEnd.getTime() - order.createdAt.getTime()) / 86_400_000)
+    );
+
+    return {
+      orderId: order.id,
+      orderNo: order.orderNo,
+      status: order.status,
+      customerName: order.customerNameSnapshot ?? "Customer",
+      totalAmount: Number(order.totalAmount),
+      paidAmount: Number(order.paidAmount),
+      balanceAmount: Number(order.balanceAmount),
+      reservationStatus: order.reservationStatus,
+      reservedBaseQuantity: toQuantity(
+        order.inventoryReservations
+          .filter((reservation) => reservation.status === "ACTIVE")
+          .reduce((sum, reservation) => sum + Number(reservation.baseQuantity), 0)
+      ),
+      cancellationFeeAmount: Number(order.cancellationFeeAmount),
+      refundedAmount: Number(order.refundedAmount),
+      ageDays,
+      ageingBucket:
+        ageDays <= 30
+          ? "0-30 days"
+          : ageDays <= 60
+            ? "31-60 days"
+            : ageDays <= 90
+              ? "61-90 days"
+              : "91+ days",
+      createdAt: order.createdAt.toISOString(),
+      expiresAt: order.layawayExpiresAt?.toISOString() ?? null
+    };
+  });
+  const reportLayawayPaymentRows: OnlineStoreWorkspaceData["reports"]["layawayPaymentRows"] =
+    salesOrderPaymentRows.flatMap((payment) => {
+      const order = layawayOrderBySourceTransactionId.get(payment.posTransactionId);
+
+      return order
+        ? [
+            {
+              paymentId: payment.id,
+              orderNo: order.orderNo,
+              customerName: order.customerNameSnapshot ?? "Customer",
+              paymentPurpose: payment.paymentPurpose,
+              tenderName:
+                payment.tenderMethodNameSnapshot ??
+                payment.tenderMethodCodeSnapshot ??
+                payment.method,
+              amount: Number(payment.amount),
+              reference: payment.reference,
+              shiftNo: payment.receivedShiftNoSnapshot,
+              terminalCode: payment.receivedTerminalCodeSnapshot,
+              cashierCode: payment.receivedCashierCodeSnapshot,
+              receivedAt: payment.receivedAt.toISOString()
+            }
+          ]
+        : [];
+    });
   const reports: OnlineStoreWorkspaceData["reports"] = {
     summary: {
       salesCount: reportTransactions.filter((transaction) => transaction.transactionType === PosTransactionType.SALE).length,
@@ -5360,6 +5890,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       fulfilledAt: order.fulfilledAt,
       cancelledAt: order.cancelledAt
     })),
+    layawayRows: reportLayawayRows,
+    layawayPaymentRows: reportLayawayPaymentRows,
     shiftRows: shiftSummaries.map((shift) => ({
       shiftId: shift.shiftId,
       shiftNo: shift.shiftNo,
@@ -5461,6 +5993,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       productType: product.productType,
       unitOfMeasure: product.unitOfMeasure,
       baseUnitOfMeasure: product.baseUnitOfMeasure,
+      sellingUnits: product.sellingUnits,
       uomConversions: product.uomConversions,
       price: product.price,
       unitCost: product.unitCost,
@@ -5601,6 +6134,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         lineIntent: line.lineIntent,
         sourceLineId: line.sourceLineId,
         quantity: Number(line.quantity),
+        sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+        baseUnitOfMeasure: line.baseUnitOfMeasure,
+        uomConversionFactor: Number(line.uomConversionFactor ?? 1),
+        baseQuantity: Number(line.baseQuantity ?? line.quantity),
         returnableQuantity:
           transaction.transactionType === PosTransactionType.RETURN || line.lineIntent === PosTransactionLineIntent.RETURN
             ? 0
@@ -5742,7 +6279,7 @@ export async function browseOnlineStoreReports(
   const salesOrderWhere: Prisma.SalesOrderWhereInput = {
     retailOrgId: session.retailOrgId,
     storeId: store.id,
-    ...(dateFrom || dateTo
+    ...((dateFrom || dateTo) && criteria.reportId !== "layawayPayments"
       ? {
           createdAt: {
             ...(dateFrom ? { gte: dateFrom } : {}),
@@ -5750,7 +6287,9 @@ export async function browseOnlineStoreReports(
           }
         }
       : {}),
-    ...(criteria.cashierCode ? { operatorName: { contains: criteria.cashierCode } } : {}),
+    ...(criteria.cashierCode && criteria.reportId !== "layawayPayments"
+      ? { operatorName: { contains: criteria.cashierCode } }
+      : {}),
     ...(criteria.customerQuery
       ? {
           OR: [
@@ -5799,6 +6338,9 @@ export async function browseOnlineStoreReports(
             variantSizeSnapshot: true,
             variantColorSnapshot: true,
             quantity: true,
+            sellingUnitOfMeasure: true,
+            baseUnitOfMeasure: true,
+            baseQuantity: true,
             unitPrice: true,
             discountAmount: true,
             taxAmount: true,
@@ -5811,10 +6353,18 @@ export async function browseOnlineStoreReports(
       where: paymentWhere,
       orderBy: [{ receivedAt: "desc" }, { createdAt: "desc" }],
       select: {
+        id: true,
+        posTransactionId: true,
         method: true,
         tenderMethodCodeSnapshot: true,
         tenderMethodNameSnapshot: true,
         amount: true,
+        reference: true,
+        paymentPurpose: true,
+        receivedShiftNoSnapshot: true,
+        receivedTerminalCodeSnapshot: true,
+        receivedCashierCodeSnapshot: true,
+        receivedAt: true,
         posTransaction: {
           select: {
             transactionType: true,
@@ -5974,20 +6524,34 @@ export async function browseOnlineStoreReports(
         id: true,
         orderNo: true,
         sourceTransactionId: true,
+        orderType: true,
         status: true,
         customerNoSnapshot: true,
         customerNameSnapshot: true,
         totalAmount: true,
         depositAmount: true,
+        paidAmount: true,
         balanceAmount: true,
         depositTenderMethodNameSnapshot: true,
         depositPaymentMethodSnapshot: true,
         depositReference: true,
+        minimumDepositAmount: true,
+        reservationStatus: true,
+        layawayExpiresAt: true,
+        expiredAt: true,
+        cancellationFeeAmount: true,
+        refundedAmount: true,
         operatorName: true,
         fulfilledTransactionNo: true,
         createdAt: true,
         fulfilledAt: true,
-        cancelledAt: true
+        cancelledAt: true,
+        inventoryReservations: {
+          select: {
+            baseQuantity: true,
+            status: true
+          }
+        }
       }
     })
   ]);
@@ -6052,13 +6616,18 @@ export async function browseOnlineStoreReports(
     for (const line of transaction.lines) {
       const variantSize = line.variantSizeSnapshot ?? null;
       const variantColor = line.variantColorSnapshot ?? null;
-      const key = `${line.productCodeSnapshot}:${line.productNameSnapshot}:${variantSize ?? ""}:${variantColor ?? ""}`;
+      const sellingUnitOfMeasure = line.sellingUnitOfMeasure ?? line.baseUnitOfMeasure ?? "EA";
+      const baseUnitOfMeasure = line.baseUnitOfMeasure ?? sellingUnitOfMeasure;
+      const key = `${line.productCodeSnapshot}:${line.productNameSnapshot}:${variantSize ?? ""}:${variantColor ?? ""}:${sellingUnitOfMeasure}`;
       const current = productRowsByKey.get(key) ?? {
         productCode: line.productCodeSnapshot,
         productName: line.productNameSnapshot,
         variantSize,
         variantColor,
+        sellingUnitOfMeasure,
+        baseUnitOfMeasure,
         quantity: 0,
+        baseQuantity: 0,
         grossAmount: 0,
         discountAmount: 0,
         taxAmount: 0,
@@ -6067,6 +6636,9 @@ export async function browseOnlineStoreReports(
       const direction = line.lineIntent === PosTransactionLineIntent.RETURN ? -1 : 1;
 
       current.quantity = toQuantity(current.quantity + Number(line.quantity) * direction);
+      current.baseQuantity = toQuantity(
+        current.baseQuantity + Number(line.baseQuantity ?? line.quantity) * direction
+      );
       current.grossAmount = toMoney(current.grossAmount + Number(line.unitPrice) * Number(line.quantity) * direction);
       current.discountAmount = toMoney(current.discountAmount + Number(line.discountAmount) * direction);
       current.taxAmount = toMoney(current.taxAmount + Number(line.taxAmount) * direction);
@@ -6129,6 +6701,83 @@ export async function browseOnlineStoreReports(
       0
     )
   );
+  const filteredLayawayOrders = salesOrderReportRows.filter(
+    (order) => order.orderType === "LAYAWAY"
+  );
+  const filteredLayawayBySourceTransactionId = new Map(
+    filteredLayawayOrders.map((order) => [order.sourceTransactionId, order] as const)
+  );
+  const filteredLayawayAgeingNow = new Date();
+  const layawayRows: OnlineStoreWorkspaceData["reports"]["layawayRows"] =
+    filteredLayawayOrders.map((order) => {
+      const ageingEnd =
+        order.fulfilledAt ?? order.cancelledAt ?? order.expiredAt ?? filteredLayawayAgeingNow;
+      const ageDays = Math.max(
+        0,
+        Math.floor((ageingEnd.getTime() - order.createdAt.getTime()) / 86_400_000)
+      );
+
+      return {
+        orderId: order.id,
+        orderNo: order.orderNo,
+        status: order.status,
+        customerName: order.customerNameSnapshot ?? "Customer",
+        totalAmount: Number(order.totalAmount),
+        paidAmount: Number(order.paidAmount),
+        balanceAmount: Number(order.balanceAmount),
+        reservationStatus: order.reservationStatus,
+        reservedBaseQuantity: toQuantity(
+          order.inventoryReservations
+            .filter((reservation) => reservation.status === "ACTIVE")
+            .reduce((sum, reservation) => sum + Number(reservation.baseQuantity), 0)
+        ),
+        cancellationFeeAmount: Number(order.cancellationFeeAmount),
+        refundedAmount: Number(order.refundedAmount),
+        ageDays,
+        ageingBucket:
+          ageDays <= 30
+            ? "0-30 days"
+            : ageDays <= 60
+              ? "31-60 days"
+              : ageDays <= 90
+                ? "61-90 days"
+                : "91+ days",
+        createdAt: order.createdAt.toISOString(),
+        expiresAt: order.layawayExpiresAt?.toISOString() ?? null
+      };
+    });
+  const layawayPaymentRows: OnlineStoreWorkspaceData["reports"]["layawayPaymentRows"] =
+    reportPayments.flatMap((payment) => {
+      const order = filteredLayawayBySourceTransactionId.get(payment.posTransactionId);
+
+      if (
+        !order ||
+        !["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"].includes(
+          payment.paymentPurpose
+        )
+      ) {
+        return [];
+      }
+
+      return [
+        {
+          paymentId: payment.id,
+          orderNo: order.orderNo,
+          customerName: order.customerNameSnapshot ?? "Customer",
+          paymentPurpose: payment.paymentPurpose,
+          tenderName:
+            payment.tenderMethodNameSnapshot ??
+            payment.tenderMethodCodeSnapshot ??
+            payment.method,
+          amount: Number(payment.amount),
+          reference: payment.reference,
+          shiftNo: payment.receivedShiftNoSnapshot,
+          terminalCode: payment.receivedTerminalCodeSnapshot,
+          cashierCode: payment.receivedCashierCodeSnapshot,
+          receivedAt: payment.receivedAt.toISOString()
+        }
+      ];
+    });
   const reports: OnlineStoreWorkspaceData["reports"] = {
     summary: {
       salesCount: transactions.filter((transaction) => transaction.transactionType === PosTransactionType.SALE).length,
@@ -6179,6 +6828,8 @@ export async function browseOnlineStoreReports(
         cancelledAt: order.cancelledAt?.toISOString() ?? null
       };
     }),
+    layawayRows,
+    layawayPaymentRows,
     shiftRows: shifts.map((shift) => {
       const summary = summarizeOnlineShift(shift);
 
@@ -6267,6 +6918,7 @@ export type CreateOnlineStoreSaleRequest = {
     variantColor?: string | null;
     lineNote?: string | null;
     preferredBatchId?: string | null;
+    sellingUnitOfMeasure?: string | null;
   }>;
   payments?: OnlinePaymentRequest[] | null;
   paymentMethod?: string | null;
@@ -6326,6 +6978,10 @@ export type CreateOnlineStoreSaleResponse = {
       variantColor: string | null;
       lineNote: string | null;
       quantity: number;
+      sellingUnitOfMeasure: string;
+      baseUnitOfMeasure: string;
+      uomConversionFactor: number;
+      baseQuantity: number;
       unitPrice: number;
       discountAmount: number;
       taxAmount: number;
@@ -6360,6 +7016,7 @@ export type CreateOnlineStoreCorrectionRequest = {
     variantColor?: string | null;
     lineNote?: string | null;
     overrideNote?: string | null;
+    sellingUnitOfMeasure?: string | null;
   }> | null;
   payments?: OnlinePaymentRequest[] | null;
   managerOverride?: OnlineStoreManagerOverrideRequest | null;
@@ -6383,11 +7040,15 @@ export type CreateOnlineStoreHeldSaleResponse = {
 export type CreateOnlineStoreSalesOrderRequest = {
   customerId: string;
   lines: CreateOnlineStoreSaleRequest["lines"];
+  orderType?: "SALES_ORDER" | "LAYAWAY" | null;
+  payments?: OnlinePaymentRequest[] | null;
   depositAmount?: number | null;
   depositTenderMethodCode?: string | null;
   depositReference?: string | null;
   serviceType?: string | null;
   note?: string | null;
+  layawayExpiresAt?: string | null;
+  policyOverrideApproved?: boolean | null;
 };
 
 export type CreateOnlineStoreSalesOrderResponse = {
@@ -6401,8 +7062,26 @@ export type CancelOnlineStoreSalesOrderResponse = {
   orderId: string;
   orderNo: string;
   status: string;
+  salesOrder: OnlineStoreWorkspaceData["salesOrders"][number];
   message: string;
   serverProcessedAt: string;
+};
+
+export type ReceiveOnlineStoreLayawayPaymentRequest = {
+  payments: OnlinePaymentRequest[];
+  note?: string | null;
+};
+
+export type OnlineStoreLayawayActionResponse = {
+  salesOrder: OnlineStoreWorkspaceData["salesOrders"][number];
+  message: string;
+  serverProcessedAt: string;
+};
+
+export type CancelOnlineStoreSalesOrderRequest = {
+  refundPayments?: OnlinePaymentRequest[] | null;
+  note?: string | null;
+  policyOverrideApproved?: boolean | null;
 };
 
 export type CreateOnlineStoreSalesOrderFulfilmentTransferRequest = {
@@ -6557,8 +7236,8 @@ export type CreateOnlineStoreSupplierReturnResponse = {
 };
 
 export type CreateOnlineStoreTransferRequest = {
+  transferBatchNo?: string | null;
   sourceStoreId: string;
-  sourceInventoryLocationId?: string | null;
   destinationInventoryLocationId?: string | null;
   productId?: string | null;
   quantity?: number | null;
@@ -6591,6 +7270,8 @@ export type CreateOnlineStoreTransferResponse = {
 };
 
 export type CreateOnlineStoreStockCountRequest = {
+  sheetNo?: string | null;
+  lineNo?: number | null;
   inventoryLocationId?: string | null;
   productId: string;
   countedQuantity: number;
@@ -7087,7 +7768,34 @@ async function prepareOnlineStoreBasketLines(
       category: true,
       subcategory: true,
       unitOfMeasure: true,
+      baseUnitOfMeasure: {
+        select: {
+          code: true
+        }
+      },
       baseUnitPrice: true,
+      storeProductSellingUnits: {
+        where: {
+          storeId,
+          status: RecordStatus.ACTIVE
+        },
+        orderBy: [{ isDefault: "desc" }, { unitOfMeasureCodeSnapshot: "asc" }],
+        select: {
+          productVariantId: true,
+          unitOfMeasureCodeSnapshot: true,
+          unitOfMeasureNameSnapshot: true,
+          conversionFactor: true,
+          unitPrice: true,
+          barcode: true,
+          isDefault: true,
+          unitOfMeasure: {
+            select: {
+              allowFractionalSale: true,
+              decimalPrecision: true
+            }
+          }
+        }
+      },
       storeProductPrices: {
         where: {
           storeId,
@@ -7103,6 +7811,7 @@ async function prepareOnlineStoreBasketLines(
       mustEnterPriceAtPos: true,
       trackSize: true,
       trackColor: true,
+      isSerialized: true,
       matrixVariants: {
         where: {
           status: RecordStatus.ACTIVE
@@ -7181,11 +7890,34 @@ async function prepareOnlineStoreBasketLines(
         product.storeProductPrices[0]?.unitPrice ??
         product.baseUnitPrice
     );
-    const requestedPrice = Number(line.unitPrice ?? baseUnitPrice);
+    const sellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: product.baseUnitOfMeasure?.code ?? product.unitOfMeasure,
+      baseUnitPrice,
+      quantity,
+      selectedUnitOfMeasure: line.sellingUnitOfMeasure,
+      sellingUnits: product.storeProductSellingUnits
+        .filter(
+          (sellingUnit) =>
+            sellingUnit.productVariantId === null ||
+            sellingUnit.productVariantId === productVariant?.id
+        )
+        .map((sellingUnit) => ({
+          unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+          unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+          conversionFactor: Number(sellingUnit.conversionFactor),
+          unitPrice: Number(sellingUnit.unitPrice),
+          barcode: sellingUnit.barcode,
+          isDefault: sellingUnit.isDefault,
+          allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+          decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+        })),
+      serialized: product.isSerialized
+    });
+    const requestedPrice = Number(line.unitPrice ?? sellingUom.unitPrice);
     const unitPrice =
       product.mustEnterPriceAtPos && Number.isFinite(requestedPrice) && requestedPrice > 0
         ? toMoney(requestedPrice)
-        : baseUnitPrice;
+        : toMoney(sellingUom.unitPrice);
     const amounts = calculateOnlineSaleLineAmounts({
       quantity,
       unitPrice,
@@ -7198,6 +7930,10 @@ async function prepareOnlineStoreBasketLines(
       productVariant,
       variantAttributesSnapshot,
       quantity,
+      sellingUnitOfMeasure: sellingUom.sellingUnitOfMeasure,
+      baseUnitOfMeasure: sellingUom.baseUnitOfMeasure,
+      uomConversionFactor: sellingUom.uomConversionFactor,
+      baseQuantity: sellingUom.baseQuantity,
       variantSize: product.trackSize ? optionalText(line.variantSize) : null,
       variantColor: product.trackColor ? optionalText(line.variantColor) : null,
       lineNote: optionalText(line.lineNote),
@@ -7409,6 +8145,7 @@ async function assertOnlineStoreSaleStockAvailable(
       displayName?: string | null;
     } | null;
     quantity: number;
+    baseQuantity: number;
   }>,
   actionLabel: string
 ) {
@@ -7431,7 +8168,7 @@ async function assertOnlineStoreSaleStockAvailable(
     const key = positionKey(line.product.id, line.productVariant?.id);
     requestedQuantityByPosition.set(
       key,
-      toQuantity((requestedQuantityByPosition.get(key) ?? 0) + line.quantity)
+      toQuantity((requestedQuantityByPosition.get(key) ?? 0) + line.baseQuantity)
     );
   }
 
@@ -7466,7 +8203,7 @@ async function assertOnlineStoreSaleStockAvailable(
     }
 
     const key = positionKey(line.product.id, line.productVariant?.id);
-    const requestedQuantity = requestedQuantityByPosition.get(key) ?? line.quantity;
+    const requestedQuantity = requestedQuantityByPosition.get(key) ?? line.baseQuantity;
     const availableQuantity = availableQuantityByPosition.get(key) ?? 0;
     return availableQuantity < requestedQuantity;
   });
@@ -7476,7 +8213,7 @@ async function assertOnlineStoreSaleStockAvailable(
   }
 
   const key = positionKey(insufficientLine.product.id, insufficientLine.productVariant?.id);
-  const requestedQuantity = requestedQuantityByPosition.get(key) ?? insufficientLine.quantity;
+  const requestedQuantity = requestedQuantityByPosition.get(key) ?? insufficientLine.baseQuantity;
   const availableQuantity = availableQuantityByPosition.get(key) ?? 0;
   const itemLabel = insufficientLine.productVariant
     ? `${insufficientLine.product.name} (${insufficientLine.productVariant.displayName ?? insufficientLine.productVariant.code})`
@@ -7517,8 +8254,12 @@ async function completeOnlineStoreParkedTransaction(
           orderNo: true,
           sourceTransactionId: true,
           sourceTransactionNo: true,
+          orderType: true,
           depositAmount: true,
-          balanceAmount: true
+          paidAmount: true,
+          balanceAmount: true,
+          layawayPolicySnapshotJson: true,
+          reservationStatus: true,
         }
       })
     : requestedSourceTransactionId
@@ -7534,11 +8275,25 @@ async function completeOnlineStoreParkedTransaction(
             orderNo: true,
             sourceTransactionId: true,
             sourceTransactionNo: true,
+            orderType: true,
             depositAmount: true,
-            balanceAmount: true
+            paidAmount: true,
+            balanceAmount: true,
+            layawayPolicySnapshotJson: true,
+            reservationStatus: true,
           }
         })
       : null;
+
+  if (openSalesOrder?.orderType === "LAYAWAY") {
+    if (!sessionHasAllPermissions(session, ["pos.layaway.fulfil"])) {
+      throw new Error("Your role is not allowed to fulfil layaways.");
+    }
+    assertLayawayFulfilmentEligible({
+      balanceAmount: Number(openSalesOrder.balanceAmount),
+      policySnapshot: readJsonObject(openSalesOrder.layawayPolicySnapshotJson),
+    });
+  }
   const sourceTransactionId = openSalesOrder?.sourceTransactionId ?? requestedSourceTransactionId;
 
   if (!sourceTransactionId) {
@@ -7591,6 +8346,10 @@ async function completeOnlineStoreParkedTransaction(
           variantColorSnapshot: true,
           variantAttributesSnapshot: true,
           quantity: true,
+          sellingUnitOfMeasure: true,
+          baseUnitOfMeasure: true,
+          uomConversionFactor: true,
+          baseQuantity: true,
           unitPrice: true,
           discountAmount: true,
           appliedPromotionCodeSnapshot: true,
@@ -7666,6 +8425,10 @@ async function completeOnlineStoreParkedTransaction(
     variantSize: line.variantSizeSnapshot,
     variantColor: line.variantColorSnapshot,
     quantity: toQuantity(line.quantity),
+    sellingUnitOfMeasure: line.sellingUnitOfMeasure ?? line.product.unitOfMeasure,
+    baseUnitOfMeasure: line.baseUnitOfMeasure ?? line.product.unitOfMeasure,
+    uomConversionFactor: Number(line.uomConversionFactor ?? 1),
+    baseQuantity: toQuantity(line.baseQuantity ?? line.quantity),
     unitPrice: Number(line.unitPrice),
     discountAmount: Number(line.discountAmount),
     appliedPromotionCode: line.appliedPromotionCodeSnapshot,
@@ -7760,7 +8523,7 @@ async function completeOnlineStoreParkedTransaction(
     const availableBatches = batchRowsByProduct.get(line.product.id) ?? [];
     const allocations = allocateInventoryBatchesFefo({
       productName: line.product.name,
-      quantity: line.quantity,
+      quantity: line.baseQuantity,
       batches: availableBatches
     });
     batchAllocationsBySourceLineId.set(line.sourceLineId, allocations);
@@ -7789,7 +8552,7 @@ async function completeOnlineStoreParkedTransaction(
   });
   const payableTotalAmount = toMoney(sourceTotals.totalAmount - loyaltyRedemption.amount);
   const depositCreditAmount = openSalesOrder
-    ? Math.min(Number(openSalesOrder.depositAmount), payableTotalAmount)
+    ? Math.min(Number(openSalesOrder.paidAmount), payableTotalAmount)
     : 0;
   const settlementAmount = toMoney(Math.max(0, payableTotalAmount - depositCreditAmount));
   const paymentInputs = Array.isArray(input.payments) ? input.payments : [];
@@ -7801,7 +8564,11 @@ async function completeOnlineStoreParkedTransaction(
     {
       allowChange: true,
       settlementLabel: openSalesOrder ? "sales order fulfilment" : "held sale checkout",
-      paymentPurpose: openSalesOrder ? "SALES_ORDER_BALANCE" : "TRANSACTION_SETTLEMENT",
+      paymentPurpose: openSalesOrder?.orderType === "LAYAWAY"
+        ? "LAYAWAY_INSTALLMENT"
+        : openSalesOrder
+          ? "SALES_ORDER_BALANCE"
+          : "TRANSACTION_SETTLEMENT",
       receiptContext: {
         shiftId: shift.id,
         shiftNo: shift.shiftNo,
@@ -7990,7 +8757,7 @@ async function completeOnlineStoreParkedTransaction(
     const allocations = batchAllocationsBySourceLineId.get(line.sourceLineId);
     const movementAllocations = allocations?.length
       ? allocations
-      : [{ batchId: null, batchNo: null, expiryDate: null, quantity: line.quantity }];
+      : [{ batchId: null, batchNo: null, expiryDate: null, quantity: line.baseQuantity }];
 
     return movementAllocations.map((allocation) => ({
       retailOrgId: session.retailOrgId,
@@ -8031,7 +8798,7 @@ async function completeOnlineStoreParkedTransaction(
       },
       data: {
         quantityOnHand: {
-          decrement: line.quantity
+          decrement: line.baseQuantity
         }
       }
     });
@@ -8045,7 +8812,7 @@ async function completeOnlineStoreParkedTransaction(
     referenceNo: transaction.transactionNo,
     lines: preparedLines.map((line) => ({
       product: line.product,
-      quantity: line.quantity
+      quantity: line.baseQuantity
     }))
   });
   await postPosTransactionAccountingInTransaction(tx, {
@@ -8055,6 +8822,19 @@ async function completeOnlineStoreParkedTransaction(
   });
 
   if (openSalesOrder) {
+    if (openSalesOrder.orderType === "LAYAWAY") {
+      await tx.salesOrderInventoryReservation.updateMany({
+        where: {
+          salesOrderId: openSalesOrder.id,
+          status: "ACTIVE",
+        },
+        data: {
+          status: "CONSUMED",
+          releaseReason: "Consumed by layaway fulfilment.",
+          releasedAt: transaction.completedAt ?? completedAt,
+        },
+      });
+    }
     await tx.salesOrder.update({
       where: {
         id: openSalesOrder.id
@@ -8062,7 +8842,14 @@ async function completeOnlineStoreParkedTransaction(
       data: {
         status: SalesOrderStatus.FULFILLED,
         totalAmount: sourceTotals.totalAmount,
+        paidAmount,
         balanceAmount: 0,
+        ...(openSalesOrder.orderType === "LAYAWAY"
+          ? {
+              reservationStatus: "CONSUMED",
+              reservationReleasedAt: transaction.completedAt ?? completedAt,
+            }
+          : {}),
         fulfilledTransactionId: transaction.id,
         fulfilledTransactionNo: transaction.transactionNo,
         fulfilledAt: transaction.completedAt ?? completedAt,
@@ -8153,6 +8940,10 @@ async function completeOnlineStoreParkedTransaction(
         variantColor: line.variantColor,
         lineNote: line.lineNote,
         quantity: line.quantity,
+        sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+        baseUnitOfMeasure: line.baseUnitOfMeasure,
+        uomConversionFactor: line.uomConversionFactor,
+        baseQuantity: line.baseQuantity,
         unitPrice: line.unitPrice,
         discountAmount: line.discountAmount,
         taxAmount: line.taxAmount,
@@ -8264,7 +9055,29 @@ export async function createOnlineStoreSale(
       category: true,
       subcategory: true,
       unitOfMeasure: true,
+      baseUnitOfMeasure: { select: { code: true } },
       baseUnitPrice: true,
+      storeProductSellingUnits: {
+        where: {
+          storeId: store.id,
+          status: RecordStatus.ACTIVE
+        },
+        select: {
+          productVariantId: true,
+          unitOfMeasureCodeSnapshot: true,
+          unitOfMeasureNameSnapshot: true,
+          conversionFactor: true,
+          unitPrice: true,
+          barcode: true,
+          isDefault: true,
+          unitOfMeasure: {
+            select: {
+              allowFractionalSale: true,
+              decimalPrecision: true
+            }
+          }
+        }
+      },
       storeProductPrices: {
         where: {
           storeId: store.id,
@@ -8280,6 +9093,7 @@ export async function createOnlineStoreSale(
       mustEnterPriceAtPos: true,
       trackSize: true,
       trackColor: true,
+      isSerialized: true,
       matrixVariants: {
         where: {
           status: RecordStatus.ACTIVE
@@ -8358,24 +9172,50 @@ export async function createOnlineStoreSale(
       throw new Error(`Choose a matrix option for ${product.name}.`);
     }
 
-    if (matrixVariant && Number(matrixVariant.quantityOnHand) < quantity) {
+    const baseUnitPrice = Number(product.storeProductPrices[0]?.unitPrice ?? product.baseUnitPrice);
+    const effectiveBaseUnitPrice = matrixVariant
+      ? Number(matrixVariant.storeProductPrices[0]?.unitPrice ?? matrixVariant.unitPrice)
+      : baseUnitPrice;
+    const sellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: product.baseUnitOfMeasure?.code ?? product.unitOfMeasure,
+      baseUnitPrice: effectiveBaseUnitPrice,
+      quantity,
+      selectedUnitOfMeasure: line.sellingUnitOfMeasure,
+      sellingUnits: product.storeProductSellingUnits
+        .filter(
+          (sellingUnit) =>
+            sellingUnit.productVariantId === null ||
+            sellingUnit.productVariantId === matrixVariant?.id
+        )
+        .map((sellingUnit) => ({
+          unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+          unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+          conversionFactor: Number(sellingUnit.conversionFactor),
+          unitPrice: Number(sellingUnit.unitPrice),
+          barcode: sellingUnit.barcode,
+          isDefault: sellingUnit.isDefault,
+          allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+          decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+        })),
+      serialized: product.isSerialized
+    });
+
+    if (matrixVariant && Number(matrixVariant.quantityOnHand) < sellingUom.baseQuantity) {
       throw new Error(
         `Only ${formatNumberForMessage(Number(matrixVariant.quantityOnHand))} ${matrixVariant.displayName ?? matrixVariant.code} is available for ${product.name}.`
       );
     }
 
-    const baseUnitPrice = Number(product.storeProductPrices[0]?.unitPrice ?? product.baseUnitPrice);
-    const effectiveBaseUnitPrice = matrixVariant
-      ? Number(matrixVariant.storeProductPrices[0]?.unitPrice ?? matrixVariant.unitPrice)
-      : baseUnitPrice;
-    const requestedPrice = Number(line.unitPrice ?? effectiveBaseUnitPrice);
-    const normalizedRequestedPrice = Number.isFinite(requestedPrice) ? toMoney(requestedPrice) : effectiveBaseUnitPrice;
+    const requestedPrice = Number(line.unitPrice ?? sellingUom.unitPrice);
+    const normalizedRequestedPrice = Number.isFinite(requestedPrice)
+      ? toMoney(requestedPrice)
+      : toMoney(sellingUom.unitPrice);
     const manualPriceOverride =
       !product.mustEnterPriceAtPos &&
       line.unitPrice !== null &&
       line.unitPrice !== undefined &&
       normalizedRequestedPrice > 0 &&
-      normalizedRequestedPrice !== effectiveBaseUnitPrice;
+      normalizedRequestedPrice !== toMoney(sellingUom.unitPrice);
     const overrideDiscountAmount =
       line.overrideDiscountAmount === null || line.overrideDiscountAmount === undefined
         ? 0
@@ -8383,7 +9223,7 @@ export async function createOnlineStoreSale(
 
     if (manualPriceOverride) {
       managerPermissionCodes.add("pos.override.price");
-      overrideNotes.push(`${product.code} price ${effectiveBaseUnitPrice.toFixed(2)} -> ${normalizedRequestedPrice.toFixed(2)}`);
+      overrideNotes.push(`${product.code} price ${sellingUom.unitPrice.toFixed(2)} -> ${normalizedRequestedPrice.toFixed(2)}`);
     }
 
     if (overrideDiscountAmount > 0) {
@@ -8394,7 +9234,7 @@ export async function createOnlineStoreSale(
     const unitPrice =
       (product.mustEnterPriceAtPos || manualPriceOverride) && normalizedRequestedPrice > 0
         ? normalizedRequestedPrice
-        : effectiveBaseUnitPrice;
+        : toMoney(sellingUom.unitPrice);
     const matrixAttributeLabel =
       matrixVariant?.values
         .map((value) => `${value.attribute.name}: ${value.valueLabelSnapshot || value.attributeValue.label}`)
@@ -8416,6 +9256,10 @@ export async function createOnlineStoreSale(
       productVariant: matrixVariant,
       variantAttributesSnapshot: matrixAttributeLabel,
       quantity,
+      sellingUnitOfMeasure: sellingUom.sellingUnitOfMeasure,
+      baseUnitOfMeasure: sellingUom.baseUnitOfMeasure,
+      uomConversionFactor: sellingUom.uomConversionFactor,
+      baseQuantity: sellingUom.baseQuantity,
       variantSize,
       variantColor,
       lineNote,
@@ -8517,7 +9361,7 @@ export async function createOnlineStoreSale(
 
       requestedQuantityByProduct.set(
         line.product.id,
-        toQuantity((requestedQuantityByProduct.get(line.product.id) ?? 0) + line.quantity)
+        toQuantity((requestedQuantityByProduct.get(line.product.id) ?? 0) + line.baseQuantity)
       );
     }
 
@@ -8546,14 +9390,14 @@ export async function createOnlineStoreSale(
         return false;
       }
 
-      const requestedQuantity = requestedQuantityByProduct.get(line.product.id) ?? line.quantity;
+      const requestedQuantity = requestedQuantityByProduct.get(line.product.id) ?? line.baseQuantity;
       const availableQuantity = availableQuantityByProduct.get(line.product.id) ?? 0;
       return availableQuantity < requestedQuantity;
     });
 
     if (insufficientLine) {
       const requestedQuantity =
-        requestedQuantityByProduct.get(insufficientLine.product.id) ?? insufficientLine.quantity;
+        requestedQuantityByProduct.get(insufficientLine.product.id) ?? insufficientLine.baseQuantity;
       const availableQuantity = availableQuantityByProduct.get(insufficientLine.product.id) ?? 0;
 
       throw new Error(
@@ -8620,7 +9464,7 @@ export async function createOnlineStoreSale(
       const availableBatches = availableBatchesByProduct.get(line.product.id) ?? [];
       const allocations = allocateInventoryBatchesFefo({
         productName: line.product.name,
-        quantity: line.quantity,
+        quantity: line.baseQuantity,
         preferredBatchId: line.preferredBatchId,
         batches: availableBatches
       });
@@ -8682,6 +9526,10 @@ export async function createOnlineStoreSale(
             variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
             variantAttributesSnapshot: line.variantAttributesSnapshot,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             batchAllocationsSnapshot: batchAllocationsByLineIndex.has(lineIndex)
               ? serializeJsonField(batchAllocationsByLineIndex.get(lineIndex) ?? [])
               : null,
@@ -8766,7 +9614,7 @@ export async function createOnlineStoreSale(
       const allocations = batchAllocationsByLineIndex.get(lineIndex);
       const movementAllocations = allocations?.length
         ? allocations
-        : [{ batchId: null, batchNo: null, expiryDate: null, quantity: line.quantity }];
+        : [{ batchId: null, batchNo: null, expiryDate: null, quantity: line.baseQuantity }];
 
       return movementAllocations.map((allocation) => ({
           retailOrgId: session.retailOrgId,
@@ -8803,7 +9651,7 @@ export async function createOnlineStoreSale(
       referenceNo: transaction.transactionNo,
       lines: pricedLines.map((line) => ({
         product: line.product,
-        quantity: line.quantity
+        quantity: line.baseQuantity
       }))
     });
     await postPosTransactionAccountingInTransaction(tx, {
@@ -8823,7 +9671,7 @@ export async function createOnlineStoreSale(
         },
         data: {
           quantityOnHand: {
-            decrement: line.quantity
+            decrement: line.baseQuantity
           }
         }
       });
@@ -8918,6 +9766,10 @@ export async function createOnlineStoreSale(
           variantColor: line.variantColor,
           lineNote: line.lineNote,
           quantity: line.quantity,
+          sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+          baseUnitOfMeasure: line.baseUnitOfMeasure,
+          uomConversionFactor: line.uomConversionFactor,
+          baseQuantity: line.baseQuantity,
           unitPrice: line.unitPrice,
           discountAmount: line.discountAmount,
           taxAmount: line.taxAmount,
@@ -9029,6 +9881,10 @@ export async function createOnlineStoreHeldSale(
             variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
             variantAttributesSnapshot: line.variantAttributesSnapshot,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -9089,6 +9945,10 @@ export async function createOnlineStoreHeldSale(
           variantColor: line.variantColor,
           lineNote: line.lineNote,
           quantity: line.quantity,
+          sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+          baseUnitOfMeasure: line.baseUnitOfMeasure,
+          uomConversionFactor: line.uomConversionFactor,
+          baseQuantity: line.baseQuantity,
           unitPrice: line.unitPrice,
           discountAmount: line.discountAmount,
           taxAmount: line.taxAmount,
@@ -9106,9 +9966,22 @@ export async function createOnlineStoreSalesOrder(
   input: CreateOnlineStoreSalesOrderRequest
 ): Promise<CreateOnlineStoreSalesOrderResponse> {
   const { session, user, store } = await requireOnlineStoreForOperation("saving an online store sales order");
+  const orderType = input.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER";
+  const isLayaway = orderType === "LAYAWAY";
+
+  if (isLayaway && !sessionHasAllPermissions(session, ["pos.layaway.create"])) {
+    throw new Error("Your role is not allowed to create layaways.");
+  }
+  if (
+    isLayaway &&
+    input.policyOverrideApproved === true &&
+    !sessionHasAllPermissions(session, ["pos.layaway.policy.override"])
+  ) {
+    throw new Error("Your role is not allowed to override the layaway policy.");
+  }
 
   if (!store.salesEnabled) {
-    throw new Error("This online store is not enabled for POS sales orders.");
+    throw new Error("This online store is not enabled for POS orders.");
   }
 
   const lineInputs = Array.isArray(input.lines) ? input.lines : [];
@@ -9151,29 +10024,54 @@ export async function createOnlineStoreSalesOrder(
     const now = new Date();
     const transactionNo = `WEB-ORD-${store.code.toUpperCase()}-${Date.now()}`;
     const orderNo = `SO-${store.code.toUpperCase()}-${Date.now()}`;
-    const requestedDepositAmount =
+    const suppliedPaymentInputs = Array.isArray(input.payments) ? input.payments : null;
+    const legacyDepositAmount =
       input.depositAmount === null || input.depositAmount === undefined
         ? 0
-        : normalizeMoney(input.depositAmount, "sales order deposit");
-
-    if (requestedDepositAmount < 0) {
-      throw new Error("Enter a sales order deposit amount of zero or more.");
-    }
+        : normalizeMoney(input.depositAmount, `${isLayaway ? "layaway" : "sales order"} deposit`);
+    const depositPaymentInputs = suppliedPaymentInputs ?? (
+      legacyDepositAmount > 0
+        ? [{
+            tenderMethodCode: input.depositTenderMethodCode,
+            amount: legacyDepositAmount,
+            reference: input.depositReference,
+          }]
+        : []
+    );
+    const requestedDepositAmount = toMoney(
+      depositPaymentInputs.reduce(
+        (sum, payment, index) =>
+          sum + normalizeMoney(payment.amount ?? 0, `deposit payment row ${index + 1}`),
+        0,
+      ),
+    );
 
     if (requestedDepositAmount > totals.totalAmount) {
-      throw new Error("A sales order deposit cannot be greater than the order total.");
+      throw new Error(`A ${isLayaway ? "layaway" : "sales order"} deposit cannot be greater than the order total.`);
     }
 
-    const depositPaymentInputs =
-      requestedDepositAmount > 0
-        ? [
-            {
-              tenderMethodCode: input.depositTenderMethodCode,
-              amount: requestedDepositAmount,
-              reference: input.depositReference
-            }
-          ]
-        : [];
+    const layawaySettings = normalizeLayawaySettings(
+      readJsonObject(store.retailOrg.companySettingsJson).layawaySettings,
+    );
+    const layawayOpening = isLayaway
+      ? evaluateLayawayOpening({
+          totalAmount: totals.totalAmount,
+          openingPaymentAmount: requestedDepositAmount,
+          settings: layawaySettings,
+          capturedAt: now.toISOString(),
+          policyOverrideApproved: input.policyOverrideApproved === true,
+        })
+      : null;
+    const layawayExpiresAtText = isLayaway ? optionalText(input.layawayExpiresAt) : null;
+    const layawayExpiresAt = layawayExpiresAtText ? new Date(layawayExpiresAtText) : null;
+
+    if (
+      layawayExpiresAt &&
+      (Number.isNaN(layawayExpiresAt.getTime()) || layawayExpiresAt.getTime() <= now.getTime())
+    ) {
+      throw new Error("Choose a future layaway expiry date and time.");
+    }
+
     const preparedDepositPayments =
       requestedDepositAmount > 0
         ? await prepareOnlinePayments(
@@ -9183,8 +10081,8 @@ export async function createOnlineStoreSalesOrder(
             requestedDepositAmount,
             {
               allowChange: false,
-              settlementLabel: "sales order deposit",
-              paymentPurpose: "SALES_ORDER_DEPOSIT",
+              settlementLabel: isLayaway ? "layaway deposit" : "sales order deposit",
+              paymentPurpose: isLayaway ? "LAYAWAY_DEPOSIT" : "SALES_ORDER_DEPOSIT",
               receiptContext: {
                 shiftId: shift.id,
                 shiftNo: shift.shiftNo,
@@ -9196,7 +10094,112 @@ export async function createOnlineStoreSalesOrder(
         : { paymentTotal: 0, changeAmount: 0, payments: [] as Prisma.PosPaymentCreateWithoutPosTransactionInput[] };
     const depositPayment = preparedDepositPayments.payments[0] ?? null;
     const depositAmount = preparedDepositPayments.paymentTotal;
-    const balanceAmount = toMoney(totals.totalAmount - depositAmount);
+    const paidAmount = layawayOpening?.paidAmount ?? depositAmount;
+    const balanceAmount = layawayOpening?.balanceAmount ?? toMoney(totals.totalAmount - depositAmount);
+    const salesOrderLines = pricedLines.map((line) => ({ id: randomUUID(), line }));
+    const reservationLocation =
+      layawayOpening?.reservationStatus === "ACTIVE"
+        ? await tx.inventoryLocation.findFirst({
+            where: {
+              retailOrgId: session.retailOrgId,
+              storeId: store.id,
+              status: RecordStatus.ACTIVE,
+            },
+            orderBy: [
+              { useForSalesOrderDefault: "desc" },
+              { useForSalesDefault: "desc" },
+              { name: "asc" },
+            ],
+            select: { id: true, code: true },
+          })
+        : null;
+
+    if (layawayOpening?.reservationStatus === "ACTIVE" && !reservationLocation) {
+      throw new Error("Configure an active sales-order inventory location before reserving layaway stock.");
+    }
+
+    const reservableLines = reservationLocation
+      ? salesOrderLines.filter(({ line }) => isOnlineStoreStockManagedProduct(line.product))
+      : [];
+    const reservationPositionKey = (productId: string, productVariantId?: string | null) =>
+      `${productId}:${productVariantId ?? ""}`;
+    const reservationSnapshotKey = (productCode: string, productVariantCode?: string | null) =>
+      `${productCode.trim().toUpperCase()}:${productVariantCode?.trim().toUpperCase() ?? ""}`;
+    const requestedByPosition = new Map<string, number>();
+
+    for (const { line } of reservableLines) {
+      const key = reservationPositionKey(line.product.id, line.productVariant?.id);
+      requestedByPosition.set(
+        key,
+        toQuantity((requestedByPosition.get(key) ?? 0) + line.baseQuantity),
+      );
+    }
+
+    const stockPositions = reservationLocation && reservableLines.length
+      ? await tx.inventoryLedgerEntry.groupBy({
+          by: ["productId", "productVariantId"],
+          where: {
+            retailOrgId: session.retailOrgId,
+            storeId: store.id,
+            inventoryLocationId: reservationLocation.id,
+            productId: { in: [...new Set(reservableLines.map(({ line }) => line.product.id))] },
+          },
+          _sum: { quantity: true },
+        })
+      : [];
+    const onHandByPosition = new Map(
+      stockPositions.map((position) => [
+        reservationPositionKey(position.productId, position.productVariantId),
+        toQuantity(position._sum.quantity),
+      ] as const),
+    );
+    const activeReservations = reservationLocation && reservableLines.length
+      ? await tx.salesOrderInventoryReservation.findMany({
+          where: {
+            inventoryLocationId: reservationLocation.id,
+            status: "ACTIVE",
+            productCodeSnapshot: {
+              in: [...new Set(reservableLines.map(({ line }) => line.product.code))],
+            },
+          },
+          select: {
+            productCodeSnapshot: true,
+            productVariantCodeSnapshot: true,
+            baseQuantity: true,
+          },
+        })
+      : [];
+    const activeReservedBySnapshot = new Map<string, number>();
+
+    for (const reservation of activeReservations) {
+      const key = reservationSnapshotKey(
+        reservation.productCodeSnapshot,
+        reservation.productVariantCodeSnapshot,
+      );
+      activeReservedBySnapshot.set(
+        key,
+        toQuantity((activeReservedBySnapshot.get(key) ?? 0) + Number(reservation.baseQuantity)),
+      );
+    }
+
+    for (const { line } of reservableLines) {
+      const positionKey = reservationPositionKey(line.product.id, line.productVariant?.id);
+      const requestedBaseQuantity = requestedByPosition.get(positionKey) ?? line.baseQuantity;
+      const availableBaseQuantity = calculateLayawayAvailableBaseQuantity({
+        onHandBaseQuantity: onHandByPosition.get(positionKey) ?? 0,
+        activeReservedBaseQuantity:
+          activeReservedBySnapshot.get(
+            reservationSnapshotKey(line.product.code, line.productVariant?.code),
+          ) ?? 0,
+      });
+
+      if (requestedBaseQuantity > availableBaseQuantity + 0.0005) {
+        throw new Error(
+          `Only ${formatNumberForMessage(availableBaseQuantity)} ${line.product.name} is available after active layaway reservations.`,
+        );
+      }
+    }
+
     const transaction = await tx.posTransaction.create({
       data: {
         retailOrgId: session.retailOrgId,
@@ -9227,6 +10230,10 @@ export async function createOnlineStoreSalesOrder(
             variantSizeSnapshot: line.variantSize ?? line.variantAttributesSnapshot,
             variantColorSnapshot: line.variantColor,
             variantAttributesSnapshot: line.variantAttributesSnapshot,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -9261,22 +10268,32 @@ export async function createOnlineStoreSalesOrder(
         sourceTransactionNo: transaction.transactionNo,
         customerNoSnapshot: customer?.customerNo ?? null,
         customerNameSnapshot: customer?.fullName ?? null,
+        orderType,
         status: SalesOrderStatus.OPEN,
         totalAmount: totals.totalAmount,
         depositAmount,
+        paidAmount,
         balanceAmount,
         depositTenderMethodCodeSnapshot: depositPayment?.tenderMethodCodeSnapshot ?? null,
         depositTenderMethodNameSnapshot: depositPayment?.tenderMethodNameSnapshot ?? null,
         depositPaymentMethodSnapshot: depositPayment?.method ?? null,
         depositReference: depositPayment?.reference ?? null,
         depositPaidAt: depositAmount > 0 ? now : null,
+        layawayPolicySnapshotJson: layawayOpening
+          ? serializeJsonField(layawayOpening.policySnapshot satisfies Prisma.InputJsonValue)
+          : null,
+        minimumDepositAmount: layawayOpening?.minimumDepositAmount ?? 0,
+        reservationStatus: layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
+        reservationCreatedAt:
+          layawayOpening?.reservationStatus === "ACTIVE" ? now : null,
+        layawayExpiresAt,
         operatorName: user.displayName ?? user.loginId,
         note,
         originNodeCode: "ONLINE_DIRECT",
         createdAt: now,
         lines: {
-          create: pricedLines.map((line) => ({
-            id: randomUUID(),
+          create: salesOrderLines.map(({ id, line }) => ({
+            id,
             productCodeSnapshot: line.product.code,
             productVariantCodeSnapshot: line.productVariant?.code ?? null,
             productNameSnapshot: line.product.name,
@@ -9284,6 +10301,10 @@ export async function createOnlineStoreSalesOrder(
             variantColorSnapshot: line.variantColor,
             variantAttributesSnapshot: line.variantAttributesSnapshot,
             lineNote: line.lineNote,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -9298,19 +10319,48 @@ export async function createOnlineStoreSalesOrder(
         id: true,
         orderNo: true,
         status: true,
+        orderType: true,
         totalAmount: true,
         depositAmount: true,
+        paidAmount: true,
         balanceAmount: true,
         depositTenderMethodCodeSnapshot: true,
         depositTenderMethodNameSnapshot: true,
         depositPaymentMethodSnapshot: true,
         depositReference: true,
         depositPaidAt: true,
+        minimumDepositAmount: true,
+        layawayPolicySnapshotJson: true,
+        reservationStatus: true,
+        reservationCreatedAt: true,
+        reservationReleasedAt: true,
+        layawayExpiresAt: true,
+        expiredAt: true,
+        cancellationFeeAmount: true,
+        refundedAmount: true,
         operatorName: true,
         note: true,
         createdAt: true
       }
     });
+
+    if (reservationLocation && reservableLines.length > 0) {
+      await tx.salesOrderInventoryReservation.createMany({
+        data: reservableLines.map(({ id, line }) => ({
+          salesOrderId: order.id,
+          salesOrderLineId: id,
+          inventoryLocationId: reservationLocation.id,
+          inventoryLocationCodeSnapshot: reservationLocation.code,
+          productCodeSnapshot: line.product.code,
+          productVariantCodeSnapshot: line.productVariant?.code ?? null,
+          baseUnitOfMeasure: line.baseUnitOfMeasure,
+          baseQuantity: line.baseQuantity,
+          status: "ACTIVE",
+          createdAt: now,
+          updatedAt: now,
+        })),
+      });
+    }
 
     await tx.securityLog.create({
       data: {
@@ -9318,19 +10368,21 @@ export async function createOnlineStoreSalesOrder(
         kind: SecurityLogKind.AUDIT,
         severity: SecurityLogSeverity.INFO,
         category: "ONLINE_STORE",
-        action: "SALES_ORDER_CREATED",
+        action: isLayaway ? "LAYAWAY_CREATED" : "SALES_ORDER_CREATED",
         actorLabel: user.loginId,
         targetType: "Sales order",
         targetRef: order.orderNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} saved online sales order ${order.orderNo} for ${store.code}.`,
+        message: `${user.loginId} saved online ${isLayaway ? "layaway" : "sales order"} ${order.orderNo} for ${store.code}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
           shiftNo: shift.shiftNo,
           sourceTransactionNo: transaction.transactionNo,
           totalAmount: totals.totalAmount,
           depositAmount,
-          balanceAmount
+          paidAmount,
+          balanceAmount,
+          reservationStatus: layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
         } satisfies Prisma.InputJsonValue)
       }
     });
@@ -9355,15 +10407,29 @@ export async function createOnlineStoreSalesOrder(
         originStoreCode: store.code,
         originStoreName: store.name,
         isFulfilmentOrder: false,
+        orderType: order.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
         status: order.status,
         totalAmount: Number(order.totalAmount),
         depositAmount: Number(order.depositAmount),
+        paidAmount: Number(order.paidAmount),
         balanceAmount: Number(order.balanceAmount),
         depositTenderMethodCode: order.depositTenderMethodCodeSnapshot,
         depositTenderMethodName: order.depositTenderMethodNameSnapshot,
         depositPaymentMethod: order.depositPaymentMethodSnapshot,
-        depositReference: order.depositReference,
-        depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+      depositReference: order.depositReference,
+      depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+      minimumDepositAmount: Number(order.minimumDepositAmount),
+      layawayPolicy:
+        order.orderType === "LAYAWAY"
+          ? normalizeLayawaySettings(order.layawayPolicySnapshotJson)
+          : null,
+      reservationStatus: order.reservationStatus,
+        reservationCreatedAt: order.reservationCreatedAt?.toISOString() ?? null,
+        reservationReleasedAt: order.reservationReleasedAt?.toISOString() ?? null,
+        layawayExpiresAt: order.layawayExpiresAt?.toISOString() ?? null,
+        expiredAt: order.expiredAt?.toISOString() ?? null,
+        cancellationFeeAmount: Number(order.cancellationFeeAmount),
+        refundedAmount: Number(order.refundedAmount),
         itemCount: toQuantity(pricedLines.reduce((sum, line) => sum + line.quantity, 0)),
         lineCount: pricedLines.length,
         operatorName: order.operatorName,
@@ -9380,6 +10446,10 @@ export async function createOnlineStoreSalesOrder(
           variantColor: line.variantColor,
           lineNote: line.lineNote,
           quantity: line.quantity,
+          sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+          baseUnitOfMeasure: line.baseUnitOfMeasure,
+          uomConversionFactor: line.uomConversionFactor,
+          baseQuantity: line.baseQuantity,
           unitPrice: line.unitPrice,
           discountAmount: line.discountAmount,
           taxAmount: line.taxAmount,
@@ -9391,7 +10461,7 @@ export async function createOnlineStoreSalesOrder(
         ...buildOnlineStoreReceiptBranding(store),
         storeName: store.name,
         transactionNo: order.orderNo,
-        transactionType: "SALES_ORDER",
+        transactionType: isLayaway ? "LAYAWAY" : "SALES_ORDER",
         completedAt: now.toISOString(),
         terminalCode: onlineTerminalCode,
         shiftNo: shift.shiftNo,
@@ -9417,6 +10487,10 @@ export async function createOnlineStoreSalesOrder(
           variantColor: line.variantColor,
           lineNote: line.lineNote,
           quantity: line.quantity,
+          sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+          baseUnitOfMeasure: line.baseUnitOfMeasure,
+          uomConversionFactor: line.uomConversionFactor,
+          baseQuantity: line.baseQuantity,
           unitPrice: line.unitPrice,
           discountAmount: line.discountAmount,
           taxAmount: line.taxAmount,
@@ -9425,68 +10499,138 @@ export async function createOnlineStoreSalesOrder(
         })),
         payments: receiptPayments
       },
-      message: `${order.orderNo} was saved for fulfilment.`,
+      message: `${order.orderNo} was saved as ${isLayaway ? "a layaway" : "a sales order"}.`,
       serverProcessedAt: new Date().toISOString()
     };
   });
 }
 
 export async function cancelOnlineStoreSalesOrder(
-  orderId: string
+  orderId: string,
+  input: CancelOnlineStoreSalesOrderRequest = {},
 ): Promise<CancelOnlineStoreSalesOrderResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("cancelling an online store sales order");
+  const { session, user, store } = await requireOnlineStoreForOperation(
+    "cancelling an online store sales order",
+  );
   const requestedOrderId = optionalText(orderId);
 
   if (!requestedOrderId) {
     throw new Error("Choose an open sales order before cancelling.");
   }
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const order = await tx.salesOrder.findFirst({
       where: {
         id: requestedOrderId,
         retailOrgId: session.retailOrgId,
         storeId: store.id,
-        status: SalesOrderStatus.OPEN
+        status: SalesOrderStatus.OPEN,
       },
       select: {
         id: true,
         orderNo: true,
-        sourceTransactionId: true
-      }
+        sourceTransactionId: true,
+        orderType: true,
+        paidAmount: true,
+        layawayPolicySnapshotJson: true,
+        reservationStatus: true,
+      },
     });
 
     if (!order) {
       throw new Error("Flash ERP could not find that open online sales order.");
     }
 
-    const cancelledAt = new Date();
+    const isLayaway = order.orderType === "LAYAWAY";
 
-    await tx.salesOrder.update({
-      where: {
-        id: order.id
+    if (isLayaway && !sessionHasAllPermissions(session, ["pos.layaway.cancel-refund"])) {
+      throw new Error("Your role is not allowed to cancel and refund layaways.");
+    }
+    if (
+      input.policyOverrideApproved === true &&
+      !sessionHasAllPermissions(session, ["pos.layaway.policy.override"])
+    ) {
+      throw new Error("Your role is not allowed to override the layaway policy.");
+    }
+
+    const cancelledAt = new Date();
+    const cancellationAmounts = isLayaway
+      ? calculateLayawayCancellationAmounts({
+          paidAmount: Number(order.paidAmount),
+          policySnapshot: readJsonObject(order.layawayPolicySnapshotJson),
+        })
+      : { cancellationFeeAmount: 0, refundAmount: 0 };
+    let refundPaymentCount = 0;
+
+    if (cancellationAmounts.refundAmount > 0) {
+      const { shift } = await ensureOnlineRegisterShift(tx, { session, user, store });
+      const preparedRefund = await prepareOnlinePayments(
+        tx,
+        session.retailOrgId,
+        Array.isArray(input.refundPayments) ? input.refundPayments : [],
+        cancellationAmounts.refundAmount,
+        {
+          allowChange: false,
+          refund: true,
+          settlementLabel: "layaway cancellation refund",
+          paymentPurpose: "LAYAWAY_REFUND",
+          receiptContext: {
+            shiftId: shift.id,
+            shiftNo: shift.shiftNo,
+            terminalCode: onlineTerminalCode,
+            cashierCode: user.loginId,
+          },
+        },
+      );
+      refundPaymentCount = preparedRefund.payments.length;
+      await tx.posTransaction.update({
+        where: { id: order.sourceTransactionId },
+        data: {
+          payments: {
+            create: preparedRefund.payments.map((payment) => ({
+              ...payment,
+              amount: -Math.abs(Number(payment.amount ?? 0)),
+            })),
+          },
+        },
+      });
+    }
+
+    await tx.salesOrderInventoryReservation.updateMany({
+      where: { salesOrderId: order.id, status: "ACTIVE" },
+      data: {
+        status: "RELEASED",
+        releaseReason: optionalText(input.note) ?? "Layaway cancelled.",
+        releasedAt: cancelledAt,
       },
+    });
+    await tx.salesOrder.update({
+      where: { id: order.id },
       data: {
         status: SalesOrderStatus.CANCELLED,
         cancelledAt,
-        recordVersion: {
-          increment: 1
-        }
-      }
+        reservationStatus:
+          order.reservationStatus === "ACTIVE" ? "RELEASED" : order.reservationStatus,
+        ...(order.reservationStatus === "ACTIVE"
+          ? { reservationReleasedAt: cancelledAt }
+          : {}),
+        cancellationFeeAmount: cancellationAmounts.cancellationFeeAmount,
+        refundedAmount: cancellationAmounts.refundAmount,
+        ...(optionalText(input.note) ? { note: optionalText(input.note) } : {}),
+        recordVersion: { increment: 1 },
+      },
     });
     await tx.posTransaction.updateMany({
       where: {
         id: order.sourceTransactionId,
         retailOrgId: session.retailOrgId,
         storeId: store.id,
-        status: PosTransactionStatus.PARKED
+        status: PosTransactionStatus.PARKED,
       },
       data: {
         status: PosTransactionStatus.VOIDED,
-        recordVersion: {
-          increment: 1
-        }
-      }
+        recordVersion: { increment: 1 },
+      },
     });
     await tx.securityLog.create({
       data: {
@@ -9494,27 +10638,341 @@ export async function cancelOnlineStoreSalesOrder(
         kind: SecurityLogKind.AUDIT,
         severity: SecurityLogSeverity.INFO,
         category: "ONLINE_STORE",
-        action: "SALES_ORDER_CANCELLED",
+        action: isLayaway ? "LAYAWAY_CANCELLED" : "SALES_ORDER_CANCELLED",
         actorLabel: user.loginId,
-        targetType: "Sales order",
+        targetType: isLayaway ? "Layaway" : "Sales order",
         targetRef: order.orderNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} cancelled online sales order ${order.orderNo} for ${store.code}.`,
+        message: `${user.loginId} cancelled online ${isLayaway ? "layaway" : "sales order"} ${order.orderNo} for ${store.code}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
-          orderNo: order.orderNo
-        } satisfies Prisma.InputJsonValue)
-      }
+          orderNo: order.orderNo,
+          cancellationFeeAmount: cancellationAmounts.cancellationFeeAmount,
+          refundedAmount: cancellationAmounts.refundAmount,
+          refundPaymentCount,
+        } satisfies Prisma.InputJsonValue),
+      },
     });
 
     return {
       orderId: order.id,
       orderNo: order.orderNo,
-      status: SalesOrderStatus.CANCELLED,
-      message: `${order.orderNo} was cancelled.`,
-      serverProcessedAt: new Date().toISOString()
+      isLayaway,
+      refundAmount: cancellationAmounts.refundAmount,
     };
   });
+  const salesOrder = await getOnlineStoreSalesOrderSummaryById({
+    retailOrgId: session.retailOrgId,
+    storeId: store.id,
+    orderId: result.orderId,
+  });
+
+  return {
+    orderId: result.orderId,
+    orderNo: result.orderNo,
+    status: SalesOrderStatus.CANCELLED,
+    salesOrder,
+    message: result.isLayaway
+      ? `${result.orderNo} was cancelled and ${result.refundAmount.toFixed(2)} was refunded.`
+      : `${result.orderNo} was cancelled.`,
+    serverProcessedAt: new Date().toISOString(),
+  };
+}
+
+export async function receiveOnlineStoreLayawayPayment(
+  orderId: string,
+  input: ReceiveOnlineStoreLayawayPaymentRequest,
+): Promise<OnlineStoreLayawayActionResponse> {
+  const { session, user, store } = await requireOnlineStoreForOperation(
+    "receiving a layaway payment",
+  );
+
+  if (!sessionHasAllPermissions(session, ["pos.layaway.payment.receive"])) {
+    throw new Error("Your role is not allowed to receive layaway payments.");
+  }
+
+  const requestedOrderId = optionalText(orderId);
+  const paymentInputs = Array.isArray(input.payments) ? input.payments : [];
+  const requestedAmount = toMoney(
+    paymentInputs.reduce(
+      (sum, payment, index) =>
+        sum + normalizeMoney(payment.amount ?? 0, `layaway payment row ${index + 1}`),
+      0,
+    ),
+  );
+
+  if (!requestedOrderId || requestedAmount <= 0) {
+    throw new Error("Add at least one payment before receiving a layaway installment.");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const order = await tx.salesOrder.findFirst({
+      where: {
+        id: requestedOrderId,
+        retailOrgId: session.retailOrgId,
+        storeId: store.id,
+        status: SalesOrderStatus.OPEN,
+        orderType: "LAYAWAY",
+      },
+      select: {
+        id: true,
+        orderNo: true,
+        sourceTransactionId: true,
+        totalAmount: true,
+        paidAmount: true,
+        balanceAmount: true,
+      },
+    });
+
+    if (!order) {
+      throw new Error("Flash ERP could not find that open layaway.");
+    }
+    if (requestedAmount > Number(order.balanceAmount) + 0.005) {
+      throw new Error(
+        `The payment exceeds the layaway balance by ${toMoney(requestedAmount - Number(order.balanceAmount)).toFixed(2)}.`,
+      );
+    }
+
+    const { shift } = await ensureOnlineRegisterShift(tx, { session, user, store });
+    const preparedPayments = await prepareOnlinePayments(
+      tx,
+      session.retailOrgId,
+      paymentInputs,
+      requestedAmount,
+      {
+        allowChange: false,
+        settlementLabel: "layaway installment",
+        paymentPurpose: "LAYAWAY_INSTALLMENT",
+        receiptContext: {
+          shiftId: shift.id,
+          shiftNo: shift.shiftNo,
+          terminalCode: onlineTerminalCode,
+          cashierCode: user.loginId,
+        },
+      },
+    );
+    const paidAmount = toMoney(Number(order.paidAmount) + preparedPayments.paymentTotal);
+    const balanceAmount = toMoney(Math.max(0, Number(order.totalAmount) - paidAmount));
+
+    await tx.posTransaction.update({
+      where: { id: order.sourceTransactionId },
+      data: {
+        paidAmount,
+        payments: { create: preparedPayments.payments },
+        recordVersion: { increment: 1 },
+      },
+    });
+    await tx.salesOrder.update({
+      where: { id: order.id },
+      data: {
+        paidAmount,
+        balanceAmount,
+        ...(optionalText(input.note) ? { note: optionalText(input.note) } : {}),
+        recordVersion: { increment: 1 },
+      },
+    });
+    await tx.securityLog.create({
+      data: {
+        retailOrgId: session.retailOrgId,
+        kind: SecurityLogKind.AUDIT,
+        severity: SecurityLogSeverity.INFO,
+        category: "ONLINE_STORE",
+        action: "LAYAWAY_PAYMENT_RECEIVED",
+        actorLabel: user.loginId,
+        targetType: "Layaway",
+        targetRef: order.orderNo,
+        sourceNodeCode: "ONLINE_DIRECT",
+        message: `${user.loginId} received ${preparedPayments.paymentTotal.toFixed(2)} for ${order.orderNo}.`,
+        detailsJson: serializeJsonField({
+          storeCode: store.code,
+          orderNo: order.orderNo,
+          amount: preparedPayments.paymentTotal,
+          paidAmount,
+          balanceAmount,
+          shiftNo: shift.shiftNo,
+        } satisfies Prisma.InputJsonValue),
+      },
+    });
+
+    return { orderId: order.id, orderNo: order.orderNo, amount: preparedPayments.paymentTotal };
+  });
+  const salesOrder = await getOnlineStoreSalesOrderSummaryById({
+    retailOrgId: session.retailOrgId,
+    storeId: store.id,
+    orderId: result.orderId,
+  });
+
+  return {
+    salesOrder,
+    message: `${result.amount.toFixed(2)} was received for ${result.orderNo}.`,
+    serverProcessedAt: new Date().toISOString(),
+  };
+}
+
+export async function releaseOnlineStoreLayawayReservation(
+  orderId: string,
+  input: { reason?: string | null },
+): Promise<OnlineStoreLayawayActionResponse> {
+  const { session, user, store } = await requireOnlineStoreForOperation(
+    "releasing a layaway stock reservation",
+  );
+
+  if (!sessionHasAllPermissions(session, ["pos.layaway.reservation.release"])) {
+    throw new Error("Your role is not allowed to release layaway stock reservations.");
+  }
+
+  const requestedOrderId = optionalText(orderId);
+  const reason = optionalText(input.reason);
+
+  if (!requestedOrderId || !reason) {
+    throw new Error("Enter a reason before releasing a layaway stock reservation.");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const order = await tx.salesOrder.findFirst({
+      where: {
+        id: requestedOrderId,
+        retailOrgId: session.retailOrgId,
+        storeId: store.id,
+        status: SalesOrderStatus.OPEN,
+        orderType: "LAYAWAY",
+      },
+      select: { id: true, orderNo: true, reservationStatus: true },
+    });
+
+    if (!order || order.reservationStatus !== "ACTIVE") {
+      throw new Error("Flash ERP could not find an active reservation for that open layaway.");
+    }
+
+    const releasedAt = new Date();
+    await tx.salesOrderInventoryReservation.updateMany({
+      where: { salesOrderId: order.id, status: "ACTIVE" },
+      data: { status: "RELEASED", releaseReason: reason, releasedAt },
+    });
+    await tx.salesOrder.update({
+      where: { id: order.id },
+      data: {
+        reservationStatus: "RELEASED",
+        reservationReleasedAt: releasedAt,
+        recordVersion: { increment: 1 },
+      },
+    });
+    await tx.securityLog.create({
+      data: {
+        retailOrgId: session.retailOrgId,
+        kind: SecurityLogKind.AUDIT,
+        severity: SecurityLogSeverity.INFO,
+        category: "ONLINE_STORE",
+        action: "LAYAWAY_RESERVATION_RELEASED",
+        actorLabel: user.loginId,
+        targetType: "Layaway",
+        targetRef: order.orderNo,
+        sourceNodeCode: "ONLINE_DIRECT",
+        message: `${user.loginId} released the stock reservation for ${order.orderNo}.`,
+        detailsJson: serializeJsonField({ storeCode: store.code, reason } satisfies Prisma.InputJsonValue),
+      },
+    });
+    return { orderId: order.id, orderNo: order.orderNo };
+  });
+  const salesOrder = await getOnlineStoreSalesOrderSummaryById({
+    retailOrgId: session.retailOrgId,
+    storeId: store.id,
+    orderId: result.orderId,
+  });
+
+  return {
+    salesOrder,
+    message: `${result.orderNo} stock reservation was released.`,
+    serverProcessedAt: new Date().toISOString(),
+  };
+}
+
+export async function expireOnlineStoreLayaway(
+  orderId: string,
+  input: { reason?: string | null },
+): Promise<OnlineStoreLayawayActionResponse> {
+  const { session, user, store } = await requireOnlineStoreForOperation("expiring a layaway");
+
+  if (!sessionHasAllPermissions(session, ["pos.layaway.reservation.release"])) {
+    throw new Error("Your role is not allowed to expire layaways.");
+  }
+
+  const requestedOrderId = optionalText(orderId);
+  const result = await prisma.$transaction(async (tx) => {
+    const order = await tx.salesOrder.findFirst({
+      where: {
+        id: requestedOrderId ?? "",
+        retailOrgId: session.retailOrgId,
+        storeId: store.id,
+        status: SalesOrderStatus.OPEN,
+        orderType: "LAYAWAY",
+      },
+      select: {
+        id: true,
+        orderNo: true,
+        sourceTransactionId: true,
+        layawayExpiresAt: true,
+      },
+    });
+
+    if (!order?.layawayExpiresAt) {
+      throw new Error("Flash ERP could not find an open layaway with an expiry date.");
+    }
+
+    const expiredAt = new Date();
+
+    if (order.layawayExpiresAt.getTime() > expiredAt.getTime()) {
+      throw new Error(`${order.orderNo} is not due to expire yet.`);
+    }
+
+    const reason = optionalText(input.reason) ?? "Layaway expired before fulfilment.";
+    await tx.salesOrderInventoryReservation.updateMany({
+      where: { salesOrderId: order.id, status: "ACTIVE" },
+      data: { status: "EXPIRED", releaseReason: reason, releasedAt: expiredAt },
+    });
+    await tx.salesOrder.update({
+      where: { id: order.id },
+      data: {
+        status: "EXPIRED",
+        reservationStatus: "EXPIRED",
+        reservationReleasedAt: expiredAt,
+        expiredAt,
+        note: reason,
+        recordVersion: { increment: 1 },
+      },
+    });
+    await tx.posTransaction.updateMany({
+      where: { id: order.sourceTransactionId, status: PosTransactionStatus.PARKED },
+      data: { status: PosTransactionStatus.VOIDED, recordVersion: { increment: 1 } },
+    });
+    await tx.securityLog.create({
+      data: {
+        retailOrgId: session.retailOrgId,
+        kind: SecurityLogKind.AUDIT,
+        severity: SecurityLogSeverity.INFO,
+        category: "ONLINE_STORE",
+        action: "LAYAWAY_EXPIRED",
+        actorLabel: user.loginId,
+        targetType: "Layaway",
+        targetRef: order.orderNo,
+        sourceNodeCode: "ONLINE_DIRECT",
+        message: `${user.loginId} expired ${order.orderNo}.`,
+        detailsJson: serializeJsonField({ storeCode: store.code, reason } satisfies Prisma.InputJsonValue),
+      },
+    });
+    return { orderId: order.id, orderNo: order.orderNo };
+  });
+  const salesOrder = await getOnlineStoreSalesOrderSummaryById({
+    retailOrgId: session.retailOrgId,
+    storeId: store.id,
+    orderId: result.orderId,
+  });
+
+  return {
+    salesOrder,
+    message: `${result.orderNo} expired and its stock reservation was released.`,
+    serverProcessedAt: new Date().toISOString(),
+  };
 }
 
 export async function createOnlineStoreSalesOrderFulfilmentTransfers(
@@ -9642,6 +11100,10 @@ export async function createOnlineStoreSalesOrderFulfilmentTransfers(
         productCodeSnapshot: true,
         productNameSnapshot: true,
         quantity: true,
+        sellingUnitOfMeasure: true,
+        baseUnitOfMeasure: true,
+        uomConversionFactor: true,
+        baseQuantity: true,
         product: {
           select: {
             id: true,
@@ -9730,7 +11192,7 @@ export async function createOnlineStoreSalesOrderFulfilmentTransfers(
           .map((line) => ({
             order,
             line,
-            quantity: toQuantity(line.quantity)
+            quantity: toQuantity(line.baseQuantity ?? line.quantity)
           }))
       ).filter((entry) => entry.quantity > 0);
 
@@ -9758,6 +11220,12 @@ export async function createOnlineStoreSalesOrderFulfilmentTransfers(
             origin: InterStoreTransferOrigin.ENTERPRISE,
             status: InterStoreTransferStatus.REQUESTED,
             requestedQuantity: entry.quantity,
+            requestedUnitOfMeasure:
+              entry.line.sellingUnitOfMeasure ?? entry.line.baseUnitOfMeasure ?? "EA",
+            requestedUnitQuantity: toQuantity(entry.line.quantity),
+            uomConversionFactor: Number(entry.line.uomConversionFactor ?? 1),
+            baseUnitOfMeasure:
+              entry.line.baseUnitOfMeasure ?? entry.line.sellingUnitOfMeasure ?? "EA",
             unitCost: entry.line.product.baseCostPrice ? Number(entry.line.product.baseCostPrice) : null,
             requestNote:
               operatorNote ??
@@ -10046,6 +11514,8 @@ async function requireOnlineStoreForOperation(operationLabel: string) {
   await Promise.all([
     ensureInventoryLocationSalesOrderSchemaCompatibility(),
     ensureOperatingExpenseSchemaCompatibility(),
+    ensureAlternateUomSellingSchemaCompatibility(),
+    ensureLayawayLifecycleSchemaCompatibility(),
     ensureProductVariantSalesOrderDepositSchemaCompatibility()
   ]);
 
@@ -10366,7 +11836,6 @@ export async function lookupOnlineStoreRemoteInventory(
   const query = optionalText(input.query);
   const productCode = optionalText(input.productCode);
   const storeCode = optionalText(input.storeCode);
-  const locationCode = optionalText(input.locationCode);
   const requestedLimit = Number(input.limit ?? 30);
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(50, Math.max(1, Math.trunc(requestedLimit)))
@@ -10424,7 +11893,6 @@ export async function lookupOnlineStoreRemoteInventory(
         storeId: {
           not: store.id
         },
-        ...(locationCode ? { code: locationCode } : {}),
         store: {
           ...(storeCode ? { code: storeCode } : {}),
           status: RecordStatus.ACTIVE
@@ -10473,32 +11941,47 @@ export async function lookupOnlineStoreRemoteInventory(
   });
   const productsById = new Map(products.map((product) => [product.id, product] as const));
   const locationsById = new Map(locations.map((location) => [location.id, location] as const));
-  const rows = balances
-    .map((balance) => {
+  const rowsByStoreAndProduct = new Map<
+    string,
+    OnlineStoreRemoteInventoryLookupResponse["rows"][number]
+  >();
+
+  for (const balance of balances) {
       const product = productsById.get(balance.productId);
       const location = locationsById.get(balance.inventoryLocationId);
       const quantityOnHand = toQuantity(balance._sum.quantity);
 
-      if (!product || !location?.store || quantityOnHand <= 0) {
-        return null;
+      if (!product || !location?.store) {
+        continue;
       }
 
-      return {
+      const key = `${location.store.code}\u0000${product.code}`;
+      const existing = rowsByStoreAndProduct.get(key);
+      const updatedAt =
+        balance._max.occurredAt?.toISOString() ?? new Date().toISOString();
+      rowsByStoreAndProduct.set(key, {
         storeCode: location.store.code,
         storeName: location.store.name,
-        locationCode: location.code,
-        locationName: location.name,
+        locationCode: "",
+        locationName: "All active locations",
         productCode: product.code,
         productName: product.name,
         departmentCode: product.department,
         categoryCode: product.category,
         subcategory: product.subcategory,
-        quantityOnHand,
+        quantityOnHand: toQuantity(
+          (existing?.quantityOnHand ?? 0) + quantityOnHand
+        ),
         unitPrice: toMoney(Number(product.priceListEntries[0]?.unitPrice ?? product.baseUnitPrice)),
-        updatedAt: balance._max.occurredAt?.toISOString() ?? new Date().toISOString()
-      };
-    })
-    .filter((row): row is OnlineStoreRemoteInventoryLookupResponse["rows"][number] => row !== null)
+        updatedAt:
+          !existing || new Date(updatedAt) > new Date(existing.updatedAt)
+            ? updatedAt
+            : existing.updatedAt
+      });
+  }
+
+  const rows = Array.from(rowsByStoreAndProduct.values())
+    .filter((row) => row.quantityOnHand > 0)
     .sort((left, right) => right.quantityOnHand - left.quantityOnHand)
     .slice(0, limit);
 
@@ -10627,6 +12110,8 @@ function normalizeReportDateEnd(value: string | null) {
 function normalizeOnlineReportId(value: unknown): OnlineStoreReportId {
   return value === "products" ||
     value === "orders" ||
+    value === "layaways" ||
+    value === "layawayPayments" ||
     value === "tenders" ||
     value === "inventory" ||
     value === "banking" ||
@@ -10971,11 +12456,16 @@ export async function createOnlineStoreCorrection(
             id: true,
             productId: true,
             inventoryLocationId: true,
+            productVariantId: true,
             productCodeSnapshot: true,
             productNameSnapshot: true,
             variantSizeSnapshot: true,
             variantColorSnapshot: true,
             quantity: true,
+            sellingUnitOfMeasure: true,
+            baseUnitOfMeasure: true,
+            uomConversionFactor: true,
+            baseQuantity: true,
             unitPrice: true,
             discountAmount: true,
             appliedPromotionNameSnapshot: true,
@@ -11062,6 +12552,8 @@ export async function createOnlineStoreCorrection(
       }
 
       const quantity = normalizeQuantity(lineInput.quantity);
+      const uomConversionFactor = Number(sourceLine.uomConversionFactor ?? 1);
+      const baseQuantity = toQuantity(quantity * uomConversionFactor);
       const alreadyReturned = returnedQuantityByLineId.get(sourceLineId) ?? 0;
       const availableQuantity = toQuantity(Math.max(0, Number(sourceLine.quantity) - alreadyReturned));
 
@@ -11077,7 +12569,7 @@ export async function createOnlineStoreCorrection(
       const batchAllocations = sourceLine.product.trackExpiry
         ? takeOutstandingInventoryBatchAllocations({
             productName: sourceLine.productNameSnapshot,
-            quantity,
+            quantity: baseQuantity,
             issued: sourceBatchAllocations,
             received:
               returnedBatchAllocationsByLineId.get(sourceLineId) ?? []
@@ -11088,6 +12580,10 @@ export async function createOnlineStoreCorrection(
         sourceLine,
         sourceLineId,
         batchAllocations,
+        sellingUnitOfMeasure: sourceLine.sellingUnitOfMeasure,
+        baseUnitOfMeasure: sourceLine.baseUnitOfMeasure,
+        uomConversionFactor,
+        baseQuantity,
         ...buildSourceLineAmounts(sourceLine, quantity)
       };
     });
@@ -11134,13 +12630,37 @@ export async function createOnlineStoreCorrection(
               code: true,
               name: true,
               productType: true,
+              unitOfMeasure: true,
+              baseUnitOfMeasure: { select: { code: true } },
               baseUnitPrice: true,
+              storeProductSellingUnits: {
+                where: {
+                  storeId: store.id,
+                  status: RecordStatus.ACTIVE
+                },
+                select: {
+                  productVariantId: true,
+                  unitOfMeasureCodeSnapshot: true,
+                  unitOfMeasureNameSnapshot: true,
+                  conversionFactor: true,
+                  unitPrice: true,
+                  barcode: true,
+                  isDefault: true,
+                  unitOfMeasure: {
+                    select: {
+                      allowFractionalSale: true,
+                      decimalPrecision: true
+                    }
+                  }
+                }
+              },
               baseCostPrice: true,
               mustEnterPriceAtPos: true,
               trackInventory: true,
               trackExpiry: true,
               trackSize: true,
               trackColor: true,
+              isSerialized: true,
               taxProfile: {
                 select: {
                   ratePercent: true,
@@ -11160,14 +12680,35 @@ export async function createOnlineStoreCorrection(
 
       const quantity = normalizeQuantity(lineInput.quantity);
       const baseUnitPrice = Number(product.baseUnitPrice);
-      const requestedPrice = Number(lineInput.unitPrice ?? baseUnitPrice);
-      const normalizedRequestedPrice = Number.isFinite(requestedPrice) ? toMoney(requestedPrice) : baseUnitPrice;
+      const sellingUom = resolvePosSellingUom({
+        baseUnitOfMeasure: product.baseUnitOfMeasure?.code ?? product.unitOfMeasure,
+        baseUnitPrice,
+        quantity,
+        selectedUnitOfMeasure: lineInput.sellingUnitOfMeasure,
+        sellingUnits: product.storeProductSellingUnits
+          .filter((sellingUnit) => sellingUnit.productVariantId === null)
+          .map((sellingUnit) => ({
+            unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+            unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+            conversionFactor: Number(sellingUnit.conversionFactor),
+            unitPrice: Number(sellingUnit.unitPrice),
+            barcode: sellingUnit.barcode,
+            isDefault: sellingUnit.isDefault,
+            allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+            decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+          })),
+        serialized: product.isSerialized
+      });
+      const requestedPrice = Number(lineInput.unitPrice ?? sellingUom.unitPrice);
+      const normalizedRequestedPrice = Number.isFinite(requestedPrice)
+        ? toMoney(requestedPrice)
+        : toMoney(sellingUom.unitPrice);
       const manualPriceOverride =
         !product.mustEnterPriceAtPos &&
         lineInput.unitPrice !== null &&
         lineInput.unitPrice !== undefined &&
         normalizedRequestedPrice > 0 &&
-        normalizedRequestedPrice !== baseUnitPrice;
+        normalizedRequestedPrice !== toMoney(sellingUom.unitPrice);
       const overrideDiscountAmount =
         lineInput.overrideDiscountAmount === null || lineInput.overrideDiscountAmount === undefined
           ? 0
@@ -11175,7 +12716,7 @@ export async function createOnlineStoreCorrection(
 
       if (manualPriceOverride) {
         correctionManagerPermissionCodes.add("pos.override.price");
-        correctionOverrideNotes.push(`${product.code} replacement price ${baseUnitPrice.toFixed(2)} -> ${normalizedRequestedPrice.toFixed(2)}`);
+        correctionOverrideNotes.push(`${product.code} replacement price ${sellingUom.unitPrice.toFixed(2)} -> ${normalizedRequestedPrice.toFixed(2)}`);
       }
 
       if (overrideDiscountAmount > 0) {
@@ -11186,7 +12727,7 @@ export async function createOnlineStoreCorrection(
       const unitPrice =
         (product.mustEnterPriceAtPos || manualPriceOverride) && normalizedRequestedPrice > 0
           ? normalizedRequestedPrice
-          : baseUnitPrice;
+        : sellingUom.unitPrice;
       const variantSize = product.trackSize ? optionalText(lineInput.variantSize) : null;
       const variantColor = product.trackColor ? optionalText(lineInput.variantColor) : null;
       const lineNote = optionalText(lineInput.lineNote);
@@ -11202,6 +12743,10 @@ export async function createOnlineStoreCorrection(
       return {
         product,
         quantity,
+        sellingUnitOfMeasure: sellingUom.sellingUnitOfMeasure,
+        baseUnitOfMeasure: sellingUom.baseUnitOfMeasure,
+        uomConversionFactor: sellingUom.uomConversionFactor,
+        baseQuantity: sellingUom.baseQuantity,
         variantSize,
         variantColor,
         lineNote,
@@ -11233,7 +12778,7 @@ export async function createOnlineStoreCorrection(
 
       requestedSaleQuantityByProduct.set(
         line.product.id,
-        toQuantity((requestedSaleQuantityByProduct.get(line.product.id) ?? 0) + line.quantity)
+        toQuantity((requestedSaleQuantityByProduct.get(line.product.id) ?? 0) + line.baseQuantity)
       );
     }
 
@@ -11262,7 +12807,7 @@ export async function createOnlineStoreCorrection(
         return false;
       }
 
-      const requestedQuantity = requestedSaleQuantityByProduct.get(line.product.id) ?? line.quantity;
+      const requestedQuantity = requestedSaleQuantityByProduct.get(line.product.id) ?? line.baseQuantity;
       const availableQuantity = availableQuantityByProduct.get(line.product.id) ?? 0;
 
       return availableQuantity < requestedQuantity;
@@ -11283,7 +12828,7 @@ export async function createOnlineStoreCorrection(
 
         const allocations = allocateInventoryBatchesFefo({
           productName: line.product.name,
-          quantity: line.quantity,
+          quantity: line.baseQuantity,
           batches: (
             await tx.inventoryBatch.findMany({
               where: {
@@ -11428,6 +12973,7 @@ export async function createOnlineStoreCorrection(
           create: [
             ...preparedReturnLines.map((line) => ({
               productId: line.sourceLine.productId,
+              productVariantId: line.sourceLine.productVariantId,
               inventoryLocationId:
                 line.sourceLine.inventoryLocationId ?? salesLocation.id,
               lineIntent: PosTransactionLineIntent.RETURN,
@@ -11436,6 +12982,10 @@ export async function createOnlineStoreCorrection(
               productNameSnapshot: line.sourceLine.productNameSnapshot,
               variantSizeSnapshot: line.sourceLine.variantSizeSnapshot,
               variantColorSnapshot: line.sourceLine.variantColorSnapshot,
+              sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+              baseUnitOfMeasure: line.baseUnitOfMeasure,
+              uomConversionFactor: line.uomConversionFactor,
+              baseQuantity: line.baseQuantity,
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               discountAmount: line.discountAmount,
@@ -11458,6 +13008,10 @@ export async function createOnlineStoreCorrection(
               productNameSnapshot: line.product.name,
               variantSizeSnapshot: line.variantSize,
               variantColorSnapshot: line.variantColor,
+              sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+              baseUnitOfMeasure: line.baseUnitOfMeasure,
+              uomConversionFactor: line.uomConversionFactor,
+              baseQuantity: line.baseQuantity,
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               discountAmount: line.discountAmount,
@@ -11623,7 +13177,7 @@ export async function createOnlineStoreCorrection(
               ? new Date(batch.expiryDate)
               : null,
             movementType: InventoryMovementType.RETURN,
-            quantity: batch?.quantity ?? line.quantity,
+            quantity: batch?.quantity ?? line.baseQuantity,
             unitCost: line.sourceLine.product.baseCostPrice,
             referenceType: "POS_TRANSACTION",
             referenceId: transaction.id,
@@ -11651,7 +13205,7 @@ export async function createOnlineStoreCorrection(
               ? new Date(batch.expiryDate)
               : null,
             movementType: InventoryMovementType.SALE,
-            quantity: -(batch?.quantity ?? line.quantity),
+            quantity: -(batch?.quantity ?? line.baseQuantity),
             unitCost: line.product.baseCostPrice,
             referenceType: "POS_TRANSACTION",
             referenceId: transaction.id,
@@ -11740,6 +13294,12 @@ export async function createOnlineStoreCorrection(
             variantColor: line.sourceLine.variantColorSnapshot,
             lineNote: line.sourceLine.lineNote ?? null,
             quantity: line.quantity,
+            sellingUnitOfMeasure:
+              line.sellingUnitOfMeasure ?? line.baseUnitOfMeasure ?? "EA",
+            baseUnitOfMeasure:
+              line.baseUnitOfMeasure ?? line.sellingUnitOfMeasure ?? "EA",
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
             taxAmount: line.taxAmount,
@@ -11753,6 +13313,10 @@ export async function createOnlineStoreCorrection(
             variantColor: line.variantColor,
             lineNote: line.lineNote,
             quantity: line.quantity,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
             taxAmount: line.taxAmount,
@@ -13168,7 +14732,11 @@ export async function createOnlineStoreStockCount(
         `${product.name} batch counts total ${formatNumberForMessage(countedBatchTotal)}, not ${formatNumberForMessage(countedQuantity)}.`
       );
     }
-    const sessionNo = `WEB-CNT-${store.code.toUpperCase()}-${Date.now()}`;
+    const requestedSheetNo = optionalText(input.sheetNo)?.toUpperCase() ?? null;
+    const requestedLineNo = Math.max(1, Math.trunc(Number(input.lineNo ?? 1)));
+    const sessionNo = requestedSheetNo
+      ? `${requestedSheetNo}-L${String(requestedLineNo).padStart(3, "0")}`
+      : `WEB-CNT-${store.code.toUpperCase()}-${Date.now()}`;
     const now = new Date();
     const commitNow = input.commitNow !== false;
     const countSession = await tx.stockCountSession.create({
@@ -13561,8 +15129,7 @@ export async function createOnlineStoreTransferRequest(
         code: true,
         inventoryLocations: {
           where: {
-            status: RecordStatus.ACTIVE,
-            ...(input.sourceInventoryLocationId ? { id: input.sourceInventoryLocationId } : {})
+            status: RecordStatus.ACTIVE
           },
           orderBy: [
             { useForSalesDefault: "desc" },
@@ -13633,11 +15200,54 @@ export async function createOnlineStoreTransferRequest(
   const externalReference = optionalText(input.externalReference);
   const requiredAt = optionalText(input.requiredAt);
   const requiredAtDate = requiredAt ? new Date(`${requiredAt}T00:00:00`) : null;
+  const requestedTransferBatchNo = optionalText(input.transferBatchNo);
 
   return prisma.$transaction(async (tx) => {
     const now = new Date();
     const timestamp = now.getTime();
-    const transferBatchNo = `WEB-TRF-${store.code.toUpperCase()}-${timestamp}`;
+    const existingDrafts = requestedTransferBatchNo
+      ? await tx.interStoreTransfer.findMany({
+          where: {
+            retailOrgId: session.retailOrgId,
+            transferBatchNo: requestedTransferBatchNo
+          },
+          select: {
+            id: true,
+            destinationStoreId: true,
+            origin: true,
+            status: true
+          }
+        })
+      : [];
+
+    if (requestedTransferBatchNo && existingDrafts.length === 0) {
+      throw new Error("Flash ERP could not find that online transfer request draft.");
+    }
+
+    if (
+      existingDrafts.some(
+        (draft) =>
+          draft.destinationStoreId !== store.id ||
+          draft.origin !== InterStoreTransferOrigin.STORE_REQUEST ||
+          draft.status !== InterStoreTransferStatus.DRAFT
+      )
+    ) {
+      throw new Error(
+        `${requestedTransferBatchNo} is not an amendable draft for this online store.`
+      );
+    }
+
+    if (existingDrafts.length > 0) {
+      await tx.interStoreTransfer.deleteMany({
+        where: {
+          id: { in: existingDrafts.map((draft) => draft.id) }
+        }
+      });
+    }
+
+    const transferBatchNo =
+      requestedTransferBatchNo ??
+      `WEB-TRF-${store.code.toUpperCase()}-${timestamp}`;
     const createdTransfers = [];
 
     for (const [index, lineInput] of preparedLineInputs.entries()) {
@@ -13668,7 +15278,7 @@ export async function createOnlineStoreTransferRequest(
           externalReference,
           workflowType: isFuelTransferProduct(product) ? "FUEL_TRANSFER" : null,
           origin: InterStoreTransferOrigin.STORE_REQUEST,
-          status: InterStoreTransferStatus.REQUESTED,
+          status: InterStoreTransferStatus.DRAFT,
           requestedQuantity: transferUom.baseQuantity,
           requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
           requestedUnitQuantity: transferUom.requestedUnitQuantity,
@@ -13709,12 +15319,12 @@ export async function createOnlineStoreTransferRequest(
         kind: SecurityLogKind.AUDIT,
         severity: SecurityLogSeverity.INFO,
         category: "ONLINE_STORE",
-        action: "TRANSFER_REQUESTED",
+        action: existingDrafts.length > 0 ? "TRANSFER_DRAFT_AMENDED" : "TRANSFER_DRAFT_SAVED",
         actorLabel: user.loginId,
         targetType: "Inter-store transfer",
         targetRef: transferBatchNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} requested online transfer ${transferBatchNo} for ${store.code}.`,
+        message: `${user.loginId} ${existingDrafts.length > 0 ? "amended" : "saved"} online transfer draft ${transferBatchNo} for ${store.code}.`,
         detailsJson: serializeJsonField({
           sourceStoreCode: sourceStore.code,
           destinationStoreCode: store.code,
@@ -13724,19 +15334,120 @@ export async function createOnlineStoreTransferRequest(
       }
     });
 
-    for (const transfer of createdTransfers) {
-      await queueInterStoreTransferPublication(tx, {
-        transferId: transfer.transferId,
-        publishedAt: now
-      });
-    }
-
     return {
       transferNo: createdTransfers[0]?.transferNo ?? transferBatchNo,
       transferBatchNo,
       createdTransfers,
-      message: `Flash ERP created transfer request ${transferBatchNo} directly in enterprise.`,
+      message: `${transferBatchNo} was ${existingDrafts.length > 0 ? "updated" : "saved"} as a ${createdTransfers.length}-line draft. Send it when it is ready for the source shop.`,
       serverProcessedAt: new Date().toISOString()
+    };
+  });
+}
+
+export async function submitOnlineStoreTransferRequest(
+  transferBatchNoInput: string
+): Promise<CreateOnlineStoreTransferResponse> {
+  const { session, user, store } = await requireOnlineStoreForOperation(
+    "sending an inter-store transfer request online"
+  );
+
+  if (!sessionHasAllPermissions(session, ["inventory.transfer.request"])) {
+    throw new Error("Flash ERP requires transfer request privileges before sending stock requests.");
+  }
+
+  const transferBatchNo = optionalText(transferBatchNoInput);
+
+  if (!transferBatchNo) {
+    throw new Error("Choose a saved transfer request draft before sending it.");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const drafts = await tx.interStoreTransfer.findMany({
+      where: {
+        retailOrgId: session.retailOrgId,
+        destinationStoreId: store.id,
+        transferBatchNo
+      },
+      orderBy: [{ lineNo: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        transferNo: true,
+        transferBatchNo: true,
+        productId: true,
+        requestedQuantity: true,
+        origin: true,
+        status: true
+      }
+    });
+
+    if (drafts.length === 0) {
+      throw new Error("Flash ERP could not find that online transfer request draft.");
+    }
+
+    if (
+      drafts.some(
+        (draft) =>
+          draft.origin !== InterStoreTransferOrigin.STORE_REQUEST ||
+          draft.status !== InterStoreTransferStatus.DRAFT
+      )
+    ) {
+      throw new Error(`${transferBatchNo} has already been sent and cannot be sent again.`);
+    }
+
+    const now = new Date();
+    await tx.interStoreTransfer.updateMany({
+      where: { id: { in: drafts.map((draft) => draft.id) } },
+      data: {
+        status: InterStoreTransferStatus.REQUESTED,
+        requestedAt: now,
+        requestedByNodeCode: "ONLINE_DIRECT",
+        destinationNodeCode: "ONLINE_DIRECT"
+      }
+    });
+
+    for (const transfer of drafts) {
+      await queueInterStoreTransferPublication(tx, {
+        transferId: transfer.id,
+        publishedAt: now
+      });
+    }
+
+    await tx.securityLog.create({
+      data: {
+        retailOrgId: session.retailOrgId,
+        kind: SecurityLogKind.AUDIT,
+        severity: SecurityLogSeverity.INFO,
+        category: "ONLINE_STORE",
+        action: "TRANSFER_REQUEST_SENT",
+        actorLabel: user.loginId,
+        targetType: "Inter-store transfer",
+        targetRef: transferBatchNo,
+        sourceNodeCode: "ONLINE_DIRECT",
+        message: `${user.loginId} sent online transfer request ${transferBatchNo} from ${store.code}.`,
+        detailsJson: serializeJsonField({
+          destinationStoreCode: store.code,
+          lineCount: drafts.length,
+          quantity: toQuantity(
+            drafts.reduce(
+              (sum, transfer) => sum + Number(transfer.requestedQuantity),
+              0
+            )
+          )
+        } satisfies Prisma.InputJsonValue)
+      }
+    });
+
+    return {
+      transferNo: drafts[0]?.transferNo ?? transferBatchNo,
+      transferBatchNo,
+      createdTransfers: drafts.map((transfer) => ({
+        transferId: transfer.id,
+        transferNo: transfer.transferNo,
+        productId: transfer.productId,
+        quantity: toQuantity(transfer.requestedQuantity)
+      })),
+      message: `${transferBatchNo} was sent with ${drafts.length} line(s) and is now pending issue by the source shop.`,
+      serverProcessedAt: now.toISOString()
     };
   });
 }
@@ -13745,6 +15456,7 @@ export async function processOnlineStoreTransfer(
   input: {
     transferId?: string | null;
     action: "ISSUE" | "RECEIVE";
+    sourceInventoryLocationId?: string | null;
     quantity: number;
     serialNumbers?: string[] | null;
     transporterName?: string | null;
@@ -13770,6 +15482,9 @@ export async function processOnlineStoreTransfer(
 
   const transferId = optionalText(input.transferId);
   const quantity = normalizeQuantity(input.quantity);
+  const requestedSourceLocationId = optionalText(
+    input.sourceInventoryLocationId
+  );
   const serialNumbers = normalizeSerialNumbers(input.serialNumbers);
   const note = optionalText(input.note);
   const transporterName = optionalText(input.transporterName);
@@ -13878,6 +15593,50 @@ export async function processOnlineStoreTransfer(
         throw new Error(`${transfer.transferNo} is ${String(transfer.status).toLowerCase().replace(/_/g, " ")} and cannot issue more stock.`);
       }
 
+      const selectedSourceLocation = requestedSourceLocationId
+        ? await tx.inventoryLocation.findFirst({
+            where: {
+              id: requestedSourceLocationId,
+              retailOrgId: session.retailOrgId,
+              storeId: transfer.sourceStoreId,
+              status: RecordStatus.ACTIVE
+            },
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              warehouseId: true
+            }
+          })
+        : null;
+
+      if (!selectedSourceLocation) {
+        throw new Error(
+          "Choose the dispatch location in this source shop before issuing stock."
+        );
+      }
+
+      if (
+        issuedQuantity > 0 &&
+        selectedSourceLocation.id !== transfer.sourceInventoryLocationId
+      ) {
+        throw new Error(
+          `${transfer.transferNo} has already started issuing from ${transfer.sourceInventoryLocation.name}; complete it from the same location.`
+        );
+      }
+
+      if (
+        issuedQuantity <= 0 &&
+        selectedSourceLocation.id !== transfer.sourceInventoryLocationId
+      ) {
+        await tx.interStoreTransfer.update({
+          where: { id: transfer.id },
+          data: {
+            sourceInventoryLocationId: selectedSourceLocation.id
+          }
+        });
+      }
+
       const outstandingIssueQuantity = toQuantity(Math.max(0, requestedQuantity - issuedQuantity));
 
       if (quantity - outstandingIssueQuantity > 0.0001) {
@@ -13888,7 +15647,7 @@ export async function processOnlineStoreTransfer(
         where: {
           retailOrgId: session.retailOrgId,
           storeId: store.id,
-          inventoryLocationId: transfer.sourceInventoryLocationId,
+          inventoryLocationId: selectedSourceLocation.id,
           productId: transfer.product.id
         },
         _sum: {
@@ -13898,7 +15657,7 @@ export async function processOnlineStoreTransfer(
       const availableQuantity = toQuantity(sourcePosition._sum.quantity);
 
       if (quantity - availableQuantity > 0.0001) {
-        throw new Error(`Only ${formatNumberForMessage(availableQuantity)} ${transfer.product.name} is available in ${transfer.sourceInventoryLocation.code}.`);
+        throw new Error(`Only ${formatNumberForMessage(availableQuantity)} ${transfer.product.name} is available in ${selectedSourceLocation.code}.`);
       }
 
       const issueBatchAllocations = transfer.product.trackExpiry
@@ -13908,7 +15667,7 @@ export async function processOnlineStoreTransfer(
             batches: (await tx.inventoryBatch.findMany({
               where: {
                 retailOrgId: session.retailOrgId,
-                inventoryLocationId: transfer.sourceInventoryLocationId,
+                inventoryLocationId: selectedSourceLocation.id,
                 productId: transfer.product.id,
                 quantityOnHand: { gt: 0 }
               },
@@ -13939,7 +15698,7 @@ export async function processOnlineStoreTransfer(
           where: {
             retailOrgId: session.retailOrgId,
             storeId: store.id,
-            inventoryLocationId: transfer.sourceInventoryLocationId,
+            inventoryLocationId: selectedSourceLocation.id,
             productId: transfer.product.id,
             serialNumber: {
               in: serialNumbers
@@ -13949,7 +15708,7 @@ export async function processOnlineStoreTransfer(
         });
 
         if (availableSerialCount !== serialNumbers.length) {
-          throw new Error(`Refresh the transfer and choose serials available at ${transfer.sourceInventoryLocation.code}.`);
+          throw new Error(`Refresh the transfer and choose serials available at ${selectedSourceLocation.code}.`);
         }
       }
 
@@ -13958,7 +15717,7 @@ export async function processOnlineStoreTransfer(
           where: {
             retailOrgId: session.retailOrgId,
             storeId: store.id,
-            inventoryLocationId: transfer.sourceInventoryLocationId,
+            inventoryLocationId: selectedSourceLocation.id,
             productId: transfer.product.id,
             serialNumber: {
               in: serialNumbers
@@ -14022,8 +15781,8 @@ export async function processOnlineStoreTransfer(
             data: {
               retailOrgId: session.retailOrgId,
               storeId: store.id,
-              warehouseId: transfer.sourceInventoryLocation.warehouseId,
-              inventoryLocationId: transfer.sourceInventoryLocationId,
+              warehouseId: selectedSourceLocation.warehouseId,
+              inventoryLocationId: selectedSourceLocation.id,
               productId: transfer.product.id,
               inventoryBatchId: allocation.batchId,
               batchNoSnapshot: allocation.batchNo || null,
@@ -14059,7 +15818,7 @@ export async function processOnlineStoreTransfer(
           issuedBatchAllocationsSnapshot: serializeJsonField(
             issueBatchAllocations.length ? [...issuedBatchAllocations, ...issueBatchAllocations] : null
           ),
-          issueNote: note ?? `Issued ${formatNumberForMessage(quantity)} unit(s) from ${transfer.sourceInventoryLocation.code}.`,
+          issueNote: note ?? `Issued ${formatNumberForMessage(quantity)} unit(s) from ${selectedSourceLocation.code}.`,
           issueOperatorName: user.displayName,
           issueStockUpdateStatus: postStockImmediately ? STOCK_UPDATE_STATUS_POSTED : STOCK_UPDATE_STATUS_PENDING,
           issueStockConfirmedAt: postStockImmediately ? now : null,

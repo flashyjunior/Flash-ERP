@@ -27,11 +27,15 @@ export async function POST(request: Request) {
     const response = await createOnlineStoreSalesOrder({
       customerId: body?.customerId ?? "",
       lines: Array.isArray(body?.lines) ? body.lines : [],
+      orderType: body?.orderType ?? null,
+      payments: Array.isArray(body?.payments) ? body.payments : null,
       depositAmount: body?.depositAmount ?? null,
       depositTenderMethodCode: body?.depositTenderMethodCode ?? null,
       depositReference: body?.depositReference ?? null,
       serviceType: body?.serviceType ?? null,
-      note: body?.note ?? null
+      note: body?.note ?? null,
+      layawayExpiresAt: body?.layawayExpiresAt ?? null,
+      policyOverrideApproved: body?.policyOverrideApproved === true,
     });
 
     return NextResponse.json(response);

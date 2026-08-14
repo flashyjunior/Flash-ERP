@@ -100,7 +100,10 @@ export type SyncPaymentMethod =
 export type SyncPosPaymentPurpose =
   | "TRANSACTION_SETTLEMENT"
   | "SALES_ORDER_DEPOSIT"
-  | "SALES_ORDER_BALANCE";
+  | "SALES_ORDER_BALANCE"
+  | "LAYAWAY_DEPOSIT"
+  | "LAYAWAY_INSTALLMENT"
+  | "LAYAWAY_REFUND";
 
 export type SyncInventoryMovementType =
   | "OPENING_BALANCE"
@@ -159,6 +162,10 @@ export type StorePosTransactionLinePayload = {
   lineNote?: string | null;
   serialNumbers: string[];
   quantity: number;
+  sellingUnitOfMeasure?: string | null;
+  baseUnitOfMeasure?: string | null;
+  uomConversionFactor?: number;
+  baseQuantity?: number;
   unitPrice: number;
   discountAmount: number;
   taxAmount: number;
@@ -273,7 +280,28 @@ export type StoreCustomerAccountEntryRecordedPayload = {
   occurredAt: string;
 };
 
-export type StoreSalesOrderStatus = "OPEN" | "FULFILLED" | "CANCELLED";
+export type StoreSalesOrderStatus = "OPEN" | "FULFILLED" | "CANCELLED" | "EXPIRED";
+export type StoreSalesOrderType = "SALES_ORDER" | "LAYAWAY";
+export type StoreSalesOrderReservationStatus =
+  | "NOT_APPLICABLE"
+  | "ACTIVE"
+  | "RELEASED"
+  | "CONSUMED"
+  | "EXPIRED";
+
+export type StoreSalesOrderReservationPayload = {
+  reservationId: string;
+  salesOrderLineId: string;
+  inventoryLocationCode: string | null;
+  productCode: string;
+  productVariantCode: string | null;
+  baseUnitOfMeasure: string;
+  baseQuantity: number;
+  status: StoreSalesOrderReservationStatus;
+  releaseReason: string | null;
+  createdAt: string;
+  releasedAt: string | null;
+};
 
 export type StoreSalesOrderRecordedPayload = {
   orderId: string;
@@ -285,17 +313,28 @@ export type StoreSalesOrderRecordedPayload = {
   customerId: string | null;
   customerNo: string | null;
   customerName: string | null;
+  orderType?: StoreSalesOrderType;
   subtotalAmount?: number;
   discountAmount?: number;
   taxAmount?: number;
   totalAmount: number;
   depositAmount?: number;
+  paidAmount?: number;
   balanceAmount?: number;
   depositTenderMethodCode?: string | null;
   depositTenderMethodName?: string | null;
   depositPaymentMethod?: SyncPaymentMethod | null;
   depositReference?: string | null;
   depositPaidAt?: string | null;
+  layawayPolicySnapshotJson?: string | null;
+  minimumDepositAmount?: number;
+  reservationStatus?: StoreSalesOrderReservationStatus;
+  reservationCreatedAt?: string | null;
+  reservationReleasedAt?: string | null;
+  layawayExpiresAt?: string | null;
+  expiredAt?: string | null;
+  cancellationFeeAmount?: number;
+  refundedAmount?: number;
   status: StoreSalesOrderStatus;
   operatorName: string | null;
   note: string | null;
@@ -306,6 +345,7 @@ export type StoreSalesOrderRecordedPayload = {
   cancelledAt: string | null;
   lines?: StoreSalesOrderLinePayload[];
   payments?: StorePosPaymentPayload[];
+  reservations?: StoreSalesOrderReservationPayload[];
 };
 
 export type StoreSalesOrderLinePayload = {
@@ -318,6 +358,10 @@ export type StoreSalesOrderLinePayload = {
   variantAttributesSnapshot: string | null;
   lineNote: string | null;
   quantity: number;
+  sellingUnitOfMeasure?: string | null;
+  baseUnitOfMeasure?: string | null;
+  uomConversionFactor?: number;
+  baseQuantity?: number;
   unitPrice: number;
   discountAmount: number;
   taxAmount: number;
@@ -664,6 +708,17 @@ export type EnterpriseCatalogProductPublishedPayload = {
     isBaseUnit: boolean;
     allowSale: boolean;
     allowPurchase: boolean;
+  }>;
+  sellingUnits?: Array<{
+    productVariantCode: string | null;
+    uomCode: string;
+    uomName: string;
+    conversionFactor: number;
+    unitPrice: number;
+    barcode: string | null;
+    isDefault: boolean;
+    allowFractionalSale: boolean;
+    decimalPrecision: number;
   }>;
   packSize: string | null;
   countryOfOrigin: string | null;
@@ -1132,7 +1187,15 @@ export type StoreNodePushRequest<TPayload = unknown> = {
   clientStartedAt?: string | null;
   upstreamEvents: SyncEnvelope<TPayload>[];
   acknowledgedDownstreamEventIds: string[];
+  failedDownstreamEvents?: StoreNodeDownstreamFailure[];
   telemetry?: StoreNodeTelemetry | null;
+};
+
+export type StoreNodeDownstreamFailure = {
+  eventId: string;
+  status: "FAILED" | "DEAD_LETTER";
+  errorMessage: string;
+  failedAt: string;
 };
 
 export type StoreNodePushResponse = {
@@ -1376,7 +1439,8 @@ export type CreateInterStoreTransferRequest = {
 export type CreateInterStoreTransferResponse = {
   transferId: string;
   transferNo: string;
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode: string | null;
   destinationLocationCode: string;
   sourceNodeCode: string | null;
   destinationNodeCode: string | null;
@@ -1401,7 +1465,8 @@ export type CreateInterStoreTransferBatchLineRequest = {
 };
 
 export type CreateInterStoreTransferBatchRequest = {
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode?: string | null;
   destinationLocationCode: string;
   lines: CreateInterStoreTransferBatchLineRequest[];
   externalReference?: string | null;
@@ -1420,7 +1485,8 @@ export type UpdateInterStoreTransferBatchRequest =
   CreateInterStoreTransferBatchRequest;
 
 export type CreateInterStoreTransferBatchResponse = {
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode: string | null;
   destinationLocationCode: string;
   transferBatchNo: string;
   transferCount: number;
@@ -1458,7 +1524,8 @@ export type StoreRemoteInventoryLookupResponse = {
 };
 
 export type StoreRemoteInterStoreRequestInput = {
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode?: string | null;
   destinationLocationCode?: string | null;
   productCode: string;
   quantity: number;
@@ -1599,9 +1666,12 @@ export type StoreInterStoreTransferIssuedPayload = {
 export type StoreInterStoreTransferRequestedPayload = {
   requestId: string;
   requestNo: string;
+  transferBatchNo?: string | null;
+  lineNo?: number | null;
   storeCode: string;
   terminalCode: string;
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode?: string | null;
   destinationLocationCode: string;
   productCode: string;
   quantity: number;

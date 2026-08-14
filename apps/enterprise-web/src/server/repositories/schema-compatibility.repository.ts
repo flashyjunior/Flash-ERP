@@ -6,6 +6,31 @@ let inventoryLocationSalesOrderSchemaReady: Promise<void> | null = null;
 let productVariantSalesOrderDepositSchemaReady: Promise<void> | null = null;
 let operatingExpenseSchemaReady: Promise<void> | null = null;
 let inventoryExpirySchemaReady: Promise<void> | null = null;
+let alternateUomSellingSchemaReady: Promise<void> | null = null;
+let layawayLifecycleSchemaReady: Promise<void> | null = null;
+let syncOutboxFailureSchemaReady: Promise<void> | null = null;
+
+export function ensureSyncOutboxFailureSchemaCompatibility() {
+  syncOutboxFailureSchemaReady ??= (async () => {
+    if (isEnterpriseSqlServerDatabase()) {
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.SyncOutboxEvent', N'errorMessage') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[SyncOutboxEvent] ADD [errorMessage] NVARCHAR(MAX) NULL;
+        END
+      `);
+    } else {
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "SyncOutboxEvent" ADD COLUMN IF NOT EXISTS "errorMessage" TEXT'
+      );
+    }
+  })().catch((error) => {
+    syncOutboxFailureSchemaReady = null;
+    throw error;
+  });
+
+  return syncOutboxFailureSchemaReady;
+}
 
 export function ensureInterStoreTransferSchemaCompatibility() {
   interStoreTransferSchemaReady ??= (async () => {
@@ -70,38 +95,46 @@ export function ensureInterStoreTransferSchemaCompatibility() {
             ADD [requestedUnitOfMeasure] NVARCHAR(1000) NOT NULL
               CONSTRAINT [InterStoreTransfer_requestedUnitOfMeasure_df] DEFAULT N'EA';
         END
+      `);
+      await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InterStoreTransfer', N'requestedUnitQuantity') IS NULL
         BEGIN
           ALTER TABLE [dbo].[InterStoreTransfer]
             ADD [requestedUnitQuantity] DECIMAL(18, 3) NOT NULL
               CONSTRAINT [InterStoreTransfer_requestedUnitQuantity_df] DEFAULT 0;
-          UPDATE [dbo].[InterStoreTransfer]
-            SET [requestedUnitQuantity] = [requestedQuantity];
         END
+      `);
+      await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InterStoreTransfer', N'uomConversionFactor') IS NULL
         BEGIN
           ALTER TABLE [dbo].[InterStoreTransfer]
             ADD [uomConversionFactor] DECIMAL(18, 6) NOT NULL
               CONSTRAINT [InterStoreTransfer_uomConversionFactor_df] DEFAULT 1;
         END
+      `);
+      await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InterStoreTransfer', N'baseUnitOfMeasure') IS NULL
         BEGIN
           ALTER TABLE [dbo].[InterStoreTransfer]
             ADD [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL
               CONSTRAINT [InterStoreTransfer_baseUnitOfMeasure_df] DEFAULT N'EA';
         END
-        UPDATE transferRow
-          SET [requestedUnitOfMeasure] = product.[unitOfMeasure],
-              [baseUnitOfMeasure] = product.[unitOfMeasure],
-              [requestedUnitQuantity] = CASE
-                WHEN transferRow.[requestedUnitQuantity] <= 0 THEN transferRow.[requestedQuantity]
-                ELSE transferRow.[requestedUnitQuantity]
-              END
-        FROM [dbo].[InterStoreTransfer] AS transferRow
-        INNER JOIN [dbo].[Product] AS product ON product.[id] = transferRow.[productId]
-        WHERE transferRow.[requestedUnitOfMeasure] = N'EA'
-          AND transferRow.[baseUnitOfMeasure] = N'EA'
-          AND product.[unitOfMeasure] <> N'EA';
+      `);
+      await prisma.$executeRawUnsafe(`
+        EXEC(N'
+          UPDATE transferRow
+            SET [requestedUnitOfMeasure] = product.[unitOfMeasure],
+                [baseUnitOfMeasure] = product.[unitOfMeasure],
+                [requestedUnitQuantity] = CASE
+                  WHEN transferRow.[requestedUnitQuantity] <= 0 THEN transferRow.[requestedQuantity]
+                  ELSE transferRow.[requestedUnitQuantity]
+                END
+          FROM [dbo].[InterStoreTransfer] AS transferRow
+          INNER JOIN [dbo].[Product] AS product ON product.[id] = transferRow.[productId]
+          WHERE transferRow.[requestedUnitOfMeasure] = N''EA''
+            AND transferRow.[baseUnitOfMeasure] = N''EA''
+            AND product.[unitOfMeasure] <> N''EA'';
+        ')
       `);
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InterStoreTransfer', N'feedbackDipReading') IS NULL
@@ -952,4 +985,222 @@ export function ensureInventoryExpirySchemaCompatibility() {
   });
 
   return inventoryExpirySchemaReady;
+}
+
+export function ensureAlternateUomSellingSchemaCompatibility() {
+  alternateUomSellingSchemaReady ??= (async () => {
+    if (!isEnterpriseSqlServerDatabase()) return;
+
+    await prisma.$executeRawUnsafe(`
+      IF OBJECT_ID(N'[dbo].[StoreProductSellingUnit]', N'U') IS NULL
+      BEGIN
+        CREATE TABLE [dbo].[StoreProductSellingUnit] (
+          [id] NVARCHAR(1000) NOT NULL,
+          [configurationKey] NVARCHAR(450) NOT NULL,
+          [retailOrgId] NVARCHAR(1000) NOT NULL,
+          [storeId] NVARCHAR(1000) NOT NULL,
+          [productId] NVARCHAR(1000) NOT NULL,
+          [productVariantId] NVARCHAR(1000) NULL,
+          [unitOfMeasureId] NVARCHAR(1000) NOT NULL,
+          [unitOfMeasureCodeSnapshot] NVARCHAR(1000) NOT NULL,
+          [unitOfMeasureNameSnapshot] NVARCHAR(1000) NOT NULL,
+          [conversionFactor] DECIMAL(18, 6) NOT NULL,
+          [unitPrice] DECIMAL(18, 2) NOT NULL,
+          [barcode] NVARCHAR(450) NULL,
+          [isDefault] BIT NOT NULL CONSTRAINT [StoreProductSellingUnit_isDefault_df] DEFAULT 0,
+          [status] NVARCHAR(1000) NOT NULL CONSTRAINT [StoreProductSellingUnit_status_df] DEFAULT N'ACTIVE',
+          [recordVersion] INT NOT NULL CONSTRAINT [StoreProductSellingUnit_recordVersion_df] DEFAULT 1,
+          [createdAt] DATETIME2(3) NOT NULL CONSTRAINT [StoreProductSellingUnit_createdAt_df] DEFAULT CURRENT_TIMESTAMP,
+          [updatedAt] DATETIME2(3) NOT NULL CONSTRAINT [StoreProductSellingUnit_updatedAt_df] DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT [StoreProductSellingUnit_pkey] PRIMARY KEY CLUSTERED ([id]),
+          CONSTRAINT [StoreProductSellingUnit_configurationKey_key] UNIQUE NONCLUSTERED ([configurationKey])
+        );
+      END;
+
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'StoreProductSellingUnit_retailOrgId_idx' AND [object_id] = OBJECT_ID(N'[dbo].[StoreProductSellingUnit]'))
+        CREATE INDEX [StoreProductSellingUnit_retailOrgId_idx] ON [dbo].[StoreProductSellingUnit]([retailOrgId]);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'StoreProductSellingUnit_storeId_idx' AND [object_id] = OBJECT_ID(N'[dbo].[StoreProductSellingUnit]'))
+        CREATE INDEX [StoreProductSellingUnit_storeId_idx] ON [dbo].[StoreProductSellingUnit]([storeId]);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'StoreProductSellingUnit_productId_idx' AND [object_id] = OBJECT_ID(N'[dbo].[StoreProductSellingUnit]'))
+        CREATE INDEX [StoreProductSellingUnit_productId_idx] ON [dbo].[StoreProductSellingUnit]([productId]);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'StoreProductSellingUnit_productVariantId_idx' AND [object_id] = OBJECT_ID(N'[dbo].[StoreProductSellingUnit]'))
+        CREATE INDEX [StoreProductSellingUnit_productVariantId_idx] ON [dbo].[StoreProductSellingUnit]([productVariantId]);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'StoreProductSellingUnit_barcode_idx' AND [object_id] = OBJECT_ID(N'[dbo].[StoreProductSellingUnit]'))
+        CREATE INDEX [StoreProductSellingUnit_barcode_idx] ON [dbo].[StoreProductSellingUnit]([barcode]);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'StoreProductSellingUnit_unitOfMeasureId_idx' AND [object_id] = OBJECT_ID(N'[dbo].[StoreProductSellingUnit]'))
+        CREATE INDEX [StoreProductSellingUnit_unitOfMeasureId_idx] ON [dbo].[StoreProductSellingUnit]([unitOfMeasureId]);
+
+      IF COL_LENGTH(N'dbo.PosTransactionLine', N'sellingUnitOfMeasure') IS NULL
+        ALTER TABLE [dbo].[PosTransactionLine] ADD [sellingUnitOfMeasure] NVARCHAR(1000) NOT NULL CONSTRAINT [PosTransactionLine_sellingUnitOfMeasure_df] DEFAULT N'EA';
+      IF COL_LENGTH(N'dbo.PosTransactionLine', N'baseUnitOfMeasure') IS NULL
+        ALTER TABLE [dbo].[PosTransactionLine] ADD [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL CONSTRAINT [PosTransactionLine_baseUnitOfMeasure_df] DEFAULT N'EA';
+      IF COL_LENGTH(N'dbo.PosTransactionLine', N'uomConversionFactor') IS NULL
+        ALTER TABLE [dbo].[PosTransactionLine] ADD [uomConversionFactor] DECIMAL(18, 6) NOT NULL CONSTRAINT [PosTransactionLine_uomConversionFactor_df] DEFAULT 1;
+      IF COL_LENGTH(N'dbo.PosTransactionLine', N'baseQuantity') IS NULL
+        ALTER TABLE [dbo].[PosTransactionLine] ADD [baseQuantity] DECIMAL(18, 3) NOT NULL CONSTRAINT [PosTransactionLine_baseQuantity_df] DEFAULT 0;
+
+      IF COL_LENGTH(N'dbo.SalesOrderLine', N'sellingUnitOfMeasure') IS NULL
+        ALTER TABLE [dbo].[SalesOrderLine] ADD [sellingUnitOfMeasure] NVARCHAR(1000) NOT NULL CONSTRAINT [SalesOrderLine_sellingUnitOfMeasure_df] DEFAULT N'EA';
+      IF COL_LENGTH(N'dbo.SalesOrderLine', N'baseUnitOfMeasure') IS NULL
+        ALTER TABLE [dbo].[SalesOrderLine] ADD [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL CONSTRAINT [SalesOrderLine_baseUnitOfMeasure_df] DEFAULT N'EA';
+      IF COL_LENGTH(N'dbo.SalesOrderLine', N'uomConversionFactor') IS NULL
+        ALTER TABLE [dbo].[SalesOrderLine] ADD [uomConversionFactor] DECIMAL(18, 6) NOT NULL CONSTRAINT [SalesOrderLine_uomConversionFactor_df] DEFAULT 1;
+      IF COL_LENGTH(N'dbo.SalesOrderLine', N'baseQuantity') IS NULL
+        ALTER TABLE [dbo].[SalesOrderLine] ADD [baseQuantity] DECIMAL(18, 3) NOT NULL CONSTRAINT [SalesOrderLine_baseQuantity_df] DEFAULT 0;
+    `);
+
+    // SQL Server compiles a batch before executing ALTER TABLE statements, so backfill in a second batch.
+    await prisma.$executeRawUnsafe(`
+      UPDATE line
+      SET [sellingUnitOfMeasure] = COALESCE(NULLIF(product.[unitOfMeasure], N''), N'EA'),
+          [baseUnitOfMeasure] = COALESCE(NULLIF(base_uom.[code], N''), NULLIF(product.[unitOfMeasure], N''), N'EA'),
+          [uomConversionFactor] = 1,
+          [baseQuantity] = line.[quantity]
+      FROM [dbo].[PosTransactionLine] AS line
+      INNER JOIN [dbo].[Product] AS product ON product.[id] = line.[productId]
+      LEFT JOIN [dbo].[UnitOfMeasure] AS base_uom ON base_uom.[id] = product.[baseUnitOfMeasureId]
+      WHERE line.[baseQuantity] = 0;
+
+      UPDATE line
+      SET [sellingUnitOfMeasure] = COALESCE(NULLIF(product.[unitOfMeasure], N''), N'EA'),
+          [baseUnitOfMeasure] = COALESCE(NULLIF(base_uom.[code], N''), NULLIF(product.[unitOfMeasure], N''), N'EA'),
+          [uomConversionFactor] = 1,
+          [baseQuantity] = line.[quantity]
+      FROM [dbo].[SalesOrderLine] AS line
+      INNER JOIN [dbo].[SalesOrder] AS sales_order ON sales_order.[id] = line.[salesOrderId]
+      INNER JOIN [dbo].[Product] AS product
+        ON product.[retailOrgId] = sales_order.[retailOrgId]
+       AND product.[code] = line.[productCodeSnapshot]
+      LEFT JOIN [dbo].[UnitOfMeasure] AS base_uom ON base_uom.[id] = product.[baseUnitOfMeasureId]
+      WHERE line.[baseQuantity] = 0;
+    `);
+  })().catch((error) => {
+    alternateUomSellingSchemaReady = null;
+    throw error;
+  });
+
+  return alternateUomSellingSchemaReady;
+}
+
+export function ensureLayawayLifecycleSchemaCompatibility() {
+  layawayLifecycleSchemaReady ??= (async () => {
+    if (isEnterpriseSqlServerDatabase()) {
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.SalesOrder', N'orderType') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [orderType] NVARCHAR(1000) NOT NULL CONSTRAINT [SalesOrder_orderType_df] DEFAULT N'SALES_ORDER';
+        IF COL_LENGTH(N'dbo.SalesOrder', N'paidAmount') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [paidAmount] DECIMAL(18, 2) NOT NULL CONSTRAINT [SalesOrder_paidAmount_df] DEFAULT 0;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'layawayPolicySnapshotJson') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [layawayPolicySnapshotJson] NVARCHAR(MAX) NULL;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'minimumDepositAmount') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [minimumDepositAmount] DECIMAL(18, 2) NOT NULL CONSTRAINT [SalesOrder_minimumDepositAmount_df] DEFAULT 0;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'reservationStatus') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [reservationStatus] NVARCHAR(1000) NOT NULL CONSTRAINT [SalesOrder_reservationStatus_df] DEFAULT N'NOT_APPLICABLE';
+        IF COL_LENGTH(N'dbo.SalesOrder', N'reservationCreatedAt') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [reservationCreatedAt] DATETIME2(3) NULL;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'reservationReleasedAt') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [reservationReleasedAt] DATETIME2(3) NULL;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'layawayExpiresAt') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [layawayExpiresAt] DATETIME2(3) NULL;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'expiredAt') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [expiredAt] DATETIME2(3) NULL;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'cancellationFeeAmount') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [cancellationFeeAmount] DECIMAL(18, 2) NOT NULL CONSTRAINT [SalesOrder_cancellationFeeAmount_df] DEFAULT 0;
+        IF COL_LENGTH(N'dbo.SalesOrder', N'refundedAmount') IS NULL
+          ALTER TABLE [dbo].[SalesOrder] ADD [refundedAmount] DECIMAL(18, 2) NOT NULL CONSTRAINT [SalesOrder_refundedAmount_df] DEFAULT 0;
+        IF COL_LENGTH(N'dbo.Store', N'ecommerceLayawayEnabled') IS NULL
+          ALTER TABLE [dbo].[Store] ADD [ecommerceLayawayEnabled] BIT NOT NULL CONSTRAINT [Store_ecommerceLayawayEnabled_df] DEFAULT 0;
+        IF COL_LENGTH(N'dbo.EcommerceOrder', N'layawayDepositAmount') IS NULL
+          ALTER TABLE [dbo].[EcommerceOrder] ADD [layawayDepositAmount] DECIMAL(18, 2) NOT NULL CONSTRAINT [EcommerceOrder_layawayDepositAmount_df] DEFAULT 0;
+      `);
+      await prisma.$executeRawUnsafe(`
+        UPDATE [dbo].[SalesOrder]
+        SET [paidAmount] = [depositAmount]
+        WHERE [paidAmount] = 0 AND [depositAmount] > 0;
+
+        IF OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]', N'U') IS NULL
+        BEGIN
+          CREATE TABLE [dbo].[SalesOrderInventoryReservation] (
+            [id] NVARCHAR(1000) NOT NULL,
+            [salesOrderId] NVARCHAR(1000) NOT NULL,
+            [salesOrderLineId] NVARCHAR(1000) NOT NULL,
+            [inventoryLocationId] NVARCHAR(1000) NULL,
+            [inventoryLocationCodeSnapshot] NVARCHAR(1000) NULL,
+            [productCodeSnapshot] NVARCHAR(1000) NOT NULL,
+            [productVariantCodeSnapshot] NVARCHAR(1000) NULL,
+            [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL CONSTRAINT [SalesOrderInventoryReservation_baseUom_df] DEFAULT N'EA',
+            [baseQuantity] DECIMAL(18, 3) NOT NULL,
+            [status] NVARCHAR(1000) NOT NULL CONSTRAINT [SalesOrderInventoryReservation_status_df] DEFAULT N'ACTIVE',
+            [releaseReason] NVARCHAR(1000) NULL,
+            [createdAt] DATETIME2(3) NOT NULL CONSTRAINT [SalesOrderInventoryReservation_createdAt_df] DEFAULT CURRENT_TIMESTAMP,
+            [releasedAt] DATETIME2(3) NULL,
+            [updatedAt] DATETIME2(3) NOT NULL CONSTRAINT [SalesOrderInventoryReservation_updatedAt_df] DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT [SalesOrderInventoryReservation_pkey] PRIMARY KEY CLUSTERED ([id]),
+            CONSTRAINT [SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_key] UNIQUE NONCLUSTERED ([salesOrderId], [salesOrderLineId])
+          );
+        END;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'SalesOrderInventoryReservation_salesOrderId_status_idx' AND [object_id] = OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]'))
+          CREATE INDEX [SalesOrderInventoryReservation_salesOrderId_status_idx] ON [dbo].[SalesOrderInventoryReservation]([salesOrderId], [status]);
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'SalesOrderInventoryReservation_inventoryLocationId_productCodeSnapshot_productVariantCodeSnapshot_status_idx' AND [object_id] = OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]'))
+          CREATE INDEX [SalesOrderInventoryReservation_inventoryLocationId_productCodeSnapshot_productVariantCodeSnapshot_status_idx] ON [dbo].[SalesOrderInventoryReservation]([inventoryLocationId], [productCodeSnapshot], [productVariantCodeSnapshot], [status]);
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'SalesOrderInventoryReservation_productCodeSnapshot_status_idx' AND [object_id] = OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]'))
+          CREATE INDEX [SalesOrderInventoryReservation_productCodeSnapshot_status_idx] ON [dbo].[SalesOrderInventoryReservation]([productCodeSnapshot], [status]);
+      `);
+    } else {
+      for (const statement of [
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "orderType" TEXT NOT NULL DEFAULT \'SALES_ORDER\'',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "paidAmount" DECIMAL(18,2) NOT NULL DEFAULT 0',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "layawayPolicySnapshotJson" TEXT',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "minimumDepositAmount" DECIMAL(18,2) NOT NULL DEFAULT 0',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "reservationStatus" TEXT NOT NULL DEFAULT \'NOT_APPLICABLE\'',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "reservationCreatedAt" TIMESTAMP(3)',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "reservationReleasedAt" TIMESTAMP(3)',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "layawayExpiresAt" TIMESTAMP(3)',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "expiredAt" TIMESTAMP(3)',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "cancellationFeeAmount" DECIMAL(18,2) NOT NULL DEFAULT 0',
+        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "refundedAmount" DECIMAL(18,2) NOT NULL DEFAULT 0',
+        'ALTER TABLE "Store" ADD COLUMN IF NOT EXISTS "ecommerceLayawayEnabled" BOOLEAN NOT NULL DEFAULT false',
+        'ALTER TABLE "EcommerceOrder" ADD COLUMN IF NOT EXISTS "layawayDepositAmount" DECIMAL(18,2) NOT NULL DEFAULT 0',
+      ]) {
+        await prisma.$executeRawUnsafe(statement);
+      }
+      await prisma.$executeRawUnsafe(
+        'UPDATE "SalesOrder" SET "paidAmount" = "depositAmount" WHERE "paidAmount" = 0 AND "depositAmount" > 0',
+      );
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "SalesOrderInventoryReservation" (
+          "id" TEXT PRIMARY KEY,
+          "salesOrderId" TEXT NOT NULL,
+          "salesOrderLineId" TEXT NOT NULL,
+          "inventoryLocationId" TEXT,
+          "inventoryLocationCodeSnapshot" TEXT,
+          "productCodeSnapshot" TEXT NOT NULL,
+          "productVariantCodeSnapshot" TEXT,
+          "baseUnitOfMeasure" TEXT NOT NULL DEFAULT 'EA',
+          "baseQuantity" DECIMAL(18,3) NOT NULL,
+          "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+          "releaseReason" TEXT,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "releasedAt" TIMESTAMP(3),
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE ("salesOrderId", "salesOrderLineId")
+        )
+      `);
+      await prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "SalesOrderInventoryReservation_salesOrderId_status_idx" ON "SalesOrderInventoryReservation"("salesOrderId", "status")',
+      );
+      await prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "SalesOrderInventoryReservation_inventoryLocationId_productCodeSnapshot_productVariantCodeSnapshot_status_idx" ON "SalesOrderInventoryReservation"("inventoryLocationId", "productCodeSnapshot", "productVariantCodeSnapshot", "status")',
+      );
+      await prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "SalesOrderInventoryReservation_productCodeSnapshot_status_idx" ON "SalesOrderInventoryReservation"("productCodeSnapshot", "status")',
+      );
+    }
+  })().catch((error) => {
+    layawayLifecycleSchemaReady = null;
+    throw error;
+  });
+
+  return layawayLifecycleSchemaReady;
 }

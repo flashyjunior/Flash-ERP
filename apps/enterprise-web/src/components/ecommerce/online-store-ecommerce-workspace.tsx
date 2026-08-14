@@ -103,7 +103,8 @@ export function OnlineStoreEcommerceWorkspace({
     ecommerceWhatsappPhone: workspace.store.ecommerceWhatsappPhone ?? "",
     ecommerceAllowPickup: workspace.store.ecommerceAllowPickup,
     ecommerceAllowDelivery: workspace.store.ecommerceAllowDelivery,
-    ecommercePayOnDeliveryEnabled: workspace.store.ecommercePayOnDeliveryEnabled
+    ecommercePayOnDeliveryEnabled: workspace.store.ecommercePayOnDeliveryEnabled,
+    ecommerceLayawayEnabled: workspace.store.ecommerceLayawayEnabled,
   });
   const [paymentMethods, setPaymentMethods] = useState(workspace.paymentMethods);
   const liveSignatureRef = useRef("");
@@ -238,6 +239,7 @@ export function OnlineStoreEcommerceWorkspace({
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             payOnDeliveryEnabled: settings.ecommercePayOnDeliveryEnabled,
+            layawayEnabled: settings.ecommerceLayawayEnabled,
             methods: paymentMethods.map((method) => ({
               tenderMethodId: method.id,
               enabled: method.enabled,
@@ -330,7 +332,7 @@ export function OnlineStoreEcommerceWorkspace({
                 <tbody>
                   {workspace.orders.map((order) => (
                     <tr key={order.id}>
-                      <td><strong>{order.orderNo}</strong><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatStatus(order.status)}</span></td>
+                      <td><strong>{order.orderNo}</strong><small>{order.orderType === "LAYAWAY" ? "Layaway" : "Customer order"}</small><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatStatus(order.status)}</span></td>
                       <td><strong>{order.customer.fullName}</strong><small>{order.customer.phone ?? order.customer.email ?? order.customer.customerNo}</small></td>
                       <td>{new Date(order.placedAt).toLocaleString()}</td>
                       <td>{formatStatus(order.fulfilmentMethod)}</td>
@@ -416,6 +418,26 @@ export function OnlineStoreEcommerceWorkspace({
                 <span><strong>Pay on delivery or collection</strong><small>Staff collects payment during fulfilment.</small></span>
                 <label className={styles.toggle}><input checked={settings.ecommercePayOnDeliveryEnabled} onChange={(event) => setSettings((current) => ({ ...current, ecommercePayOnDeliveryEnabled: event.target.checked }))} type="checkbox" /><span /></label>
               </div>
+              <div className={styles.paymentOptionRow}>
+                <span className={styles.paymentIcon}><WalletCards size={20} /></span>
+                <span>
+                  <strong>Offer Layaway online</strong>
+                  <small>
+                    {workspace.layawayPolicy.enabled
+                      ? `${workspace.layawayPolicy.minimumDepositPercent}% minimum deposit; the HQ Layaway policy remains authoritative.`
+                      : "Enable Layaway in HQ Company Settings before offering it online."}
+                  </small>
+                </span>
+                <label className={styles.toggle}>
+                  <input
+                    checked={settings.ecommerceLayawayEnabled}
+                    disabled={!workspace.layawayPolicy.enabled}
+                    onChange={(event) => setSettings((current) => ({ ...current, ecommerceLayawayEnabled: event.target.checked }))}
+                    type="checkbox"
+                  />
+                  <span />
+                </label>
+              </div>
               {paymentMethods.map((method) => (
                 <div className={styles.paymentOptionRow} key={method.id}>
                   <span className={styles.paymentIcon}><CircleDollarSign size={20} /></span>
@@ -477,7 +499,7 @@ export function OnlineStoreEcommerceWorkspace({
             <div className={styles.orderDialogBody}>
               <section>
                 {selectedOrder.status === "PLACED" ? (
-                  <div className={styles.acceptanceNotice}><BellRing size={18} /><span><strong>{selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Awaiting payment" : "Awaiting acceptance"}</strong><small>{selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Confirm online payment before accepting this order." : "This order is not available in the POS fulfilment lane until staff accepts it."}</small></span></div>
+                  <div className={styles.acceptanceNotice}><BellRing size={18} /><span><strong>{selectedOrder.orderType === "LAYAWAY" && selectedOrder.paidAmount + 0.005 >= selectedOrder.minimumDepositAmount ? "Layaway deposit received" : selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Awaiting payment" : "Awaiting acceptance"}</strong><small>{selectedOrder.orderType === "LAYAWAY" && selectedOrder.paidAmount + 0.005 >= selectedOrder.minimumDepositAmount ? "The minimum deposit is satisfied. Staff may accept the Layaway; full-payment fulfilment rules still apply." : selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Confirm the required online payment before accepting this order." : "This order is not available in the POS fulfilment lane until staff accepts it."}</small></span></div>
                 ) : null}
                 <h3>Items</h3>
                 <div className={styles.lineItems}>{selectedOrder.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant || line.productCode}</small></span><span>{line.quantity} x {money(selectedOrder.currencyCode, line.unitPrice)}</span><strong>{money(selectedOrder.currencyCode, line.lineTotal)}</strong></div>)}</div>

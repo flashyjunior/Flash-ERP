@@ -10,12 +10,12 @@ export async function POST(request: NextRequest) {
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
 
     if (
-      typeof payload.sourceLocationCode !== "string" ||
-      payload.sourceLocationCode.trim().length === 0
+      typeof payload.sourceStoreCode !== "string" ||
+      payload.sourceStoreCode.trim().length === 0
     ) {
       return NextResponse.json(
         {
-          error: "A source location code is required before Flash ERP can create an inter-store request."
+          error: "A source shop is required before Flash ERP can create an inter-store request."
         },
         { status: 400 }
       );
@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
     }
 
     const response = await createInterStoreTransferBatch({
-      sourceLocationCode: payload.sourceLocationCode.trim(),
+      sourceStoreCode: payload.sourceStoreCode.trim(),
       destinationLocationCode: payload.destinationLocationCode.trim(),
       externalReference:
         typeof payload.externalReference === "string" ? payload.externalReference : undefined,

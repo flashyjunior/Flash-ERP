@@ -8,6 +8,7 @@ import type {
   SetStateAction,
 } from "react";
 import type { SheetData } from "write-excel-file/browser";
+import { calculatePosBaseQuantity } from "@flash-erp/domain";
 
 import retailLoginBackgroundUrl from "../assets/retail-login-bg.jpg";
 import { buildGoodsReceiptPrintWindowHtml } from "../shared/receipt-printing";
@@ -23,6 +24,7 @@ import type {
   StoreCatalogBrowseItem,
   StoreCatalogBatchAvailability,
   StoreCatalogMatrixVariant,
+  StoreProductSellingUnitSummary,
   StoreCustomerSummary,
   StoreDesktopConnectionConfig,
   StoreDesktopConnectionConfigResult,
@@ -30,6 +32,7 @@ import type {
   StoreDesktopWindowStatus,
   StoreInventoryBatchAllocation,
   StoreInventoryBrowseItem,
+  StoreInterStoreTransferRequestDraftLineInput,
   StoreInterStoreTransferRequestDraftSummary,
   StoreInterStoreTransferSummary,
   StoreLocalGoodsReceiptSummary,
@@ -46,6 +49,7 @@ import type {
   StoreStandalonePasswordPolicyInput,
   StoreStandaloneProductInput,
   StoreStandalonePurchaseOrderInput,
+  StoreStockCountSessionSummary,
   StoreStoreExpenseInput,
   StoreTransactionReferenceSummary,
   StoreSyncActionResult,
@@ -53,7 +57,12 @@ import type {
   StoreSyncSnapshot,
 } from "@shared/desktop-runtime";
 
-type SaleMode = "SALE" | "SALES_ORDER";
+type SaleMode = "SALE" | "SALES_ORDER" | "LAYAWAY";
+type LayawayActionKind = "PAYMENT" | "CANCEL" | "RELEASE" | "EXPIRE";
+type LayawayActionDraft = {
+  kind: LayawayActionKind;
+  order: StoreSalesOrderSummary;
+};
 
 type OperationalWorkspace =
   | "dashboard"
@@ -137,6 +146,8 @@ type OpenPriceDraft = {
   productName: string;
   productType: string | null;
   quantity: string;
+  sellingUnits: StoreProductSellingUnitSummary[];
+  sellingUnitOfMeasure: string;
   unitPrice: string;
   mustEnterPriceAtPos: boolean;
   isSerialized: boolean;
@@ -165,6 +176,40 @@ type ProductColourOption = {
   name: string;
   value: string;
 };
+
+function sellingUnitsForVariant(
+  sellingUnits: StoreProductSellingUnitSummary[],
+  productVariantCode: string | null,
+) {
+  const normalizedVariantCode = productVariantCode?.trim().toUpperCase() ?? null;
+
+  return sellingUnits.filter(
+    (unit) =>
+      (unit.productVariantCode?.trim().toUpperCase() ?? null) ===
+      normalizedVariantCode,
+  );
+}
+
+function resolveDraftSellingUnit(
+  sellingUnits: StoreProductSellingUnitSummary[],
+  productVariantCode: string | null,
+  requestedUnitOfMeasure: string | null,
+) {
+  const scopedUnits = sellingUnitsForVariant(
+    sellingUnits,
+    productVariantCode,
+  );
+  const requestedCode = requestedUnitOfMeasure?.trim().toUpperCase() ?? "";
+
+  return (
+    scopedUnits.find(
+      (unit) => unit.unitOfMeasureCode.trim().toUpperCase() === requestedCode,
+    ) ??
+    scopedUnits.find((unit) => unit.isDefault) ??
+    scopedUnits[0] ??
+    null
+  );
+}
 
 const productColourOptions: ProductColourOption[] = [
   { name: "Black", value: "#111827" },
@@ -212,6 +257,8 @@ type InventorySerialDraft = {
 };
 
 type StockCountUploadRow = {
+  sessionId?: string | null;
+  sheetNo?: string | null;
   productCode: string;
   productName: string;
   batchId: string | null;
@@ -222,6 +269,10 @@ type StockCountUploadRow = {
   countedQuantity: number | null;
   varianceQuantity: number | null;
 };
+
+function stockCountSheetNo(sessionNo: string) {
+  return sessionNo.replace(/-L\d{3}$/i, "");
+}
 
 type ExpiringBatchAlertRow = {
   locationCode: string;
@@ -974,6 +1025,12 @@ const standaloneSupervisorPermissionCodes = [
   "pos.override.no-receipt-return",
   "pos.override.discount",
   "pos.override.price",
+  "pos.layaway.create",
+  "pos.layaway.payment.receive",
+  "pos.layaway.cancel-refund",
+  "pos.layaway.reservation.release",
+  "pos.layaway.policy.override",
+  "pos.layaway.fulfil",
   "inventory.view",
   "inventory.adjust",
   "inventory.count.submit",
@@ -1026,6 +1083,17 @@ const defaultStandalonePasswordPolicyDraft: StandalonePasswordPolicyDraft = {
 
 const standalonePromotionDays = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
+type StandaloneSellingUnitDraft = {
+  unitOfMeasureCode: string;
+  unitOfMeasureName: string;
+  conversionFactor: string;
+  unitPrice: string;
+  barcode: string;
+  isDefault: boolean;
+  allowFractionalSale: boolean;
+  decimalPrecision: string;
+};
+
 const defaultStandaloneProductDraft = {
   productCode: "",
   productName: "",
@@ -1050,6 +1118,7 @@ const defaultStandaloneProductDraft = {
   reorderPoint: "",
   safetyStockLevel: "",
   catalogSortOrder: "0",
+  sellingUnits: [] as StandaloneSellingUnitDraft[],
 };
 
 type StandaloneProductDraft = typeof defaultStandaloneProductDraft;
@@ -1111,7 +1180,13 @@ type StandalonePromotionEditorTab =
 function createStandaloneProductDraft(
   overrides: Partial<StandaloneProductDraft> = {},
 ) {
-  return { ...defaultStandaloneProductDraft, ...overrides };
+  return {
+    ...defaultStandaloneProductDraft,
+    ...overrides,
+    sellingUnits: [
+      ...(overrides.sellingUnits ?? defaultStandaloneProductDraft.sellingUnits),
+    ],
+  };
 }
 
 function createStandalonePasswordPolicyDraft(
@@ -1224,6 +1299,16 @@ function createStandaloneProductInput(
     reorderPoint: nullableNumberDraft(draft.reorderPoint),
     safetyStockLevel: nullableNumberDraft(draft.safetyStockLevel),
     catalogSortOrder: nullableNumberDraft(draft.catalogSortOrder),
+    sellingUnits: draft.sellingUnits.map((unit) => ({
+      unitOfMeasureCode: unit.unitOfMeasureCode,
+      unitOfMeasureName: unit.unitOfMeasureName,
+      conversionFactor: numberDraft(unit.conversionFactor),
+      unitPrice: numberDraft(unit.unitPrice),
+      barcode: unit.barcode,
+      isDefault: unit.isDefault,
+      allowFractionalSale: unit.allowFractionalSale,
+      decimalPrecision: numberDraft(unit.decimalPrecision),
+    })),
   };
 }
 
@@ -1256,6 +1341,18 @@ function createStandaloneProductDraftFromCatalogItem(
       row.safetyStockLevel == null ? "" : String(row.safetyStockLevel),
     catalogSortOrder:
       row.catalogSortOrder == null ? "0" : String(row.catalogSortOrder),
+    sellingUnits: (row.sellingUnits ?? [])
+      .filter((unit) => unit.productVariantCode == null)
+      .map((unit) => ({
+        unitOfMeasureCode: unit.unitOfMeasureCode,
+        unitOfMeasureName: unit.unitOfMeasureName,
+        conversionFactor: String(unit.conversionFactor),
+        unitPrice: String(unit.unitPrice),
+        barcode: unit.barcode ?? "",
+        isDefault: unit.isDefault,
+        allowFractionalSale: unit.allowFractionalSale,
+        decimalPrecision: String(unit.decimalPrecision),
+      })),
   });
 }
 
@@ -2109,6 +2206,33 @@ function sortTenderMethodsForPos(
   });
 }
 
+function paymentDraftsToRequests(
+  drafts: PaymentDraft[],
+  tenderMethods: StoreSyncSnapshot["availableTenderMethods"],
+): StoreBasketCheckoutPayment[] {
+  return drafts
+    .map<StoreBasketCheckoutPayment | null>((draft) => {
+      const tender = tenderMethods.find(
+        (method) => method.tenderMethodCode === draft.tenderMethodCode,
+      );
+      const amount = Number(draft.amount);
+
+      if (!tender || !Number.isFinite(amount) || amount <= 0) {
+        return null;
+      }
+
+      return {
+        method: tender.paymentMethod,
+        tenderMethodCode: tender.tenderMethodCode,
+        tenderMethodName: tender.tenderMethodName,
+        bankAccountId: draft.bankAccountId || null,
+        amount,
+        reference: draft.reference.trim() || null,
+      };
+    })
+    .filter((payment): payment is StoreBasketCheckoutPayment => payment !== null);
+}
+
 function paymentDraftsFromReceiptLookup(
   snapshot: StoreSyncSnapshot,
   basket: StoreBasketSummary | null,
@@ -2863,6 +2987,12 @@ function getTransferDocumentKey(transfer: StoreInterStoreTransferSummary) {
   return transfer.transferBatchNo ?? transfer.transferNo;
 }
 
+function getRemoteInventoryRowKey(
+  row: StoreRemoteInventoryLookupResult["rows"][number],
+) {
+  return `${row.storeCode}::${row.productCode}`;
+}
+
 function buildTransferDocumentGroups(
   transfers: StoreInterStoreTransferSummary[],
 ) {
@@ -3058,6 +3188,7 @@ export function ModernDesktopApp() {
   const [securityMenuExpanded, setSecurityMenuExpanded] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [saleMode, setSaleMode] = useState<SaleMode>("SALE");
+  const [layawayExpiresAt, setLayawayExpiresAt] = useState("");
   const [shiftCloseDialogOpen, setShiftCloseDialogOpen] = useState(false);
   const [isScreenLocked, setIsScreenLocked] = useState(false);
   const [lockLoginId, setLockLoginId] = useState("");
@@ -3162,7 +3293,7 @@ export function ModernDesktopApp() {
   const [stockCountRows, setStockCountRows] = useState<StockCountUploadRow[]>(
     [],
   );
-  const [transferSourceLocation, setTransferSourceLocation] = useState("");
+  const [transferSourceStore, setTransferSourceStore] = useState("");
   const [transferDestinationLocation, setTransferDestinationLocation] =
     useState("");
   const [transferProductCode, setTransferProductCode] = useState("");
@@ -3172,8 +3303,6 @@ export function ModernDesktopApp() {
   const [remoteInventoryStoreFilter, setRemoteInventoryStoreFilter] =
     useState("");
   const [remoteInventoryItemFilter, setRemoteInventoryItemFilter] =
-    useState("");
-  const [remoteInventoryLocationFilter, setRemoteInventoryLocationFilter] =
     useState("");
   const [remoteInventoryRows, setRemoteInventoryRows] = useState<
     StoreRemoteInventoryLookupResult["rows"]
@@ -3381,9 +3510,9 @@ export function ModernDesktopApp() {
       setInventoryLocation(nextSnapshot.inventoryLocations[0].locationCode);
     }
 
-    if (!transferSourceLocation && nextSnapshot.transferRequestTargets[0]) {
-      setTransferSourceLocation(
-        nextSnapshot.transferRequestTargets[0].sourceLocationCode,
+    if (!transferSourceStore && nextSnapshot.transferRequestTargets[0]) {
+      setTransferSourceStore(
+        nextSnapshot.transferRequestTargets[0].sourceStoreCode,
       );
     }
 
@@ -3407,7 +3536,7 @@ export function ModernDesktopApp() {
     refreshRuntimeStatus,
     runtime,
     transferDestinationLocation,
-    transferSourceLocation,
+    transferSourceStore,
   ]);
 
   const applyActionResult = useCallback((result: StoreSyncActionResult) => {
@@ -3694,7 +3823,7 @@ export function ModernDesktopApp() {
         categoryCode: catalogCategory || null,
         sellableOnly:
           activeWorkspace !== "setup" &&
-          !(activeWorkspace === "pos" && saleMode === "SALES_ORDER"),
+          !(activeWorkspace === "pos" && saleMode !== "SALE"),
         includeInactiveCatalog: activeWorkspace === "setup",
         limit: activeWorkspace === "setup" ? 500 : 30,
       });
@@ -3780,7 +3909,7 @@ export function ModernDesktopApp() {
         query: remoteInventoryQuery.trim() || null,
         productCode: remoteInventoryItemFilter || null,
         storeCode: remoteInventoryStoreFilter || null,
-        locationCode: remoteInventoryLocationFilter || null,
+        locationCode: null,
         limit: 30,
       });
       setRemoteInventoryRows(result.rows);
@@ -3798,28 +3927,6 @@ export function ModernDesktopApp() {
     } finally {
       setIsBusy(false);
     }
-  }
-
-  async function requestRemoteStock(
-    row: StoreRemoteInventoryLookupResult["rows"][number],
-  ) {
-    const quantity = Number(transferQuantity);
-
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      setError("Enter a request quantity greater than zero.");
-      return;
-    }
-
-    await runAction((desktopRuntime) =>
-      desktopRuntime.requestRemoteInterStoreStock({
-        sourceLocationCode: row.locationCode,
-        destinationLocationCode: transferDestinationLocation || null,
-        productCode: row.productCode,
-        quantity,
-        operatorName: operatorName ?? undefined,
-        note: `Store requested stock after HQ lookup found ${formatNumber(row.quantityOnHand)} unit(s) at ${row.storeName}.`,
-      }),
-    );
   }
 
   useEffect(() => {
@@ -5122,6 +5229,7 @@ export function ModernDesktopApp() {
       setTransactionDetailsOpen(false);
       setOpenPriceDraft(null);
       setSaleMode("SALE");
+      setLayawayExpiresAt("");
       setVoidModeTransactionNo(null);
       setNotice(
         activeSalesOrder
@@ -5308,11 +5416,17 @@ export function ModernDesktopApp() {
       lookup?.productType === "MATRIX" && matrixVariants.length > 0;
     const needsTrackedOptionChoice =
       !needsMatrixChoice && Boolean(lookup?.trackSize || lookup?.trackColor);
+    const selectedSellingUnit = resolveDraftSellingUnit(
+      lookup.sellingUnits,
+      selectedMatrixVariant?.variantCode ?? lookup.productVariantCode,
+      lookup.selectedSellingUnitOfMeasure,
+    );
 
     if (
       lookup?.mustEnterPriceAtPos ||
       (lookup?.isSerialized && saleMode !== "SALES_ORDER") ||
       (lookup?.trackExpiry && saleMode !== "SALES_ORDER") ||
+      lookup.sellingUnits.length > 0 ||
       needsMatrixChoice ||
       needsTrackedOptionChoice
     ) {
@@ -5325,9 +5439,17 @@ export function ModernDesktopApp() {
         productName: lookup.productName,
         productType: lookup.productType,
         quantity: scanQuantity,
+        sellingUnits: lookup.sellingUnits,
+        sellingUnitOfMeasure:
+          selectedSellingUnit?.unitOfMeasureCode ??
+          lookup.selectedSellingUnitOfMeasure,
         unitPrice: lookup.mustEnterPriceAtPos
           ? ""
-          : (selectedMatrixVariant?.unitPrice ?? lookup.unitPrice).toFixed(2),
+          : (
+              selectedSellingUnit?.unitPrice ??
+              selectedMatrixVariant?.unitPrice ??
+              lookup.unitPrice
+            ).toFixed(2),
         mustEnterPriceAtPos: lookup.mustEnterPriceAtPos,
         isSerialized: lookup.isSerialized,
         trackExpiry: lookup.trackExpiry,
@@ -5359,7 +5481,8 @@ export function ModernDesktopApp() {
       desktopRuntime.addItemToBasket({
         lookupValue,
         quantity,
-        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        sellingUnitOfMeasure: lookup.selectedSellingUnitOfMeasure,
+        deferInventoryValidationForSalesOrder: saleMode !== "SALE",
         lineIntent: getCatalogLineIntent(snapshot),
       }),
     );
@@ -5398,6 +5521,7 @@ export function ModernDesktopApp() {
       item.mustEnterPriceAtPos ||
       (item.isSerialized && saleMode !== "SALES_ORDER") ||
       (item.trackExpiry && saleMode !== "SALES_ORDER") ||
+      (item.sellingUnits?.length ?? 0) > 0 ||
       needsMatrixChoice ||
       needsTrackedOptionChoice
     ) {
@@ -5413,6 +5537,11 @@ export function ModernDesktopApp() {
       const matrixVariants = lookup.matrixVariants ?? itemMatrixVariants;
       const selectedMatrixVariant =
         matrixVariants.length === 1 ? matrixVariants[0] : null;
+      const selectedSellingUnit = resolveDraftSellingUnit(
+        lookup.sellingUnits,
+        selectedMatrixVariant?.variantCode ?? lookup.productVariantCode,
+        lookup.selectedSellingUnitOfMeasure,
+      );
 
       setOpenPriceDraft({
         lookupValue: item.productCode,
@@ -5421,9 +5550,17 @@ export function ModernDesktopApp() {
         productName: item.productName,
         productType: item.productType,
         quantity: "1",
+        sellingUnits: lookup.sellingUnits,
+        sellingUnitOfMeasure:
+          selectedSellingUnit?.unitOfMeasureCode ??
+          lookup.selectedSellingUnitOfMeasure,
         unitPrice: lookup.mustEnterPriceAtPos
           ? ""
-          : (selectedMatrixVariant?.unitPrice ?? lookup.unitPrice).toFixed(2),
+          : (
+              selectedSellingUnit?.unitPrice ??
+              selectedMatrixVariant?.unitPrice ??
+              lookup.unitPrice
+            ).toFixed(2),
         mustEnterPriceAtPos: lookup.mustEnterPriceAtPos,
         isSerialized: lookup.isSerialized,
         trackExpiry: lookup.trackExpiry,
@@ -5455,7 +5592,7 @@ export function ModernDesktopApp() {
       desktopRuntime.addItemToBasket({
         lookupValue: item.productCode,
         quantity: 1,
-        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        deferInventoryValidationForSalesOrder: saleMode !== "SALE",
         lineIntent: getCatalogLineIntent(snapshot),
       }),
     );
@@ -5477,11 +5614,19 @@ export function ModernDesktopApp() {
     const quantity = Number(draft.quantity);
     const unitPrice = draft.unitPrice.trim() ? Number(draft.unitPrice) : null;
     const serialNumbers = parseSerialDraft(draft.serialNumbers);
+    const selectedSellingUnit = resolveDraftSellingUnit(
+      draft.sellingUnits,
+      draft.productVariantCode,
+      draft.sellingUnitOfMeasure,
+    );
 
     if (!Number.isFinite(quantity) || quantity <= 0) {
       setError("Enter a valid quantity before adding the item.");
       return;
     }
+    const baseQuantity = selectedSellingUnit
+      ? calculatePosBaseQuantity(quantity, selectedSellingUnit.conversionFactor)
+      : quantity;
 
     if (await addReceiptReturnItemIfActive(draft.productCode, quantity)) {
       setOpenPriceDraft(null);
@@ -5491,10 +5636,10 @@ export function ModernDesktopApp() {
     if (
       draft.isSerialized &&
       saleMode !== "SALES_ORDER" &&
-      serialNumbers.length !== quantity
+      serialNumbers.length !== baseQuantity
     ) {
       setError(
-        `Choose exactly ${quantity} serial number(s) before adding ${draft.productName}.`,
+        `Choose exactly ${baseQuantity} serial number(s) before adding ${draft.productName}.`,
       );
       return;
     }
@@ -5557,7 +5702,8 @@ export function ModernDesktopApp() {
       desktopRuntime.addItemToBasket({
         lookupValue: draft.lookupValue,
         quantity,
-        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        sellingUnitOfMeasure: draft.sellingUnitOfMeasure,
+        deferInventoryValidationForSalesOrder: saleMode !== "SALE",
         lineIntent: getCatalogLineIntent(snapshot),
         serialNumbers,
         preferredBatchId: draft.preferredBatchId || null,
@@ -5610,7 +5756,7 @@ export function ModernDesktopApp() {
       desktopRuntime.updateBasketLine({
         lineId,
         quantity,
-        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        deferInventoryValidationForSalesOrder: saleMode !== "SALE",
         serialNumbers: line.serialNumbers,
         overrideDiscountAmount,
         configuredDiscountRate,
@@ -5623,29 +5769,7 @@ export function ModernDesktopApp() {
       return [];
     }
 
-    return paymentDrafts
-      .map<StoreBasketCheckoutPayment | null>((draft) => {
-        const tender = tenderMethods.find(
-          (method) => method.tenderMethodCode === draft.tenderMethodCode,
-        );
-        const amount = Number(draft.amount);
-
-        if (!tender || !Number.isFinite(amount) || amount <= 0) {
-          return null;
-        }
-
-        return {
-          method: tender.paymentMethod,
-          tenderMethodCode: tender.tenderMethodCode,
-          tenderMethodName: tender.tenderMethodName,
-          bankAccountId: draft.bankAccountId || null,
-          amount,
-          reference: draft.reference.trim() || null,
-        };
-      })
-      .filter(
-        (payment): payment is StoreBasketCheckoutPayment => payment !== null,
-      );
+    return paymentDraftsToRequests(paymentDrafts, tenderMethods);
   }
 
   async function checkoutBasket() {
@@ -5739,6 +5863,7 @@ export function ModernDesktopApp() {
     const firstPayment = payments[0] ?? null;
     const result = await runAction((desktopRuntime) =>
       desktopRuntime.createSalesOrderFromActiveBasket({
+        orderType: saleMode === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
         operatorName: getOperatorName(snapshot),
         headerReference: transactionReference.trim() || null,
         additionalDetails: transactionDetails.trim() || null,
@@ -5747,6 +5872,10 @@ export function ModernDesktopApp() {
         depositTenderMethodCode:
           depositAmount > 0 ? firstPayment?.tenderMethodCode ?? null : null,
         depositReference: depositAmount > 0 ? firstPayment?.reference ?? null : null,
+        layawayExpiresAt:
+          saleMode === "LAYAWAY" && layawayExpiresAt
+            ? new Date(layawayExpiresAt).toISOString()
+            : null,
         note:
           [transactionReference.trim(), transactionDetails.trim()]
             .filter(Boolean)
@@ -5756,6 +5885,7 @@ export function ModernDesktopApp() {
 
     if (result) {
       setSaleMode("SALE");
+      setLayawayExpiresAt("");
       setTransactionReference("");
       setTransactionDetails("");
       setTransactionReferenceMatches([]);
@@ -5933,7 +6063,7 @@ export function ModernDesktopApp() {
       const result = await runtime.updateBasketLine({
         lineId: line.lineId,
         quantity: line.quantity,
-        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        deferInventoryValidationForSalesOrder: saleMode !== "SALE",
         serialNumbers: line.serialNumbers,
         overrideDiscountAmount: discountAmount,
         configuredDiscountRate: rate,
@@ -5993,6 +6123,13 @@ export function ModernDesktopApp() {
     } finally {
       setIsBusy(false);
     }
+  }
+
+  function activateLayawayMode() {
+    setSaleMode("LAYAWAY");
+    setNotice(
+      "Layaway mode is on. Select a registered customer and enter the opening deposit.",
+    );
   }
 
   async function searchCustomers() {
@@ -6648,12 +6785,18 @@ export function ModernDesktopApp() {
   }
 
   async function saveStockCount(input?: {
+    sessionId?: string | null;
+    sheetNo?: string | null;
+    lineNo?: number | null;
     productCode?: string;
     countedQuantity?: number;
     batchQuantities?: StoreInventoryBatchAllocation[];
   }) {
-    await runAction((desktopRuntime) =>
+    return runAction((desktopRuntime) =>
       desktopRuntime.saveStockCountSessionDraft({
+        sessionId: input?.sessionId ?? null,
+        sheetNo: input?.sheetNo ?? null,
+        lineNo: input?.lineNo ?? null,
         inventoryLocationCode: inventoryLocation,
         productCode: (input?.productCode ?? stockCountProductCode).trim(),
         countedQuantity: input?.countedQuantity ?? Number(stockCountQuantity),
@@ -6664,13 +6807,23 @@ export function ModernDesktopApp() {
     );
   }
 
-  async function submitStockCount(sessionId: string) {
-    await runAction((desktopRuntime) =>
-      desktopRuntime.submitStockCountSession(sessionId),
-    );
+  async function submitStockCount(sessionIds: string[]) {
+    await runAction(async (desktopRuntime) => {
+      let result: StoreSyncActionResult | null = null;
+
+      for (const sessionId of sessionIds) {
+        result = await desktopRuntime.submitStockCountSession(sessionId);
+      }
+
+      if (!result) {
+        throw new Error("The count sheet has no saved lines to submit.");
+      }
+
+      return result;
+    });
   }
 
-  async function commitStockCount(sessionId: string, sessionNo: string) {
+  async function commitStockCount(sessionIds: string[], sessionNo: string) {
     const confirmed = window.confirm(
       `Commit ${sessionNo} and post the variance to local inventory? This will sync the committed count variance to HQ.`,
     );
@@ -6679,24 +6832,36 @@ export function ModernDesktopApp() {
       return;
     }
 
-    await runAction((desktopRuntime) =>
-      desktopRuntime.commitStockCountSession(sessionId),
-    );
+    await runAction(async (desktopRuntime) => {
+      let result: StoreSyncActionResult | null = null;
+
+      for (const sessionId of sessionIds) {
+        result = await desktopRuntime.commitStockCountSession(sessionId);
+      }
+
+      if (!result) {
+        throw new Error("The count sheet has no submitted lines to commit.");
+      }
+
+      return result;
+    });
   }
 
   async function createTransferRequest(input?: {
-    sourceLocationCode?: string;
+    draftId?: string | null;
+    sourceStoreCode?: string;
     destinationLocationCode?: string;
     productCode?: string;
     quantity?: number;
     unitOfMeasure?: string | null;
+    lines?: StoreInterStoreTransferRequestDraftLineInput[];
     externalReference?: string | null;
     note?: string | null;
   }): Promise<boolean> {
     const nextProductCode = (input?.productCode ?? transferProductCode).trim();
     const nextQuantity = input?.quantity ?? Number(transferQuantity);
 
-    if (!nextProductCode) {
+    if (!nextProductCode && !input?.lines?.length) {
       setError(
         "Choose an item on the Details tab before saving the transfer request.",
       );
@@ -6705,13 +6870,17 @@ export function ModernDesktopApp() {
 
     const result = await runAction((desktopRuntime) =>
       desktopRuntime.saveInterStoreTransferRequestDraft({
-        sourceLocationCode: input?.sourceLocationCode ?? transferSourceLocation,
+        draftId: input?.draftId ?? null,
+        sourceStoreCode: input?.sourceStoreCode ?? transferSourceStore,
         destinationLocationCode:
           input?.destinationLocationCode ?? transferDestinationLocation,
-        productCode: nextProductCode.toUpperCase(),
-        quantity: nextQuantity,
+        productCode: nextProductCode
+          ? nextProductCode.toUpperCase()
+          : undefined,
+        quantity: nextProductCode ? nextQuantity : undefined,
         unitOfMeasure:
           input?.unitOfMeasure ?? (transferUnitOfMeasure || null),
+        lines: input?.lines,
         externalReference: input?.externalReference ?? null,
         note: input?.note ?? null,
         operatorName: operatorName ?? undefined,
@@ -6891,10 +7060,12 @@ export function ModernDesktopApp() {
   async function issueInterStoreTransfer(
     transfer: StoreInterStoreTransferSummary,
     serialNumbers: string[] = [],
+    sourceLocationCode = "",
   ) {
     await runAction((desktopRuntime) =>
       desktopRuntime.issueInterStoreTransfer({
         transferId: transfer.transferId,
+        sourceLocationCode,
         quantity: transfer.isSerialized
           ? serialNumbers.length
           : transfer.outstandingIssueQuantity,
@@ -8035,6 +8206,7 @@ export function ModernDesktopApp() {
             openPriceDraft={openPriceDraft}
             paymentDrafts={paymentDrafts}
             saleMode={saleMode}
+            layawayExpiresAt={layawayExpiresAt}
             cashierReport={cashierReport}
             reportPanelOpen={reportPanelOpen}
             reportDateFrom={reportDateFrom}
@@ -8076,6 +8248,7 @@ export function ModernDesktopApp() {
             setCatalogQuery={setCatalogQuery}
             setCustomerQuery={setCustomerQuery}
             setSaleMode={setSaleMode}
+            setLayawayExpiresAt={setLayawayExpiresAt}
             setSelectedAccountCustomer={setSelectedAccountCustomer}
             setLineQuantityDrafts={setLineQuantityDrafts}
             setOpenPriceDraft={setOpenPriceDraft}
@@ -8126,6 +8299,7 @@ export function ModernDesktopApp() {
             addPaymentRow={addPaymentRow}
             applyPosDiscountRate={applyPosDiscountRate}
             activateSalesOrderMode={activateSalesOrderMode}
+            activateLayawayMode={activateLayawayMode}
             closeShift={closeShift}
             loadStoreReport={loadStoreReport}
             openShift={openShift}
@@ -8189,11 +8363,9 @@ export function ModernDesktopApp() {
             }
             recordSupplierReturn={recordSupplierReturn}
             remoteInventoryItemFilter={remoteInventoryItemFilter}
-            remoteInventoryLocationFilter={remoteInventoryLocationFilter}
             remoteInventoryQuery={remoteInventoryQuery}
             remoteInventoryRows={remoteInventoryRows}
             remoteInventoryStoreFilter={remoteInventoryStoreFilter}
-            requestRemoteStock={requestRemoteStock}
             saveStockCount={saveStockCount}
             submitTransferRequestDraft={submitTransferRequestDraft}
             submitStockCount={submitStockCount}
@@ -8203,7 +8375,6 @@ export function ModernDesktopApp() {
             setInventorySerialDraft={setInventorySerialDraft}
             setError={setError}
             setRemoteInventoryItemFilter={setRemoteInventoryItemFilter}
-            setRemoteInventoryLocationFilter={setRemoteInventoryLocationFilter}
             setRemoteInventoryQuery={setRemoteInventoryQuery}
             setRemoteInventoryStoreFilter={setRemoteInventoryStoreFilter}
             setStockCountNote={setStockCountNote}
@@ -8214,7 +8385,7 @@ export function ModernDesktopApp() {
             setTransferProductCode={setTransferProductCode}
             setTransferUnitOfMeasure={setTransferUnitOfMeasure}
             setTransferQuantity={setTransferQuantity}
-            setTransferSourceLocation={setTransferSourceLocation}
+            setTransferSourceStore={setTransferSourceStore}
             snapshot={snapshot}
             stockCountNote={stockCountNote}
             stockCountProductCode={stockCountProductCode}
@@ -8224,7 +8395,7 @@ export function ModernDesktopApp() {
             transferProductCode={transferProductCode}
             transferUnitOfMeasure={transferUnitOfMeasure}
             transferQuantity={transferQuantity}
-            transferSourceLocation={transferSourceLocation}
+            transferSourceStore={transferSourceStore}
             transfers={transfers}
           />
         ) : null}
@@ -8760,6 +8931,175 @@ function StandaloneProductEditorForm(props: {
           </label>
         </section>
 
+        <section className="rms-product-form-section rms-form-span-all">
+          <div className="rms-form-section-title">
+            <span>Alternate UOM</span>
+            <strong>Selling units and prices</strong>
+          </div>
+          <div className="rms-table rms-selling-unit-editor-table">
+            <div className="rms-table-head">
+              <span>Unit</span>
+              <span>Conversion</span>
+              <span>Price</span>
+              <span>Barcode</span>
+              <span>Default</span>
+              <span aria-hidden="true" />
+            </div>
+            {props.productDraft.sellingUnits.map((unit, index) => (
+              <div
+                className="rms-table-row"
+                key={`${unit.unitOfMeasureCode || "unit"}-${index}`}
+              >
+                <label>
+                  <span className="rms-visually-hidden">Selling unit</span>
+                  <select
+                    onChange={(event) =>
+                      props.setProductDraft((draft) => ({
+                        ...draft,
+                        sellingUnits: draft.sellingUnits.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? {
+                                ...candidate,
+                                unitOfMeasureCode: event.target.value,
+                                unitOfMeasureName: event.target.value,
+                              }
+                            : candidate,
+                        ),
+                      }))
+                    }
+                    value={unit.unitOfMeasureCode}
+                  >
+                    <option value="">Select unit</option>
+                    {Array.from(
+                      new Set([...props.units, unit.unitOfMeasureCode]),
+                    )
+                      .filter(Boolean)
+                      .map((unitCode) => (
+                        <option key={unitCode} value={unitCode}>
+                          {unitCode}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  <span className="rms-visually-hidden">Conversion factor</span>
+                  <input
+                    min="0.000001"
+                    onChange={(event) =>
+                      props.setProductDraft((draft) => ({
+                        ...draft,
+                        sellingUnits: draft.sellingUnits.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? { ...candidate, conversionFactor: event.target.value }
+                            : candidate,
+                        ),
+                      }))
+                    }
+                    step="0.000001"
+                    type="number"
+                    value={unit.conversionFactor}
+                  />
+                </label>
+                <label>
+                  <span className="rms-visually-hidden">Selling price</span>
+                  <input
+                    min="0.01"
+                    onChange={(event) =>
+                      props.setProductDraft((draft) => ({
+                        ...draft,
+                        sellingUnits: draft.sellingUnits.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? { ...candidate, unitPrice: event.target.value }
+                            : candidate,
+                        ),
+                      }))
+                    }
+                    step="0.01"
+                    type="number"
+                    value={unit.unitPrice}
+                  />
+                </label>
+                <label>
+                  <span className="rms-visually-hidden">Selling-unit barcode</span>
+                  <input
+                    onChange={(event) =>
+                      props.setProductDraft((draft) => ({
+                        ...draft,
+                        sellingUnits: draft.sellingUnits.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? { ...candidate, barcode: event.target.value }
+                            : candidate,
+                        ),
+                      }))
+                    }
+                    value={unit.barcode}
+                  />
+                </label>
+                <label className="rms-check-field">
+                  <input
+                    checked={unit.isDefault}
+                    onChange={(event) =>
+                      props.setProductDraft((draft) => ({
+                        ...draft,
+                        sellingUnits: draft.sellingUnits.map((candidate, candidateIndex) => ({
+                          ...candidate,
+                          isDefault:
+                            candidateIndex === index ? event.target.checked : false,
+                        })),
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                  <span>Default</span>
+                </label>
+                <button
+                  aria-label={`Remove ${unit.unitOfMeasureCode || "selling unit"}`}
+                  className="rms-button is-compact"
+                  onClick={() =>
+                    props.setProductDraft((draft) => ({
+                      ...draft,
+                      sellingUnits: draft.sellingUnits.filter(
+                        (_, candidateIndex) => candidateIndex !== index,
+                      ),
+                    }))
+                  }
+                  title="Remove selling unit"
+                  type="button"
+                >
+                  X
+                </button>
+              </div>
+            ))}
+            {props.productDraft.sellingUnits.length === 0 ? (
+              <div className="rms-table-empty">Base-unit selling remains active.</div>
+            ) : null}
+          </div>
+          <button
+            className="rms-button is-compact"
+            onClick={() =>
+              props.setProductDraft((draft) => ({
+                ...draft,
+                sellingUnits: [
+                  ...draft.sellingUnits,
+                  {
+                    unitOfMeasureCode: "",
+                    unitOfMeasureName: "",
+                    conversionFactor: "1",
+                    unitPrice: draft.unitPrice || "0",
+                    barcode: "",
+                    isDefault: draft.sellingUnits.length === 0,
+                    allowFractionalSale: false,
+                    decimalPrecision: "0",
+                  },
+                ],
+              }))
+            }
+            type="button"
+          >
+            Add selling unit
+          </button>
+        </section>
+
         <section className="rms-product-form-section">
           <div className="rms-form-section-title">
             <span>Pricing</span>
@@ -9219,7 +9559,12 @@ function StandaloneSetupWorkspace(props: {
   const departments = props.snapshot?.productDepartments ?? [];
   const categories = props.snapshot?.productCategories ?? [];
   const units = Array.from(
-    new Set(["EA", unitDraft.uomCode, productDraft.unitOfMeasure]),
+    new Set([
+      "EA",
+      unitDraft.uomCode,
+      productDraft.unitOfMeasure,
+      ...productDraft.sellingUnits.map((unit) => unit.unitOfMeasureCode),
+    ]),
   ).filter(Boolean);
   const tenders = props.snapshot?.availableTenderMethods ?? [];
   const locations = props.snapshot?.inventoryLocations ?? [];
@@ -14535,8 +14880,32 @@ function DashboardWorkspace({
     salesCount + returnCount > 0
       ? (returnCount / (salesCount + returnCount)) * 100
       : 0;
-  const topProducts = (dashboardReport?.productRows ?? [])
-    .filter((product) => product.netAmount > 0 || product.quantity > 0)
+  const dashboardProductsByCode = new Map<
+    string,
+    {
+      productCode: string;
+      productName: string;
+      baseQuantity: number;
+      baseUnitOfMeasure: string;
+      netAmount: number;
+    }
+  >();
+  for (const product of dashboardReport?.productRows ?? []) {
+    const current = dashboardProductsByCode.get(product.productCode) ?? {
+      productCode: product.productCode,
+      productName: product.productName,
+      baseQuantity: 0,
+      baseUnitOfMeasure: product.baseUnitOfMeasure,
+      netAmount: 0,
+    };
+    current.baseQuantity = Number(
+      (current.baseQuantity + product.baseQuantity).toFixed(3),
+    );
+    current.netAmount = Number((current.netAmount + product.netAmount).toFixed(2));
+    dashboardProductsByCode.set(product.productCode, current);
+  }
+  const topProducts = Array.from(dashboardProductsByCode.values())
+    .filter((product) => product.netAmount > 0 || product.baseQuantity > 0)
     .sort((left, right) => right.netAmount - left.netAmount)
     .slice(0, 5);
   const topProduct = topProducts[0] ?? null;
@@ -14707,7 +15076,7 @@ function DashboardWorkspace({
       label: "Top product",
       value: topProduct ? topProduct.productName : "None",
       detail: topProduct
-        ? `${formatMoney(topProduct.netAmount)} / ${formatNumber(topProduct.quantity)} qty`
+        ? `${formatMoney(topProduct.netAmount)} / ${formatNumber(topProduct.baseQuantity)} ${topProduct.baseUnitOfMeasure}`
         : "No sales yet",
       tone: "slate",
       title: "Highest net-selling product in the dashboard scope.",
@@ -14961,7 +15330,9 @@ function DashboardWorkspace({
                   <strong>
                     {index + 2}. {product.productName}
                   </strong>
-                  <span>{formatNumber(product.quantity)} qty</span>
+                  <span>
+                    {formatNumber(product.baseQuantity)} {product.baseUnitOfMeasure}
+                  </span>
                 </div>
                 <strong>{formatMoney(product.netAmount)}</strong>
               </div>
@@ -15068,6 +15439,7 @@ function POSWorkspace(props: {
   isVoidReviewBasket: boolean;
   openPriceDraft: OpenPriceDraft | null;
   saleMode: SaleMode;
+  layawayExpiresAt: string;
   scanQuery: string;
   scanQuantity: string;
   catalogQuery: string;
@@ -15118,6 +15490,7 @@ function POSWorkspace(props: {
   setCatalogCategory: (value: string) => void;
   setCustomerQuery: (value: string) => void;
   setSaleMode: (value: SaleMode) => void;
+  setLayawayExpiresAt: (value: string) => void;
   setAccountCustomerQuery: (value: string) => void;
   setAccountPanelOpen: (value: boolean) => void;
   setSelectedAccountCustomer: (customer: StoreCustomerSummary | null) => void;
@@ -15161,6 +15534,7 @@ function POSWorkspace(props: {
   checkoutBasket: () => Promise<void>;
   applyPosDiscountRate: (lineId: string, value: string) => Promise<void>;
   activateSalesOrderMode: () => Promise<void>;
+  activateLayawayMode: () => void;
   cancelSalesOrder: (order: StoreSalesOrderSummary) => Promise<void>;
   clearSaleScreen: () => Promise<void>;
   fulfilSalesOrder: (order: StoreSalesOrderSummary) => Promise<void>;
@@ -15205,6 +15579,10 @@ function POSWorkspace(props: {
     ) => Promise<StoreSyncActionResult>,
   ) => Promise<StoreSyncActionResult | null>;
 }) {
+  const [layawayActionDraft, setLayawayActionDraft] =
+    useState<LayawayActionDraft | null>(null);
+  const [layawayActionPayments, setLayawayActionPayments] = useState<PaymentDraft[]>([]);
+  const [layawayActionReason, setLayawayActionReason] = useState("");
   const selectedCustomer =
     props.selectedCustomer &&
     (props.selectedCustomer.customerId === props.activeBasket?.customerId ||
@@ -15232,6 +15610,19 @@ function POSWorkspace(props: {
   const canEditBasket = canSell && !isReadOnlyVoid && !isReadOnlySalesOrder;
   const capabilities =
     props.snapshot?.activeOperatorSession?.capabilities ?? null;
+  const permissionCodes =
+    props.snapshot?.activeOperatorSession?.permissionCodes ?? [];
+  const canCreateLayaway = permissionCodes.includes("pos.layaway.create");
+  const canReceiveLayawayPayment = permissionCodes.includes(
+    "pos.layaway.payment.receive",
+  );
+  const canCancelLayaway = permissionCodes.includes(
+    "pos.layaway.cancel-refund",
+  );
+  const canReleaseLayawayReservation = permissionCodes.includes(
+    "pos.layaway.reservation.release",
+  );
+  const canFulfilLayaway = permissionCodes.includes("pos.layaway.fulfil");
   const canAttachCustomer =
     canEditBasket && capabilities?.canAttachCustomer === true;
   const canSearchReceipt = capabilities?.canSearchReceipt === true;
@@ -15312,10 +15703,10 @@ function POSWorkspace(props: {
       )
     );
   });
-  const salesOrderDepositAmount =
-    props.saleMode === "SALES_ORDER" ? paymentTotal : 0;
+  const isOrderMode = props.saleMode !== "SALE";
+  const salesOrderDepositAmount = isOrderMode ? paymentTotal : 0;
   const salesOrderDepositOver =
-    props.saleMode === "SALES_ORDER" &&
+    isOrderMode &&
     salesOrderDepositAmount - basketTotal > 0.005;
   const salesOrderBalanceDue = Math.max(
     0,
@@ -15332,8 +15723,20 @@ function POSWorkspace(props: {
     props.activeBasket?.transactionType === "SALE" &&
     Boolean(props.activeBasket.customerId) &&
     Boolean(props.activeBasket.lines.length);
+  const layawayMinimumDepositAmount = Number(
+    (
+      basketTotal *
+      ((props.snapshot?.optionSettings.layawaySettings.minimumDepositPercent ?? 0) / 100)
+    ).toFixed(2),
+  );
+  const layawayDepositShort =
+    props.saleMode === "LAYAWAY" &&
+    salesOrderDepositAmount + 0.005 < layawayMinimumDepositAmount;
   const canSaveSalesOrder =
     canCreateSalesOrder &&
+    (props.saleMode !== "LAYAWAY" ||
+      (props.snapshot?.optionSettings.layawaySettings.enabled === true && canCreateLayaway)) &&
+    !layawayDepositShort &&
     !salesOrderDepositOver &&
     !missingTenderSelection &&
     !missingBankAccountTender &&
@@ -15346,7 +15749,7 @@ function POSWorkspace(props: {
       capabilities?.canProcessSale === true ||
       capabilities?.canOpenShift === true);
   const visibleCatalogItems =
-    props.saleMode === "SALES_ORDER"
+    props.saleMode !== "SALE"
       ? props.catalogItems
       : props.catalogItems.filter(isCatalogItemSellable);
   const receiptLinkedCorrectionActive =
@@ -15380,11 +15783,33 @@ function POSWorkspace(props: {
     props.openPriceDraft?.serialNumbers ?? "",
   );
   const openPriceQuantity = Number(props.openPriceDraft?.quantity ?? 0);
+  const openPriceSellingUnits = props.openPriceDraft
+    ? sellingUnitsForVariant(
+        props.openPriceDraft.sellingUnits,
+        props.openPriceDraft.productVariantCode,
+      )
+    : [];
+  const openPriceSelectedSellingUnit = props.openPriceDraft
+    ? resolveDraftSellingUnit(
+        props.openPriceDraft.sellingUnits,
+        props.openPriceDraft.productVariantCode,
+        props.openPriceDraft.sellingUnitOfMeasure,
+      )
+    : null;
+  const openPriceBaseQuantity =
+    Number.isFinite(openPriceQuantity) && openPriceQuantity > 0
+      ? Number(
+          (
+            openPriceQuantity *
+            (openPriceSelectedSellingUnit?.conversionFactor ?? 1)
+          ).toFixed(3),
+        )
+      : 0;
   const openPriceSerialMismatch =
     Boolean(props.openPriceDraft?.isSerialized) &&
     props.saleMode !== "SALES_ORDER" &&
-    (!Number.isFinite(openPriceQuantity) ||
-      selectedSerialNumbers.length !== openPriceQuantity);
+    (!Number.isFinite(openPriceBaseQuantity) ||
+      selectedSerialNumbers.length !== openPriceBaseQuantity);
   const openPriceBatchUnavailable =
     Boolean(props.openPriceDraft?.trackExpiry) &&
     props.saleMode !== "SALES_ORDER" &&
@@ -15556,9 +15981,115 @@ function POSWorkspace(props: {
     props.snapshot?.salesOrders,
   ]);
 
+  function estimateLayawayRefund(order: StoreSalesOrderSummary) {
+    const settings = props.snapshot?.optionSettings.layawaySettings;
+
+    if (!settings?.refundPaymentsOnCancellation) {
+      return 0;
+    }
+
+    const fee =
+      settings.cancellationFeeType === "PERCENTAGE"
+        ? order.paidAmount * (settings.cancellationFeeValue / 100)
+        : settings.cancellationFeeValue;
+
+    return Number(Math.max(0, order.paidAmount - Math.min(order.paidAmount, fee)).toFixed(2));
+  }
+
+  function openLayawayAction(kind: LayawayActionKind, order: StoreSalesOrderSummary) {
+    const amount =
+      kind === "PAYMENT" ? order.balanceAmount : kind === "CANCEL" ? estimateLayawayRefund(order) : 0;
+
+    setLayawayActionDraft({ kind, order });
+    setLayawayActionReason("");
+    setLayawayActionPayments(
+      amount > 0
+        ? [defaultPaymentDraft(props.snapshot, null, amount.toFixed(2))]
+        : [],
+    );
+  }
+
+  async function submitLayawayAction() {
+    if (!layawayActionDraft) {
+      return;
+    }
+
+    const { kind, order } = layawayActionDraft;
+    const payments = paymentDraftsToRequests(
+      layawayActionPayments,
+      props.snapshot?.availableTenderMethods ?? [],
+    );
+    let result: StoreSyncActionResult | null = null;
+
+    if (kind === "PAYMENT") {
+      result = await props.runAction((desktopRuntime) =>
+        desktopRuntime.receiveLayawayPayment({
+          orderId: order.orderId,
+          payments,
+          operatorName: props.snapshot?.activeOperatorSession?.displayName ?? null,
+          note: layawayActionReason.trim() || null,
+        }),
+      );
+    } else if (kind === "CANCEL") {
+      result = await props.runAction((desktopRuntime) =>
+        desktopRuntime.cancelSalesOrder({
+          orderId: order.orderId,
+          operatorName: props.snapshot?.activeOperatorSession?.displayName ?? null,
+          note: layawayActionReason.trim() || "Layaway cancelled from the POS queue.",
+          refundPayments: payments,
+        }),
+      );
+    } else if (kind === "RELEASE") {
+      result = await props.runAction((desktopRuntime) =>
+        desktopRuntime.releaseLayawayReservation({
+          orderId: order.orderId,
+          reason: layawayActionReason.trim(),
+          operatorName: props.snapshot?.activeOperatorSession?.displayName ?? null,
+        }),
+      );
+    } else {
+      result = await props.runAction((desktopRuntime) =>
+        desktopRuntime.expireLayaway({
+          orderId: order.orderId,
+          reason: layawayActionReason.trim() || null,
+          operatorName: props.snapshot?.activeOperatorSession?.displayName ?? null,
+        }),
+      );
+    }
+
+    if (result) {
+      setLayawayActionDraft(null);
+      setLayawayActionPayments([]);
+      setLayawayActionReason("");
+    }
+  }
+
+  const layawayActionExpectedAmount = layawayActionDraft
+    ? layawayActionDraft.kind === "PAYMENT"
+      ? layawayActionDraft.order.balanceAmount
+      : layawayActionDraft.kind === "CANCEL"
+        ? estimateLayawayRefund(layawayActionDraft.order)
+        : 0
+    : 0;
+  const layawayActionPaymentTotal = layawayActionPayments.reduce(
+    (sum, payment) => sum + (Number(payment.amount) || 0),
+    0,
+  );
+  const layawayActionNeedsPayment =
+    layawayActionDraft?.kind === "PAYMENT" ||
+    (layawayActionDraft?.kind === "CANCEL" && layawayActionExpectedAmount > 0.005);
+  const layawayActionPaymentInvalid =
+    layawayActionDraft?.kind === "PAYMENT"
+      ? layawayActionPaymentTotal <= 0 ||
+        layawayActionPaymentTotal - layawayActionExpectedAmount > 0.005
+      : layawayActionNeedsPayment &&
+        Math.abs(layawayActionPaymentTotal - layawayActionExpectedAmount) > 0.005;
+  const layawayActionReasonMissing =
+    layawayActionDraft?.kind === "RELEASE" && !layawayActionReason.trim();
+
   return (
     <div
-      className={`rms-workspace rms-pos-grid${props.saleMode === "SALES_ORDER" ? " is-sales-order-mode" : ""}`}
+      className={`rms-workspace rms-pos-grid${isOrderMode ? " is-sales-order-mode" : ""}`}
     >
       <section className="rms-panel rms-pos-cart">
         {isReadOnlyVoid ? (
@@ -15742,6 +16273,7 @@ function POSWorkspace(props: {
                         : null,
                       line.variantSize ? `Size ${line.variantSize}` : null,
                       line.variantColor ? `Colour ${line.variantColor}` : null,
+                      `${line.sellingUnitOfMeasure} x ${formatNumber(line.uomConversionFactor)} = ${formatNumber(line.baseQuantity)} ${line.baseUnitOfMeasure}`,
                       line.serialNumbers.length
                         ? `Serial ${line.serialNumbers.join(", ")}`
                         : null,
@@ -15924,12 +16456,13 @@ function POSWorkspace(props: {
           </div>
         ) : null}
 
-        {props.saleMode === "SALES_ORDER" ? (
+        {isOrderMode ? (
           <div className="rms-payment-panel is-order-mode">
             <div className="rms-payment-summary">
               <strong>{formatMoney(salesOrderDepositAmount)}</strong>
               <span>
-                Order {formatMoney(basketTotal)} · Balance{" "}
+                {props.saleMode === "LAYAWAY" ? "Layaway" : "Order"}{" "}
+                {formatMoney(basketTotal)} · Balance{" "}
                 {formatMoney(salesOrderBalanceDue)}
               </span>
               <button
@@ -15951,9 +16484,20 @@ function POSWorkspace(props: {
                 onClick={() => void props.saveSalesOrderBasket()}
                 type="button"
               >
-                Save order
+                {props.saleMode === "LAYAWAY" ? "Save layaway" : "Save order"}
               </button>
             </div>
+            {props.saleMode === "LAYAWAY" ? (
+              <label className="rms-layaway-expiry-field">
+                <span>Expiry date and time (optional)</span>
+                <input
+                  disabled={props.isBusy || isReadOnlyVoid}
+                  onChange={(event) => props.setLayawayExpiresAt(event.target.value)}
+                  type="datetime-local"
+                  value={props.layawayExpiresAt}
+                />
+              </label>
+            ) : null}
             {props.paymentDrafts.map((payment, index) => (
               <div className="rms-payment-row" key={payment.id}>
                 <select
@@ -16062,7 +16606,12 @@ function POSWorkspace(props: {
             ))}
             {salesOrderDepositOver ? (
               <p className="rms-inline-message">
-                Sales order deposits cannot be greater than the order total.
+                Deposits cannot be greater than the order total.
+              </p>
+            ) : null}
+            {layawayDepositShort ? (
+              <p className="rms-inline-message">
+                The opening deposit must be at least {formatMoney(layawayMinimumDepositAmount)} ({formatNumber(props.snapshot?.optionSettings.layawaySettings.minimumDepositPercent ?? 0)}%).
               </p>
             ) : null}
             {missingTenderSelection ? (
@@ -16315,14 +16864,14 @@ function POSWorkspace(props: {
           ) : (
             <EmptyState
               title={
-                props.saleMode === "SALES_ORDER"
+                isOrderMode
                   ? "No active catalog products"
                   : isStandaloneDeployment(props.snapshot)
                   ? "No local stock available"
                   : "No sellable stock available"
               }
               detail={
-                props.saleMode === "SALES_ORDER"
+                isOrderMode
                   ? "Sync or publish active products before creating this order."
                   : isStandaloneDeployment(props.snapshot)
                   ? "Add products with quantity on hand before using the POS lane."
@@ -16350,6 +16899,20 @@ function POSWorkspace(props: {
             type="button"
           >
             Sales order mode
+          </button>
+          <button
+            className={`rms-action-button${props.saleMode === "LAYAWAY" ? " is-selected is-order" : ""}`}
+            disabled={
+              props.isBusy ||
+              isReadOnlyVoid ||
+              isReadOnlySalesOrder ||
+              props.snapshot?.optionSettings.layawaySettings.enabled !== true ||
+              !canCreateLayaway
+            }
+            onClick={props.activateLayawayMode}
+            type="button"
+          >
+            Layaway mode
           </button>
         </div>
         <button
@@ -17016,10 +17579,13 @@ function POSWorkspace(props: {
                       · {order.operatorName ?? "cashier"}
                     </span>
                     <small>
-                      {order.sourceTransactionNo} ·{" "}
+                      {order.orderType === "LAYAWAY" ? "Layaway" : "Sales order"} · {order.sourceTransactionNo} ·{" "}
                       {formatNumber(order.itemCount)} item(s) · Deposit{" "}
                       {formatMoney(order.depositAmount)} · Balance{" "}
                       {formatMoney(order.balanceAmount)}
+                      {order.orderType === "LAYAWAY"
+                        ? ` · Reservation ${order.reservationStatus}`
+                        : ""}
                     </small>
                   </div>
                   <strong>{formatMoney(order.totalAmount)}</strong>
@@ -17033,17 +17599,65 @@ function POSWorkspace(props: {
                         props.isBusy ||
                         !canSell ||
                         Boolean(props.activeBasket) ||
-                        order.status !== "OPEN"
+                        order.status !== "OPEN" ||
+                        (order.orderType === "LAYAWAY" &&
+                          (!canFulfilLayaway ||
+                            (props.snapshot?.optionSettings.layawaySettings.requireFullPaymentBeforeFulfilment === true &&
+                              order.balanceAmount > 0.005)))
                       }
                       onClick={() => void props.fulfilSalesOrder(order)}
                       type="button"
                     >
                       Fulfil
                     </button>
+                    {order.orderType === "LAYAWAY" ? (
+                      <button
+                        className="rms-row-button"
+                        disabled={
+                          props.isBusy ||
+                          !canReceiveLayawayPayment ||
+                          order.balanceAmount <= 0.005
+                        }
+                        onClick={() => openLayawayAction("PAYMENT", order)}
+                        type="button"
+                      >
+                        Payment
+                      </button>
+                    ) : null}
+                    {order.orderType === "LAYAWAY" && order.reservationStatus === "ACTIVE" ? (
+                      <button
+                        className="rms-row-button"
+                        disabled={props.isBusy || !canReleaseLayawayReservation}
+                        onClick={() => openLayawayAction("RELEASE", order)}
+                        type="button"
+                      >
+                        Release stock
+                      </button>
+                    ) : null}
+                    {order.orderType === "LAYAWAY" &&
+                    order.layawayExpiresAt &&
+                    Date.parse(order.layawayExpiresAt) <= Date.now() ? (
+                      <button
+                        className="rms-row-button"
+                        disabled={props.isBusy || !canReleaseLayawayReservation}
+                        onClick={() => openLayawayAction("EXPIRE", order)}
+                        type="button"
+                      >
+                        Expire
+                      </button>
+                    ) : null}
                     <button
                       className="rms-row-button is-danger"
-                      disabled={props.isBusy || order.status !== "OPEN"}
-                      onClick={() => void props.cancelSalesOrder(order)}
+                      disabled={
+                        props.isBusy ||
+                        order.status !== "OPEN" ||
+                        (order.orderType === "LAYAWAY" && !canCancelLayaway)
+                      }
+                      onClick={() =>
+                        order.orderType === "LAYAWAY"
+                          ? openLayawayAction("CANCEL", order)
+                          : void props.cancelSalesOrder(order)
+                      }
                       type="button"
                     >
                       Cancel
@@ -17305,6 +17919,194 @@ function POSWorkspace(props: {
         </section>
       ) : null}
 
+      {layawayActionDraft ? (
+        <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
+          <section className="rms-dialog rms-layaway-action-dialog">
+            <div className="rms-panel-title">
+              <div>
+                <span>Layaway · {layawayActionDraft.order.orderNo}</span>
+                <h2>
+                  {layawayActionDraft.kind === "PAYMENT"
+                    ? "Receive installment"
+                    : layawayActionDraft.kind === "CANCEL"
+                      ? "Cancel and refund"
+                      : layawayActionDraft.kind === "RELEASE"
+                        ? "Release reserved stock"
+                        : "Expire layaway"}
+                </h2>
+              </div>
+              <button
+                className="rms-button"
+                disabled={props.isBusy}
+                onClick={() => setLayawayActionDraft(null)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="rms-layaway-action-summary">
+              <Stat label="Order total" value={formatMoney(layawayActionDraft.order.totalAmount)} />
+              <Stat label="Paid" value={formatMoney(layawayActionDraft.order.paidAmount)} />
+              <Stat label="Balance" value={formatMoney(layawayActionDraft.order.balanceAmount)} tone="warn" />
+              <Stat label="Reservation" value={layawayActionDraft.order.reservationStatus} />
+            </div>
+            {layawayActionNeedsPayment ? (
+              <div className="rms-layaway-payment-list">
+                <div className="rms-dialog-toolbar">
+                  <span>
+                    {layawayActionDraft.kind === "CANCEL"
+                      ? `Refund due ${formatMoney(layawayActionExpectedAmount)}`
+                      : `Maximum installment ${formatMoney(layawayActionExpectedAmount)}`}
+                  </span>
+                  <button
+                    className="rms-row-button is-add"
+                    disabled={props.isBusy}
+                    onClick={() =>
+                      setLayawayActionPayments((payments) => [
+                        ...payments,
+                        defaultPaymentDraft(props.snapshot, null, "0.00"),
+                      ])
+                    }
+                    type="button"
+                  >
+                    Add tender
+                  </button>
+                </div>
+                {layawayActionPayments.map((payment, index) => {
+                  const tender = props.tenderMethods.find(
+                    (method) => method.tenderMethodCode === payment.tenderMethodCode,
+                  );
+
+                  return (
+                    <div className="rms-payment-row" key={payment.id}>
+                      <select
+                        disabled={props.isBusy}
+                        onChange={(event) =>
+                          setLayawayActionPayments((payments) =>
+                            payments.map((entry) =>
+                              entry.id === payment.id
+                                ? { ...entry, tenderMethodCode: event.target.value, bankAccountId: "" }
+                                : entry,
+                            ),
+                          )
+                        }
+                        value={payment.tenderMethodCode}
+                      >
+                        {props.tenderMethods.map((method) => (
+                          <option key={method.tenderMethodCode} value={method.tenderMethodCode}>
+                            {method.tenderMethodName}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        disabled={props.isBusy || !tenderRequiresBankAccount(tender)}
+                        onChange={(event) =>
+                          setLayawayActionPayments((payments) =>
+                            payments.map((entry) =>
+                              entry.id === payment.id
+                                ? { ...entry, bankAccountId: event.target.value }
+                                : entry,
+                            ),
+                          )
+                        }
+                        value={payment.bankAccountId}
+                      >
+                        <option value="">Bank account</option>
+                        {props.snapshot?.availableBankAccounts.map((account) => (
+                          <option key={account.bankAccountId} value={account.bankAccountId}>
+                            {account.bankName} · {account.accountNumber}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        disabled={props.isBusy}
+                        min="0.01"
+                        onChange={(event) =>
+                          setLayawayActionPayments((payments) =>
+                            payments.map((entry) =>
+                              entry.id === payment.id ? { ...entry, amount: event.target.value } : entry,
+                            ),
+                          )
+                        }
+                        step="0.01"
+                        type="number"
+                        value={payment.amount}
+                      />
+                      <input
+                        disabled={props.isBusy}
+                        onChange={(event) =>
+                          setLayawayActionPayments((payments) =>
+                            payments.map((entry) =>
+                              entry.id === payment.id ? { ...entry, reference: event.target.value } : entry,
+                            ),
+                          )
+                        }
+                        placeholder="Reference"
+                        value={payment.reference}
+                      />
+                      <button
+                        aria-label={`Remove tender ${index + 1}`}
+                        className="rms-icon-button is-danger rms-payment-remove-button"
+                        disabled={props.isBusy || layawayActionPayments.length <= 1}
+                        onClick={() =>
+                          setLayawayActionPayments((payments) =>
+                            payments.filter((entry) => entry.id !== payment.id),
+                          )
+                        }
+                        title="Remove tender"
+                        type="button"
+                      >
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  );
+                })}
+                {layawayActionPaymentInvalid ? (
+                  <p className="rms-inline-message">
+                    {layawayActionDraft.kind === "CANCEL"
+                      ? `Refund tenders must total ${formatMoney(layawayActionExpectedAmount)}.`
+                      : `Enter an installment above zero and not more than ${formatMoney(layawayActionExpectedAmount)}.`}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+            <label className="rms-field">
+              <span>{layawayActionDraft.kind === "RELEASE" ? "Reason" : "Note"}</span>
+              <textarea
+                disabled={props.isBusy}
+                onChange={(event) => setLayawayActionReason(event.target.value)}
+                placeholder={
+                  layawayActionDraft.kind === "RELEASE"
+                    ? "Why is the stock reservation being released?"
+                    : "Optional action note"
+                }
+                value={layawayActionReason}
+              />
+            </label>
+            <div className="rms-dialog-actions">
+              <button
+                className="rms-button"
+                disabled={props.isBusy}
+                onClick={() => setLayawayActionDraft(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className={`rms-button is-primary${layawayActionDraft.kind === "CANCEL" ? " is-danger" : ""}`}
+                disabled={
+                  props.isBusy || layawayActionPaymentInvalid || layawayActionReasonMissing
+                }
+                onClick={() => void submitLayawayAction()}
+                type="button"
+              >
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {props.transactionDetailsOpen ? (
         <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
           <section className="rms-dialog rms-transaction-details-dialog">
@@ -17470,14 +18272,26 @@ function POSWorkspace(props: {
                         const selectedLabel = selectedVariant
                           ? formatMatrixVariantLabel(selectedVariant)
                           : "";
+                        const selectedSellingUnit = resolveDraftSellingUnit(
+                          draft.sellingUnits,
+                          selectedVariant?.variantCode ?? null,
+                          null,
+                        );
 
                         return {
                           ...draft,
                           productVariantCode:
                             selectedVariant?.variantCode ?? null,
+                          sellingUnitOfMeasure:
+                            selectedSellingUnit?.unitOfMeasureCode ??
+                            draft.sellingUnitOfMeasure,
                           unitPrice:
-                            selectedVariant && !draft.mustEnterPriceAtPos
-                              ? String(selectedVariant.unitPrice)
+                            !draft.mustEnterPriceAtPos
+                              ? String(
+                                  selectedSellingUnit?.unitPrice ??
+                                    selectedVariant?.unitPrice ??
+                                    draft.unitPrice,
+                                )
                               : draft.unitPrice,
                           variantAttributesSnapshot: selectedLabel,
                         };
@@ -17495,6 +18309,45 @@ function POSWorkspace(props: {
                       </option>
                     ))}
                   </select>
+                </label>
+              ) : null}
+              {openPriceSellingUnits.length > 0 ? (
+                <label className="rms-field">
+                  <span>Selling unit</span>
+                  <select
+                    onChange={(event) =>
+                      props.setOpenPriceDraft((draft) => {
+                        if (!draft) return draft;
+                        const selectedSellingUnit = resolveDraftSellingUnit(
+                          draft.sellingUnits,
+                          draft.productVariantCode,
+                          event.target.value,
+                        );
+
+                        return {
+                          ...draft,
+                          sellingUnitOfMeasure: event.target.value,
+                          unitPrice:
+                            selectedSellingUnit && !draft.mustEnterPriceAtPos
+                              ? selectedSellingUnit.unitPrice.toFixed(2)
+                              : draft.unitPrice,
+                        };
+                      })
+                    }
+                    value={props.openPriceDraft.sellingUnitOfMeasure}
+                  >
+                    {openPriceSellingUnits.map((unit) => (
+                      <option
+                        key={`${unit.productVariantCode ?? "base"}:${unit.unitOfMeasureCode}`}
+                        value={unit.unitOfMeasureCode}
+                      >
+                        {`${unit.unitOfMeasureName} (${formatNumber(unit.conversionFactor)} ${props.openPriceDraft?.productName ? "base unit(s)" : "unit(s)"}) - ${formatMoney(unit.unitPrice)}`}
+                      </option>
+                    ))}
+                  </select>
+                  <small>
+                    {`${formatNumber(openPriceQuantity || 0)} ${props.openPriceDraft.sellingUnitOfMeasure} = ${formatNumber(openPriceBaseQuantity)} base unit(s)`}
+                  </small>
                 </label>
               ) : null}
               {!openPriceIsMatrix && props.openPriceDraft.trackSize ? (
@@ -17821,8 +18674,8 @@ function POSWorkspace(props: {
                 <div className="rms-serial-status">
                   <strong>
                     {selectedSerialNumbers.length} of{" "}
-                    {Number.isFinite(openPriceQuantity)
-                      ? formatNumber(openPriceQuantity)
+                    {Number.isFinite(openPriceBaseQuantity)
+                      ? formatNumber(openPriceBaseQuantity)
                       : "0"}{" "}
                     selected
                   </strong>
@@ -19377,13 +20230,12 @@ function InventoryWorkspace(props: {
   remoteInventoryQuery: string;
   remoteInventoryStoreFilter: string;
   remoteInventoryItemFilter: string;
-  remoteInventoryLocationFilter: string;
   remoteInventoryRows: StoreRemoteInventoryLookupResult["rows"];
   stockCountRows: StockCountUploadRow[];
   stockCountProductCode: string;
   stockCountQuantity: string;
   stockCountNote: string;
-  transferSourceLocation: string;
+  transferSourceStore: string;
   transferDestinationLocation: string;
   transferProductCode: string;
   transferUnitOfMeasure: string;
@@ -19393,12 +20245,11 @@ function InventoryWorkspace(props: {
   setRemoteInventoryQuery: (value: string) => void;
   setRemoteInventoryStoreFilter: (value: string) => void;
   setRemoteInventoryItemFilter: (value: string) => void;
-  setRemoteInventoryLocationFilter: (value: string) => void;
   setStockCountRows: Dispatch<SetStateAction<StockCountUploadRow[]>>;
   setStockCountProductCode: (value: string) => void;
   setStockCountQuantity: (value: string) => void;
   setStockCountNote: (value: string) => void;
-  setTransferSourceLocation: (value: string) => void;
+  setTransferSourceStore: (value: string) => void;
   setTransferDestinationLocation: (value: string) => void;
   setTransferProductCode: (value: string) => void;
   setTransferUnitOfMeasure: (value: string) => void;
@@ -19409,26 +20260,28 @@ function InventoryWorkspace(props: {
   >;
   browseInventory: () => Promise<void>;
   lookupRemoteInventory: () => Promise<void>;
-  requestRemoteStock: (
-    row: StoreRemoteInventoryLookupResult["rows"][number],
-  ) => Promise<void>;
   browseAvailableSerialNumbers: (
     productCode: string,
     locationCode: string,
   ) => Promise<string[]>;
   saveStockCount: (input?: {
+    sessionId?: string | null;
+    sheetNo?: string | null;
+    lineNo?: number | null;
     productCode?: string;
     countedQuantity?: number;
     batchQuantities?: StoreInventoryBatchAllocation[];
-  }) => Promise<void>;
-  submitStockCount: (sessionId: string) => Promise<void>;
-  commitStockCount: (sessionId: string, sessionNo: string) => Promise<void>;
+  }) => Promise<StoreSyncActionResult | null>;
+  submitStockCount: (sessionIds: string[]) => Promise<void>;
+  commitStockCount: (sessionIds: string[], sessionNo: string) => Promise<void>;
   createTransferRequest: (input?: {
-    sourceLocationCode?: string;
+    draftId?: string | null;
+    sourceStoreCode?: string;
     destinationLocationCode?: string;
     productCode?: string;
     quantity?: number;
     unitOfMeasure?: string | null;
+    lines?: StoreInterStoreTransferRequestDraftLineInput[];
     externalReference?: string | null;
     note?: string | null;
   }) => Promise<boolean>;
@@ -19460,6 +20313,7 @@ function InventoryWorkspace(props: {
   issueInterStoreTransfer: (
     transfer: StoreInterStoreTransferSummary,
     serialNumbers?: string[],
+    sourceLocationCode?: string,
   ) => Promise<void>;
   receiveInterStoreTransfer: (
     transfer: StoreInterStoreTransferSummary,
@@ -19497,6 +20351,11 @@ function InventoryWorkspace(props: {
   const [remoteLookupOpen, setRemoteLookupOpen] = useState(false);
   const [transferRequestDialogOpen, setTransferRequestDialogOpen] =
     useState(false);
+  const [activeTransferDraftId, setActiveTransferDraftId] = useState<
+    string | null
+  >(null);
+  const [selectedRemoteInventoryKeys, setSelectedRemoteInventoryKeys] =
+    useState<Set<string>>(() => new Set());
   const [transferHistoryFrom, setTransferHistoryFrom] = useState("");
   const [transferHistoryTo, setTransferHistoryTo] = useState("");
   const [transferHistoryShop, setTransferHistoryShop] = useState("");
@@ -19510,6 +20369,9 @@ function InventoryWorkspace(props: {
   const [transferReceiptQuantities, setTransferReceiptQuantities] = useState<
     Record<string, string>
   >({});
+  const [transferIssueLocationCode, setTransferIssueLocationCode] = useState(
+    props.inventoryLocation || props.snapshot?.inventoryLocations[0]?.locationCode || "",
+  );
   const [selectedPurchaseOrderId, setSelectedPurchaseOrderId] = useState<
     string | null
   >(null);
@@ -19580,6 +20442,9 @@ function InventoryWorkspace(props: {
   >([]);
   const [localPurchaseOrderProductSearch, setLocalPurchaseOrderProductSearch] =
     useState("");
+  useEffect(() => {
+    setSelectedRemoteInventoryKeys(new Set());
+  }, [props.remoteInventoryRows]);
   const remoteStoreOptions = Array.from(
     new Map(
       [
@@ -19602,46 +20467,6 @@ function InventoryWorkspace(props: {
         (item) => [item.productCode, item.productName] as const,
       ),
     ]).entries(),
-  );
-  const remoteLocationOptions = Array.from(
-    new Map(
-      [
-        ...(props.snapshot?.transferRequestTargets ?? [])
-          .filter(
-            (target) =>
-              !props.remoteInventoryStoreFilter ||
-              target.sourceStoreCode === props.remoteInventoryStoreFilter,
-          )
-          .map(
-            (target) =>
-              [
-                target.sourceLocationCode,
-                {
-                  locationName: target.sourceLocationName,
-                  storeName: target.sourceStoreName,
-                },
-              ] as const,
-          ),
-        ...props.remoteInventoryRows
-          .filter(
-            (row) =>
-              !props.remoteInventoryStoreFilter ||
-              row.storeCode === props.remoteInventoryStoreFilter,
-          )
-          .map(
-            (row) =>
-              [
-                row.locationCode,
-                {
-                  locationName: row.locationName,
-                  storeName: row.storeName,
-                },
-              ] as const,
-          ),
-      ],
-    ).entries(),
-  ).sort((left, right) =>
-    left[1].locationName.localeCompare(right[1].locationName),
   );
   const countLocationItems = props.inventoryItems.filter(
     (item) =>
@@ -19696,41 +20521,76 @@ function InventoryWorkspace(props: {
     props.inventoryLocation,
     selectedStockCountItem?.updatedAt,
   ]);
-  const requestableProducts = Array.from(
-    new Map(
-      props.inventoryItems.map((item) => {
-        const catalogItem = props.catalogItems.find(
-          (candidate) => candidate.productCode === item.productCode,
-        );
-        const baseUnitOfMeasure =
-          catalogItem?.baseUnitOfMeasure || catalogItem?.unitOfMeasure || "EA";
-        const uomConversions = catalogItem?.uomConversions?.length
-          ? catalogItem.uomConversions
-          : [
-              {
-                uomCode: baseUnitOfMeasure,
-                uomName: baseUnitOfMeasure,
-                conversionFactor: 1,
-                isBaseUnit: true,
-                allowSale: true,
-                allowPurchase: true,
-              },
-            ];
+  const requestableProductMap = new Map<
+    string,
+    {
+      productCode: string;
+      productName: string;
+      unitPrice: number;
+      unitOfMeasure: string;
+      baseUnitOfMeasure: string;
+      uomConversions: NonNullable<StoreCatalogBrowseItem["uomConversions"]>;
+    }
+  >();
 
-        return [
-          item.productCode,
-          {
-          productCode: item.productCode,
-          productName: item.productName,
-          unitPrice: item.unitPrice,
-            unitOfMeasure: catalogItem?.unitOfMeasure ?? baseUnitOfMeasure,
-            baseUnitOfMeasure,
-            uomConversions,
-          },
-        ] as const;
-      }),
-    ).values(),
-  ).sort((left, right) => left.productName.localeCompare(right.productName));
+  for (const catalogItem of props.catalogItems) {
+    if (catalogItem.trackInventory !== true) {
+      continue;
+    }
+
+    const baseUnitOfMeasure =
+      catalogItem.baseUnitOfMeasure || catalogItem.unitOfMeasure || "EA";
+    requestableProductMap.set(catalogItem.productCode, {
+      productCode: catalogItem.productCode,
+      productName: catalogItem.productName,
+      unitPrice: catalogItem.unitPrice,
+      unitOfMeasure: catalogItem.unitOfMeasure ?? baseUnitOfMeasure,
+      baseUnitOfMeasure,
+      uomConversions: catalogItem.uomConversions?.length
+        ? catalogItem.uomConversions
+        : [
+            {
+              uomCode: baseUnitOfMeasure,
+              uomName: baseUnitOfMeasure,
+              conversionFactor: 1,
+              isBaseUnit: true,
+              allowSale: true,
+              allowPurchase: true,
+            },
+          ],
+    });
+  }
+
+  for (const item of props.inventoryItems) {
+    const catalogItem = props.catalogItems.find(
+      (candidate) => candidate.productCode === item.productCode,
+    );
+    const baseUnitOfMeasure =
+      catalogItem?.baseUnitOfMeasure || catalogItem?.unitOfMeasure || "EA";
+    requestableProductMap.set(item.productCode, {
+      productCode: item.productCode,
+      productName: item.productName,
+      unitPrice: item.unitPrice,
+      unitOfMeasure: catalogItem?.unitOfMeasure ?? baseUnitOfMeasure,
+      baseUnitOfMeasure,
+      uomConversions: catalogItem?.uomConversions?.length
+        ? catalogItem.uomConversions
+        : [
+            {
+              uomCode: baseUnitOfMeasure,
+              uomName: baseUnitOfMeasure,
+              conversionFactor: 1,
+              isBaseUnit: true,
+              allowSale: true,
+              allowPurchase: true,
+            },
+          ],
+    });
+  }
+
+  const requestableProducts = Array.from(requestableProductMap.values()).sort(
+    (left, right) => left.productName.localeCompare(right.productName),
+  );
   const selectedTransferProduct = requestableProducts.find(
     (item) => item.productCode === props.transferProductCode,
   );
@@ -19771,8 +20631,17 @@ function InventoryWorkspace(props: {
     transferDocumentGroups.find(
       (group) => group.key === selectedTransferDocumentKey,
     ) ?? null;
+  const projectedTransferRequestNos = new Set(
+    transferDocumentGroups.map((group) => group.documentNo.toUpperCase()),
+  );
   const transferHistoryRows = [
-    ...(props.snapshot?.transferRequestDrafts ?? []).map((draft) => ({
+    ...(props.snapshot?.transferRequestDrafts ?? [])
+      .filter(
+        (draft) =>
+          draft.status === "DRAFT" ||
+          !projectedTransferRequestNos.has(draft.requestNo.toUpperCase()),
+      )
+      .map((draft) => ({
       id: draft.draftId,
       documentNo: draft.requestNo,
       status: draft.status,
@@ -19780,9 +20649,9 @@ function InventoryWorkspace(props: {
       sourceShopCode: draft.sourceStoreCode,
       destinationShop: draft.destinationStoreName,
       destinationShopCode: draft.destinationStoreCode,
-      productName: draft.productName,
-      productCode: draft.productCode,
-      quantity: draft.quantity,
+      productName: `${formatNumber(draft.lines.length)} line(s)`,
+      productCode: draft.lines.map((line) => line.productCode).join(", "),
+      quantity: draft.lines.reduce((sum, line) => sum + line.quantity, 0),
       reference: draft.externalReference,
       note: draft.note,
       updatedAt: draft.updatedAt,
@@ -19898,6 +20767,29 @@ function InventoryWorkspace(props: {
   }, [selectedSupplierReturnReceipt, supplierReturnGoodsReceiptLineId]);
 
   function exportCountSheet() {
+    if (props.stockCountRows.length) {
+      const csv = [
+        "productCode,productName,batchNo,manufacturedAt,expiryDate,countedQuantity,systemQuantity",
+        ...props.stockCountRows.map((row) =>
+          [
+            row.productCode,
+            `"${row.productName.replace(/"/g, '""')}"`,
+            row.batchNo ?? "",
+            row.manufacturedAt?.slice(0, 10) ?? "",
+            row.expiryDate?.slice(0, 10) ?? "",
+            row.countedQuantity ?? "",
+            row.systemQuantity,
+          ].join(","),
+        ),
+      ].join("\n");
+
+      downloadTextFile(
+        `flash-erp-count-sheet-${props.stockCountRows[0]?.sheetNo ?? (props.inventoryLocation || "draft")}.csv`,
+        csv,
+      );
+      return;
+    }
+
     const rows = countLocationItems.length
       ? countLocationItems
       : props.inventoryItems;
@@ -19980,6 +20872,168 @@ function InventoryWorkspace(props: {
       }),
     );
     setActiveCountEntryTab("variance");
+  }
+
+  function resetTransferRequestDraft() {
+    setActiveTransferDraftId(null);
+    setTransferRequestLines([]);
+    setTransferRequestReference("");
+    setTransferRequestNote("");
+    setTransferRequiredDate(new Date().toISOString().slice(0, 10));
+    setActiveTransferEntryTab("header");
+  }
+
+  function openTransferRequestDraft(
+    draft: StoreInterStoreTransferRequestDraftSummary,
+  ) {
+    const requiredDate = draft.note?.match(
+      /(?:^|\|\s*)Required (\d{4}-\d{2}-\d{2})/,
+    )?.[1];
+    const note = (draft.note ?? "")
+      .split("|")
+      .map((part) => part.trim())
+      .filter((part) => !/^Required \d{4}-\d{2}-\d{2}$/.test(part))
+      .join(" | ");
+
+    setActiveTransferDraftId(draft.draftId);
+    props.setTransferSourceStore(draft.sourceStoreCode);
+    props.setTransferDestinationLocation(draft.destinationLocationCode);
+    setTransferRequestReference(draft.externalReference ?? "");
+    setTransferRequestNote(note);
+    setTransferRequiredDate(
+      requiredDate ?? new Date().toISOString().slice(0, 10),
+    );
+    setTransferRequestLines(
+      draft.lines.map((line) => ({
+        id: line.lineId,
+        productCode: line.productCode,
+        productName: line.productName,
+        quantity: line.requestedUnitQuantity,
+        requestedUnitOfMeasure: line.requestedUnitOfMeasure,
+        uomConversionFactor: line.uomConversionFactor,
+        baseUnitOfMeasure: line.baseUnitOfMeasure,
+        baseQuantity: line.quantity,
+        unitPrice: requestableProductMap.get(line.productCode)?.unitPrice ?? 0,
+      })),
+    );
+    setActiveTransferEntryTab("details");
+    setTransferRequestDialogOpen(true);
+  }
+
+  function getRemoteRequestEligibility(
+    row: StoreRemoteInventoryLookupResult["rows"][number],
+  ) {
+    const target = props.snapshot?.transferRequestTargets.find(
+      (candidate) =>
+        candidate.sourceStoreCode.toUpperCase() ===
+          row.storeCode.toUpperCase(),
+    );
+    const product = requestableProductMap.get(row.productCode);
+    const selectedSource = props.remoteInventoryRows.find((candidate) =>
+      selectedRemoteInventoryKeys.has(getRemoteInventoryRowKey(candidate)),
+    );
+
+    if (!props.transferDestinationLocation) {
+      return {
+        eligible: false,
+        reason: "Choose the local destination location first.",
+      };
+    }
+
+    if (!target) {
+      return {
+        eligible: false,
+        reason:
+          "This shop is not in the synced transfer target directory. Run sync at this store.",
+      };
+    }
+
+    if (!product) {
+      return {
+        eligible: false,
+        reason:
+          "This tracked product is not available in the local synced catalog.",
+      };
+    }
+
+    if (row.quantityOnHand <= 0) {
+      return { eligible: false, reason: "No stock is currently available in this shop." };
+    }
+
+    if (
+      selectedSource &&
+      selectedSource.storeCode.toUpperCase() !== row.storeCode.toUpperCase()
+    ) {
+      return {
+        eligible: false,
+        reason:
+          "One request can contain many items from one source shop. Save this request before choosing another source.",
+      };
+    }
+
+    return { eligible: true, reason: "Available for this request." };
+  }
+
+  function toggleRemoteInventorySelection(
+    row: StoreRemoteInventoryLookupResult["rows"][number],
+  ) {
+    const rowKey = getRemoteInventoryRowKey(row);
+    const isSelected = selectedRemoteInventoryKeys.has(rowKey);
+
+    if (!isSelected) {
+      const eligibility = getRemoteRequestEligibility(row);
+      if (!eligibility.eligible) {
+        props.setError(eligibility.reason);
+        return;
+      }
+    }
+
+    setSelectedRemoteInventoryKeys((current) => {
+      const next = new Set(current);
+      if (isSelected) {
+        next.delete(rowKey);
+      } else {
+        next.add(rowKey);
+      }
+      return next;
+    });
+  }
+
+  function buildTransferDraftFromRemoteSelection() {
+    const selectedRows = props.remoteInventoryRows.filter((row) =>
+      selectedRemoteInventoryKeys.has(getRemoteInventoryRowKey(row)),
+    );
+    const source = selectedRows[0];
+
+    if (!source) {
+      props.setError(
+        "Select at least one eligible stock row before building the request.",
+      );
+      return;
+    }
+
+    resetTransferRequestDraft();
+    props.setTransferSourceStore(source.storeCode);
+    setTransferRequestLines(
+      selectedRows.map((row) => {
+        const product = requestableProductMap.get(row.productCode)!;
+        return {
+          id: getRemoteInventoryRowKey(row),
+          productCode: row.productCode,
+          productName: row.productName,
+          quantity: 1,
+          requestedUnitOfMeasure: product.baseUnitOfMeasure,
+          uomConversionFactor: 1,
+          baseUnitOfMeasure: product.baseUnitOfMeasure,
+          baseQuantity: 1,
+          unitPrice: product.unitPrice,
+        };
+      }),
+    );
+    setSelectedRemoteInventoryKeys(new Set());
+    setRemoteLookupOpen(false);
+    setActiveTransferEntryTab("details");
+    setTransferRequestDialogOpen(true);
   }
 
   function addTransferRequestLine() {
@@ -20145,7 +21199,7 @@ function InventoryWorkspace(props: {
 
   async function saveTransferRequestLines() {
     if (
-      !props.transferSourceLocation ||
+      !props.transferSourceStore ||
       !props.transferDestinationLocation ||
       transferRequestLines.length === 0
     ) {
@@ -20153,12 +21207,14 @@ function InventoryWorkspace(props: {
     }
 
     const selectedSourceTarget = props.snapshot?.transferRequestTargets.find(
-      (target) => target.sourceLocationCode === props.transferSourceLocation,
+      (target) =>
+        target.sourceStoreCode.toUpperCase() ===
+          props.transferSourceStore.toUpperCase(),
     );
 
     if (!selectedSourceTarget) {
       props.setError(
-        `Flash ERP has no synced enterprise transfer source target for ${props.transferSourceLocation}. Run sync, then choose a source from the Ship from dropdown.`,
+        `Flash ERP has no synced enterprise transfer source shop for ${props.transferSourceStore}. Run sync, then choose the source again.`,
       );
       return;
     }
@@ -20170,27 +21226,25 @@ function InventoryWorkspace(props: {
       .filter(Boolean)
       .join(" | ");
 
-    for (const line of transferRequestLines) {
-      const saved = await props.createTransferRequest({
-        sourceLocationCode: props.transferSourceLocation,
-        destinationLocationCode: props.transferDestinationLocation,
+    const saved = await props.createTransferRequest({
+      draftId: activeTransferDraftId,
+      sourceStoreCode: props.transferSourceStore,
+      destinationLocationCode: props.transferDestinationLocation,
+      lines: transferRequestLines.map((line) => ({
         productCode: line.productCode,
         quantity: line.quantity,
         unitOfMeasure: line.requestedUnitOfMeasure,
-        externalReference: transferRequestReference.trim() || null,
-        note: note || null,
-      });
+      })),
+      externalReference: transferRequestReference.trim() || null,
+      note: note || null,
+    });
 
-      if (!saved) {
-        return;
-      }
+    if (!saved) {
+      return;
     }
 
-    setTransferRequestLines([]);
-    setTransferRequestReference("");
-    setTransferRequestNote("");
+    resetTransferRequestDraft();
     setTransferRequestDialogOpen(false);
-    setActiveTransferEntryTab("header");
   }
 
   function printGoodsReceipt(receipt: StoreLocalGoodsReceiptSummary) {
@@ -20324,7 +21378,89 @@ function InventoryWorkspace(props: {
     popup.focus();
   }
 
+  function addStockCountLine() {
+    if (!selectedStockCountItem) {
+      props.setError("Select an item before adding it to the count sheet.");
+      return;
+    }
+
+    const existingRows = props.stockCountRows.filter(
+      (row) => row.productCode === selectedStockCountItem.productCode,
+    );
+    const sessionId = existingRows.find((row) => row.sessionId)?.sessionId ?? null;
+    const sheetNo = existingRows.find((row) => row.sheetNo)?.sheetNo ?? null;
+    const nextRows: StockCountUploadRow[] = selectedStockCountItem.trackExpiry
+      ? selectedStockCountItem.batchQuantities.map((batch) => {
+          const countedQuantity = Number(
+            stockCountBatchQuantities[batch.batchNo] ?? batch.quantity,
+          );
+
+          return {
+            sessionId,
+            sheetNo,
+            productCode: selectedStockCountItem.productCode,
+            productName: selectedStockCountItem.productName,
+            batchId: batch.batchId ?? null,
+            batchNo: batch.batchNo,
+            manufacturedAt: batch.manufacturedAt ?? null,
+            expiryDate: batch.expiryDate,
+            systemQuantity: batch.quantity,
+            countedQuantity,
+            varianceQuantity: Number(
+              (countedQuantity - batch.quantity).toFixed(3),
+            ),
+          };
+        })
+      : [
+          {
+            sessionId,
+            sheetNo,
+            productCode: selectedStockCountItem.productCode,
+            productName: selectedStockCountItem.productName,
+            batchId: null,
+            batchNo: null,
+            manufacturedAt: null,
+            expiryDate: null,
+            systemQuantity: selectedStockCountItem.quantityOnHand,
+            countedQuantity: Number(props.stockCountQuantity),
+            varianceQuantity: Number(
+              (
+                Number(props.stockCountQuantity) -
+                selectedStockCountItem.quantityOnHand
+              ).toFixed(3),
+            ),
+          },
+        ];
+
+    if (
+      nextRows.some(
+        (row) =>
+          row.countedQuantity === null ||
+          !Number.isFinite(row.countedQuantity) ||
+          row.countedQuantity < 0,
+      )
+    ) {
+      props.setError("Enter a counted quantity of zero or greater before adding the item.");
+      return;
+    }
+
+    props.setStockCountRows((rows) => [
+      ...rows.filter(
+        (row) => row.productCode !== selectedStockCountItem.productCode,
+      ),
+      ...nextRows,
+    ]);
+    props.setStockCountProductCode("");
+    props.setStockCountQuantity("0");
+    props.setError(null);
+  }
+
   async function saveCalculatedCountRows() {
+    if (!props.stockCountRows.length) {
+      props.setError("Add at least one item before saving the count sheet.");
+      return;
+    }
+
     const rowsByProduct = new Map<string, StockCountUploadRow[]>();
 
     for (const row of props.stockCountRows) {
@@ -20334,7 +21470,14 @@ function InventoryWorkspace(props: {
       ]);
     }
 
+    const existingSheetNo = props.stockCountRows.find((row) => row.sheetNo)?.sheetNo;
+    const sheetNo =
+      existingSheetNo ??
+      `CNT-SHEET-${Date.now()}`;
+    let lineNo = 0;
+
     for (const [productCode, rows] of rowsByProduct) {
+      lineNo += 1;
       const item = props.inventoryItems.find(
         (candidate) => candidate.productCode === productCode,
       );
@@ -20366,7 +21509,10 @@ function InventoryWorkspace(props: {
         const batchQuantities = countedBatchQuantities.filter(
           (batch): batch is StoreInventoryBatchAllocation => batch !== null,
         );
-        await props.saveStockCount({
+        const result = await props.saveStockCount({
+          sessionId: rows.find((row) => row.sessionId)?.sessionId ?? null,
+          sheetNo,
+          lineNo,
           productCode,
           countedQuantity: Number(
             batchQuantities
@@ -20375,6 +21521,9 @@ function InventoryWorkspace(props: {
           ),
           batchQuantities,
         });
+        if (!result) {
+          return;
+        }
         continue;
       }
 
@@ -20383,11 +21532,20 @@ function InventoryWorkspace(props: {
         continue;
       }
 
-      await props.saveStockCount({
+      const result = await props.saveStockCount({
+        sessionId: rows.find((candidate) => candidate.sessionId)?.sessionId ?? null,
+        sheetNo,
+        lineNo,
         productCode,
         countedQuantity: row.countedQuantity,
       });
+      if (!result) {
+        return;
+      }
     }
+
+    props.setStockCountRows([]);
+    setActiveCountEntryTab("header");
   }
 
   function addInventorySerialCandidates(candidates: string[]) {
@@ -20514,9 +21672,14 @@ function InventoryWorkspace(props: {
   async function openTransferIssueSerials(
     transfer: StoreInterStoreTransferSummary,
   ) {
+    if (!transferIssueLocationCode) {
+      props.setError("Choose the dispatch location before selecting serials.");
+      return;
+    }
+
     const availableSerialNumbers = await props.browseAvailableSerialNumbers(
       transfer.productCode,
-      transfer.sourceLocationCode,
+      transferIssueLocationCode,
     );
 
     props.setInventorySerialDraft({
@@ -20531,7 +21694,11 @@ function InventoryWorkspace(props: {
       message: "Only serials available at the source location can be issued.",
       submitLabel: "Issue serials",
       onSubmit: async (serialNumbers) => {
-        await props.issueInterStoreTransfer(transfer, serialNumbers);
+        await props.issueInterStoreTransfer(
+          transfer,
+          serialNumbers,
+          transferIssueLocationCode,
+        );
       },
     });
   }
@@ -20584,6 +21751,11 @@ function InventoryWorkspace(props: {
   }
 
   async function issueAllTransferLines(group: TransferDocumentGroup) {
+    if (!transferIssueLocationCode) {
+      props.setError("Choose the dispatch location before issuing stock.");
+      return;
+    }
+
     const issuableLines = group.lines.filter(
       (transfer) =>
         transfer.role === "SOURCE" &&
@@ -20599,7 +21771,11 @@ function InventoryWorkspace(props: {
     }
 
     for (const transfer of issuableLines) {
-      await props.issueInterStoreTransfer(transfer);
+      await props.issueInterStoreTransfer(
+        transfer,
+        [],
+        transferIssueLocationCode,
+      );
     }
   }
 
@@ -20979,6 +22155,10 @@ function InventoryWorkspace(props: {
         transfer.outstandingReceiptQuantity > 0 &&
         !transfer.isSerialized,
     ).length;
+    const hasIssuableLines = selectedTransferDocument.lines.some(
+      (transfer) =>
+        transfer.role === "SOURCE" && transfer.outstandingIssueQuantity > 0,
+    );
 
     return (
       <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
@@ -20992,7 +22172,7 @@ function InventoryWorkspace(props: {
               {issuableLineCount > 0 ? (
                 <button
                   className="rms-button is-primary"
-                  disabled={props.isBusy}
+                  disabled={props.isBusy || !transferIssueLocationCode}
                   onClick={() =>
                     void issueAllTransferLines(selectedTransferDocument)
                   }
@@ -21054,6 +22234,27 @@ function InventoryWorkspace(props: {
               }
             />
           </div>
+          {hasIssuableLines ? (
+            <label className="rms-note-field rms-transfer-note">
+              <span>Dispatch location</span>
+              <select
+                onChange={(event) =>
+                  setTransferIssueLocationCode(event.target.value)
+                }
+                value={transferIssueLocationCode}
+              >
+                <option value="">Select source location</option>
+                {props.snapshot?.inventoryLocations.map((location) => (
+                  <option
+                    key={location.locationCode}
+                    value={location.locationCode}
+                  >
+                    {location.locationName}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <div className="rms-table rms-transfer-line-table">
             <div className="rms-table-head">
               <span>Item</span>
@@ -21086,11 +22287,15 @@ function InventoryWorkspace(props: {
                 transfer.outstandingIssueQuantity > 0 ? (
                   <button
                     className="rms-row-button"
-                    disabled={props.isBusy}
+                    disabled={props.isBusy || !transferIssueLocationCode}
                     onClick={() =>
                       transfer.isSerialized
                         ? void openTransferIssueSerials(transfer)
-                        : void props.issueInterStoreTransfer(transfer)
+                        : void props.issueInterStoreTransfer(
+                            transfer,
+                            [],
+                            transferIssueLocationCode,
+                          )
                     }
                     type="button"
                   >
@@ -21959,8 +23164,8 @@ function InventoryWorkspace(props: {
                 className="rms-button is-primary"
                 disabled={props.isBusy}
                 onClick={() => {
+                  resetTransferRequestDraft();
                   setTransferRequestDialogOpen(true);
-                  setActiveTransferEntryTab("header");
                 }}
                 type="button"
               >
@@ -22074,6 +23279,15 @@ function InventoryWorkspace(props: {
                     >
                       <ViewIcon />
                     </ActionIconButton>
+                  ) : row.draft?.status === "DRAFT" ? (
+                    <button
+                      className="rms-row-button"
+                      disabled={props.isBusy}
+                      onClick={() => openTransferRequestDraft(row.draft!)}
+                      type="button"
+                    >
+                      Edit
+                    </button>
                   ) : (
                     <span />
                   )}
@@ -22099,7 +23313,7 @@ function InventoryWorkspace(props: {
                       }
                       type="button"
                     >
-                      Submit
+                      Send
                     </button>
                   ) : (
                     <span />
@@ -22133,7 +23347,9 @@ function InventoryWorkspace(props: {
               <div className="rms-panel-title">
                 <div>
                   <span>Stock request</span>
-                  <h2>Create request</h2>
+                  <h2>
+                    {activeTransferDraftId ? "Amend request draft" : "Create request"}
+                  </h2>
                 </div>
                 <button
                   className="rms-button"
@@ -22163,22 +23379,22 @@ function InventoryWorkspace(props: {
               </div>
 
               {activeTransferEntryTab === "header" ? (
-                <div className="rms-form-grid">
+                <div className="rms-form-grid rms-stock-request-header-form">
                   <label>
-                    <span>Ship from</span>
+                    <span>Source shop</span>
                     <select
                       onChange={(event) =>
-                        props.setTransferSourceLocation(event.target.value)
+                        props.setTransferSourceStore(event.target.value)
                       }
-                      value={props.transferSourceLocation}
+                      value={props.transferSourceStore}
                     >
-                      <option value="">Source location</option>
-                      {props.snapshot?.transferRequestTargets.map((target) => (
+                      <option value="">Select source shop</option>
+                      {remoteStoreOptions.map(([storeCode, storeName]) => (
                         <option
-                          key={`${target.sourceStoreCode}-${target.sourceLocationCode}`}
-                          value={target.sourceLocationCode}
+                          key={storeCode}
+                          value={storeCode}
                         >
-                          {target.sourceStoreName} · {target.sourceLocationName}
+                          {storeName}
                         </option>
                       ))}
                     </select>
@@ -22235,7 +23451,7 @@ function InventoryWorkspace(props: {
                 </div>
               ) : (
                 <div className="rms-stock-request-details">
-                  <div className="rms-form-grid">
+                  <div className="rms-form-grid rms-stock-request-line-form">
                     <label>
                       <span>Item</span>
                       <select
@@ -22336,7 +23552,33 @@ function InventoryWorkspace(props: {
                           <strong>{line.productName}</strong>
                           <span>{line.productCode}</span>
                           <span>
-                            {formatNumber(line.quantity)} {line.requestedUnitOfMeasure}
+                            <input
+                              aria-label={`Requested quantity for ${line.productName}`}
+                              min="0.001"
+                              onChange={(event) => {
+                                const quantity = Number(event.target.value);
+                                setTransferRequestLines((currentLines) =>
+                                  currentLines.map((currentLine) =>
+                                    currentLine.id === line.id
+                                      ? {
+                                          ...currentLine,
+                                          quantity,
+                                          baseQuantity: Number(
+                                            (
+                                              quantity *
+                                              currentLine.uomConversionFactor
+                                            ).toFixed(3),
+                                          ),
+                                        }
+                                      : currentLine,
+                                  ),
+                                );
+                              }}
+                              step="0.001"
+                              type="number"
+                              value={line.quantity}
+                            />{" "}
+                            {line.requestedUnitOfMeasure}
                             {line.uomConversionFactor !== 1 ? (
                               <small>
                                 {` = ${formatNumber(line.baseQuantity)} ${line.baseUnitOfMeasure}`}
@@ -22390,14 +23632,14 @@ function InventoryWorkspace(props: {
                   className="rms-button is-primary"
                   disabled={
                     props.isBusy ||
-                    !props.transferSourceLocation ||
+                    !props.transferSourceStore ||
                     !props.transferDestinationLocation ||
                     transferRequestLines.length === 0
                   }
                   onClick={() => void saveTransferRequestLines()}
                   type="button"
                 >
-                  Save
+                  Save draft
                 </button>
               </div>
             </section>
@@ -22408,6 +23650,82 @@ function InventoryWorkspace(props: {
   }
 
   function renderCountsPanel() {
+    const stockCountSheetGroups = Array.from(
+      (props.snapshot?.stockCountSessions ?? []).reduce(
+        (groups, session) => {
+          const sheetNo = stockCountSheetNo(session.sessionNo);
+          groups.set(sheetNo, [
+            ...(groups.get(sheetNo) ?? []),
+            session,
+          ]);
+          return groups;
+        },
+        new Map<string, StoreStockCountSessionSummary[]>(),
+      ),
+    ).map(([sheetNo, sessions]) => ({
+      sheetNo,
+      sessions,
+      status: sessions.every((session) => session.status === "COMMITTED")
+        ? "COMMITTED"
+        : sessions.every((session) => session.status === "SUBMITTED")
+          ? "SUBMITTED"
+          : "DRAFT",
+      varianceQuantity: Number(
+        sessions.reduce((sum, session) => sum + session.varianceQuantity, 0).toFixed(3),
+      ),
+    }));
+
+    function editCountSheet(sessions: StoreStockCountSessionSummary[]) {
+      const first = sessions[0];
+      if (!first) {
+        return;
+      }
+
+      const sheetNo = stockCountSheetNo(first.sessionNo);
+      props.setInventoryLocation(first.inventoryLocationCode);
+      props.setStockCountNote(first.note ?? "");
+      props.setStockCountRows(
+        sessions.flatMap<StockCountUploadRow>((session): StockCountUploadRow[] =>
+          session.previousBatchQuantities.length
+            ? session.previousBatchQuantities.map((previousBatch) => {
+                const countedBatch = session.countedBatchQuantities.find(
+                  (batch) =>
+                    (batch.batchId && batch.batchId === previousBatch.batchId) ||
+                    batch.batchNo === previousBatch.batchNo,
+                );
+                const countedQuantity = countedBatch?.quantity ?? 0;
+                return {
+                  sessionId: session.sessionId,
+                  sheetNo,
+                  productCode: session.productCode,
+                  productName: session.productName,
+                  batchId: previousBatch.batchId ?? null,
+                  batchNo: previousBatch.batchNo,
+                  manufacturedAt: previousBatch.manufacturedAt ?? null,
+                  expiryDate: previousBatch.expiryDate,
+                  systemQuantity: previousBatch.quantity,
+                  countedQuantity,
+                  varianceQuantity: Number((countedQuantity - previousBatch.quantity).toFixed(3)),
+                };
+              })
+            : [{
+                sessionId: session.sessionId,
+                sheetNo,
+                productCode: session.productCode,
+                productName: session.productName,
+                batchId: null,
+                batchNo: null,
+                manufacturedAt: null,
+                expiryDate: null,
+                systemQuantity: session.previousQuantity,
+                countedQuantity: session.countedQuantity,
+                varianceQuantity: session.varianceQuantity,
+              }],
+        ),
+      );
+      setActiveCountEntryTab("sheet");
+    }
+
     return (
       <section className="rms-panel rms-tab-panel">
         <div className="rms-panel-title">
@@ -22469,7 +23787,9 @@ function InventoryWorkspace(props: {
                 <button
                   className="rms-button"
                   disabled={props.isBusy || !props.inventoryLocation}
-                  onClick={() => void props.browseInventory()}
+                  onClick={() => {
+                    void props.browseInventory().then(() => setActiveCountEntryTab("sheet"));
+                  }}
                   type="button"
                 >
                   Load items
@@ -22477,6 +23797,7 @@ function InventoryWorkspace(props: {
               </div>
             ) : null}
             {activeCountEntryTab === "sheet" ? (
+              <div className="rms-count-sheet-pane">
               <div className="rms-form-grid">
                 <select
                   onChange={(event) =>
@@ -22566,29 +23887,10 @@ function InventoryWorkspace(props: {
                     !props.inventoryLocation ||
                     !props.stockCountProductCode
                   }
-                  onClick={() =>
-                    void props.saveStockCount(
-                      selectedStockCountItem?.trackExpiry
-                        ? {
-                            productCode: selectedStockCountItem.productCode,
-                            countedQuantity: selectedStockCountBatchTotal,
-                            batchQuantities:
-                              selectedStockCountItem.batchQuantities.map(
-                                (batch) => ({
-                                  ...batch,
-                                  quantity: Number(
-                                    stockCountBatchQuantities[batch.batchNo] ??
-                                      0,
-                                  ),
-                                }),
-                              ),
-                          }
-                        : undefined,
-                    )
-                  }
+                  onClick={addStockCountLine}
                   type="button"
                 >
-                  Save line
+                  Add item
                 </button>
                 <button
                   className="rms-button"
@@ -22610,6 +23912,61 @@ function InventoryWorkspace(props: {
                     type="file"
                   />
                 </label>
+              </div>
+              <div className="rms-table rms-count-variance-table">
+                <div className="rms-table-head">
+                  <span>Item</span>
+                  <span>System</span>
+                  <span>Counted</span>
+                  <span>Action</span>
+                </div>
+                {props.stockCountRows.map((row) => (
+                  <div className="rms-table-row" key={`${row.productCode}-${row.batchNo ?? "product"}`}>
+                    <div>
+                      <strong>{row.productName}</strong>
+                      <small>{row.productCode}{row.batchNo ? ` · Batch ${row.batchNo}` : ""}</small>
+                    </div>
+                    <span>{formatNumber(row.systemQuantity)}</span>
+                    <input
+                      min="0"
+                      onChange={(event) => {
+                        const countedQuantity = Number(event.target.value);
+                        props.setStockCountRows((rows) => rows.map((candidate) =>
+                          candidate === row
+                            ? {
+                                ...candidate,
+                                countedQuantity,
+                                varianceQuantity: Number((countedQuantity - candidate.systemQuantity).toFixed(3)),
+                              }
+                            : candidate,
+                        ));
+                      }}
+                      step="0.001"
+                      type="number"
+                      value={row.countedQuantity ?? ""}
+                    />
+                    <button
+                      className="rms-icon-button is-danger"
+                      onClick={() => props.setStockCountRows((rows) => rows.filter((candidate) => candidate !== row))}
+                      title={`Remove ${row.productName}`}
+                      type="button"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                ))}
+                {!props.stockCountRows.length ? (
+                  <EmptyState title="No count-sheet items" detail="Select an item, enter its count, and add it to this sheet." />
+                ) : null}
+              </div>
+              <div className="rms-sync-actions">
+                <button className="rms-button" disabled={!props.stockCountRows.length} onClick={() => setActiveCountEntryTab("variance")} type="button">
+                  Review variance
+                </button>
+                <button className="rms-button is-primary" disabled={props.isBusy || !props.stockCountRows.length} onClick={() => void saveCalculatedCountRows()} type="button">
+                  Save count sheet
+                </button>
+              </div>
               </div>
             ) : null}
             {activeCountEntryTab === "variance" ? (
@@ -22657,63 +24014,51 @@ function InventoryWorkspace(props: {
                       </div>
                     ))
                   ) : (
-                    <EmptyState
-                      title="No uploaded count sheet"
-                      detail="Export a count sheet, populate counted quantities, then upload it."
-                    />
+                    <EmptyState title="No count-sheet lines" detail="Add items on the Count Sheet tab or upload a completed CSV." />
                   )}
                 </div>
-                <div className="rms-sync-actions">
-                  <button
-                    className="rms-button is-primary"
-                    disabled={
-                      props.isBusy ||
-                      !props.stockCountRows.some(
-                        (row) => row.countedQuantity !== null,
-                      )
-                    }
-                    onClick={() => void saveCalculatedCountRows()}
-                    type="button"
-                  >
-                    Save calculated rows
-                  </button>
-                </div>
+                <p className="rms-inline-message">Variance is calculated for review. Return to Count Sheet to edit or save the document.</p>
               </div>
             ) : null}
           </div>
         ) : null}
         <div className="rms-list">
-          {props.snapshot?.stockCountSessions.length ? (
-            props.snapshot.stockCountSessions.map((session) => (
-              <div className="rms-list-row" key={session.sessionId}>
+          {stockCountSheetGroups.length ? (
+            stockCountSheetGroups.map((sheet) => (
+              <div className="rms-list-row" key={sheet.sheetNo}>
                 <div>
-                  <strong>{session.sessionNo}</strong>
+                  <strong>{sheet.sheetNo}</strong>
                   <span>
-                    {session.productCode} · variance{" "}
-                    {formatNumber(session.varianceQuantity)}
+                    {sheet.sessions.length} item(s) · variance{" "}
+                    {formatNumber(sheet.varianceQuantity)}
                   </span>
                 </div>
-                <StatusPill>{session.status}</StatusPill>
-                {session.status === "DRAFT" ? (
+                <StatusPill>{sheet.status}</StatusPill>
+                {sheet.status === "DRAFT" ? (
+                  <button className="rms-row-button" disabled={props.isBusy} onClick={() => editCountSheet(sheet.sessions)} type="button">
+                    Edit
+                  </button>
+                ) : null}
+                {sheet.status === "DRAFT" ? (
                   <button
                     className="rms-row-button"
                     disabled={props.isBusy}
                     onClick={() =>
-                      void props.submitStockCount(session.sessionId)
+                      void props.submitStockCount(sheet.sessions.map((session) => session.sessionId))
                     }
                     type="button"
                   >
                     Submit
                   </button>
                 ) : null}
-                {session.status === "SUBMITTED" ? (
+                {sheet.status === "SUBMITTED" ? (
                   <button
                     className="rms-row-button"
                     disabled={props.isBusy}
                     onClick={() =>
                       void props.commitStockCount(
-                        session.sessionId,
-                        session.sessionNo,
+                        sheet.sessions.map((session) => session.sessionId),
+                        sheet.sheetNo,
                       )
                     }
                     type="button"
@@ -22753,112 +24098,145 @@ function InventoryWorkspace(props: {
             </button>
           </div>
           <div className="rms-dialog-body">
-            <div className="rms-dialog-toolbar">
-              <input
-                autoFocus
-                onChange={(event) =>
-                  props.setRemoteInventoryQuery(event.target.value)
-                }
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void props.lookupRemoteInventory();
+            <div className="rms-dialog-toolbar rms-remote-inventory-filters">
+              <label className="rms-toolbar-field">
+                <span>Search product</span>
+                <input
+                  autoFocus
+                  onChange={(event) =>
+                    props.setRemoteInventoryQuery(event.target.value)
                   }
-                }}
-                placeholder="Product, category, barcode"
-                value={props.remoteInventoryQuery}
-              />
-              <select
-                onChange={(event) =>
-                  props.setRemoteInventoryStoreFilter(event.target.value)
-                }
-                value={props.remoteInventoryStoreFilter}
-              >
-                <option value="">All stores</option>
-                {remoteStoreOptions.map(([storeCode, storeName]) => (
-                  <option key={storeCode} value={storeCode}>
-                    {storeName}
-                  </option>
-                ))}
-              </select>
-              <select
-                onChange={(event) =>
-                  props.setRemoteInventoryItemFilter(event.target.value)
-                }
-                value={props.remoteInventoryItemFilter}
-              >
-                <option value="">All items</option>
-                {remoteItemOptions.map(([productCode, productName]) => (
-                  <option key={productCode} value={productCode}>
-                    {productName}
-                  </option>
-                ))}
-              </select>
-              <select
-                onChange={(event) =>
-                  props.setRemoteInventoryLocationFilter(event.target.value)
-                }
-                value={props.remoteInventoryLocationFilter}
-              >
-                <option value="">All locations</option>
-                {remoteLocationOptions.map(
-                  ([locationCode, { locationName, storeName }]) => (
-                    <option key={locationCode} value={locationCode}>
-                      {locationName} - {storeName}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void props.lookupRemoteInventory();
+                    }
+                  }}
+                  placeholder="Product, category, barcode"
+                  value={props.remoteInventoryQuery}
+                />
+              </label>
+              <label className="rms-toolbar-field">
+                <span>Source shop</span>
+                <select
+                  onChange={(event) => {
+                    props.setRemoteInventoryStoreFilter(event.target.value);
+                    setSelectedRemoteInventoryKeys(new Set());
+                  }}
+                  value={props.remoteInventoryStoreFilter}
+                >
+                  <option value="">All shops</option>
+                  {remoteStoreOptions.map(([storeCode, storeName]) => (
+                    <option key={storeCode} value={storeCode}>
+                      {storeName}
                     </option>
-                  ),
-                )}
-              </select>
-              <button
-                className="rms-button is-primary"
-                disabled={props.isBusy || !props.snapshot?.enterpriseBaseUrl}
-                onClick={() => void props.lookupRemoteInventory()}
-                type="button"
-              >
-                Search HQ
-              </button>
+                  ))}
+                </select>
+              </label>
+              <label className="rms-toolbar-field">
+                <span>Product</span>
+                <select
+                  onChange={(event) => {
+                    props.setRemoteInventoryItemFilter(event.target.value);
+                    setSelectedRemoteInventoryKeys(new Set());
+                  }}
+                  value={props.remoteInventoryItemFilter}
+                >
+                  <option value="">All products</option>
+                  {remoteItemOptions.map(([productCode, productName]) => (
+                    <option key={productCode} value={productCode}>
+                      {productName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="rms-toolbar-field">
+                <span>Request destination</span>
+                <select
+                  onChange={(event) =>
+                    props.setTransferDestinationLocation(event.target.value)
+                  }
+                  value={props.transferDestinationLocation}
+                >
+                  <option value="">Select this shop's location</option>
+                  {props.snapshot?.inventoryLocations.map((location) => (
+                    <option
+                      key={location.locationCode}
+                      value={location.locationCode}
+                    >
+                      {location.locationName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="rms-toolbar-actions">
+                <button
+                  className="rms-button"
+                  disabled={props.isBusy || !props.snapshot?.enterpriseBaseUrl}
+                  onClick={() => void props.lookupRemoteInventory()}
+                  type="button"
+                >
+                  Search HQ
+                </button>
+                <button
+                  className="rms-button is-primary"
+                  disabled={
+                    props.isBusy ||
+                    !canRequestTransfer ||
+                    selectedRemoteInventoryKeys.size === 0
+                  }
+                  onClick={buildTransferDraftFromRemoteSelection}
+                  type="button"
+                >
+                  Build request ({selectedRemoteInventoryKeys.size})
+                </button>
+              </div>
             </div>
             <div className="rms-table rms-remote-inventory-table">
               <div className="rms-table-head">
+                <span>Select</span>
                 <span>Product</span>
                 <span>Shop</span>
-                <span>Location</span>
-                <span>On hand</span>
+                <span>Total on hand</span>
                 <span>Updated</span>
-                <span />
+                <span>Request eligibility</span>
               </div>
               {props.remoteInventoryRows.length ? (
-                props.remoteInventoryRows.map((row) => (
-                  <div
-                    className="rms-table-row"
-                    key={`${row.storeCode}-${row.locationCode}-${row.productCode}`}
-                  >
-                    <div>
-                      <strong>{row.productName}</strong>
-                      <small>{row.productCode}</small>
+                props.remoteInventoryRows.map((row) => {
+                  const rowKey = getRemoteInventoryRowKey(row);
+                  const eligibility = getRemoteRequestEligibility(row);
+                  const selected = selectedRemoteInventoryKeys.has(rowKey);
+
+                  return (
+                    <div className="rms-table-row" key={rowKey}>
+                      <input
+                        aria-label={`Select ${row.productName} from ${row.storeName}`}
+                        checked={selected}
+                        disabled={
+                          props.isBusy ||
+                          !canRequestTransfer ||
+                          (!selected && !eligibility.eligible)
+                        }
+                        onChange={() => toggleRemoteInventorySelection(row)}
+                        title={eligibility.reason}
+                        type="checkbox"
+                      />
+                      <div>
+                        <strong>{row.productName}</strong>
+                        <small>{row.productCode}</small>
+                      </div>
+                      <div>
+                        <strong>{row.storeName}</strong>
+                        <small>{row.storeCode}</small>
+                      </div>
+                      <strong>{formatNumber(row.quantityOnHand)}</strong>
+                      <span>{formatRelative(row.updatedAt)}</span>
+                      <small title={eligibility.reason}>
+                        {eligibility.eligible ? "Eligible" : eligibility.reason}
+                      </small>
                     </div>
-                    <div>
-                      <strong>{row.storeName}</strong>
-                      <small>{row.storeCode}</small>
-                    </div>
-                    <div>
-                      <strong>{row.locationName}</strong>
-                      <small>{row.locationCode}</small>
-                    </div>
-                    <strong>{formatNumber(row.quantityOnHand)}</strong>
-                    <span>{formatRelative(row.updatedAt)}</span>
-                    <button
-                      className="rms-row-button"
-                      disabled={
-                        props.isBusy || !props.transferDestinationLocation
-                      }
-                      onClick={() => void props.requestRemoteStock(row)}
-                      type="button"
-                    >
-                      Request
-                    </button>
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <EmptyState
                   title="No remote stock loaded"
@@ -23986,7 +25364,11 @@ function reportRowsForExport(report: StoreReportResult, kind: ReportKind) {
       return report.productRows.map((row) => ({
         "Product Code": row.productCode,
         Product: row.productName,
-        Quantity: row.quantity,
+        "Selling Quantity": row.quantity,
+        "Selling UOM": row.sellingUnitOfMeasure,
+        "Base Quantity": row.baseQuantity,
+        "Base UOM": row.baseUnitOfMeasure,
+        Conversion: row.uomConversionFactor,
         Gross: row.grossAmount,
         Discount: row.discountAmount,
         Tax: row.taxAmount,

@@ -36,6 +36,18 @@ const prisma = new PrismaClient({
 
 const defaultStoreCode = process.env.FLASH_ERP_BOOTSTRAP_STORE_CODE?.trim() || "accra-central";
 
+const layawayCashierPermissionCodes = [
+  "pos.layaway.create",
+  "pos.layaway.payment.receive",
+  "pos.layaway.fulfil"
+] as const;
+
+const layawaySupervisorPermissionCodes = [
+  "pos.layaway.cancel-refund",
+  "pos.layaway.reservation.release",
+  "pos.layaway.policy.override"
+] as const;
+
 function normalizeStorePrefix(storeCode: string) {
   return storeCode.replace(/[^a-z0-9]+/gi, ".").replace(/^\.+|\.+$/g, "");
 }
@@ -50,7 +62,8 @@ const cashierPermissionCodes = [
   "pos.receipt.reprint",
   "pos.customer.attach",
   "pos.customer.account.collect",
-  "pos.loyalty.redeem"
+  "pos.loyalty.redeem",
+  ...layawayCashierPermissionCodes
 ] as const;
 
 const supervisorPermissionCodes = [
@@ -72,7 +85,8 @@ const supervisorPermissionCodes = [
   "fuel.dip.capture",
   "fuel.meter-reading.capture",
   "fuel.supplier-receipt.capture",
-  "fuel.reconciliation.manage"
+  "fuel.reconciliation.manage",
+  ...layawaySupervisorPermissionCodes
 ] as const;
 
 const onlineCashierPermissionCodes = [

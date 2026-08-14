@@ -6,9 +6,12 @@ import type {
   StoreBasketLineUpdateRequest,
   StoreCancelSalesOrderRequest,
   StoreCreateSalesOrderRequest,
+  StoreExpireLayawayRequest,
   StoreOperatorSignInInput,
+  StoreReceiveLayawayPaymentRequest,
   StoreRecordBankingDepositRequest,
   StoreRecordEodReconciliationRequest,
+  StoreReleaseLayawayReservationRequest,
   StoreSellCaptureRequest,
   StoreSyncCycleStatusEvent
 } from "../src/shared/desktop-runtime.js";
@@ -161,6 +164,12 @@ const desktopRuntime: DesktopRuntimeApi = {
     ipcRenderer.invoke("flash-erp:create-sales-order-from-active-basket", input),
   resumeSalesOrder: (orderId: string) =>
     ipcRenderer.invoke("flash-erp:resume-sales-order", orderId),
+  receiveLayawayPayment: (input: StoreReceiveLayawayPaymentRequest) =>
+    ipcRenderer.invoke("flash-erp:receive-layaway-payment", input),
+  releaseLayawayReservation: (input: StoreReleaseLayawayReservationRequest) =>
+    ipcRenderer.invoke("flash-erp:release-layaway-reservation", input),
+  expireLayaway: (input: StoreExpireLayawayRequest) =>
+    ipcRenderer.invoke("flash-erp:expire-layaway", input),
   cancelSalesOrder: (input: StoreCancelSalesOrderRequest) =>
     ipcRenderer.invoke("flash-erp:cancel-sales-order", input),
   recordEodReconciliation: (input: StoreRecordEodReconciliationRequest) =>

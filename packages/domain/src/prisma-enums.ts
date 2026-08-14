@@ -154,6 +154,7 @@ export const SalesOrderStatus = makeEnum({
   OPEN: "OPEN",
   FULFILLED: "FULFILLED",
   CANCELLED: "CANCELLED",
+  EXPIRED: "EXPIRED",
 } as const);
 export type SalesOrderStatus = string;
 

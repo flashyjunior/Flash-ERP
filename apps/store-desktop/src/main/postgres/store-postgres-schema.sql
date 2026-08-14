@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS product_snapshot (
   unit_of_measure TEXT NOT NULL DEFAULT 'EA',
   base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
   uom_conversions_json TEXT NOT NULL DEFAULT '[]',
+  selling_units_json TEXT NOT NULL DEFAULT '[]',
   taxable INTEGER NOT NULL DEFAULT 1,
   tax_profile_code TEXT,
   tax_profile_name TEXT,
@@ -501,6 +502,7 @@ CREATE TABLE IF NOT EXISTS inter_store_transfer_request_draft (
   external_reference TEXT,
   note TEXT,
   operator_name TEXT NOT NULL,
+  lines_json TEXT NOT NULL DEFAULT '[]',
   submitted_at TEXT,
   updated_at TEXT NOT NULL
 );
@@ -683,6 +685,10 @@ CREATE TABLE IF NOT EXISTS pos_transaction_line (
   line_note TEXT,
   serial_numbers_json TEXT,
   quantity NUMERIC NOT NULL DEFAULT 0,
+  selling_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  uom_conversion_factor NUMERIC NOT NULL DEFAULT 1,
+  base_quantity NUMERIC NOT NULL DEFAULT 0,
   unit_price NUMERIC NOT NULL DEFAULT 0,
   discount_amount NUMERIC NOT NULL DEFAULT 0,
   tax_amount NUMERIC NOT NULL DEFAULT 0,
@@ -694,6 +700,11 @@ ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS inventory_location_cod
 ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS product_variant_code_snapshot TEXT;
 ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS variant_attributes_snapshot TEXT;
 ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS line_note TEXT;
+ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS selling_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS base_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS uom_conversion_factor NUMERIC NOT NULL DEFAULT 1;
+ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS base_quantity NUMERIC NOT NULL DEFAULT 0;
+UPDATE pos_transaction_line SET base_quantity = quantity WHERE base_quantity <= 0;
 
 CREATE TABLE IF NOT EXISTS pos_payment (
   id TEXT PRIMARY KEY,
@@ -762,15 +773,27 @@ CREATE TABLE IF NOT EXISTS sales_order (
   customer_id TEXT,
   customer_no TEXT,
   customer_name TEXT,
+  order_type TEXT NOT NULL DEFAULT 'SALES_ORDER',
   status TEXT NOT NULL DEFAULT 'OPEN',
   total_amount NUMERIC NOT NULL DEFAULT 0,
   deposit_amount NUMERIC NOT NULL DEFAULT 0,
+  paid_amount NUMERIC NOT NULL DEFAULT 0,
   balance_amount NUMERIC NOT NULL DEFAULT 0,
   deposit_tender_method_code TEXT,
   deposit_tender_method_name TEXT,
   deposit_payment_method TEXT,
   deposit_reference TEXT,
   deposit_paid_at TEXT,
+  layaway_policy_snapshot_json TEXT,
+  minimum_deposit_amount NUMERIC NOT NULL DEFAULT 0,
+  reservation_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
+  reservation_created_at TEXT,
+  reservation_released_at TEXT,
+  layaway_expires_at TEXT,
+  expired_at TEXT,
+  cancellation_fee_amount NUMERIC NOT NULL DEFAULT 0,
+  refunded_amount NUMERIC NOT NULL DEFAULT 0,
+  record_version INTEGER NOT NULL DEFAULT 1,
   operator_name TEXT,
   note TEXT,
   fulfilled_transaction_id TEXT,
@@ -780,6 +803,37 @@ CREATE TABLE IF NOT EXISTS sales_order (
   fulfilled_at TEXT,
   cancelled_at TEXT,
   updated_at TEXT NOT NULL
+);
+
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS order_type TEXT NOT NULL DEFAULT 'SALES_ORDER';
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS paid_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS layaway_policy_snapshot_json TEXT;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS minimum_deposit_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS reservation_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE';
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS reservation_created_at TEXT;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS reservation_released_at TEXT;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS layaway_expires_at TEXT;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS expired_at TEXT;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS cancellation_fee_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS refunded_amount NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE sales_order ADD COLUMN IF NOT EXISTS record_version INTEGER NOT NULL DEFAULT 1;
+UPDATE sales_order SET paid_amount = deposit_amount WHERE paid_amount = 0 AND deposit_amount > 0;
+
+CREATE TABLE IF NOT EXISTS sales_order_inventory_reservation (
+  id TEXT PRIMARY KEY,
+  sales_order_id TEXT NOT NULL,
+  sales_order_line_id TEXT NOT NULL,
+  inventory_location_code TEXT,
+  product_code TEXT NOT NULL,
+  product_variant_code TEXT,
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  base_quantity NUMERIC NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  release_reason TEXT,
+  created_at TEXT NOT NULL,
+  released_at TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (sales_order_id, sales_order_line_id)
 );
 
 CREATE TABLE IF NOT EXISTS eod_reconciliation (
@@ -965,6 +1019,8 @@ CREATE INDEX IF NOT EXISTS idx_customer_account_entry_customer ON customer_accou
 CREATE INDEX IF NOT EXISTS idx_customer_account_entry_synced ON customer_account_entry(synced_at, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pos_shift_status ON pos_shift(status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_order_status ON sales_order(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_order_status ON sales_order_inventory_reservation(sales_order_id, status);
+CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_stock ON sales_order_inventory_reservation(inventory_location_code, product_code, product_variant_code, status);
 CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_banking_deposit_reconciliation ON banking_deposit(reconciliation_id, deposited_at DESC);
 CREATE INDEX IF NOT EXISTS idx_local_store_expense_status ON local_store_expense(status, expense_date DESC);
@@ -992,6 +1048,7 @@ ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS issued_batch_
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS received_batch_allocations_json TEXT;
 ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS base_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
 ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS uom_conversions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS selling_units_json TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS requested_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS requested_unit_quantity NUMERIC NOT NULL DEFAULT 0;
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS uom_conversion_factor NUMERIC NOT NULL DEFAULT 1;
@@ -1000,6 +1057,7 @@ ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS requeste
 ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS requested_unit_quantity NUMERIC NOT NULL DEFAULT 0;
 ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS uom_conversion_factor NUMERIC NOT NULL DEFAULT 1;
 ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS base_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS lines_json TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE stock_count_session ADD COLUMN IF NOT EXISTS previous_batch_quantities_json TEXT;
 ALTER TABLE stock_count_session ADD COLUMN IF NOT EXISTS counted_batch_quantities_json TEXT;
 ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS batch_allocations_json TEXT;

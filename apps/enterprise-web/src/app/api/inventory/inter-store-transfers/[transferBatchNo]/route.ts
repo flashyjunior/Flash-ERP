@@ -18,12 +18,12 @@ export async function PATCH(
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
 
     if (
-      typeof payload.sourceLocationCode !== "string" ||
-      payload.sourceLocationCode.trim().length === 0
+      typeof payload.sourceStoreCode !== "string" ||
+      payload.sourceStoreCode.trim().length === 0
     ) {
       return NextResponse.json(
         {
-          error: "Choose the source location before Flash ERP can update the transfer request."
+          error: "Choose the source shop before Flash ERP can update the transfer request."
         },
         { status: 400 }
       );
@@ -51,7 +51,7 @@ export async function PATCH(
     }
 
     const response = await updateInterStoreTransferBatch(decodeURIComponent(transferBatchNo), {
-      sourceLocationCode: payload.sourceLocationCode.trim(),
+      sourceStoreCode: payload.sourceStoreCode.trim(),
       destinationLocationCode: payload.destinationLocationCode.trim(),
       externalReference:
         typeof payload.externalReference === "string" ? payload.externalReference : undefined,

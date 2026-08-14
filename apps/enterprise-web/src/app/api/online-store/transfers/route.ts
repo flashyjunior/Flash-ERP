@@ -6,8 +6,8 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const response = await createOnlineStoreTransferRequest({
+      transferBatchNo: body?.transferBatchNo ?? null,
       sourceStoreId: body?.sourceStoreId ?? "",
-      sourceInventoryLocationId: body?.sourceInventoryLocationId ?? null,
       destinationInventoryLocationId: body?.destinationInventoryLocationId ?? null,
       productId: body?.productId ?? "",
       quantity: body?.quantity === undefined || body?.quantity === null ? null : Number(body.quantity),

@@ -4523,6 +4523,9 @@ if (!desktopSingleInstanceLock) {
   registerStoreIpcHandler("flash-erp:record-customer-account-payment", "recordCustomerAccountPayment");
   registerStoreIpcHandler("flash-erp:create-sales-order-from-active-basket", "createSalesOrderFromActiveBasket");
   registerStoreIpcHandler("flash-erp:resume-sales-order", "resumeSalesOrder");
+  registerStoreIpcHandler("flash-erp:receive-layaway-payment", "receiveLayawayPayment");
+  registerStoreIpcHandler("flash-erp:release-layaway-reservation", "releaseLayawayReservation");
+  registerStoreIpcHandler("flash-erp:expire-layaway", "expireLayaway");
   registerStoreIpcHandler("flash-erp:cancel-sales-order", "cancelSalesOrder");
   registerStoreIpcHandler("flash-erp:record-eod-reconciliation", "recordEodReconciliation");
   registerStoreIpcHandler("flash-erp:record-banking-deposit", "recordBankingDeposit");

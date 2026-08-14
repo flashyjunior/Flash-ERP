@@ -2,6 +2,12 @@ import crypto from "node:crypto";
 
 import { Prisma } from "@prisma/client";
 import {
+  buildLayawayPolicySnapshot,
+  calculateLayawayMinimumDeposit,
+  normalizeLayawaySettings,
+  resolvePosSellingUom,
+} from "@flash-erp/domain";
+import {
   applyAutomaticPromotions,
   type AutomaticPromotionPolicy,
   type SyncPromotionDiscountType,
@@ -25,11 +31,32 @@ import {
   invalidateEnterpriseReadCache
 } from "@/server/performance/enterprise-read-cache";
 import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
+import {
+  ensureAlternateUomSellingSchemaCompatibility,
+  ensureLayawayLifecycleSchemaCompatibility,
+} from "@/server/repositories/schema-compatibility.repository";
 
 const ecommerceTerminalCode = "ecommerce-web";
 
 function optionalText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readJsonObject(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string") return {};
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function toMoney(value: number) {
@@ -363,12 +390,14 @@ async function getPublicStore(storeCodeOrSlug: string) {
       ecommerceAllowPickup: true,
       ecommerceAllowDelivery: true,
       ecommercePayOnDeliveryEnabled: true,
+      ecommerceLayawayEnabled: true,
       ecommerceDeliveryFee: true,
       ecommerceFreeDeliveryThreshold: true,
       retailOrg: {
         select: {
           name: true,
-          baseCurrencyCode: true
+          baseCurrencyCode: true,
+          companySettingsJson: true,
         }
       }
     }
@@ -392,6 +421,10 @@ async function getSalesLocation(storeId: string) {
 export type PublicStorefrontData = Awaited<ReturnType<typeof loadPublicStorefront>>;
 
 async function loadPublicStorefront(storeCodeOrSlug: string) {
+  await Promise.all([
+    ensureAlternateUomSellingSchemaCompatibility(),
+    ensureLayawayLifecycleSchemaCompatibility(),
+  ]);
   const store = await getPublicStore(storeCodeOrSlug);
   const salesLocation = await getSalesLocation(store.id);
   const products = await prisma.product.findMany({
@@ -424,8 +457,25 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       subcategory: true,
       brand: true,
       unitOfMeasure: true,
+      baseUnitOfMeasure: { select: { code: true } },
       primaryImageUrl: true,
       baseUnitPrice: true,
+      storeProductSellingUnits: {
+        where: { storeId: store.id, status: "ACTIVE" },
+        orderBy: [{ isDefault: "desc" }, { unitOfMeasureCodeSnapshot: "asc" }],
+        select: {
+          productVariantId: true,
+          unitOfMeasureCodeSnapshot: true,
+          unitOfMeasureNameSnapshot: true,
+          conversionFactor: true,
+          unitPrice: true,
+          barcode: true,
+          isDefault: true,
+          unitOfMeasure: {
+            select: { allowFractionalSale: true, decimalPrecision: true }
+          }
+        }
+      },
       taxProfile: { select: { ratePercent: true, isTaxInclusive: true } },
       trackInventory: true,
       isSerialized: true,
@@ -576,6 +626,19 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       subcategory: product.subcategory,
       brand: product.brand,
       unitOfMeasure: product.unitOfMeasure,
+      baseUnitOfMeasure: product.baseUnitOfMeasure?.code ?? product.unitOfMeasure,
+      sellingUnits: product.storeProductSellingUnits
+        .filter((sellingUnit) => sellingUnit.productVariantId === null)
+        .map((sellingUnit) => ({
+          unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+          unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+          conversionFactor: Number(sellingUnit.conversionFactor),
+          unitPrice: Number(sellingUnit.unitPrice),
+          barcode: sellingUnit.barcode,
+          isDefault: sellingUnit.isDefault,
+          allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+          decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+        })),
       imageUrl: product.primaryImageUrl,
       unitPrice,
       compareAtPrice:
@@ -625,6 +688,22 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
           code: variant.code,
           name: variant.displayName ?? variant.code,
           unitPrice: variantUnitPrice,
+          sellingUnits: product.storeProductSellingUnits
+            .filter(
+              (sellingUnit) =>
+                sellingUnit.productVariantId === null ||
+                sellingUnit.productVariantId === variant.id
+            )
+            .map((sellingUnit) => ({
+              unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+              unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+              conversionFactor: Number(sellingUnit.conversionFactor),
+              unitPrice: Number(sellingUnit.unitPrice),
+              barcode: sellingUnit.barcode,
+              isDefault: sellingUnit.isDefault,
+              allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+              decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+            })),
           promotion: variantPromotions[0] ?? null,
           promotions: variantPromotions,
           availableQuantity: Number(variant.quantityOnHand),
@@ -647,6 +726,13 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
     (promotion) => promotion.targetScope === "ALL_ITEMS"
   );
   const promotionRefreshAt = getPromotionRefreshAt(applicablePromotions, new Date());
+  const layawaySettings = normalizeLayawaySettings(
+    readJsonObject(store.retailOrg.companySettingsJson).layawaySettings,
+  );
+  const layawayOfferEnabled =
+    store.ecommerceLayawayEnabled &&
+    layawaySettings.enabled &&
+    gatewayMethods.length > 0;
 
   return {
     store: {
@@ -670,6 +756,17 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       allowPickup: store.ecommerceAllowPickup,
       allowDelivery: store.ecommerceAllowDelivery,
       payOnDeliveryEnabled: store.ecommercePayOnDeliveryEnabled,
+      layawayOffer: {
+        enabled: layawayOfferEnabled,
+        minimumDepositPercent: layawaySettings.minimumDepositPercent,
+        reserveStockOnDeposit: layawaySettings.reserveStockOnDeposit,
+        requireFullPaymentBeforeFulfilment:
+          layawaySettings.requireFullPaymentBeforeFulfilment,
+        refundPaymentsOnCancellation:
+          layawaySettings.refundPaymentsOnCancellation,
+        cancellationFeeType: layawaySettings.cancellationFeeType,
+        cancellationFeeValue: layawaySettings.cancellationFeeValue,
+      },
       deliveryFee: 0,
       freeDeliveryThreshold: null
     },
@@ -704,6 +801,7 @@ export async function getPublicStorefront(storeCodeOrSlug: string) {
 type EcommerceOrderLineInput = {
   productId?: string;
   variantCode?: string | null;
+  sellingUnitOfMeasure?: string | null;
   quantity?: number;
 };
 
@@ -727,6 +825,10 @@ async function priceEcommerceLines(input: {
   customerType?: string | null;
   loyaltyTier?: string | null;
 }) {
+  await Promise.all([
+    ensureAlternateUomSellingSchemaCompatibility(),
+    ensureLayawayLifecycleSchemaCompatibility(),
+  ]);
   const productIds = [
     ...new Set(input.lineInputs.map((line) => optionalText(line.productId)).filter(Boolean))
   ] as string[];
@@ -746,7 +848,26 @@ async function priceEcommerceLines(input: {
       productType: true,
       department: true,
       category: true,
+      unitOfMeasure: true,
+      baseUnitOfMeasure: { select: { code: true } },
       baseUnitPrice: true,
+      isSerialized: true,
+      storeProductSellingUnits: {
+        where: { storeId: input.store.id, status: "ACTIVE" },
+        orderBy: [{ isDefault: "desc" }, { unitOfMeasureCodeSnapshot: "asc" }],
+        select: {
+          productVariantId: true,
+          unitOfMeasureCodeSnapshot: true,
+          unitOfMeasureNameSnapshot: true,
+          conversionFactor: true,
+          unitPrice: true,
+          barcode: true,
+          isDefault: true,
+          unitOfMeasure: {
+            select: { allowFractionalSale: true, decimalPrecision: true }
+          }
+        }
+      },
       storeProductPrices: {
         where: { storeId: input.store.id, status: "ACTIVE", productVariantId: null },
         take: 1,
@@ -796,11 +917,35 @@ async function priceEcommerceLines(input: {
       throw new EcommerceAuthError(`Choose an option for ${product.name}.`);
     }
 
-    const unitPrice = Number(
+    const baseUnitPrice = Number(
       variant
         ? variant.storeProductPrices[0]?.unitPrice ?? variant.unitPrice
         : product.storeProductPrices[0]?.unitPrice ?? product.baseUnitPrice
     );
+    const sellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: product.baseUnitOfMeasure?.code ?? product.unitOfMeasure,
+      baseUnitPrice,
+      quantity,
+      selectedUnitOfMeasure: line.sellingUnitOfMeasure,
+      sellingUnits: product.storeProductSellingUnits
+        .filter(
+          (sellingUnit) =>
+            sellingUnit.productVariantId === null ||
+            sellingUnit.productVariantId === variant?.id
+        )
+        .map((sellingUnit) => ({
+          unitOfMeasureCode: sellingUnit.unitOfMeasureCodeSnapshot,
+          unitOfMeasureName: sellingUnit.unitOfMeasureNameSnapshot,
+          conversionFactor: Number(sellingUnit.conversionFactor),
+          unitPrice: Number(sellingUnit.unitPrice),
+          barcode: sellingUnit.barcode,
+          isDefault: sellingUnit.isDefault,
+          allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+          decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision
+        })),
+      serialized: product.isSerialized
+    });
+    const unitPrice = toMoney(sellingUom.unitPrice);
     const amounts = calculateLineAmounts({
       quantity,
       unitPrice,
@@ -816,6 +961,10 @@ async function priceEcommerceLines(input: {
       variant,
       variantAttributes,
       quantity,
+      sellingUnitOfMeasure: sellingUom.sellingUnitOfMeasure,
+      baseUnitOfMeasure: sellingUom.baseUnitOfMeasure,
+      uomConversionFactor: sellingUom.uomConversionFactor,
+      baseQuantity: sellingUom.baseQuantity,
       unitPrice,
       taxAmount: amounts.taxAmount,
       lineTotal: amounts.lineTotal,
@@ -906,6 +1055,10 @@ export async function quoteEcommerceOrder(input: {
       productId: line.product.id,
       variantCode: line.variant?.code ?? null,
       quantity: line.quantity,
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      uomConversionFactor: line.uomConversionFactor,
+      baseQuantity: line.baseQuantity,
       unitPrice: line.unitPrice,
       subtotalAmount: toMoney(line.quantity * line.unitPrice),
       discountAmount: line.discountAmount,
@@ -924,6 +1077,8 @@ export async function createEcommerceOrder(input: {
   delivery?: EcommerceDeliveryInput;
   customerNote?: string | null;
   paymentMethodCode?: string | null;
+  orderType?: "SALES_ORDER" | "LAYAWAY";
+  layawayDepositAmount?: number | null;
 }) {
   const customerSession = await getEcommerceCustomerSession({
     storeCode: input.storeCode,
@@ -932,6 +1087,8 @@ export async function createEcommerceOrder(input: {
   const store = await getPublicStore(input.storeCode);
   const checkoutRequestKey = requireEcommerceIdempotencyKey(input.idempotencyKey);
   const lineInputs = Array.isArray(input.lines) ? input.lines : [];
+  const orderType = input.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER";
+  const isLayaway = orderType === "LAYAWAY";
 
   if (!customerSession || lineInputs.length === 0) {
     throw new EcommerceAuthError("Add at least one product before checkout.");
@@ -948,6 +1105,7 @@ export async function createEcommerceOrder(input: {
     lines: lineInputs.map((line) => ({
       productId: optionalText(line.productId),
       variantCode: optionalText(line.variantCode),
+      sellingUnitOfMeasure: optionalText(line.sellingUnitOfMeasure)?.toUpperCase() ?? null,
       quantity: Number(line.quantity)
     })),
     delivery: {
@@ -963,7 +1121,13 @@ export async function createEcommerceOrder(input: {
       saveAddress: Boolean(input.delivery?.saveAddress)
     },
     customerNote: optionalText(input.customerNote),
-    paymentMethodCode: requestedPaymentMethodCode
+    paymentMethodCode: requestedPaymentMethodCode,
+    orderType,
+    layawayDepositAmount: isLayaway
+      ? input.layawayDepositAmount === null || input.layawayDepositAmount === undefined
+        ? null
+        : toMoney(Number(input.layawayDepositAmount))
+      : null,
   });
   const loadReplay = () => prisma.ecommerceOrder.findFirst({
     where: {
@@ -980,7 +1144,15 @@ export async function createEcommerceOrder(input: {
       selectedPaymentMethodCode: true,
       selectedPaymentMethodName: true,
       paymentTiming: true,
-      checkoutRequestHash: true
+      layawayDepositAmount: true,
+      checkoutRequestHash: true,
+      salesOrder: {
+        select: {
+          orderType: true,
+          minimumDepositAmount: true,
+          balanceAmount: true,
+        },
+      },
     }
   });
   const mapReplay = (order: NonNullable<Awaited<ReturnType<typeof loadReplay>>>) => {
@@ -999,6 +1171,13 @@ export async function createEcommerceOrder(input: {
       paymentMethodCode: order.selectedPaymentMethodCode ?? "",
       paymentMethodName: order.selectedPaymentMethodName ?? "",
       paymentTiming: order.paymentTiming as "ON_DELIVERY" | "PREPAY",
+      orderType: order.salesOrder.orderType === "LAYAWAY" ? "LAYAWAY" as const : "SALES_ORDER" as const,
+      paymentAmountDueNow:
+        order.salesOrder.orderType === "LAYAWAY"
+          ? Number(order.layawayDepositAmount) || Number(order.salesOrder.minimumDepositAmount)
+          : order.paymentTiming === "PREPAY"
+            ? Number(order.salesOrder.balanceAmount)
+            : 0,
       message: "Your order has already been placed.",
       idempotentReplay: true
     };
@@ -1032,6 +1211,12 @@ export async function createEcommerceOrder(input: {
   };
 
   if (requestedPaymentMethodCode === "PAY_ON_DELIVERY") {
+    if (isLayaway) {
+      throw new EcommerceAuthError(
+        "Layaway needs a secure online payment method for the opening deposit.",
+        409,
+      );
+    }
     if (!store.ecommercePayOnDeliveryEnabled) {
       throw new EcommerceAuthError("Pay on delivery is not available for this shop.", 409);
     }
@@ -1084,6 +1269,35 @@ export async function createEcommerceOrder(input: {
   const deliveryFeeAmount = 0;
   const totalAmount = itemsTotalAmount;
   const now = new Date();
+  const layawaySettings = normalizeLayawaySettings(
+    readJsonObject(store.retailOrg.companySettingsJson).layawaySettings,
+  );
+  const layawayPolicy = isLayaway
+    ? buildLayawayPolicySnapshot(layawaySettings, now.toISOString())
+    : null;
+  const minimumDepositAmount = isLayaway
+    ? calculateLayawayMinimumDeposit(totalAmount, layawaySettings.minimumDepositPercent)
+    : 0;
+  const requestedLayawayDepositAmount = isLayaway
+    ? toMoney(Number(input.layawayDepositAmount ?? minimumDepositAmount))
+    : 0;
+
+  if (isLayaway && totalAmount <= 0) {
+    throw new EcommerceAuthError("A Layaway needs an order total greater than zero.");
+  }
+  if (isLayaway && (!store.ecommerceLayawayEnabled || !layawaySettings.enabled)) {
+    throw new EcommerceAuthError("Layaway is not available from this storefront.", 409);
+  }
+  if (
+    isLayaway &&
+    (!Number.isFinite(requestedLayawayDepositAmount) ||
+      requestedLayawayDepositAmount + 0.005 < minimumDepositAmount ||
+      requestedLayawayDepositAmount > totalAmount + 0.005)
+  ) {
+    throw new EcommerceAuthError(
+      `Enter an opening deposit between ${minimumDepositAmount.toFixed(2)} and ${totalAmount.toFixed(2)}.`,
+    );
+  }
   const uniqueSuffix = `${now.getTime()}-${crypto.randomInt(100, 999)}`;
   const transactionNo = `WEB-ECOM-${store.code.toUpperCase()}-${uniqueSuffix}`;
   const orderNo = `SO-${store.code.toUpperCase()}-ECOM-${uniqueSuffix}`;
@@ -1123,7 +1337,7 @@ export async function createEcommerceOrder(input: {
         paidAmount: 0,
         changeAmount: 0,
         notes: [
-          `Ecommerce ${fulfilmentMethod.toLowerCase()} order`,
+          `Ecommerce ${isLayaway ? "layaway" : "order"} for ${fulfilmentMethod.toLowerCase()}`,
           optionalText(input.customerNote)
         ].filter(Boolean).join(" | "),
         originNodeCode: "ECOMMERCE",
@@ -1136,6 +1350,10 @@ export async function createEcommerceOrder(input: {
             productNameSnapshot: line.product.name,
             variantSizeSnapshot: line.variantAttributes,
             variantAttributesSnapshot: line.variantAttributes,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -1160,11 +1378,16 @@ export async function createEcommerceOrder(input: {
         customerNoSnapshot: customerSession.customerAccount.customer.customerNo,
         customerNameSnapshot: customerSession.customerAccount.customer.fullName,
         status: "OPEN",
+        orderType,
         totalAmount,
         depositAmount: 0,
+        paidAmount: 0,
         balanceAmount: totalAmount,
+        layawayPolicySnapshotJson: layawayPolicy ? JSON.stringify(layawayPolicy) : null,
+        minimumDepositAmount,
+        reservationStatus: "NOT_APPLICABLE",
         operatorName: "Customer web order",
-        note: `Ecommerce ${fulfilmentMethod.toLowerCase()} order`,
+        note: `Ecommerce ${isLayaway ? "layaway" : "order"} for ${fulfilmentMethod.toLowerCase()}`,
         originNodeCode: "ECOMMERCE",
         createdAt: now,
         lines: {
@@ -1175,6 +1398,10 @@ export async function createEcommerceOrder(input: {
             productNameSnapshot: line.product.name,
             variantSizeSnapshot: line.variantAttributes,
             variantAttributesSnapshot: line.variantAttributes,
+            sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+            baseUnitOfMeasure: line.baseUnitOfMeasure,
+            uomConversionFactor: line.uomConversionFactor,
+            baseQuantity: line.baseQuantity,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -1208,6 +1435,7 @@ export async function createEcommerceOrder(input: {
         totalAmount,
         paidAmount: 0,
         balanceAmount: totalAmount,
+        layawayDepositAmount: requestedLayawayDepositAmount,
         recipientName,
         deliveryPhone,
         deliveryAddressLine1: fulfilmentMethod === "DELIVERY" ? deliveryAddressLine1 : null,
@@ -1225,8 +1453,10 @@ export async function createEcommerceOrder(input: {
         statusEvents: {
           create: {
             status: "PLACED",
-            label: "Order placed",
-            note: "Your order has reached the shop.",
+            label: isLayaway ? "Layaway requested" : "Order placed",
+            note: isLayaway
+              ? `Pay at least ${store.currencyCode} ${minimumDepositAmount.toFixed(2)} to activate this layaway.`
+              : "Your order has reached the shop.",
             actorType: "CUSTOMER",
             actorLabel: customerSession.customerAccount.customer.fullName
           }
@@ -1263,18 +1493,21 @@ export async function createEcommerceOrder(input: {
         kind: "AUDIT",
         severity: "INFO",
         category: "ECOMMERCE",
-        action: "ECOMMERCE_ORDER_PLACED",
+        action: isLayaway ? "ECOMMERCE_LAYAWAY_REQUESTED" : "ECOMMERCE_ORDER_PLACED",
         actorLabel: customerSession.customerAccount.customer.customerNo,
         targetType: "Sales order",
         targetRef: salesOrder.orderNo,
         sourceNodeCode: "ECOMMERCE",
-        message: `${salesOrder.orderNo} was placed through the public storefront.`,
+        message: `${salesOrder.orderNo} was placed through the public storefront as ${isLayaway ? "a layaway" : "an order"}.`,
         detailsJson: JSON.stringify({
           storeCode: store.code,
           fulfilmentMethod,
           paymentMethodCode: paymentSelection.code,
           paymentTiming: paymentSelection.timing,
           totalAmount,
+          orderType,
+          minimumDepositAmount,
+          requestedLayawayDepositAmount,
           itemCount: orderLines.length
         })
       }
@@ -1289,7 +1522,16 @@ export async function createEcommerceOrder(input: {
       paymentMethodCode: paymentSelection.code,
       paymentMethodName: paymentSelection.name,
       paymentTiming: paymentSelection.timing,
-      message: "Your order has been placed.",
+      orderType,
+      paymentAmountDueNow:
+        isLayaway
+          ? requestedLayawayDepositAmount
+          : paymentSelection.timing === "PREPAY"
+            ? totalAmount
+            : 0,
+      message: isLayaway
+        ? "Your layaway has been created. Complete the opening deposit to activate it."
+        : "Your order has been placed.",
       idempotentReplay: false
     };
     });
@@ -1317,6 +1559,7 @@ function mapCustomerOrder(order: {
   totalAmount: Prisma.Decimal;
   paidAmount: Prisma.Decimal;
   balanceAmount: Prisma.Decimal;
+  layawayDepositAmount: Prisma.Decimal;
   recipientName: string;
   deliveryPhone: string;
   deliveryAddressLine1: string | null;
@@ -1332,7 +1575,12 @@ function mapCustomerOrder(order: {
   selectedPaymentMethodName: string | null;
   placedAt: Date;
   updatedAt: Date;
-  salesOrder: { lines: Array<{
+  salesOrder: {
+    orderType: string;
+    minimumDepositAmount: Prisma.Decimal;
+    reservationStatus: string;
+    layawayExpiresAt: Date | null;
+    lines: Array<{
     id: string;
     productCodeSnapshot: string;
     productVariantCodeSnapshot: string | null;
@@ -1343,7 +1591,8 @@ function mapCustomerOrder(order: {
     discountAmount: Prisma.Decimal;
     taxAmount: Prisma.Decimal;
     lineTotal: Prisma.Decimal;
-  }> };
+    }>;
+  };
   payments: Array<{
     id: string;
     reference: string;
@@ -1375,6 +1624,7 @@ function mapCustomerOrder(order: {
   return {
     id: order.id,
     orderNo: order.orderNo,
+    orderType: order.salesOrder.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
     status: order.status,
     paymentStatus: order.paymentStatus,
     deliveryStatus: order.deliveryStatus,
@@ -1387,6 +1637,10 @@ function mapCustomerOrder(order: {
     totalAmount: Number(order.totalAmount),
     paidAmount: Number(order.paidAmount),
     balanceAmount: Number(order.balanceAmount),
+    layawayDepositAmount: Number(order.layawayDepositAmount),
+    minimumDepositAmount: Number(order.salesOrder.minimumDepositAmount),
+    reservationStatus: order.salesOrder.reservationStatus,
+    layawayExpiresAt: order.salesOrder.layawayExpiresAt?.toISOString() ?? null,
     recipientName: order.recipientName,
     deliveryPhone: order.deliveryPhone,
     deliveryAddress: [
@@ -1576,6 +1830,7 @@ export async function requireOnlineStoreStaff() {
 }
 
 export async function getOnlineStoreEcommerceWorkspace() {
+  await ensureLayawayLifecycleSchemaCompatibility();
   const { session, store } = await requireOnlineStoreStaff();
   const [orders, products, tenderMethods] = await Promise.all([
     prisma.ecommerceOrder.findMany({
@@ -1653,12 +1908,19 @@ export async function getOnlineStoreEcommerceWorkspace() {
       ecommerceAllowPickup: store.ecommerceAllowPickup,
       ecommerceAllowDelivery: store.ecommerceAllowDelivery,
       ecommercePayOnDeliveryEnabled: store.ecommercePayOnDeliveryEnabled,
+      ecommerceLayawayEnabled: store.ecommerceLayawayEnabled,
       ecommerceDeliveryFee: Number(store.ecommerceDeliveryFee),
       ecommerceFreeDeliveryThreshold:
         store.ecommerceFreeDeliveryThreshold === null
           ? null
           : Number(store.ecommerceFreeDeliveryThreshold)
     },
+    layawayPolicy: normalizeLayawaySettings(
+      readJsonObject((await prisma.retailOrg.findUnique({
+        where: { id: session.retailOrgId },
+        select: { companySettingsJson: true },
+      }))?.companySettingsJson).layawaySettings,
+    ),
     products: products.map((product) => ({
       ...product,
       ecommerceCompareAtPrice:
@@ -1808,8 +2070,10 @@ export async function updateEcommerceProductPublication(input: {
 
 export async function updateEcommercePaymentOptions(input: {
   payOnDeliveryEnabled?: boolean;
+  layawayEnabled?: boolean;
   methods?: Array<{ tenderMethodId?: string; enabled?: boolean; sortOrder?: number }>;
 }) {
+  await ensureLayawayLifecycleSchemaCompatibility();
   const { session, store } = await requireOnlineStoreStaff();
   const methods = Array.isArray(input.methods) ? input.methods : [];
   const tenderMethodIds = methods
@@ -1831,10 +2095,20 @@ export async function updateEcommercePaymentOptions(input: {
   }
 
   await prisma.$transaction(async (tx) => {
-    if (typeof input.payOnDeliveryEnabled === "boolean") {
+    if (
+      typeof input.payOnDeliveryEnabled === "boolean" ||
+      typeof input.layawayEnabled === "boolean"
+    ) {
       await tx.store.update({
         where: { id: store.id },
-        data: { ecommercePayOnDeliveryEnabled: input.payOnDeliveryEnabled }
+        data: {
+          ...(typeof input.payOnDeliveryEnabled === "boolean"
+            ? { ecommercePayOnDeliveryEnabled: input.payOnDeliveryEnabled }
+            : {}),
+          ...(typeof input.layawayEnabled === "boolean"
+            ? { ecommerceLayawayEnabled: input.layawayEnabled }
+            : {}),
+        }
       });
     }
     for (const method of methods) {
@@ -1978,7 +2252,14 @@ export async function updateEcommerceOrderStatus(input: {
       status: true,
       salesOrderId: true,
       paymentStatus: true,
-      paymentTiming: true
+      paymentTiming: true,
+      salesOrder: {
+        select: {
+          orderType: true,
+          paidAmount: true,
+          minimumDepositAmount: true,
+        },
+      },
     }
   });
 
@@ -1988,9 +2269,19 @@ export async function updateEcommerceOrderStatus(input: {
   if (!(ecommerceStatusTransitions[order.status] ?? []).includes(status)) {
     throw new EcommerceAuthError(`Order ${order.orderNo} cannot move from ${order.status} to ${status}.`, 409);
   }
-  if (status === "CONFIRMED" && order.paymentTiming === "PREPAY" && order.paymentStatus !== "PAID") {
+  const openingLayawayDepositSatisfied =
+    order.salesOrder.orderType === "LAYAWAY" &&
+    Number(order.salesOrder.paidAmount) + 0.005 >= Number(order.salesOrder.minimumDepositAmount);
+  if (
+    status === "CONFIRMED" &&
+    order.paymentTiming === "PREPAY" &&
+    order.paymentStatus !== "PAID" &&
+    !openingLayawayDepositSatisfied
+  ) {
     throw new EcommerceAuthError(
-      `Order ${order.orderNo} requires confirmed payment before staff can accept it.`,
+      order.salesOrder.orderType === "LAYAWAY"
+        ? `Layaway ${order.orderNo} needs its minimum opening deposit before staff can accept it.`
+        : `Order ${order.orderNo} requires confirmed payment before staff can accept it.`,
       409
     );
   }

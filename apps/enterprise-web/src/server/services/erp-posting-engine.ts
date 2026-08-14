@@ -78,7 +78,7 @@ function normalizeOptionalText(value: string | null | undefined) {
 
 function normalizeCode(value: string | null | undefined, label: string) {
   const code = normalizeRequiredText(value, label)
-    .replace(/[^A-Za-z0-9-]/g, "-")
+    .replace(/[^A-Za-z0-9_-]/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .toUpperCase()
@@ -309,10 +309,13 @@ export async function postAccountingDocumentInTransaction(
   const postedBy = normalizeOptionalText(input.postedBy) ?? "Flash ERP posting engine";
 
   if (inputSourceId) {
+    const compatibleSourceTypes = [
+      ...new Set([sourceType, sourceType.replaceAll("_", "-")])
+    ];
     const duplicate = await tx.glJournalEntry.findFirst({
       where: {
         retailOrgId: context.retailOrgId,
-        sourceType,
+        sourceType: { in: compatibleSourceTypes },
         sourceId: inputSourceId
       },
       select: {

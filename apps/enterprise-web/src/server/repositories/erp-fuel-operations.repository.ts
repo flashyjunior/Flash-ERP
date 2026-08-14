@@ -20,6 +20,7 @@ import {
   SyncNodeType
 } from "@flash-erp/domain";
 import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
+import { ensureInterStoreTransferSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 
 type FuelContext = {
   retailOrgId: string;
@@ -3258,6 +3259,8 @@ type FuelOperationsWorkspaceScope = {
 export async function getFuelOperationsWorkspace(
   scope: FuelOperationsWorkspaceScope = {}
 ): Promise<FuelOperationsWorkspaceData> {
+  await ensureInterStoreTransferSchemaCompatibility();
+
   return prisma.$transaction(async (tx) => {
     const { context, company } = await ensureFuelFoundation(tx);
     const productOptions = await buildFuelProductOptions(tx, context, company);

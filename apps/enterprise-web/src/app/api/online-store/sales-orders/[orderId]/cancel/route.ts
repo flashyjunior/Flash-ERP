@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { cancelOnlineStoreSalesOrder } from "@/server/repositories/online-store.repository";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: {
     params: Promise<{
       orderId: string;
@@ -12,7 +12,12 @@ export async function POST(
 ) {
   try {
     const params = await context.params;
-    const response = await cancelOnlineStoreSalesOrder(params.orderId);
+    const body = await request.json().catch(() => ({}));
+    const response = await cancelOnlineStoreSalesOrder(params.orderId, {
+      refundPayments: Array.isArray(body?.refundPayments) ? body.refundPayments : null,
+      note: body?.note ?? null,
+      policyOverrideApproved: body?.policyOverrideApproved === true,
+    });
 
     return NextResponse.json(response);
   } catch (error) {

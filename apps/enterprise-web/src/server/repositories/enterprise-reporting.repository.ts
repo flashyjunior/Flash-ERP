@@ -707,6 +707,44 @@ export type EnterpriseReportingDashboardData = {
     updatedAt: string;
     updatedAtLabel: string;
   }>;
+  layawayRows: Array<{
+    orderNo: string;
+    store: string;
+    storeCode: string;
+    customerNo: string | null;
+    customerName: string | null;
+    status: string;
+    totalAmount: number;
+    paidAmount: number;
+    balanceAmount: number;
+    minimumDepositAmount: number;
+    reservationStatus: string;
+    reservedBaseQuantity: number;
+    cancellationFeeAmount: number;
+    refundedAmount: number;
+    ageDays: number;
+    ageingBucket: string;
+    operatorName: string | null;
+    createdAt: string;
+    createdAtLabel: string;
+    expiresAt: string | null;
+  }>;
+  layawayPaymentRows: Array<{
+    paymentId: string;
+    orderNo: string;
+    store: string;
+    storeCode: string;
+    customerName: string | null;
+    paymentPurpose: string;
+    tenderName: string;
+    amount: number;
+    reference: string | null;
+    shiftNo: string | null;
+    terminalCode: string | null;
+    cashierCode: string | null;
+    receivedAt: string;
+    receivedAtLabel: string;
+  }>;
   closeoutRows: Array<{
     reconciliationNo: string;
     store: string;
@@ -827,6 +865,8 @@ export function buildUnavailableEnterpriseReportingDashboard(
     promotionRows: [],
     exceptionRows: [],
     salesOrderRows: [],
+    layawayRows: [],
+    layawayPaymentRows: [],
     closeoutRows: [],
     postureMessages: [
       "Flash ERP reporting will appear here once the enterprise control-plane database is available.",
@@ -853,6 +893,172 @@ async function getReportingEnterpriseContext() {
       retailOrgId: true
     }
   });
+}
+
+async function getLayawayReportRows(
+  filters: EnterpriseReportingDashboardData["filters"]
+): Promise<
+  Pick<EnterpriseReportingDashboardData, "layawayRows" | "layawayPaymentRows">
+> {
+  const enterpriseContext = await getReportingEnterpriseContext();
+
+  if (!enterpriseContext) {
+    return { layawayRows: [], layawayPaymentRows: [] };
+  }
+
+  const dateFrom = parseDateStart(filters.dateFrom);
+  const dateTo = parseDateEnd(filters.dateTo);
+  const orders = await prisma.salesOrder.findMany({
+    where: {
+      retailOrgId: enterpriseContext.retailOrgId,
+      orderType: "LAYAWAY",
+      ...(filters.storeCode ? { store: { code: filters.storeCode } } : {})
+    },
+    orderBy: [{ createdAt: "desc" }, { orderNo: "desc" }],
+    take: 2000,
+    select: {
+      orderNo: true,
+      sourceTransactionId: true,
+      customerNoSnapshot: true,
+      customerNameSnapshot: true,
+      status: true,
+      totalAmount: true,
+      paidAmount: true,
+      balanceAmount: true,
+      minimumDepositAmount: true,
+      reservationStatus: true,
+      cancellationFeeAmount: true,
+      refundedAmount: true,
+      operatorName: true,
+      createdAt: true,
+      layawayExpiresAt: true,
+      fulfilledAt: true,
+      cancelledAt: true,
+      expiredAt: true,
+      store: { select: { name: true, code: true } },
+      customer: { select: { customerNo: true, fullName: true } },
+      inventoryReservations: {
+        select: { baseQuantity: true, status: true }
+      }
+    }
+  });
+  const sourceTransactionIds = orders.map((order) => order.sourceTransactionId);
+  const payments = sourceTransactionIds.length
+    ? await prisma.posPayment.findMany({
+        where: {
+          posTransactionId: { in: sourceTransactionIds },
+          paymentPurpose: {
+            in: ["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"]
+          },
+          ...(dateFrom || dateTo
+            ? {
+                receivedAt: {
+                  ...(dateFrom ? { gte: dateFrom } : {}),
+                  ...(dateTo ? { lte: dateTo } : {})
+                }
+              }
+            : {})
+        },
+        orderBy: [{ receivedAt: "desc" }, { id: "desc" }],
+        take: 5000,
+        select: {
+          id: true,
+          posTransactionId: true,
+          paymentPurpose: true,
+          tenderMethodNameSnapshot: true,
+          tenderMethodCodeSnapshot: true,
+          method: true,
+          amount: true,
+          reference: true,
+          receivedShiftNoSnapshot: true,
+          receivedTerminalCodeSnapshot: true,
+          receivedCashierCodeSnapshot: true,
+          receivedAt: true
+        }
+      })
+    : [];
+  const orderBySourceTransactionId = new Map(
+    orders.map((order) => [order.sourceTransactionId, order] as const)
+  );
+  const now = new Date();
+  const scopedOrders = orders.filter(
+    (order) =>
+      (!dateFrom || order.createdAt >= dateFrom) &&
+      (!dateTo || order.createdAt <= dateTo)
+  );
+
+  return {
+    layawayRows: scopedOrders.map((order) => {
+      const ageingEnd =
+        order.fulfilledAt ?? order.cancelledAt ?? order.expiredAt ?? now;
+      const ageDays = Math.max(
+        0,
+        Math.floor((ageingEnd.getTime() - order.createdAt.getTime()) / 86_400_000)
+      );
+      const ageingBucket =
+        ageDays <= 30
+          ? "0-30 days"
+          : ageDays <= 60
+            ? "31-60 days"
+            : ageDays <= 90
+              ? "61-90 days"
+              : "91+ days";
+
+      return {
+        orderNo: order.orderNo,
+        store: order.store.name,
+        storeCode: order.store.code,
+        customerNo: order.customer?.customerNo ?? order.customerNoSnapshot,
+        customerName: order.customer?.fullName ?? order.customerNameSnapshot,
+        status: order.status,
+        totalAmount: Number(order.totalAmount),
+        paidAmount: Number(order.paidAmount),
+        balanceAmount: Number(order.balanceAmount),
+        minimumDepositAmount: Number(order.minimumDepositAmount),
+        reservationStatus: order.reservationStatus,
+        reservedBaseQuantity: order.inventoryReservations
+          .filter((reservation) => reservation.status === "ACTIVE")
+          .reduce((sum, reservation) => sum + Number(reservation.baseQuantity), 0),
+        cancellationFeeAmount: Number(order.cancellationFeeAmount),
+        refundedAmount: Number(order.refundedAmount),
+        ageDays,
+        ageingBucket,
+        operatorName: order.operatorName,
+        createdAt: order.createdAt.toISOString(),
+        createdAtLabel: formatRelativeTime(order.createdAt),
+        expiresAt: order.layawayExpiresAt?.toISOString() ?? null
+      };
+    }),
+    layawayPaymentRows: payments.flatMap((payment) => {
+      const order = orderBySourceTransactionId.get(payment.posTransactionId);
+
+      if (!order) {
+        return [];
+      }
+
+      return [
+        {
+          paymentId: payment.id,
+          orderNo: order.orderNo,
+          store: order.store.name,
+          storeCode: order.store.code,
+          customerName: order.customer?.fullName ?? order.customerNameSnapshot,
+          paymentPurpose: payment.paymentPurpose,
+          tenderName:
+            payment.tenderMethodNameSnapshot ??
+            payment.tenderMethodCodeSnapshot ??
+            payment.method,
+          amount: Number(payment.amount),
+          reference: payment.reference,
+          shiftNo: payment.receivedShiftNoSnapshot,
+          terminalCode: payment.receivedTerminalCodeSnapshot,
+          cashierCode: payment.receivedCashierCodeSnapshot,
+          receivedAt: payment.receivedAt.toISOString(),
+          receivedAtLabel: formatRelativeTime(payment.receivedAt)
+        }
+      ];
+    })
+  };
 }
 
 function buildCompletedTransactionWhere(
@@ -2227,12 +2433,19 @@ export async function getEnterpriseReportingDashboard(
   ]);
 
   const currencyCode = operationsDashboard.currencyCode || posWorkspace.currencyCode || "USD";
-  const [reportingFacts, fuelDailyReportRows, cashExposureRows, payrollCostRows] =
+  const [
+    reportingFacts,
+    fuelDailyReportRows,
+    cashExposureRows,
+    payrollCostRows,
+    layawayReporting
+  ] =
     await Promise.all([
       getReportingFactRows(operationsDashboard.filters),
       getFuelDailyReportRows(operationsDashboard.filters),
       getCashExposureRows(operationsDashboard.filters),
-      getPayrollCostRows(operationsDashboard.filters)
+      getPayrollCostRows(operationsDashboard.filters),
+      getLayawayReportRows(operationsDashboard.filters)
     ]);
   const laneAggregateByStore = buildLaneAggregateByStore(posWorkspace.laneRows);
   const storeCodes = uniqueStrings([
@@ -3094,6 +3307,8 @@ export async function getEnterpriseReportingDashboard(
     promotionRows,
     exceptionRows,
     salesOrderRows,
+    layawayRows: layawayReporting.layawayRows,
+    layawayPaymentRows: layawayReporting.layawayPaymentRows,
     closeoutRows,
     postureMessages,
     priorities,

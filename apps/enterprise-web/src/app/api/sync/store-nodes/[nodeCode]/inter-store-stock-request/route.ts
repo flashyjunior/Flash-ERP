@@ -14,10 +14,10 @@ export async function POST(
     const payload = (await request.json()) as Partial<StoreRemoteInterStoreRequestInput>;
     const quantity = Number(payload.quantity);
 
-    if (typeof payload.sourceLocationCode !== "string" || !payload.sourceLocationCode.trim()) {
+    if (typeof payload.sourceStoreCode !== "string" || !payload.sourceStoreCode.trim()) {
       return NextResponse.json(
         {
-          error: "Choose the source shop/location that has stock before placing the request."
+          error: "Choose the source shop that has stock before placing the request."
         },
         { status: 400 }
       );
@@ -42,7 +42,11 @@ export async function POST(
     }
 
     const response = await createStoreNodeRemoteInterStoreRequest(nodeCode, {
-      sourceLocationCode: payload.sourceLocationCode.trim(),
+      sourceStoreCode: payload.sourceStoreCode.trim(),
+      sourceLocationCode:
+        typeof payload.sourceLocationCode === "string"
+          ? payload.sourceLocationCode.trim() || null
+          : null,
       destinationLocationCode:
         typeof payload.destinationLocationCode === "string"
           ? payload.destinationLocationCode.trim()

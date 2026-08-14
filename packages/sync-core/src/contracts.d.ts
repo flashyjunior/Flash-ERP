@@ -131,6 +131,10 @@ export type StorePosTransactionLinePayload = {
     lineNote?: string | null;
     serialNumbers: string[];
     quantity: number;
+    sellingUnitOfMeasure?: string | null;
+    baseUnitOfMeasure?: string | null;
+    uomConversionFactor?: number;
+    baseQuantity?: number;
   unitPrice: number;
   discountAmount: number;
   taxAmount: number;
@@ -525,6 +529,17 @@ export type EnterpriseCatalogProductPublishedPayload = {
     isBaseUnit: boolean;
     allowSale: boolean;
     allowPurchase: boolean;
+  }>;
+  sellingUnits?: Array<{
+    productVariantCode: string | null;
+    uomCode: string;
+    uomName: string;
+    conversionFactor: number;
+    unitPrice: number;
+    barcode: string | null;
+    isDefault: boolean;
+    allowFractionalSale: boolean;
+    decimalPrecision: number;
   }>;
   packSize: string | null;
   countryOfOrigin: string | null;
@@ -934,9 +949,16 @@ export type StoreNodePushRequest<TPayload = unknown> = {
   syncRunId?: string | null;
   trigger?: StoreNodeSyncTrigger | null;
   clientStartedAt?: string | null;
-  upstreamEvents: SyncEnvelope<TPayload>[];
-  acknowledgedDownstreamEventIds: string[];
-  telemetry?: StoreNodeTelemetry | null;
+    upstreamEvents: SyncEnvelope<TPayload>[];
+    acknowledgedDownstreamEventIds: string[];
+    failedDownstreamEvents?: StoreNodeDownstreamFailure[];
+    telemetry?: StoreNodeTelemetry | null;
+};
+export type StoreNodeDownstreamFailure = {
+    eventId: string;
+    status: "FAILED" | "DEAD_LETTER";
+    errorMessage: string;
+    failedAt: string;
 };
 export type StoreNodePushResponse = {
   acceptedEventIds: string[];
@@ -1145,7 +1167,8 @@ export type CreateInterStoreTransferRequest = {
 export type CreateInterStoreTransferResponse = {
   transferId: string;
   transferNo: string;
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode: string | null;
   destinationLocationCode: string;
   sourceNodeCode: string | null;
   destinationNodeCode: string | null;
@@ -1275,9 +1298,12 @@ export type StoreInterStoreTransferIssuedPayload = {
 export type StoreInterStoreTransferRequestedPayload = {
   requestId: string;
   requestNo: string;
+  transferBatchNo?: string | null;
+  lineNo?: number | null;
   storeCode: string;
   terminalCode: string;
-  sourceLocationCode: string;
+  sourceStoreCode: string;
+  sourceLocationCode?: string | null;
   destinationLocationCode: string;
   productCode: string;
   quantity: number;

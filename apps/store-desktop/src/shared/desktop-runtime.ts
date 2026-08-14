@@ -740,6 +740,10 @@ export type StoreBasketLineSummary = {
   availableSerialNumbers: string[];
   batchAllocations: StoreInventoryBatchAllocation[];
   quantity: number;
+  sellingUnitOfMeasure: string;
+  baseUnitOfMeasure: string;
+  uomConversionFactor: number;
+  baseQuantity: number;
   unitPrice: number;
   discountAmount: number;
   taxAmount: number;
@@ -800,7 +804,14 @@ export type StoreParkedBasketSummary = {
   updatedAt: string;
 };
 
-export type StoreSalesOrderStatus = "OPEN" | "FULFILLED" | "CANCELLED";
+export type StoreSalesOrderStatus = "OPEN" | "FULFILLED" | "CANCELLED" | "EXPIRED";
+export type StoreSalesOrderType = "SALES_ORDER" | "LAYAWAY";
+export type StoreSalesOrderReservationStatus =
+  | "NOT_APPLICABLE"
+  | "ACTIVE"
+  | "RELEASED"
+  | "CONSUMED"
+  | "EXPIRED";
 
 export type StoreSalesOrderSummary = {
   orderId: string;
@@ -810,15 +821,25 @@ export type StoreSalesOrderSummary = {
   customerId: string | null;
   customerNo: string | null;
   customerName: string | null;
+  orderType: StoreSalesOrderType;
   status: StoreSalesOrderStatus;
   totalAmount: number;
   depositAmount: number;
+  paidAmount: number;
   balanceAmount: number;
   depositTenderMethodCode: string | null;
   depositTenderMethodName: string | null;
   depositPaymentMethod: SyncPaymentMethod | null;
   depositReference: string | null;
   depositPaidAt: string | null;
+  minimumDepositAmount: number;
+  reservationStatus: StoreSalesOrderReservationStatus;
+  reservationCreatedAt: string | null;
+  reservationReleasedAt: string | null;
+  layawayExpiresAt: string | null;
+  expiredAt: string | null;
+  cancellationFeeAmount: number;
+  refundedAmount: number;
   lineCount: number;
   itemCount: number;
   operatorName: string | null;
@@ -880,6 +901,10 @@ export type StoreReceiptLookupLine = {
   quantityReturned: number;
   quantityPending: number;
   quantityAvailableToReturn: number;
+  sellingUnitOfMeasure: string;
+  baseUnitOfMeasure: string;
+  uomConversionFactor: number;
+  baseQuantitySold: number;
   unitPrice: number;
   taxAmount: number;
   lineTotal: number;
@@ -973,6 +998,8 @@ export type StoreCatalogLookupResult = {
   mustEnterPriceAtPos: boolean;
   availableSerialNumbers: string[];
   availableBatches: StoreCatalogBatchAvailability[];
+  sellingUnits: StoreProductSellingUnitSummary[];
+  selectedSellingUnitOfMeasure: string;
   unitPrice: number;
   quantityOnHand: number;
   barcode: string | null;
@@ -998,6 +1025,18 @@ export type StoreCatalogMatrixVariant = {
   }>;
 };
 
+export type StoreProductSellingUnitSummary = {
+  productVariantCode: string | null;
+  unitOfMeasureCode: string;
+  unitOfMeasureName: string;
+  conversionFactor: number;
+  unitPrice: number;
+  barcode: string | null;
+  isDefault: boolean;
+  allowFractionalSale: boolean;
+  decimalPrecision: number;
+};
+
 export type StoreCatalogBrowseItem = {
   productCode: string;
   productName: string;
@@ -1019,6 +1058,7 @@ export type StoreCatalogBrowseItem = {
     allowSale: boolean;
     allowPurchase: boolean;
   }>;
+  sellingUnits?: StoreProductSellingUnitSummary[];
   taxable?: boolean;
   taxProfileCode?: string | null;
   trackInventory?: boolean;
@@ -1465,6 +1505,24 @@ export type StoreTransferRequestTargetSummary = {
 
 export type StoreInterStoreTransferRequestDraftStatus = "DRAFT" | "SUBMITTED";
 
+export type StoreInterStoreTransferRequestDraftLine = {
+  lineId: string;
+  lineNo: number;
+  productCode: string;
+  productName: string;
+  departmentCode: string | null;
+  departmentName: string | null;
+  categoryCode: string | null;
+  categoryName: string | null;
+  subcategory: string | null;
+  isSerialized: boolean;
+  quantity: number;
+  requestedUnitOfMeasure: string;
+  requestedUnitQuantity: number;
+  uomConversionFactor: number;
+  baseUnitOfMeasure: string;
+};
+
 export type StoreInterStoreTransferRequestDraftSummary = {
   draftId: string;
   requestNo: string;
@@ -1495,14 +1553,24 @@ export type StoreInterStoreTransferRequestDraftSummary = {
   operatorName: string;
   submittedAt: string | null;
   updatedAt: string;
+  lines: StoreInterStoreTransferRequestDraftLine[];
 };
 
-export type StoreInterStoreTransferRequestDraftInput = {
-  sourceLocationCode: string;
-  destinationLocationCode: string;
+export type StoreInterStoreTransferRequestDraftLineInput = {
   productCode: string;
   quantity: number;
   unitOfMeasure?: string | null;
+};
+
+export type StoreInterStoreTransferRequestDraftInput = {
+  draftId?: string | null;
+  sourceStoreCode: string;
+  sourceLocationCode?: string | null;
+  destinationLocationCode: string;
+  productCode?: string;
+  quantity?: number;
+  unitOfMeasure?: string | null;
+  lines?: StoreInterStoreTransferRequestDraftLineInput[];
   externalReference?: string | null;
   note?: string | null;
   operatorName?: string;
@@ -1539,6 +1607,9 @@ export type StoreStockCountSessionSummary = {
 };
 
 export type StoreStockCountSessionDraftInput = {
+  sessionId?: string | null;
+  sheetNo?: string | null;
+  lineNo?: number | null;
   inventoryLocationCode: string;
   productCode: string;
   countedQuantity: number;
@@ -1550,6 +1621,7 @@ export type StoreStockCountSessionDraftInput = {
 
 export type StoreInterStoreTransferIssueRequest = {
   transferId: string;
+  sourceLocationCode: string;
   quantity: number;
   serialNumbers?: string[];
   batchAllocations?: StoreInventoryBatchAllocation[];
@@ -1744,6 +1816,10 @@ export type StoreReceiptPrintLine = {
   variantColor: string | null;
   lineNote: string | null;
   quantity: number;
+  sellingUnitOfMeasure: string;
+  baseQuantity: number;
+  baseUnitOfMeasure: string;
+  uomConversionFactor: number;
   unitPrice: number;
   discountAmount: number;
   taxAmount: number;
@@ -1932,6 +2008,10 @@ export type StoreProductSalesReportRow = {
   productCode: string;
   productName: string;
   quantity: number;
+  sellingUnitOfMeasure: string;
+  baseQuantity: number;
+  baseUnitOfMeasure: string;
+  uomConversionFactor: number;
   grossAmount: number;
   discountAmount: number;
   taxAmount: number;
@@ -2293,6 +2373,16 @@ export type StoreStandaloneProductInput = {
   safetyStockLevel?: number | null;
   catalogSortOrder?: number | null;
   barcode?: string | null;
+  sellingUnits?: Array<{
+    unitOfMeasureCode: string;
+    unitOfMeasureName?: string | null;
+    conversionFactor: number;
+    unitPrice: number;
+    barcode?: string | null;
+    isDefault?: boolean | null;
+    allowFractionalSale?: boolean | null;
+    decimalPrecision?: number | null;
+  }>;
 };
 
 export type StorePasswordPolicySummary = {
@@ -2393,6 +2483,7 @@ export type StoreSellCaptureRequest = {
   productVariantCode?: string | null;
   serialNumbers?: string[];
   preferredBatchId?: string | null;
+  sellingUnitOfMeasure?: string | null;
   unitPrice?: number | null;
   variantSize?: string | null;
   variantColor?: string | null;
@@ -2458,6 +2549,7 @@ export type StoreCustomerAccountPaymentRequest = {
 };
 
 export type StoreCreateSalesOrderRequest = {
+  orderType?: StoreSalesOrderType | null;
   operatorName?: string | null;
   note?: string | null;
   headerReference?: string | null;
@@ -2466,12 +2558,35 @@ export type StoreCreateSalesOrderRequest = {
   depositAmount?: number | null;
   depositTenderMethodCode?: string | null;
   depositReference?: string | null;
+  layawayExpiresAt?: string | null;
+  policyOverrideApproved?: boolean | null;
 };
 
 export type StoreCancelSalesOrderRequest = {
   orderId: string;
   operatorName?: string | null;
   note?: string | null;
+  refundPayments?: StoreBasketCheckoutPayment[] | null;
+  policyOverrideApproved?: boolean | null;
+};
+
+export type StoreReceiveLayawayPaymentRequest = {
+  orderId: string;
+  payments: StoreBasketCheckoutPayment[];
+  operatorName?: string | null;
+  note?: string | null;
+};
+
+export type StoreReleaseLayawayReservationRequest = {
+  orderId: string;
+  reason: string;
+  operatorName?: string | null;
+};
+
+export type StoreExpireLayawayRequest = {
+  orderId: string;
+  reason?: string | null;
+  operatorName?: string | null;
 };
 
 export type StoreRecordEodReconciliationRequest = {
@@ -2716,6 +2831,13 @@ export type DesktopRuntimeApi = {
     input?: StoreCreateSalesOrderRequest
   ) => Promise<StoreSyncActionResult>;
   resumeSalesOrder: (orderId: string) => Promise<StoreSyncActionResult>;
+  receiveLayawayPayment: (
+    input: StoreReceiveLayawayPaymentRequest
+  ) => Promise<StoreSyncActionResult>;
+  releaseLayawayReservation: (
+    input: StoreReleaseLayawayReservationRequest
+  ) => Promise<StoreSyncActionResult>;
+  expireLayaway: (input: StoreExpireLayawayRequest) => Promise<StoreSyncActionResult>;
   cancelSalesOrder: (input: StoreCancelSalesOrderRequest) => Promise<StoreSyncActionResult>;
   recordEodReconciliation: (
     input: StoreRecordEodReconciliationRequest
