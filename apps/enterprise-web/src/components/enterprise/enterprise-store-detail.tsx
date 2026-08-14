@@ -1,11 +1,13 @@
 "use client";
 
-import type { ColumnDef } from "@tanstack/react-table";
+import type { ColumnDef, FilterFn } from "@tanstack/react-table";
 import type { PublishStoreLocationsResponse } from "@flash-erp/sync-core";
 import {
   Activity,
   ArrowLeft,
   Boxes,
+  MonitorSmartphone,
+  Plus,
   RefreshCcw,
   Store,
   Waypoints,
@@ -30,6 +32,7 @@ import type {
 const numberFormatter = new Intl.NumberFormat("en-US");
 
 type NodeRow = EnterpriseStoreDetailData["nodeRows"][number];
+type TerminalRow = EnterpriseStoreDetailData["terminalRows"][number];
 type TransactionRow = EnterpriseStoreDetailData["recentTransactions"][number];
 type InventoryRow = EnterpriseStoreDetailData["recentInventoryRows"][number];
 type LocationRow = EnterpriseStoreDetailData["locationRows"][number];
@@ -208,10 +211,35 @@ function renderTimestamp(value: string | null, label: string) {
   );
 }
 
+const terminalFilter: FilterFn<TerminalRow> = (
+  row,
+  _columnId,
+  filterValue,
+) => {
+  const query = String(filterValue ?? "").trim().toLowerCase();
+
+  if (!query) {
+    return true;
+  }
+
+  return [
+    row.original.terminalCode,
+    row.original.terminalName,
+    row.original.terminalStatus,
+    row.original.licenseStatus,
+    ...row.original.nodeCodes,
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
+};
+
 export function EnterpriseStoreDetail({
   detail,
+  initialTab = "overview",
 }: {
   detail: EnterpriseStoreDetailData;
+  initialTab?: "overview" | "topology" | "activity";
 }) {
   const router = useRouter();
   const currencyFormatter = useMemo(
@@ -225,6 +253,7 @@ export function EnterpriseStoreDetail({
   const [isPublishLocationsOpen, setIsPublishLocationsOpen] = useState(false);
   const [isEditStoreOpen, setIsEditStoreOpen] = useState(false);
   const [isProvisionTopologyOpen, setIsProvisionTopologyOpen] = useState(false);
+  const [isTerminalSetupOpen, setIsTerminalSetupOpen] = useState(false);
   const [isLocationSetupOpen, setIsLocationSetupOpen] = useState(false);
   const [isDatabaseInstructionOpen, setIsDatabaseInstructionOpen] =
     useState(false);
@@ -301,6 +330,12 @@ export function EnterpriseStoreDetail({
   const [terminalName, setTerminalName] = useState("");
   const [nodeCode, setNodeCode] = useState("");
   const [nodeName, setNodeName] = useState("");
+  const [newTerminalCode, setNewTerminalCode] = useState("");
+  const [newTerminalName, setNewTerminalName] = useState("");
+  const [newTerminalStatus, setNewTerminalStatus] = useState("ACTIVE");
+  const [createTerminalNode, setCreateTerminalNode] = useState(true);
+  const [newTerminalNodeCode, setNewTerminalNodeCode] = useState("");
+  const [newTerminalNodeName, setNewTerminalNodeName] = useState("");
   const [locationCode, setLocationCode] = useState("");
   const [locationName, setLocationName] = useState("");
   const [locationType, setLocationType] = useState("STORE_FLOOR");
@@ -348,6 +383,13 @@ export function EnterpriseStoreDetail({
     message: null,
   });
   const [provisionState, setProvisionState] = useState<{
+    status: "idle" | "submitting" | "success" | "error";
+    message: string | null;
+  }>({
+    status: "idle",
+    message: null,
+  });
+  const [terminalSetupState, setTerminalSetupState] = useState<{
     status: "idle" | "submitting" | "success" | "error";
     message: string | null;
   }>({
@@ -412,7 +454,13 @@ export function EnterpriseStoreDetail({
   }, [detail.availableReceiptTemplates, detail.store.receiptTemplateMode]);
   const primaryNode = detail.nodeRows[0] ?? null;
   const isOnlineDirectStore = detail.store.storeMode === "ONLINE_DIRECT";
-  const shouldShowProvisionTopology = !isOnlineDirectStore && !primaryNode;
+  const hasCompletePrimaryTopology =
+    Boolean(primaryNode) &&
+    detail.terminalRows.length > 0 &&
+    detail.warehouseRows.length > 0 &&
+    detail.locationRows.length > 0;
+  const shouldShowProvisionTopology =
+    !isOnlineDirectStore && !hasCompletePrimaryTopology;
   const canPublishLocations = Boolean(primaryNode) || isOnlineDirectStore;
   const locationPublishTargetLabel =
     primaryNode?.nodeCode ?? "Online store (enterprise direct)";
@@ -478,6 +526,58 @@ export function EnterpriseStoreDetail({
           renderTimestamp(
             row.original.lastSyncAt,
             row.original.lastSyncAtLabel,
+          ),
+        meta: { disableTruncate: true },
+      },
+    ],
+    [],
+  );
+
+  const terminalColumns = useMemo<ColumnDef<TerminalRow>[]>(
+    () => [
+      {
+        accessorKey: "terminalName",
+        header: "Terminal",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">
+              {row.original.terminalName}
+            </p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.terminalCode}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true },
+      },
+      {
+        accessorKey: "terminalStatus",
+        header: "Status",
+        cell: ({ row }) => <StatusBadge value={row.original.terminalStatus} />,
+        meta: { disableTruncate: true },
+      },
+      {
+        accessorKey: "licenseStatus",
+        header: "Licence",
+        cell: ({ row }) => <StatusBadge value={row.original.licenseStatus} />,
+        meta: { disableTruncate: true },
+      },
+      {
+        id: "nodeCodes",
+        header: "Desktop node",
+        cell: ({ row }) =>
+          row.original.nodeCodes.length > 0
+            ? row.original.nodeCodes.join(", ")
+            : "Not bound",
+        meta: { disableTruncate: true },
+      },
+      {
+        accessorKey: "lastHeartbeatAtLabel",
+        header: "Last heartbeat",
+        cell: ({ row }) =>
+          renderTimestamp(
+            row.original.lastHeartbeatAt,
+            row.original.lastHeartbeatAtLabel,
           ),
         meta: { disableTruncate: true },
       },
@@ -573,6 +673,100 @@ export function EnterpriseStoreDetail({
       status: "idle",
       message: null,
     });
+  }
+
+  function resetTerminalSetupDialog() {
+    const position = detail.terminalRows.length + 1;
+    const suffix = String(position).padStart(2, "0");
+    const warehouseOnly =
+      !detail.store.salesEnabled && detail.store.warehouseEnabled;
+    const codeBase = getCodeSegment(detail.store.code);
+    const terminalKind = warehouseOnly ? "ops" : "front";
+    const terminalDisplayKind = warehouseOnly ? "Operations Desk" : "Front Counter";
+    const nodeKind = warehouseOnly ? "ops" : "pos";
+
+    setNewTerminalCode(`${terminalKind}-${suffix}`);
+    setNewTerminalName(`${terminalDisplayKind} ${suffix}`);
+    setNewTerminalStatus("ACTIVE");
+    setCreateTerminalNode(!isOnlineDirectStore);
+    setNewTerminalNodeCode(`${codeBase}-${nodeKind}-${suffix}`);
+    setNewTerminalNodeName(`${detail.store.name} ${nodeKind.toUpperCase()} ${suffix}`);
+    setTerminalSetupState({
+      status: "idle",
+      message: null,
+    });
+  }
+
+  async function handleCreateTerminal() {
+    const requestBody = {
+      terminalCode: newTerminalCode.trim(),
+      terminalName: newTerminalName.trim(),
+      status: newTerminalStatus,
+      nodeCode: createTerminalNode ? newTerminalNodeCode.trim() : null,
+      nodeName: createTerminalNode ? newTerminalNodeName.trim() : null,
+    };
+
+    if (!requestBody.terminalCode || !requestBody.terminalName) {
+      setTerminalSetupState({
+        status: "error",
+        message: "Enter the terminal code and name before saving.",
+      });
+      return;
+    }
+
+    if (createTerminalNode && !requestBody.nodeCode) {
+      setTerminalSetupState({
+        status: "error",
+        message: "Enter the desktop node code or clear the node-binding option.",
+      });
+      return;
+    }
+
+    setTerminalSetupState({
+      status: "submitting",
+      message: "Flash ERP is registering the terminal.",
+    });
+
+    try {
+      const response = await fetch(
+        `/api/stores/${encodeURIComponent(detail.store.code)}/terminals`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(requestBody),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(
+          payload.message ?? "Flash ERP could not register that terminal.",
+        );
+      }
+
+      setTerminalSetupState({
+        status: "success",
+        message: payload.message ?? "Flash ERP registered the terminal.",
+      });
+      startTransition(() => {
+        window.setTimeout(() => {
+          setIsTerminalSetupOpen(false);
+          router.refresh();
+        }, 700);
+      });
+    } catch (error) {
+      setTerminalSetupState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not register that terminal.",
+      });
+    }
   }
 
   function applySuggestedTopology() {
@@ -1931,12 +2125,12 @@ export function EnterpriseStoreDetail({
 
       <WorkspaceTabs
         ariaLabel="Store detail views"
-        defaultValue="overview"
+        defaultValue={initialTab}
         summaries={{
           overview:
             "Review store setup, node posture, and rollout guidance from one workspace.",
-          nodes:
-            "Inspect live node telemetry and jump into sync recovery when needed.",
+          topology:
+            "Manage terminals and inspect their desktop sync-node bindings.",
           activity:
             "Review the latest canonical posted sales and stock movements attached to this store.",
         }}
@@ -1947,7 +2141,11 @@ export function EnterpriseStoreDetail({
             badge: "Live",
             badgeTone: "success",
           },
-          { value: "nodes", label: "Nodes" },
+          {
+            value: "topology",
+            label: "Topology",
+            badge: `${detail.terminalRows.length} terminal${detail.terminalRows.length === 1 ? "" : "s"}`,
+          },
           { value: "activity", label: "Activity" },
         ]}
       >
@@ -2350,17 +2548,184 @@ export function EnterpriseStoreDetail({
           </section>
         </WorkspaceTabsContent>
 
-        <WorkspaceTabsContent value="nodes">
-          <SharedDataGrid
-            columns={nodeColumns}
-            data={detail.nodeRows}
-            emptyLabel="No desktop nodes are currently attached to this store."
-            exportFileName={`flash-erp-${detail.store.code}-nodes`}
-            getRowHref={(row) =>
-              `/sync/nodes/${encodeURIComponent(row.nodeCode)}`
-            }
-            searchPlaceholder="Search store nodes by code, name, or health"
-          />
+        <WorkspaceTabsContent value="topology">
+          <section className="grid gap-4">
+            <SharedDataGrid
+              columns={terminalColumns}
+              data={detail.terminalRows}
+              emptyLabel="No terminals are registered for this store yet."
+              exportFileName={`flash-erp-${detail.store.code}-terminals`}
+              globalFilterFn={terminalFilter}
+              searchPlaceholder="Search terminals by code, name, licence, or node"
+              toolbarActions={
+                <div className="flex flex-wrap items-center gap-2">
+                  <ActionDialog
+                    description="Register another store terminal and optionally bind its desktop sync node."
+                    onOpenChange={(nextOpen) => {
+                      setIsTerminalSetupOpen(nextOpen);
+
+                      if (nextOpen) {
+                        resetTerminalSetupDialog();
+                      }
+                    }}
+                    open={isTerminalSetupOpen}
+                    title="Add terminal"
+                    triggerIcon={Plus}
+                    triggerLabel="Add terminal"
+                    widthClassName="max-w-3xl"
+                  >
+                    <div className="space-y-5">
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <label className="space-y-2 text-sm text-stone-700">
+                          <span className="block font-semibold text-stone-900">
+                            Terminal code
+                          </span>
+                          <input
+                            className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+                            disabled={terminalSetupState.status === "submitting"}
+                            onChange={(event) =>
+                              setNewTerminalCode(event.target.value)
+                            }
+                            value={newTerminalCode}
+                          />
+                        </label>
+                        <label className="space-y-2 text-sm text-stone-700">
+                          <span className="block font-semibold text-stone-900">
+                            Terminal name
+                          </span>
+                          <input
+                            className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+                            disabled={terminalSetupState.status === "submitting"}
+                            onChange={(event) =>
+                              setNewTerminalName(event.target.value)
+                            }
+                            value={newTerminalName}
+                          />
+                        </label>
+                        <label className="space-y-2 text-sm text-stone-700 md:col-span-2">
+                          <span className="block font-semibold text-stone-900">
+                            Status
+                          </span>
+                          <select
+                            className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+                            disabled={terminalSetupState.status === "submitting"}
+                            onChange={(event) =>
+                              setNewTerminalStatus(event.target.value)
+                            }
+                            value={newTerminalStatus}
+                          >
+                            <option value="ACTIVE">Active</option>
+                            <option value="INACTIVE">Inactive</option>
+                          </select>
+                        </label>
+                      </div>
+
+                      {!isOnlineDirectStore ? (
+                        <div className="space-y-4 border-t border-stone-200 pt-4">
+                          <label className="flex items-center gap-3 text-sm font-semibold text-stone-800">
+                            <input
+                              checked={createTerminalNode}
+                              disabled={terminalSetupState.status === "submitting"}
+                              onChange={(event) =>
+                                setCreateTerminalNode(event.target.checked)
+                              }
+                              type="checkbox"
+                            />
+                            Create desktop sync node
+                          </label>
+                          {createTerminalNode ? (
+                            <div className="grid gap-4 md:grid-cols-2">
+                              <label className="space-y-2 text-sm text-stone-700">
+                                <span className="block font-semibold text-stone-900">
+                                  Node code
+                                </span>
+                                <input
+                                  className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+                                  disabled={terminalSetupState.status === "submitting"}
+                                  onChange={(event) =>
+                                    setNewTerminalNodeCode(event.target.value)
+                                  }
+                                  value={newTerminalNodeCode}
+                                />
+                              </label>
+                              <label className="space-y-2 text-sm text-stone-700">
+                                <span className="block font-semibold text-stone-900">
+                                  Node name
+                                </span>
+                                <input
+                                  className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+                                  disabled={terminalSetupState.status === "submitting"}
+                                  onChange={(event) =>
+                                    setNewTerminalNodeName(event.target.value)
+                                  }
+                                  value={newTerminalNodeName}
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {terminalSetupState.message ? (
+                        <div
+                          className={`rounded-xl border px-4 py-3 text-sm leading-6 ${
+                            terminalSetupState.status === "error"
+                              ? "border-rose-200 bg-rose-50 text-rose-700"
+                              : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                          }`}
+                        >
+                          {terminalSetupState.message}
+                        </div>
+                      ) : null}
+
+                      <div className="flex flex-wrap justify-end gap-3">
+                        <button
+                          className="inline-flex items-center justify-center rounded-xl border border-stone-300 px-4 py-2.5 text-sm font-semibold text-stone-700"
+                          disabled={terminalSetupState.status === "submitting"}
+                          onClick={() => setIsTerminalSetupOpen(false)}
+                          type="button"
+                        >
+                          Close
+                        </button>
+                        <button
+                          className="inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--brand)] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+                          disabled={
+                            terminalSetupState.status === "submitting" ||
+                            !newTerminalCode.trim() ||
+                            !newTerminalName.trim() ||
+                            (createTerminalNode && !newTerminalNodeCode.trim())
+                          }
+                          onClick={() => void handleCreateTerminal()}
+                          type="button"
+                        >
+                          <MonitorSmartphone className="h-4 w-4" />
+                          {terminalSetupState.status === "submitting"
+                            ? "Saving..."
+                            : "Save terminal"}
+                        </button>
+                      </div>
+                    </div>
+                  </ActionDialog>
+                  <Link
+                    className="inline-flex items-center gap-2 rounded-full border border-stone-300 bg-white px-4 py-2 text-sm font-semibold text-stone-800 transition hover:border-[var(--brand)]"
+                    href="/settings/licenses"
+                  >
+                    Open licensing
+                  </Link>
+                </div>
+              }
+            />
+            <SharedDataGrid
+              columns={nodeColumns}
+              data={detail.nodeRows}
+              emptyLabel="No desktop nodes are currently attached to this store."
+              exportFileName={`flash-erp-${detail.store.code}-nodes`}
+              getRowHref={(row) =>
+                `/sync/nodes/${encodeURIComponent(row.nodeCode)}`
+              }
+              searchPlaceholder="Search store nodes by code, name, or health"
+            />
+          </section>
         </WorkspaceTabsContent>
 
         <WorkspaceTabsContent value="activity">

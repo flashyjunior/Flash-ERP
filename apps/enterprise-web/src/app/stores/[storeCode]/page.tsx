@@ -10,16 +10,28 @@ type StoreDetailPageProps = {
   params: Promise<{
     storeCode: string;
   }>;
+  searchParams: Promise<{
+    tab?: string;
+  }>;
 };
 
-export default async function StoreDetailPage({ params }: StoreDetailPageProps) {
+export default async function StoreDetailPage({
+  params,
+  searchParams,
+}: StoreDetailPageProps) {
   await requireEnterprisePermission(["master.store.manage"]);
   const { storeCode } = await params;
+  const { tab } = await searchParams;
   const detail = await getEnterpriseStoreDetail(decodeURIComponent(storeCode));
 
   if (!detail) {
     notFound();
   }
 
-  return <EnterpriseStoreDetail detail={detail} />;
+  return (
+    <EnterpriseStoreDetail
+      detail={detail}
+      initialTab={tab === "topology" || tab === "activity" ? tab : "overview"}
+    />
+  );
 }
