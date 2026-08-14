@@ -8,6 +8,72 @@ function normalizeCode(value) {
     const trimmed = value?.trim() ?? "";
     return trimmed ? trimmed.toUpperCase() : null;
 }
+function normalizeCodeSet(values) {
+    const normalized = (values ?? [])
+        .map((value) => normalizeCode(value))
+        .filter((value) => Boolean(value));
+    return normalized.length > 0 ? new Set(normalized) : null;
+}
+function normalizeWeekday(value) {
+    const normalized = String(value ?? "").trim().toUpperCase();
+    if (!normalized) {
+        return null;
+    }
+    const aliases = {
+        "0": "SUNDAY",
+        "1": "MONDAY",
+        "2": "TUESDAY",
+        "3": "WEDNESDAY",
+        "4": "THURSDAY",
+        "5": "FRIDAY",
+        "6": "SATURDAY",
+        SUN: "SUNDAY",
+        SUNDAY: "SUNDAY",
+        MON: "MONDAY",
+        MONDAY: "MONDAY",
+        TUE: "TUESDAY",
+        TUESDAY: "TUESDAY",
+        WED: "WEDNESDAY",
+        WEDNESDAY: "WEDNESDAY",
+        THU: "THURSDAY",
+        THURSDAY: "THURSDAY",
+        FRI: "FRIDAY",
+        FRIDAY: "FRIDAY",
+        SAT: "SATURDAY",
+        SATURDAY: "SATURDAY"
+    };
+    return aliases[normalized] ?? null;
+}
+function getWeekdayName(value) {
+    return ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"][value.getDay()];
+}
+function normalizeMinuteOfDay(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    const normalized = Math.trunc(Number(value));
+    return Number.isFinite(normalized) && normalized >= 0 && normalized <= 1439 ? normalized : null;
+}
+function isWithinMinuteWindow(evaluatedAt, activeFromMinutes, activeToMinutes) {
+    const fromMinutes = normalizeMinuteOfDay(activeFromMinutes);
+    const toMinutes = normalizeMinuteOfDay(activeToMinutes);
+    if (fromMinutes === null && toMinutes === null) {
+        return true;
+    }
+    const currentMinutes = evaluatedAt.getHours() * 60 + evaluatedAt.getMinutes();
+    if (fromMinutes !== null && toMinutes !== null) {
+        if (fromMinutes === toMinutes) {
+            return true;
+        }
+        return fromMinutes < toMinutes
+            ? currentMinutes >= fromMinutes && currentMinutes <= toMinutes
+            : currentMinutes >= fromMinutes || currentMinutes <= toMinutes;
+    }
+    if (fromMinutes !== null) {
+        return currentMinutes >= fromMinutes;
+    }
+    return toMinutes === null || currentMinutes <= toMinutes;
+}
 function calculateBaseLineAmounts(input) {
     const extendedPrice = roundMoney(input.unitPrice * input.quantity);
     const effectiveRate = input.taxable ? Math.max(0, input.taxRatePercent ?? 0) / 100 : 0;
@@ -76,9 +142,48 @@ function isPromotionActive(promotion, evaluatedAt) {
     if (endAt && !Number.isNaN(endAt.getTime()) && evaluatedAt > endAt) {
         return false;
     }
+    const activeWeekdays = (promotion.activeDaysOfWeek ?? [])
+        .map((value) => normalizeWeekday(value))
+        .filter((value) => Boolean(value));
+    if (activeWeekdays.length > 0 && !activeWeekdays.includes(getWeekdayName(evaluatedAt))) {
+        return false;
+    }
+    if (!isWithinMinuteWindow(evaluatedAt, promotion.activeFromMinutes, promotion.activeToMinutes)) {
+        return false;
+    }
+    return true;
+}
+function promotionMatchesContext(promotion, input) {
+    const eligibleStores = normalizeCodeSet(promotion.eligibleStoreCodes);
+    const eligibleCustomerTypes = normalizeCodeSet(promotion.eligibleCustomerTypes);
+    const eligibleLoyaltyTiers = normalizeCodeSet(promotion.eligibleLoyaltyTiers);
+    if (eligibleStores && !eligibleStores.has(normalizeCode(input.storeCode) ?? "")) {
+        return false;
+    }
+    if (eligibleCustomerTypes &&
+        !eligibleCustomerTypes.has(normalizeCode(input.customerType) ?? "")) {
+        return false;
+    }
+    if (eligibleLoyaltyTiers && !eligibleLoyaltyTiers.has(normalizeCode(input.loyaltyTier) ?? "")) {
+        return false;
+    }
+    if (promotion.couponRequired || normalizeCode(promotion.couponCode)) {
+        const providedCoupons = normalizeCodeSet(input.couponCodes);
+        const requiredCoupon = normalizeCode(promotion.couponCode);
+        if (!providedCoupons) {
+            return false;
+        }
+        if (requiredCoupon && !providedCoupons.has(requiredCoupon)) {
+            return false;
+        }
+    }
     return true;
 }
 function promotionMatchesLine(promotion, line) {
+    const minimumLineQuantity = Number(promotion.minimumLineQuantity ?? 0);
+    if (Number.isFinite(minimumLineQuantity) && minimumLineQuantity > 0 && line.quantity < minimumLineQuantity) {
+        return false;
+    }
     switch (promotion.targetScope) {
         case "DEPARTMENT":
             return normalizeCode(line.departmentCode) === normalizeCode(promotion.targetDepartmentCode);
@@ -91,10 +196,63 @@ function promotionMatchesLine(promotion, line) {
             return true;
     }
 }
+function calculateRewardQuantity(promotion, line) {
+    const buyQuantity = Number(promotion.buyQuantity ?? 0);
+    const rewardQuantity = Number(promotion.rewardQuantity ?? 0);
+    if (!Number.isFinite(buyQuantity) ||
+        !Number.isFinite(rewardQuantity) ||
+        buyQuantity <= 0 ||
+        rewardQuantity <= 0 ||
+        line.quantity <= buyQuantity) {
+        return 0;
+    }
+    const groupQuantity = buyQuantity + rewardQuantity;
+    const earnedRewardQuantity = Math.floor(line.quantity / groupQuantity) * rewardQuantity;
+    return Number(Math.min(line.quantity, earnedRewardQuantity).toFixed(3));
+}
+function calculateBonusBuyDiscount(promotion, line) {
+    const rewardQuantity = calculateRewardQuantity(promotion, line);
+    const discountValue = roundMoney(Math.max(0, promotion.discountValue));
+    if (rewardQuantity <= 0 || discountValue <= 0) {
+        return 0;
+    }
+    const rewardBaseAmounts = calculateBaseLineAmounts({
+        unitPrice: line.unitPrice,
+        quantity: rewardQuantity,
+        taxable: line.taxable,
+        taxRatePercent: line.taxRatePercent,
+        taxInclusive: line.taxInclusive
+    });
+    switch (promotion.discountType) {
+        case "PERCENT":
+            return roundMoney(rewardBaseAmounts.lineTotal * Math.min(100, Math.max(0, discountValue)) / 100);
+        case "AMOUNT":
+            return roundMoney(Math.min(discountValue * rewardQuantity, rewardBaseAmounts.lineTotal));
+        case "FIXED_PRICE": {
+            const fixedUnitPrice = Math.min(line.unitPrice, discountValue);
+            const targetAmounts = calculateBaseLineAmounts({
+                unitPrice: fixedUnitPrice,
+                quantity: rewardQuantity,
+                taxable: line.taxable,
+                taxRatePercent: line.taxRatePercent,
+                taxInclusive: line.taxInclusive
+            });
+            return roundMoney(Math.max(0, rewardBaseAmounts.lineTotal - targetAmounts.lineTotal));
+        }
+        default:
+            return 0;
+    }
+}
+function isBonusBuyPromotion(promotion) {
+    return Number(promotion.buyQuantity ?? 0) > 0 && Number(promotion.rewardQuantity ?? 0) > 0;
+}
 function calculateLinePromotionDiscount(promotion, line) {
     const discountValue = roundMoney(Math.max(0, promotion.discountValue));
     if (discountValue <= 0 || line.baseAmounts.lineTotal <= 0) {
         return 0;
+    }
+    if (isBonusBuyPromotion(promotion)) {
+        return calculateBonusBuyDiscount(promotion, line);
     }
     switch (promotion.discountType) {
         case "PERCENT":
@@ -172,6 +330,12 @@ export function applyAutomaticPromotions(input) {
     }));
     const applicablePromotions = input.promotions
         .filter((promotion) => isPromotionActive(promotion, safeEvaluatedAt))
+        .filter((promotion) => promotionMatchesContext(promotion, {
+        storeCode: input.storeCode,
+        customerType: input.customerType,
+        loyaltyTier: input.loyaltyTier,
+        couponCodes: input.couponCodes
+    }))
         .sort((left, right) => {
         if (left.priority !== right.priority) {
             return left.priority - right.priority;
@@ -190,7 +354,9 @@ export function applyAutomaticPromotions(input) {
             eligibleBasketAmount < promotion.minimumBasketAmount) {
             continue;
         }
-        if (promotion.discountType !== "FIXED_PRICE" && promotion.applyOncePerBasket) {
+        if (promotion.discountType !== "FIXED_PRICE" &&
+            promotion.applyOncePerBasket &&
+            !isBonusBuyPromotion(promotion)) {
             const basketDiscountAmount = calculateBasketPromotionDiscount(promotion, eligibleLines);
             if (basketDiscountAmount <= 0) {
                 continue;

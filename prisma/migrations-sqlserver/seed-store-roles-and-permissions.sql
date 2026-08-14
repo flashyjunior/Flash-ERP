@@ -88,6 +88,7 @@ VALUES
   (N'fuel.meter-reading.capture', N'Capture meter readings', N'Record fuel meter/nozzle readings with evidence from the online-store fuel workspace.'),
   (N'fuel.supplier-receipt.capture', N'Capture fuel receipts', N'Record supplier fuel receipts into station tanks from the online-store fuel workspace.'),
   (N'fuel.reconciliation.manage', N'Manage fuel reconciliation', N'Review station fuel reconciliation from the online-store fuel workspace.'),
+  (N'ecommerce.console.access', N'Access ecommerce staff console', N'Open and manage the public ecommerce order and storefront console.'),
   (N'pos.shift.open', N'Open shift', N'Open a POS shift and start a branch till session.'),
   (N'pos.shift.close', N'Close shift', N'Close and reconcile a POS shift.'),
   (N'pos.sale.process', N'Process sales', N'Capture normal sales and complete baskets at POS.'),
@@ -225,7 +226,8 @@ VALUES
   (N'ONLINE_STORE_SUPERVISOR', N'fuel.dip.capture'),
   (N'ONLINE_STORE_SUPERVISOR', N'fuel.meter-reading.capture'),
   (N'ONLINE_STORE_SUPERVISOR', N'fuel.supplier-receipt.capture'),
-  (N'ONLINE_STORE_SUPERVISOR', N'fuel.reconciliation.manage');
+  (N'ONLINE_STORE_SUPERVISOR', N'fuel.reconciliation.manage'),
+  (N'ONLINE_STORE_SUPERVISOR', N'ecommerce.console.access');
 
 BEGIN TRANSACTION;
 

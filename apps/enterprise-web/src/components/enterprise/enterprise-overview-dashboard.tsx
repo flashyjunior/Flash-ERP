@@ -14,7 +14,7 @@ import {
   WalletCards
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -210,12 +210,19 @@ function EmptyChart({ label }: { label: string }) {
   );
 }
 
+function ChartPlaceholder() {
+  return <div aria-hidden="true" className="h-full min-h-56 animate-pulse rounded-lg bg-stone-100" />;
+}
+
 export function EnterpriseOverviewDashboard({
   operationsDashboard
 }: EnterpriseOverviewDashboardProps) {
   const currencyCode = operationsDashboard.currencyCode;
   const [salesTrendPeriod, setSalesTrendPeriod] = useState<TrendPeriod>("daily");
   const [totalSalesPeriod, setTotalSalesPeriod] = useState<TrendPeriod>("monthly");
+  const [chartsReady, setChartsReady] = useState(false);
+
+  useEffect(() => setChartsReady(true), []);
   const salesTrendRows =
     operationsDashboard.salesTrendByPeriod[salesTrendPeriod] ?? operationsDashboard.salesTrendRows;
   const totalSalesRows = operationsDashboard.totalSalesTrendByPeriod[totalSalesPeriod] ?? [];
@@ -390,7 +397,9 @@ export function EnterpriseOverviewDashboard({
             </div>
           </div>
           <div className="mt-4 h-72">
-            {salesTrendRows.length > 0 && operationsDashboard.salesTrendSeries.length > 0 ? (
+            {!chartsReady ? (
+              <ChartPlaceholder />
+            ) : salesTrendRows.length > 0 && operationsDashboard.salesTrendSeries.length > 0 ? (
               <ResponsiveContainer height="100%" width="100%">
                 <LineChart data={salesTrendRows} margin={{ left: 4, right: 18, top: 12 }}>
                   <CartesianGrid stroke="#e7e5e4" strokeDasharray="3 3" vertical={false} />
@@ -434,7 +443,9 @@ export function EnterpriseOverviewDashboard({
             <WalletCards className="h-5 w-5 text-stone-400" />
           </div>
           <div className="mt-4 h-64">
-            {tenderRows.length > 0 ? (
+            {!chartsReady ? (
+              <ChartPlaceholder />
+            ) : tenderRows.length > 0 ? (
               <ResponsiveContainer height="100%" width="100%">
                 <PieChart>
                   <Pie
@@ -495,7 +506,9 @@ export function EnterpriseOverviewDashboard({
             </select>
           </div>
           <div className="mt-4 h-72">
-            {hasTotalSales ? (
+            {!chartsReady ? (
+              <ChartPlaceholder />
+            ) : hasTotalSales ? (
               <ResponsiveContainer height="100%" width="100%">
                 <BarChart data={totalSalesRows} margin={{ left: 4, right: 18, top: 10 }}>
                   <CartesianGrid stroke="#e7e5e4" strokeDasharray="3 3" vertical={false} />
@@ -589,7 +602,9 @@ export function EnterpriseOverviewDashboard({
             </div>
           </div>
           <div className="mt-4 h-72">
-            {topStoreRows.length > 0 ? (
+            {!chartsReady ? (
+              <ChartPlaceholder />
+            ) : topStoreRows.length > 0 ? (
               <ResponsiveContainer height="100%" width="100%">
                 <BarChart data={topStoreRows} margin={{ left: 4, right: 18, top: 10 }}>
                   <CartesianGrid stroke="#e7e5e4" strokeDasharray="3 3" vertical={false} />

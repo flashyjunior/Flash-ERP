@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 
-import { prisma } from "@/lib/db/prisma";
+import { isEnterpriseSqlServerDatabase, prisma } from "@/lib/db/prisma";
 import { readJsonObject } from "./json-field";
 
 type Tx = Prisma.TransactionClient | PrismaClient;
@@ -27,10 +27,6 @@ export type SaleSmsInput = {
 const defaultSaleSmsTemplate =
   "Thank you for shopping at {shopName}. Receipt {transactionNo}. Total {currencyCode} {totalAmount}.";
 
-function isSqlServerDatabase() {
-  return (process.env.DATABASE_URL ?? "").trim().toLowerCase().startsWith("sqlserver://");
-}
-
 function normalizeReference(value: string | null | undefined) {
   return value?.trim() ?? "";
 }
@@ -52,7 +48,7 @@ function normalizePhoneReference(value: string | null | undefined) {
 }
 
 export async function ensureReferenceCaptureTable(tx: Tx) {
-  if (isSqlServerDatabase()) {
+  if (isEnterpriseSqlServerDatabase()) {
     await tx.$executeRawUnsafe(`
       IF OBJECT_ID(N'[dbo].[transaction_reference_capture]', N'U') IS NULL
       BEGIN

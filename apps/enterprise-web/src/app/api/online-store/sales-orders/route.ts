@@ -1,6 +1,25 @@
 import { NextResponse } from "next/server";
 
-import { createOnlineStoreSalesOrder } from "@/server/repositories/online-store.repository";
+import {
+  createOnlineStoreSalesOrder,
+  getOnlineStorePendingSalesOrders
+} from "@/server/repositories/online-store.repository";
+
+export async function GET() {
+  try {
+    return NextResponse.json({ salesOrders: await getOnlineStorePendingSalesOrders() });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not refresh pending online store sales orders."
+      },
+      { status: 400 }
+    );
+  }
+}
 
 export async function POST(request: Request) {
   try {

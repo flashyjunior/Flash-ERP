@@ -2432,6 +2432,7 @@ async function main() {
     "pos.loyalty.redeem"
   ]);
   await ensureRolePermissions(onlineStoreSupervisorRole.id, [
+    "ecommerce.console.access",
     "inventory.view",
     "inventory.adjust",
     "inventory.count.submit",

@@ -516,6 +516,12 @@ option {
   padding-right: 2px;
 }
 
+.rms-online-desktop .rms-main > .rms-ecommerce-workspace {
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 .rms-panel {
   border: 1px solid var(--rms-line);
   border-radius: 8px;

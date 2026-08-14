@@ -2,7 +2,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import { X } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/utils/cn";
@@ -34,6 +34,8 @@ export function ActionDialog({
 }: ActionDialogProps) {
   const [mounted, setMounted] = useState(false);
   const [internalOpen, setInternalOpen] = useState(false);
+  const titleId = useId();
+  const descriptionId = useId();
   const isControlled = open !== undefined;
   const isOpen = isControlled ? open : internalOpen;
 
@@ -94,20 +96,24 @@ export function ActionDialog({
               onMouseDown={() => setOpen(false)}
             >
               <div
+                aria-describedby={description ? descriptionId : undefined}
+                aria-labelledby={titleId}
+                aria-modal="true"
                 className={cn(
                   "mx-auto flex max-h-[calc(100vh-3rem)] w-full flex-col overflow-hidden rounded-[1.75rem] border border-stone-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(245,236,226,0.95))] shadow-[0_28px_80px_rgba(15,23,42,0.24)]",
                   widthClassName ?? "max-w-4xl"
                 )}
                 onMouseDown={(event) => event.stopPropagation()}
+                role="dialog"
               >
                 <div className="flex items-start justify-between gap-4 border-b border-stone-200/80 px-5 py-4 sm:px-6">
                   <div>
                     <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-stone-400">
                       Enterprise action
                     </p>
-                    <h2 className="mt-1 text-xl font-semibold text-stone-950">{title}</h2>
+                    <h2 className="mt-1 text-xl font-semibold text-stone-950" id={titleId}>{title}</h2>
                     {description ? (
-                      <p className="mt-1.5 max-w-2xl text-[13px] leading-5 text-stone-500">
+                      <p className="mt-1.5 max-w-2xl text-[13px] leading-5 text-stone-500" id={descriptionId}>
                         {description}
                       </p>
                     ) : null}

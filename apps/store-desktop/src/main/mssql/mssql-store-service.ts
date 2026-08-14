@@ -6,6 +6,7 @@ import {
   allocateInventoryBatchesFefo,
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
+  normalizeLayawaySettings,
   validateInventoryBatchReceipt,
 } from "@flash-erp/domain";
 import {
@@ -21,6 +22,7 @@ import type {
   EnterpriseGiftCertificatePublishedPayload,
   EnterpriseInventoryLocationPublishedPayload,
   EnterpriseInventorySerialSnapshotPublishedPayload,
+  EnterpriseInterStoreTransferPublishedPayload,
   EnterpriseInterStoreTransferRequestTargetPublishedPayload,
   EnterprisePermissionPublishedPayload,
   EnterprisePriceListPublishedPayload,
@@ -66,6 +68,7 @@ import type {
 import {
   computeNextStoreSyncAt,
   readStoreSyncPolicyFromMetadata,
+  resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
 } from "../../shared/desktop-runtime.js";
 import {
@@ -304,6 +307,8 @@ type ProductRow = {
   category_code: string | null;
   subcategory: string | null;
   unit_of_measure: string;
+  base_unit_of_measure: string;
+  uom_conversions_json: string;
   taxable: string | number;
   tax_profile_code: string | null;
   tax_profile_name: string | null;
@@ -494,6 +499,10 @@ type InterStoreTransferSnapshotRow = {
   is_serialized: string | number;
   track_expiry: string | number;
   requested_quantity: string | number;
+  requested_unit_of_measure: string;
+  requested_unit_quantity: string | number;
+  uom_conversion_factor: string | number;
+  base_unit_of_measure: string;
   issued_quantity: string | number;
   received_quantity: string | number;
   outstanding_issue_quantity: string | number;
@@ -558,6 +567,10 @@ type InterStoreTransferRequestDraftRow = {
   subcategory: string | null;
   is_serialized: string | number;
   quantity: string | number;
+  requested_unit_of_measure: string;
+  requested_unit_quantity: string | number;
+  uom_conversion_factor: string | number;
+  base_unit_of_measure: string;
   external_reference: string | null;
   note: string | null;
   operator_name: string;
@@ -1646,6 +1659,34 @@ function normalizeSetupNumber(
   return Number(numeric.toFixed(decimals));
 }
 
+function parseProductUomConversions(
+  value: string | null | undefined,
+  baseUnitOfMeasure: string,
+): NonNullable<StoreCatalogBrowseItem["uomConversions"]> {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (Array.isArray(parsed)) {
+      const rows = parsed.filter(
+        (item): item is NonNullable<StoreCatalogBrowseItem["uomConversions"]>[number] =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as { uomCode?: unknown }).uomCode === "string" &&
+          Number.isFinite(Number((item as { conversionFactor?: unknown }).conversionFactor)),
+      );
+      if (rows.length) return rows;
+    }
+  } catch {}
+
+  return [{
+    uomCode: baseUnitOfMeasure,
+    uomName: baseUnitOfMeasure,
+    conversionFactor: 1,
+    isBaseUnit: true,
+    allowSale: true,
+    allowPurchase: true,
+  }];
+}
+
 function normalizePolicyInteger(
   value: number | string | null | undefined,
   fallback: number,
@@ -2015,6 +2056,40 @@ export class MssqlStoreService {
   }
 
   private async ensureRuntimeSchema() {
+    await this.query(`
+      IF COL_LENGTH(N'[dbo].[product_snapshot]', N'base_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[product_snapshot] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_base_uom_runtime] DEFAULT N'EA';
+      IF COL_LENGTH(N'[dbo].[product_snapshot]', N'uom_conversions_json') IS NULL
+        ALTER TABLE [dbo].[product_snapshot] ADD [uom_conversions_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_uom_conversions_runtime] DEFAULT N'[]';
+    `);
+    await this.query(`
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'requested_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [requested_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_snapshot_requested_uom_runtime] DEFAULT N'EA';
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'requested_unit_quantity') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [requested_unit_quantity] decimal(18,3) NOT NULL CONSTRAINT [DF_transfer_snapshot_requested_uom_qty_runtime] DEFAULT 0;
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'uom_conversion_factor') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_transfer_snapshot_uom_factor_runtime] DEFAULT 1;
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'base_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_snapshot] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_snapshot_base_uom_runtime] DEFAULT N'EA';
+    `);
+    await this.query(`
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'requested_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [requested_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_draft_requested_uom_runtime] DEFAULT N'EA';
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'requested_unit_quantity') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [requested_unit_quantity] decimal(18,3) NOT NULL CONSTRAINT [DF_transfer_draft_requested_uom_qty_runtime] DEFAULT 0;
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'uom_conversion_factor') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_transfer_draft_uom_factor_runtime] DEFAULT 1;
+      IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'base_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_draft_base_uom_runtime] DEFAULT N'EA';
+    `);
+    await this.query(`
+      UPDATE [dbo].[inter_store_transfer_snapshot]
+      SET [requested_unit_quantity] = [requested_quantity]
+      WHERE [requested_unit_quantity] <= 0;
+      UPDATE [dbo].[inter_store_transfer_request_draft]
+      SET [requested_unit_quantity] = [quantity]
+      WHERE [requested_unit_quantity] <= 0;
+    `);
     await this.query(`
       IF OBJECT_ID(N'[dbo].[pos_transaction_line]', N'U') IS NOT NULL
          AND COL_LENGTH(N'[dbo].[pos_transaction_line]', N'product_variant_code_snapshot') IS NULL
@@ -5120,6 +5195,17 @@ export class MssqlStoreService {
         posExpressChargeRates: readPosDiscountRatesMetadata(
           metadata.pos_express_charge_rates_json,
         ),
+        layawaySettings: normalizeLayawaySettings({
+          enabled: metadata.layaway_enabled === "1",
+          reserveStockOnDeposit: metadata.layaway_reserve_stock_on_deposit !== "0",
+          minimumDepositPercent: metadata.layaway_minimum_deposit_percent,
+          requireFullPaymentBeforeFulfilment:
+            metadata.layaway_require_full_payment_before_fulfilment !== "0",
+          refundPaymentsOnCancellation:
+            metadata.layaway_refund_payments_on_cancellation !== "0",
+          cancellationFeeType: metadata.layaway_cancellation_fee_type,
+          cancellationFeeValue: metadata.layaway_cancellation_fee_value,
+        }),
       },
       loyaltySettings: {} as StoreSyncSnapshot["loyaltySettings"],
       receiptSettings: {} as StoreSyncSnapshot["receiptSettings"],
@@ -5847,6 +5933,8 @@ export class MssqlStoreService {
         product.[category_code],
         product.[subcategory],
         product.[unit_of_measure],
+        product.[base_unit_of_measure],
+        product.[uom_conversions_json],
         product.[taxable],
         product.[tax_profile_code],
         product.[tax_profile_name],
@@ -6320,6 +6408,11 @@ export class MssqlStoreService {
           categoryName: row.category_name,
           subcategory: row.subcategory,
           unitOfMeasure: row.unit_of_measure,
+          baseUnitOfMeasure: row.base_unit_of_measure,
+          uomConversions: parseProductUomConversions(
+            row.uom_conversions_json,
+            row.base_unit_of_measure,
+          ),
           taxable: asBooleanFlag(row.taxable),
           taxProfileCode: row.tax_profile_code,
           trackInventory: asBooleanFlag(row.track_inventory),
@@ -7343,6 +7436,10 @@ export class MssqlStoreService {
         transfer.[is_serialized],
         transfer.[track_expiry],
         transfer.[requested_quantity],
+        transfer.[requested_unit_of_measure],
+        transfer.[requested_unit_quantity],
+        transfer.[uom_conversion_factor],
+        transfer.[base_unit_of_measure],
         transfer.[issued_quantity],
         transfer.[received_quantity],
         transfer.[outstanding_issue_quantity],
@@ -7413,6 +7510,14 @@ export class MssqlStoreService {
       isSerialized: asBooleanFlag(row.is_serialized),
       trackExpiry: asBooleanFlag(row.track_expiry),
       requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
+      requestedUnitOfMeasure: row.requested_unit_of_measure,
+      requestedUnitQuantity: Number(
+        asNumber(row.requested_unit_quantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        asNumber(row.uom_conversion_factor).toFixed(6),
+      ),
+      baseUnitOfMeasure: row.base_unit_of_measure,
       issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
       receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
       outstandingIssueQuantity: Number(
@@ -7518,6 +7623,10 @@ export class MssqlStoreService {
         draft.[subcategory],
         draft.[is_serialized],
         draft.[quantity],
+        draft.[requested_unit_of_measure],
+        draft.[requested_unit_quantity],
+        draft.[uom_conversion_factor],
+        draft.[base_unit_of_measure],
         draft.[external_reference],
         draft.[note],
         draft.[operator_name],
@@ -7560,6 +7669,10 @@ export class MssqlStoreService {
         draft.[subcategory],
         draft.[is_serialized],
         draft.[quantity],
+        draft.[requested_unit_of_measure],
+        draft.[requested_unit_quantity],
+        draft.[uom_conversion_factor],
+        draft.[base_unit_of_measure],
         draft.[external_reference],
         draft.[note],
         draft.[operator_name],
@@ -7596,6 +7709,14 @@ export class MssqlStoreService {
       subcategory: row.subcategory,
       isSerialized: asBooleanFlag(row.is_serialized),
       quantity: Number(asNumber(row.quantity).toFixed(3)),
+      requestedUnitOfMeasure: row.requested_unit_of_measure,
+      requestedUnitQuantity: Number(
+        asNumber(row.requested_unit_quantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        asNumber(row.uom_conversion_factor).toFixed(6),
+      ),
+      baseUnitOfMeasure: row.base_unit_of_measure,
       externalReference: row.external_reference,
       note: row.note,
       operatorName: row.operator_name,
@@ -7687,6 +7808,26 @@ export class MssqlStoreService {
       );
     }
 
+    const transferUom = resolveInventoryTransferUom({
+      enteredQuantity: quantity,
+      requestedUnitOfMeasure: input.unitOfMeasure,
+      unitOfMeasure: product.unit_of_measure,
+      baseUnitOfMeasure: product.base_unit_of_measure,
+      uomConversions: parseProductUomConversions(
+        product.uom_conversions_json,
+        product.base_unit_of_measure,
+      ),
+    });
+
+    if (
+      asBooleanFlag(product.is_serialized) &&
+      !Number.isInteger(transferUom.baseQuantity)
+    ) {
+      throw new Error(
+        `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
+      );
+    }
+
     const timestamp = isoNow();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
     const requestId = randomUUID();
@@ -7721,6 +7862,10 @@ export class MssqlStoreService {
         [subcategory],
         [is_serialized],
         [quantity],
+        [requested_unit_of_measure],
+        [requested_unit_quantity],
+        [uom_conversion_factor],
+        [base_unit_of_measure],
         [external_reference],
         [note],
         [operator_name],
@@ -7745,6 +7890,10 @@ export class MssqlStoreService {
         @subcategory,
         @isSerialized,
         @quantity,
+        @requestedUnitOfMeasure,
+        @requestedUnitQuantity,
+        @uomConversionFactor,
+        @baseUnitOfMeasure,
         @externalReference,
         @note,
         @operatorName,
@@ -7768,7 +7917,11 @@ export class MssqlStoreService {
         categoryCode: product.category_code,
         subcategory: product.subcategory,
         isSerialized: asBooleanFlag(product.is_serialized) ? 1 : 0,
-        quantity,
+        quantity: transferUom.baseQuantity,
+        requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+        requestedUnitQuantity: transferUom.requestedUnitQuantity,
+        uomConversionFactor: transferUom.uomConversionFactor,
+        baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
         externalReference,
         note,
         operatorName,
@@ -7839,7 +7992,8 @@ export class MssqlStoreService {
       sourceLocationCode: draft.source_location_code,
       destinationLocationCode: draft.destination_location_code,
       productCode: draft.product_code,
-      quantity: Number(asNumber(draft.quantity).toFixed(3)),
+      quantity: Number(asNumber(draft.requested_unit_quantity).toFixed(3)),
+      unitOfMeasure: draft.requested_unit_of_measure,
       externalReference: draft.external_reference,
       operatorName,
       note: draft.note,
@@ -8108,6 +8262,22 @@ export class MssqlStoreService {
 
       for (const [key, value] of listSettings) {
         if (value !== null) {
+          await this.setMetadata(key, value, transaction);
+        }
+      }
+      if (input.layawaySettings) {
+        const layawaySettings = normalizeLayawaySettings(input.layawaySettings);
+        const layawayEntries = [
+          ["layaway_enabled", layawaySettings.enabled ? "1" : "0"],
+          ["layaway_reserve_stock_on_deposit", layawaySettings.reserveStockOnDeposit ? "1" : "0"],
+          ["layaway_minimum_deposit_percent", layawaySettings.minimumDepositPercent.toFixed(2)],
+          ["layaway_require_full_payment_before_fulfilment", layawaySettings.requireFullPaymentBeforeFulfilment ? "1" : "0"],
+          ["layaway_refund_payments_on_cancellation", layawaySettings.refundPaymentsOnCancellation ? "1" : "0"],
+          ["layaway_cancellation_fee_type", layawaySettings.cancellationFeeType],
+          ["layaway_cancellation_fee_value", layawaySettings.cancellationFeeValue.toFixed(2)],
+        ] as const;
+
+        for (const [key, value] of layawayEntries) {
           await this.setMetadata(key, value, transaction);
         }
       }
@@ -19184,6 +19354,21 @@ export class MssqlStoreService {
         }
       }
 
+      const layawaySettings = normalizeLayawaySettings(storePayload.layawaySettings);
+      const layawayEntries = [
+        ["layaway_enabled", layawaySettings.enabled ? "1" : "0"],
+        ["layaway_reserve_stock_on_deposit", layawaySettings.reserveStockOnDeposit ? "1" : "0"],
+        ["layaway_minimum_deposit_percent", layawaySettings.minimumDepositPercent.toFixed(2)],
+        ["layaway_require_full_payment_before_fulfilment", layawaySettings.requireFullPaymentBeforeFulfilment ? "1" : "0"],
+        ["layaway_refund_payments_on_cancellation", layawaySettings.refundPaymentsOnCancellation ? "1" : "0"],
+        ["layaway_cancellation_fee_type", layawaySettings.cancellationFeeType],
+        ["layaway_cancellation_fee_value", layawaySettings.cancellationFeeValue.toFixed(2)],
+      ] as const;
+
+      for (const [key, value] of layawayEntries) {
+        await this.setMetadata(key, value, runner);
+      }
+
       return;
     }
 
@@ -19725,6 +19910,8 @@ export class MssqlStoreService {
              @categoryCode AS [category_code],
              @subcategory AS [subcategory],
              @unitOfMeasure AS [unit_of_measure],
+             @baseUnitOfMeasure AS [base_unit_of_measure],
+             @uomConversionsJson AS [uom_conversions_json],
              @taxable AS [taxable],
              @taxProfileCode AS [tax_profile_code],
              @taxProfileName AS [tax_profile_name],
@@ -19756,6 +19943,8 @@ export class MssqlStoreService {
            [category_code] = source.[category_code],
            [subcategory] = source.[subcategory],
            [unit_of_measure] = source.[unit_of_measure],
+           [base_unit_of_measure] = source.[base_unit_of_measure],
+           [uom_conversions_json] = source.[uom_conversions_json],
            [taxable] = source.[taxable],
            [tax_profile_code] = source.[tax_profile_code],
            [tax_profile_name] = source.[tax_profile_name],
@@ -19779,7 +19968,7 @@ export class MssqlStoreService {
          WHEN NOT MATCHED THEN INSERT (
            [id], [product_code], [product_name], [product_type], [short_name], [description],
            [primary_image_url], [department_code], [category_code], [subcategory],
-           [unit_of_measure], [taxable], [tax_profile_code], [tax_profile_name],
+           [unit_of_measure], [base_unit_of_measure], [uom_conversions_json], [taxable], [tax_profile_code], [tax_profile_name],
            [tax_rate_percent], [tax_inclusive], [track_inventory], [track_expiry], [shelf_life_days], [is_serialized],
            [track_size], [track_color], [must_enter_price_at_pos], [min_stock_level], [reorder_point],
            [safety_stock_level], [catalog_membership_active], [catalog_sort_order],
@@ -19788,7 +19977,7 @@ export class MssqlStoreService {
            source.[id], source.[product_code], source.[product_name],
            source.[product_type], source.[short_name], source.[description], source.[primary_image_url],
            source.[department_code], source.[category_code], source.[subcategory],
-           source.[unit_of_measure], source.[taxable], source.[tax_profile_code],
+           source.[unit_of_measure], source.[base_unit_of_measure], source.[uom_conversions_json], source.[taxable], source.[tax_profile_code],
            source.[tax_profile_name], source.[tax_rate_percent],
            source.[tax_inclusive], source.[track_inventory], source.[track_expiry], source.[shelf_life_days], source.[is_serialized],
            source.[track_size], source.[track_color],
@@ -19809,6 +19998,9 @@ export class MssqlStoreService {
           categoryCode: productPayload.category ?? null,
           subcategory: productPayload.subcategory ?? null,
           unitOfMeasure: productPayload.unitOfMeasure ?? "EA",
+          baseUnitOfMeasure:
+            productPayload.baseUnitOfMeasure ?? productPayload.unitOfMeasure ?? "EA",
+          uomConversionsJson: JSON.stringify(productPayload.uomConversions ?? []),
           taxable: productPayload.taxable === false ? 0 : 1,
           taxProfileCode: productPayload.taxProfileCode ?? null,
           taxProfileName: productPayload.taxProfileName ?? null,
@@ -20316,6 +20508,119 @@ export class MssqlStoreService {
           use_for_receiving_default: targetPayload.useForReceivingDefault ? 1 : 0,
           updated_at: appliedAt,
         },
+        runner,
+      );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "interStoreTransfer" &&
+      event.eventType === "inter-store-transfer.published"
+    ) {
+      const transferPayload =
+        payload as Partial<EnterpriseInterStoreTransferPublishedPayload>;
+
+      if (
+        transferPayload.storeCode !== storeCode ||
+        typeof transferPayload.transferId !== "string" ||
+        typeof transferPayload.transferNo !== "string" ||
+        typeof transferPayload.role !== "string" ||
+        typeof transferPayload.origin !== "string" ||
+        typeof transferPayload.status !== "string" ||
+        typeof transferPayload.productCode !== "string" ||
+        typeof transferPayload.productName !== "string" ||
+        typeof transferPayload.requestedQuantity !== "number"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid inter-store transfer publication payload.",
+        );
+      }
+
+      await this.mergeRow(
+        "inter_store_transfer_snapshot",
+        ["id"],
+        {
+          id: transferPayload.transferId,
+          transfer_no: transferPayload.transferNo,
+          transfer_batch_no:
+            transferPayload.transferBatchNo ?? transferPayload.transferNo,
+          line_no: Math.max(1, Math.trunc(transferPayload.lineNo ?? 1)),
+          role: transferPayload.role,
+          origin: transferPayload.origin,
+          status: transferPayload.status,
+          external_reference: transferPayload.externalReference ?? null,
+          source_store_code: transferPayload.sourceStoreCode ?? storeCode,
+          source_store_name: transferPayload.sourceStoreName ?? storeCode,
+          source_location_code: transferPayload.sourceLocationCode ?? "",
+          source_location_name: transferPayload.sourceLocationName ?? "",
+          destination_store_code:
+            transferPayload.destinationStoreCode ?? storeCode,
+          destination_store_name:
+            transferPayload.destinationStoreName ?? storeCode,
+          destination_location_code:
+            transferPayload.destinationLocationCode ?? "",
+          destination_location_name:
+            transferPayload.destinationLocationName ?? "",
+          product_code: transferPayload.productCode,
+          product_name: transferPayload.productName,
+          department_code: transferPayload.departmentCode ?? null,
+          category_code: transferPayload.categoryCode ?? null,
+          subcategory: transferPayload.subcategory ?? null,
+          is_serialized: transferPayload.isSerialized ? 1 : 0,
+          track_expiry: transferPayload.trackExpiry ? 1 : 0,
+          requested_quantity: transferPayload.requestedQuantity,
+          requested_unit_of_measure:
+            transferPayload.requestedUnitOfMeasure ?? "EA",
+          requested_unit_quantity:
+            transferPayload.requestedUnitQuantity ??
+            transferPayload.requestedQuantity,
+          uom_conversion_factor:
+            transferPayload.uomConversionFactor ?? 1,
+          base_unit_of_measure:
+            transferPayload.baseUnitOfMeasure ?? "EA",
+          issued_quantity: transferPayload.issuedQuantity ?? 0,
+          received_quantity: transferPayload.receivedQuantity ?? 0,
+          outstanding_issue_quantity:
+            transferPayload.outstandingIssueQuantity ?? 0,
+          outstanding_receipt_quantity:
+            transferPayload.outstandingReceiptQuantity ?? 0,
+          unit_cost: transferPayload.unitCost ?? null,
+          issued_serial_numbers_json: writeSerializedLineNumbers(
+            transferPayload.issuedSerialNumbers ?? [],
+          ),
+          received_serial_numbers_json: writeSerializedLineNumbers(
+            transferPayload.receivedSerialNumbers ?? [],
+          ),
+          issued_batch_allocations_json: writeInventoryBatchAllocations(
+            transferPayload.issuedBatchAllocations ?? [],
+          ),
+          received_batch_allocations_json: writeInventoryBatchAllocations(
+            transferPayload.receivedBatchAllocations ?? [],
+          ),
+          request_note: transferPayload.requestNote ?? null,
+          issue_note: transferPayload.issueNote ?? null,
+          receipt_note: transferPayload.receiptNote ?? null,
+          request_operator_name:
+            transferPayload.requestOperatorName ?? null,
+          issue_operator_name: transferPayload.issueOperatorName ?? null,
+          receipt_operator_name: transferPayload.receiptOperatorName ?? null,
+          requested_by_node_code:
+            transferPayload.requestedByNodeCode ?? null,
+          source_node_code: transferPayload.sourceNodeCode ?? null,
+          destination_node_code: transferPayload.destinationNodeCode ?? null,
+          requested_at: transferPayload.requestedAt ?? appliedAt,
+          required_at: transferPayload.requiredAt ?? null,
+          issued_at: transferPayload.issuedAt ?? null,
+          received_at: transferPayload.receivedAt ?? null,
+          closed_at: transferPayload.closedAt ?? null,
+          updated_at: appliedAt,
+        },
+        runner,
+      );
+      await this.query(
+        "DELETE FROM [dbo].[inter_store_transfer_request_draft] WHERE [id] = @transferId",
+        { transferId: transferPayload.transferId },
         runner,
       );
 

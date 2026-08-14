@@ -11,8 +11,8 @@ import {
   type LucideIcon
 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useMemo, useState } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
@@ -182,6 +182,8 @@ export function EnterpriseFinanceWorkspace({
   workspace: EnterpriseFinanceWorkspaceData;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const serializedSearchParams = searchParams.toString();
   const [selectedExpense, setSelectedExpense] = useState<ExpenseRow | null>(null);
   const [expenseDialogOpen, setExpenseDialogOpen] = useState(false);
   const [expenseAccountDraft, setExpenseAccountDraft] = useState("");
@@ -222,6 +224,60 @@ export function EnterpriseFinanceWorkspace({
     Boolean(expenseAccountDraft) &&
     Boolean(paymentAccountDraft) &&
     postingExpenseId !== selectedExpense?.expenseId;
+
+  const updateFinanceQuery = useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(serializedSearchParams);
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (value) {
+          params.set(key, value);
+        } else {
+          params.delete(key);
+        }
+      }
+
+      const query = params.toString();
+      router.push(query ? `/finance?${query}` : "/finance", { scroll: false });
+    },
+    [router, serializedSearchParams]
+  );
+  const changeJournalPage = useCallback(
+    (page: number) => updateFinanceQuery({ jp: String(page) }),
+    [updateFinanceQuery]
+  );
+  const changeJournalPageSize = useCallback(
+    (pageSize: number) => updateFinanceQuery({ jp: null, jps: String(pageSize) }),
+    [updateFinanceQuery]
+  );
+  const changeJournalSearch = useCallback(
+    (search: string) => updateFinanceQuery({ jp: null, jq: search || null }),
+    [updateFinanceQuery]
+  );
+  const changeExpensePage = useCallback(
+    (page: number) => updateFinanceQuery({ ep: String(page) }),
+    [updateFinanceQuery]
+  );
+  const changeJournalLinePage = useCallback(
+    (page: number) => updateFinanceQuery({ lp: String(page) }),
+    [updateFinanceQuery]
+  );
+  const changeJournalLinePageSize = useCallback(
+    (pageSize: number) => updateFinanceQuery({ lp: null, lps: String(pageSize) }),
+    [updateFinanceQuery]
+  );
+  const changeJournalLineSearch = useCallback(
+    (search: string) => updateFinanceQuery({ lp: null, lq: search || null }),
+    [updateFinanceQuery]
+  );
+  const changeExpensePageSize = useCallback(
+    (pageSize: number) => updateFinanceQuery({ ep: null, eps: String(pageSize) }),
+    [updateFinanceQuery]
+  );
+  const changeExpenseSearch = useCallback(
+    (search: string) => updateFinanceQuery({ ep: null, eq: search || null }),
+    [updateFinanceQuery]
+  );
 
   function openExpenseReview(row: ExpenseRow) {
     setSelectedExpense(row);
@@ -747,6 +803,13 @@ export function EnterpriseFinanceWorkspace({
             initialPageSize={25}
             pageSizeOptions={[25, 50, 100]}
             searchPlaceholder="Search journal, source, reference, description, or status"
+            serverPagination={{
+              ...workspace.journalPage,
+              searchValue: workspace.journalPage.search,
+              onPageChange: changeJournalPage,
+              onPageSizeChange: changeJournalPageSize,
+              onSearchChange: changeJournalSearch
+            }}
           />
         </WorkspaceTabsContent>
 
@@ -760,6 +823,13 @@ export function EnterpriseFinanceWorkspace({
             initialPageSize={25}
             pageSizeOptions={[25, 50, 100]}
             searchPlaceholder="Search journal, account, shop, or memo"
+            serverPagination={{
+              ...workspace.journalLinePage,
+              searchValue: workspace.journalLinePage.search,
+              onPageChange: changeJournalLinePage,
+              onPageSizeChange: changeJournalLinePageSize,
+              onSearchChange: changeJournalLineSearch
+            }}
           />
         </WorkspaceTabsContent>
 
@@ -783,6 +853,13 @@ export function EnterpriseFinanceWorkspace({
             initialPageSize={25}
             pageSizeOptions={[25, 50, 100]}
             searchPlaceholder="Search expense, category, shop, supplier, reference, or status"
+            serverPagination={{
+              ...workspace.expensePage,
+              searchValue: workspace.expensePage.search,
+              onPageChange: changeExpensePage,
+              onPageSizeChange: changeExpensePageSize,
+              onSearchChange: changeExpenseSearch
+            }}
           />
         </WorkspaceTabsContent>
 

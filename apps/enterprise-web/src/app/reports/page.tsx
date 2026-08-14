@@ -1,9 +1,12 @@
 import { EnterpriseReportingDashboard } from "@/components/enterprise/enterprise-reporting-dashboard";
+import { EnterpriseClientWorkspaceBoundary } from "@/components/layouts/enterprise-client-workspace-boundary";
 import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableEnterpriseReportingDashboard,
   getEnterpriseReportingDashboard
 } from "@/server/repositories/enterprise-reporting.repository";
+import { getEnterpriseHqCachedRead } from "@/server/performance/enterprise-read-cache";
+import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +39,38 @@ export default async function ReportsPage({ searchParams }: ReportsPageProps) {
     dateFrom: filters.from ?? "",
     dateTo: filters.to ?? ""
   };
-  const dashboard = await getEnterpriseReportingDashboard(reportFilters).catch((error: unknown) =>
+  const requestedReportId = filters.report?.trim() ?? "";
+
+  if (!requestedReportId) {
+    return (
+      <EnterpriseClientWorkspaceBoundary
+        activeSection="reports"
+        description="Choose a report group and open an export-ready grid."
+        eyebrow="HQ reporting"
+        heading="Reports"
+      >
+      <EnterpriseReportingDashboard
+        canViewHrReports={canViewHrReports}
+        catalogOnly
+        dashboard={buildUnavailableEnterpriseReportingDashboard(
+          "Choose a report to load its current data.",
+          reportFilters
+        )}
+      />
+      </EnterpriseClientWorkspaceBoundary>
+    );
+  }
+
+  const dashboard = await getEnterpriseHqCachedRead(
+    `reports:${session.retailOrgId}:${JSON.stringify(reportFilters)}`,
+    () => runEnterpriseOperation("AUTHENTICATED_READ", () =>
+      getEnterpriseReportingDashboard(reportFilters)
+    ),
+    {
+      ttlMs: 60_000,
+      staleWhileRevalidateMs: 300_000
+    }
+  ).catch((error: unknown) =>
     buildUnavailableEnterpriseReportingDashboard(
       error instanceof Error
         ? `Unable to load live Flash ERP reporting: ${error.message}`
@@ -46,10 +80,17 @@ export default async function ReportsPage({ searchParams }: ReportsPageProps) {
   );
 
   return (
+    <EnterpriseClientWorkspaceBoundary
+      activeSection="reports"
+      description="Review the report grid, search within the results, then export."
+      eyebrow="HQ reporting"
+      heading="Reports"
+    >
     <EnterpriseReportingDashboard
       canViewHrReports={canViewHrReports}
       dashboard={dashboard}
-      initialReportId={filters.report ?? null}
+      initialReportId={requestedReportId}
     />
+    </EnterpriseClientWorkspaceBoundary>
   );
 }

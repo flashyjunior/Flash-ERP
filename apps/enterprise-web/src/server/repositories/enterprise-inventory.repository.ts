@@ -3,6 +3,12 @@ import { parseJsonField, readJsonStringArray } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
 import { ensureInterStoreTransferSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
+import {
+  buildEnterprisePageInfo,
+  normalizeEnterprisePageInput,
+  type EnterprisePageInfo,
+  type EnterprisePageInput
+} from "@/server/performance/enterprise-pagination";
 import { RecordStatus, SyncNodeType } from "@flash-erp/domain";
 
 
@@ -247,6 +253,7 @@ type InventoryProductRollup = {
 
 export type EnterpriseInventoryWorkspaceData = {
   currencyCode: string;
+  productPage: EnterprisePageInfo;
   metrics: {
     warehouses: number;
     locations: number;
@@ -294,6 +301,12 @@ export type EnterpriseInventoryWorkspaceData = {
     sku: string | null;
     productName: string;
     isSerialized: boolean;
+    baseUnitOfMeasure: string;
+    uomConversions: Array<{
+      uomCode: string;
+      uomName: string;
+      conversionFactor: number;
+    }>;
   }>;
   stockPositionRows: Array<{
     locationCode: string;
@@ -445,6 +458,10 @@ export type EnterpriseInventoryWorkspaceData = {
     productCode: string;
     productName: string;
     requestedQuantity: number;
+    requestedUnitOfMeasure: string;
+    requestedUnitQuantity: number;
+    uomConversionFactor: number;
+    baseUnitOfMeasure: string;
     issuedQuantity: number;
     receivedQuantity: number;
     inTransitQuantity: number;
@@ -527,10 +544,14 @@ export type EnterpriseInventoryWorkspaceData = {
 };
 
 export function buildUnavailableEnterpriseInventoryWorkspace(
-  reason: string
+  reason: string,
+  input?: EnterprisePageInput
 ): EnterpriseInventoryWorkspaceData {
+  const productPage = normalizeEnterprisePageInput(input);
+
   return {
     currencyCode: "USD",
+    productPage: buildEnterprisePageInfo(productPage, 0),
     metrics: {
       warehouses: 0,
       locations: 0,
@@ -573,16 +594,22 @@ export function buildUnavailableEnterpriseInventoryWorkspace(
   };
 }
 
-export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInventoryWorkspaceData> {
+export async function getEnterpriseInventoryWorkspace(
+  input?: EnterprisePageInput
+): Promise<EnterpriseInventoryWorkspaceData> {
   await ensureInterStoreTransferSchemaCompatibility();
 
   const enterpriseNode = await getEnterpriseContext();
 
   if (!enterpriseNode) {
     return buildUnavailableEnterpriseInventoryWorkspace(
-      "No primary enterprise node is available yet, so Flash ERP cannot read canonical inventory posture."
+      "No primary enterprise node is available yet, so Flash ERP cannot read canonical inventory posture.",
+      input
     );
   }
+
+  const productPage = normalizeEnterprisePageInput(input);
+  const productPagingEnabled = Boolean(input);
 
   const [
     warehousesCount,
@@ -646,7 +673,21 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         status: true,
         trackInventory: true,
         isSerialized: true,
-        baseUnitPrice: true
+        baseUnitPrice: true,
+        unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
+          select: {
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              orderBy: [{ sortOrder: "asc" }],
+              select: {
+                conversionFactor: true,
+                unitOfMeasure: { select: { code: true, name: true } }
+              }
+            }
+          }
+        }
       }
     }),
     prisma.inventoryLedgerEntry.groupBy({
@@ -929,6 +970,10 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
         status: true,
         externalReference: true,
         requestedQuantity: true,
+        requestedUnitOfMeasure: true,
+        requestedUnitQuantity: true,
+        uomConversionFactor: true,
+        baseUnitOfMeasure: true,
         issuedQuantity: true,
         receivedQuantity: true,
         sourceNodeCode: true,
@@ -1131,7 +1176,7 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
     };
   });
 
-  const productRows = products
+  const allProductRows = products
     .map((product) => {
       const rollup = productRollups.get(product.id);
       const onHandQuantity = Number((rollup?.onHandQuantity ?? 0).toFixed(3));
@@ -1155,6 +1200,17 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
 
       return left.productName.localeCompare(right.productName);
     });
+  const matchingProductRows = productPage.search
+    ? allProductRows.filter((product) =>
+        [product.productCode, product.sku ?? "", product.productName, product.status]
+          .join(" ")
+          .toLowerCase()
+          .includes(productPage.search.toLowerCase())
+      )
+    : allProductRows;
+  const productRows = productPagingEnabled
+    ? matchingProductRows.slice(productPage.skip, productPage.skip + productPage.pageSize)
+    : matchingProductRows;
   const transferLocationOptions = locations
     .filter((location) => location.store?.code && location.store?.name)
     .map((location) => ({
@@ -1175,7 +1231,23 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
       productCode: product.code,
       sku: product.sku,
       productName: product.name,
-      isSerialized: product.isSerialized
+      isSerialized: product.isSerialized,
+      baseUnitOfMeasure:
+        product.baseUnitOfMeasure?.code ??
+        product.uomSchedule?.baseUnitOfMeasure.code ??
+        product.unitOfMeasure,
+      uomConversions:
+        product.uomSchedule?.lines.map((line) => ({
+          uomCode: line.unitOfMeasure.code,
+          uomName: line.unitOfMeasure.name,
+          conversionFactor: Number(line.conversionFactor)
+        })) ?? [
+          {
+            uomCode: product.unitOfMeasure,
+            uomName: product.unitOfMeasure,
+            conversionFactor: 1
+          }
+        ]
     }))
     .sort((left, right) => left.productName.localeCompare(right.productName));
   const balanceByLocationProduct = new Map(
@@ -1232,10 +1304,10 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
   const defaultSalesCount = locations.filter((location) => location.useForSalesDefault).length;
   const defaultReceivingCount = locations.filter((location) => location.useForReceivingDefault).length;
   const locationsWithoutMovement = locationRows.filter((location) => location.lastMovementAt === null).length;
-  const inactiveProductsWithStock = productRows.filter(
+  const inactiveProductsWithStock = allProductRows.filter(
     (product) => product.status !== RecordStatus.ACTIVE && product.onHandQuantity !== 0
   ).length;
-  const productsWithStock = productRows.filter((product) => product.onHandQuantity > 0).length;
+  const productsWithStock = allProductRows.filter((product) => product.onHandQuantity > 0).length;
   const serializedProductsWithStock = new Set(
     balanceGroups
       .filter((group) => Number(group._sum.quantity ?? 0) > 0)
@@ -1504,6 +1576,10 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
       productCode: transfer.product.code,
       productName: transfer.product.name,
       requestedQuantity,
+      requestedUnitOfMeasure: transfer.requestedUnitOfMeasure,
+      requestedUnitQuantity: Number(Number(transfer.requestedUnitQuantity).toFixed(3)),
+      uomConversionFactor: Number(Number(transfer.uomConversionFactor).toFixed(6)),
+      baseUnitOfMeasure: transfer.baseUnitOfMeasure,
       issuedQuantity,
       receivedQuantity,
       inTransitQuantity: Number(Math.max(0, issuedQuantity - receivedQuantity).toFixed(3)),
@@ -1687,6 +1763,7 @@ export async function getEnterpriseInventoryWorkspace(): Promise<EnterpriseInven
 
   return {
     currencyCode: enterpriseNode.retailOrg.baseCurrencyCode,
+    productPage: buildEnterprisePageInfo(productPage, matchingProductRows.length),
     metrics: {
       warehouses: warehousesCount,
       locations: locations.length,

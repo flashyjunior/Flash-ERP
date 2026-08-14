@@ -4,12 +4,16 @@ import {
   buildUnavailableEnterpriseSyncDashboard,
   getEnterpriseSyncDashboard
 } from "@/server/repositories/enterprise-dashboard.repository";
+import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 
 export const dynamic = "force-dynamic";
 
 export default async function SyncPage() {
   await requireEnterprisePermission(["sync.monitor"]);
-  const dashboard = await getEnterpriseSyncDashboard().catch((error: unknown) =>
+  const dashboard = await runEnterpriseOperation(
+    "AUTHENTICATED_READ",
+    getEnterpriseSyncDashboard
+  ).catch((error: unknown) =>
     buildUnavailableEnterpriseSyncDashboard(
       error instanceof Error
         ? `Unable to load live Flash ERP sync telemetry: ${error.message}`

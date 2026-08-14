@@ -9,6 +9,7 @@ const requiredMigrationNames = [
   "20260522000000_init_sqlserver",
   "20260522021500_add_relation_indexes",
   "20260522043000_widen_receipt_template_html",
+  "20260812010000_public_ecommerce_extension",
 ];
 
 const requiredTables = [
@@ -24,6 +25,17 @@ const requiredTables = [
   "InventoryCatalogStore",
   "LicenseEvent",
   "GiftCertificate",
+  "EcommerceCustomerAccount",
+  "EcommerceCustomerIdentity",
+  "EcommerceCustomerSession",
+  "EcommerceOtpChallenge",
+  "EcommerceCustomerAddress",
+  "EcommerceOrder",
+  "EcommercePayment",
+  "EcommerceRefundRequest",
+  "EcommerceOrderStatusEvent",
+  "EcommerceStorePaymentMethod",
+  "EcommerceProductReview",
 ];
 
 const requiredColumns = [
@@ -68,6 +80,24 @@ const requiredColumns = [
   { tableName: "GiftCertificate", columnName: "certificateNo" },
   { tableName: "GiftCertificate", columnName: "balanceAmount" },
   { tableName: "GiftCertificate", columnName: "status" },
+  { tableName: "Store", columnName: "ecommerceEnabled" },
+  { tableName: "Store", columnName: "ecommerceSlug" },
+  { tableName: "Store", columnName: "ecommerceAllowPickup" },
+  { tableName: "Store", columnName: "ecommerceAllowDelivery" },
+  { tableName: "Store", columnName: "ecommerceHeroImageUrl" },
+  { tableName: "Store", columnName: "ecommerceWhatsappPhone" },
+  { tableName: "Store", columnName: "ecommercePayOnDeliveryEnabled" },
+  { tableName: "Product", columnName: "ecommercePublished" },
+  { tableName: "Product", columnName: "ecommerceFeatured" },
+  { tableName: "Product", columnName: "ecommerceSortOrder" },
+  { tableName: "Product", columnName: "ecommerceDescription" },
+  { tableName: "Product", columnName: "ecommerceCompareAtPrice" },
+  { tableName: "Product", columnName: "ecommerceSpecificationsJson" },
+  { tableName: "Product", columnName: "ecommerceGalleryJson" },
+  { tableName: "EcommerceOrder", columnName: "paymentTiming" },
+  { tableName: "EcommerceOrder", columnName: "selectedPaymentMethodCode" },
+  { tableName: "EcommerceCustomerAccount", columnName: "failedLoginAttempts" },
+  { tableName: "EcommerceCustomerAccount", columnName: "lockedUntil" },
 ];
 
 export type EnterpriseDatabaseReadinessIssue = {

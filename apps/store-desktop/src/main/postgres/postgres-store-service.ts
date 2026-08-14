@@ -5,6 +5,7 @@ import {
   allocateInventoryBatchesFefo,
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
+  normalizeLayawaySettings,
   validateInventoryBatchReceipt,
 } from "@flash-erp/domain";
 import {
@@ -18,6 +19,7 @@ import pg from "pg";
 import {
   computeNextStoreSyncAt,
   readStoreSyncPolicyFromMetadata,
+  resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
 } from "../../shared/desktop-runtime.js";
 import {
@@ -290,6 +292,8 @@ type ProductRow = {
   category_code: string | null;
   subcategory: string | null;
   unit_of_measure: string;
+  base_unit_of_measure: string;
+  uom_conversions_json: string;
   taxable: string | number;
   tax_profile_code: string | null;
   tax_profile_name: string | null;
@@ -840,6 +844,10 @@ type InterStoreTransferSnapshotRow = {
   is_serialized: string | number;
   track_expiry: string | number;
   requested_quantity: string | number;
+  requested_unit_of_measure: string;
+  requested_unit_quantity: string | number;
+  uom_conversion_factor: string | number;
+  base_unit_of_measure: string;
   issued_quantity: string | number;
   received_quantity: string | number;
   outstanding_issue_quantity: string | number;
@@ -904,6 +912,10 @@ type InterStoreTransferRequestDraftRow = {
   subcategory: string | null;
   is_serialized: string | number;
   quantity: string | number;
+  requested_unit_of_measure: string;
+  requested_unit_quantity: string | number;
+  uom_conversion_factor: string | number;
+  base_unit_of_measure: string;
   external_reference: string | null;
   note: string | null;
   operator_name: string;
@@ -1726,6 +1738,34 @@ function readStringArray(value: string | null | undefined) {
   }
 }
 
+function parseProductUomConversions(
+  value: string | null | undefined,
+  baseUnitOfMeasure: string,
+): NonNullable<StoreCatalogBrowseItem["uomConversions"]> {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (Array.isArray(parsed)) {
+      const rows = parsed.filter(
+        (item): item is NonNullable<StoreCatalogBrowseItem["uomConversions"]>[number] =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as { uomCode?: unknown }).uomCode === "string" &&
+          Number.isFinite(Number((item as { conversionFactor?: unknown }).conversionFactor)),
+      );
+      if (rows.length) return rows;
+    }
+  } catch {}
+
+  return [{
+    uomCode: baseUnitOfMeasure,
+    uomName: baseUnitOfMeasure,
+    conversionFactor: 1,
+    isBaseUnit: true,
+    allowSale: true,
+    allowPurchase: true,
+  }];
+}
+
 function writeStringArray(values: string[]) {
   return JSON.stringify([...new Set(values)].sort());
 }
@@ -2427,6 +2467,47 @@ export class PostgresStoreService {
       "inter_store_transfer_snapshot",
       "required_at",
       "TEXT",
+    );
+    await this.ensureColumn(
+      "product_snapshot",
+      "base_unit_of_measure",
+      "TEXT NOT NULL DEFAULT 'EA'",
+    );
+    await this.ensureColumn(
+      "product_snapshot",
+      "uom_conversions_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    for (const tableName of [
+      "inter_store_transfer_snapshot",
+      "inter_store_transfer_request_draft",
+    ]) {
+      await this.ensureColumn(
+        tableName,
+        "requested_unit_of_measure",
+        "TEXT NOT NULL DEFAULT 'EA'",
+      );
+      await this.ensureColumn(
+        tableName,
+        "requested_unit_quantity",
+        "NUMERIC NOT NULL DEFAULT 0",
+      );
+      await this.ensureColumn(
+        tableName,
+        "uom_conversion_factor",
+        "NUMERIC NOT NULL DEFAULT 1",
+      );
+      await this.ensureColumn(
+        tableName,
+        "base_unit_of_measure",
+        "TEXT NOT NULL DEFAULT 'EA'",
+      );
+    }
+    await this.pool.query(
+      "UPDATE inter_store_transfer_snapshot SET requested_unit_quantity = requested_quantity WHERE requested_unit_quantity <= 0",
+    );
+    await this.pool.query(
+      "UPDATE inter_store_transfer_request_draft SET requested_unit_quantity = quantity WHERE requested_unit_quantity <= 0",
     );
     await this.ensureColumn("pos_transaction", "cashier_code", "TEXT");
     await this.ensureColumn(
@@ -3703,6 +3784,23 @@ export class PostgresStoreService {
 
       for (const [key, value] of listSettings) {
         if (value !== null) {
+          await this.setMetadata(key, value, client);
+        }
+      }
+
+      if (input.layawaySettings) {
+        const layawaySettings = normalizeLayawaySettings(input.layawaySettings);
+        const layawayEntries = [
+          ["layaway_enabled", layawaySettings.enabled ? "1" : "0"],
+          ["layaway_reserve_stock_on_deposit", layawaySettings.reserveStockOnDeposit ? "1" : "0"],
+          ["layaway_minimum_deposit_percent", layawaySettings.minimumDepositPercent.toFixed(2)],
+          ["layaway_require_full_payment_before_fulfilment", layawaySettings.requireFullPaymentBeforeFulfilment ? "1" : "0"],
+          ["layaway_refund_payments_on_cancellation", layawaySettings.refundPaymentsOnCancellation ? "1" : "0"],
+          ["layaway_cancellation_fee_type", layawaySettings.cancellationFeeType],
+          ["layaway_cancellation_fee_value", layawaySettings.cancellationFeeValue.toFixed(2)],
+        ] as const;
+
+        for (const [key, value] of layawayEntries) {
           await this.setMetadata(key, value, client);
         }
       }
@@ -5483,6 +5581,8 @@ export class PostgresStoreService {
         product.category_code,
         product.subcategory,
         product.unit_of_measure,
+        product.base_unit_of_measure,
+        product.uom_conversions_json,
         product.taxable,
         product.tax_profile_code,
         product.tax_profile_name,
@@ -5945,6 +6045,11 @@ export class PostgresStoreService {
           categoryName: row.category_name,
           subcategory: row.subcategory,
           unitOfMeasure: row.unit_of_measure,
+          baseUnitOfMeasure: row.base_unit_of_measure,
+          uomConversions: parseProductUomConversions(
+            row.uom_conversions_json,
+            row.base_unit_of_measure,
+          ),
           taxable: asBooleanFlag(row.taxable),
           taxProfileCode: row.tax_profile_code,
           trackInventory: asBooleanFlag(row.track_inventory),
@@ -7835,6 +7940,10 @@ export class PostgresStoreService {
         transfer.is_serialized,
         transfer.track_expiry,
         transfer.requested_quantity,
+        transfer.requested_unit_of_measure,
+        transfer.requested_unit_quantity,
+        transfer.uom_conversion_factor,
+        transfer.base_unit_of_measure,
         transfer.issued_quantity,
         transfer.received_quantity,
         transfer.outstanding_issue_quantity,
@@ -7906,6 +8015,14 @@ export class PostgresStoreService {
       isSerialized: asBooleanFlag(row.is_serialized),
       trackExpiry: asBooleanFlag(row.track_expiry),
       requestedQuantity: Number(asNumber(row.requested_quantity).toFixed(3)),
+      requestedUnitOfMeasure: row.requested_unit_of_measure,
+      requestedUnitQuantity: Number(
+        asNumber(row.requested_unit_quantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        asNumber(row.uom_conversion_factor).toFixed(6),
+      ),
+      baseUnitOfMeasure: row.base_unit_of_measure,
       issuedQuantity: Number(asNumber(row.issued_quantity).toFixed(3)),
       receivedQuantity: Number(asNumber(row.received_quantity).toFixed(3)),
       outstandingIssueQuantity: Number(
@@ -8013,6 +8130,10 @@ export class PostgresStoreService {
         draft.subcategory,
         draft.is_serialized,
         draft.quantity,
+        draft.requested_unit_of_measure,
+        draft.requested_unit_quantity,
+        draft.uom_conversion_factor,
+        draft.base_unit_of_measure,
         draft.external_reference,
         draft.note,
         draft.operator_name,
@@ -8050,6 +8171,14 @@ export class PostgresStoreService {
       subcategory: row.subcategory,
       isSerialized: asBooleanFlag(row.is_serialized),
       quantity: Number(asNumber(row.quantity).toFixed(3)),
+      requestedUnitOfMeasure: row.requested_unit_of_measure,
+      requestedUnitQuantity: Number(
+        asNumber(row.requested_unit_quantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        asNumber(row.uom_conversion_factor).toFixed(6),
+      ),
+      baseUnitOfMeasure: row.base_unit_of_measure,
       externalReference: row.external_reference,
       note: row.note,
       operatorName: row.operator_name,
@@ -9029,6 +9158,17 @@ export class PostgresStoreService {
       posExpressChargeRates: readPosDiscountRatesMetadata(
         metadata.pos_express_charge_rates_json,
       ),
+      layawaySettings: normalizeLayawaySettings({
+        enabled: metadata.layaway_enabled === "1",
+        reserveStockOnDeposit: metadata.layaway_reserve_stock_on_deposit !== "0",
+        minimumDepositPercent: metadata.layaway_minimum_deposit_percent,
+        requireFullPaymentBeforeFulfilment:
+          metadata.layaway_require_full_payment_before_fulfilment !== "0",
+        refundPaymentsOnCancellation:
+          metadata.layaway_refund_payments_on_cancellation !== "0",
+        cancellationFeeType: metadata.layaway_cancellation_fee_type,
+        cancellationFeeValue: metadata.layaway_cancellation_fee_value,
+      }),
     };
   }
 
@@ -15360,6 +15500,26 @@ export class PostgresStoreService {
       );
     }
 
+    const transferUom = resolveInventoryTransferUom({
+      enteredQuantity: quantity,
+      requestedUnitOfMeasure: input.unitOfMeasure,
+      unitOfMeasure: product.unit_of_measure,
+      baseUnitOfMeasure: product.base_unit_of_measure,
+      uomConversions: parseProductUomConversions(
+        product.uom_conversions_json,
+        product.base_unit_of_measure,
+      ),
+    });
+
+    if (
+      asBooleanFlag(product.is_serialized) &&
+      !Number.isInteger(transferUom.baseQuantity)
+    ) {
+      throw new Error(
+        `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
+      );
+    }
+
     const timestamp = isoNow();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
     const requestId = randomUUID();
@@ -15394,12 +15554,16 @@ export class PostgresStoreService {
         subcategory,
         is_serialized,
         quantity,
+        requested_unit_of_measure,
+        requested_unit_quantity,
+        uom_conversion_factor,
+        base_unit_of_measure,
         external_reference,
         note,
         operator_name,
         submitted_at,
         updated_at
-      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NULL, $21)`,
+      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NULL, $25)`,
       [
         requestId,
         requestNo,
@@ -15417,7 +15581,11 @@ export class PostgresStoreService {
         product.category_code,
         product.subcategory,
         asBooleanFlag(product.is_serialized) ? 1 : 0,
-        quantity,
+        transferUom.baseQuantity,
+        transferUom.requestedUnitOfMeasure,
+        transferUom.requestedUnitQuantity,
+        transferUom.uomConversionFactor,
+        transferUom.baseUnitOfMeasure,
         externalReference,
         note,
         operatorName,
@@ -15475,6 +15643,10 @@ export class PostgresStoreService {
         draft.subcategory,
         draft.is_serialized,
         draft.quantity,
+        draft.requested_unit_of_measure,
+        draft.requested_unit_quantity,
+        draft.uom_conversion_factor,
+        draft.base_unit_of_measure,
         draft.external_reference,
         draft.note,
         draft.operator_name,
@@ -15519,7 +15691,8 @@ export class PostgresStoreService {
       sourceLocationCode: draft.source_location_code,
       destinationLocationCode: draft.destination_location_code,
       productCode: draft.product_code,
-      quantity: Number(asNumber(draft.quantity).toFixed(3)),
+      quantity: Number(asNumber(draft.requested_unit_quantity).toFixed(3)),
+      unitOfMeasure: draft.requested_unit_of_measure,
       externalReference: draft.external_reference,
       operatorName,
       note: draft.note,
@@ -20205,6 +20378,20 @@ export class PostgresStoreService {
         ),
         runner,
       );
+      const layawaySettings = normalizeLayawaySettings(storePayload.layawaySettings);
+      const layawayEntries = [
+        ["layaway_enabled", layawaySettings.enabled ? "1" : "0"],
+        ["layaway_reserve_stock_on_deposit", layawaySettings.reserveStockOnDeposit ? "1" : "0"],
+        ["layaway_minimum_deposit_percent", layawaySettings.minimumDepositPercent.toFixed(2)],
+        ["layaway_require_full_payment_before_fulfilment", layawaySettings.requireFullPaymentBeforeFulfilment ? "1" : "0"],
+        ["layaway_refund_payments_on_cancellation", layawaySettings.refundPaymentsOnCancellation ? "1" : "0"],
+        ["layaway_cancellation_fee_type", layawaySettings.cancellationFeeType],
+        ["layaway_cancellation_fee_value", layawaySettings.cancellationFeeValue.toFixed(2)],
+      ] as const;
+
+      for (const [key, value] of layawayEntries) {
+        await this.setMetadata(key, value, runner);
+      }
       await this.setMetadata(
         "loyalty_program_enabled",
         storePayload.loyaltyProgramEnabled ? "1" : "0",
@@ -21335,6 +21522,10 @@ export class PostgresStoreService {
           subcategory,
           is_serialized,
           requested_quantity,
+          requested_unit_of_measure,
+          requested_unit_quantity,
+          uom_conversion_factor,
+          base_unit_of_measure,
           issued_quantity,
           received_quantity,
           outstanding_issue_quantity,
@@ -21357,7 +21548,7 @@ export class PostgresStoreService {
           received_at,
           closed_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49)
         ON CONFLICT (id) DO UPDATE SET
           transfer_no = excluded.transfer_no,
           transfer_batch_no = excluded.transfer_batch_no,
@@ -21381,6 +21572,10 @@ export class PostgresStoreService {
           subcategory = excluded.subcategory,
           is_serialized = excluded.is_serialized,
           requested_quantity = excluded.requested_quantity,
+          requested_unit_of_measure = excluded.requested_unit_of_measure,
+          requested_unit_quantity = excluded.requested_unit_quantity,
+          uom_conversion_factor = excluded.uom_conversion_factor,
+          base_unit_of_measure = excluded.base_unit_of_measure,
           issued_quantity = excluded.issued_quantity,
           received_quantity = excluded.received_quantity,
           outstanding_issue_quantity = excluded.outstanding_issue_quantity,
@@ -21455,6 +21650,20 @@ export class PostgresStoreService {
           typeof payload.requestedQuantity === "number"
             ? payload.requestedQuantity
             : 0,
+          typeof payload.requestedUnitOfMeasure === "string"
+            ? payload.requestedUnitOfMeasure
+            : "EA",
+          typeof payload.requestedUnitQuantity === "number"
+            ? payload.requestedUnitQuantity
+            : typeof payload.requestedQuantity === "number"
+              ? payload.requestedQuantity
+              : 0,
+          typeof payload.uomConversionFactor === "number"
+            ? payload.uomConversionFactor
+            : 1,
+          typeof payload.baseUnitOfMeasure === "string"
+            ? payload.baseUnitOfMeasure
+            : "EA",
           typeof payload.issuedQuantity === "number"
             ? payload.issuedQuantity
             : 0,
@@ -21970,6 +22179,8 @@ export class PostgresStoreService {
           category_code,
           subcategory,
           unit_of_measure,
+          base_unit_of_measure,
+          uom_conversions_json,
           taxable,
           tax_profile_code,
           tax_profile_name,
@@ -21990,7 +22201,7 @@ export class PostgresStoreService {
           unit_price,
           quantity_on_hand,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
         ON CONFLICT (product_code) DO UPDATE SET
           product_name = excluded.product_name,
           product_type = excluded.product_type,
@@ -22001,6 +22212,8 @@ export class PostgresStoreService {
           category_code = excluded.category_code,
           subcategory = excluded.subcategory,
           unit_of_measure = excluded.unit_of_measure,
+          base_unit_of_measure = excluded.base_unit_of_measure,
+          uom_conversions_json = excluded.uom_conversions_json,
           taxable = excluded.taxable,
           tax_profile_code = excluded.tax_profile_code,
           tax_profile_name = excluded.tax_profile_name,
@@ -22039,6 +22252,10 @@ export class PostgresStoreService {
           typeof payload.unitOfMeasure === "string"
             ? payload.unitOfMeasure
             : "EA",
+          typeof payload.baseUnitOfMeasure === "string"
+            ? payload.baseUnitOfMeasure
+            : payload.unitOfMeasure ?? "EA",
+          JSON.stringify(payload.uomConversions ?? []),
           payload.taxable === false ? 0 : 1,
           typeof payload.taxProfileCode === "string"
             ? payload.taxProfileCode

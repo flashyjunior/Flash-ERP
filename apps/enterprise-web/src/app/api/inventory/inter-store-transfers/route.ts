@@ -64,6 +64,10 @@ export async function POST(request: NextRequest) {
       lines: lines.map((line) => ({
         productCode: line.productCode,
         quantity: Number(line.quantity),
+        unitOfMeasure:
+          typeof line.unitOfMeasure === "string"
+            ? line.unitOfMeasure.trim()
+            : undefined,
         externalReference:
           typeof line.externalReference === "string" ? line.externalReference : undefined,
         note: typeof line.note === "string" ? line.note : undefined

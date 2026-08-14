@@ -6,6 +6,7 @@ import {
   buildUnavailableEnterpriseSecurityWorkspace,
   getEnterpriseSecurityWorkspace
 } from "@/server/repositories/enterprise-security.repository";
+import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 import {
   isEnterpriseSecurityView,
   type EnterpriseSecurityView
@@ -42,7 +43,10 @@ export default async function SecuritySubmenuPage({
     await requireEnterprisePermission([required]);
   }
 
-  const workspace = await getEnterpriseSecurityWorkspace().catch((error: unknown) =>
+  const workspace = await runEnterpriseOperation(
+    "AUTHENTICATED_READ",
+    getEnterpriseSecurityWorkspace
+  ).catch((error: unknown) =>
     buildUnavailableEnterpriseSecurityWorkspace(
       error instanceof Error
         ? `Unable to load live Flash ERP security policy: ${error.message}`

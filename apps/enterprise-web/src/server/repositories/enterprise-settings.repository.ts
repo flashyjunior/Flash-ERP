@@ -10,6 +10,9 @@ import {
   formatStockUpdateMode
 } from "@/server/repositories/inventory-stock-policy.repository";
 import {
+  defaultLayawaySettings,
+  normalizeLayawaySettings,
+  type LayawaySettings,
   RecordStatus,
   SecurityLogKind,
   SecurityLogSeverity,
@@ -104,6 +107,7 @@ type CompanyProfileSettings = {
   posDiscountRates: number[];
   posExpressChargeRates: number[];
   salesOrderFulfilmentStoreId: string;
+  layawaySettings: LayawaySettings;
   phone: string;
   email: string;
   website: string;
@@ -115,6 +119,47 @@ type CompanyProfileSettings = {
   countryCode: string;
   postalCode: string;
 };
+
+function normalizeLayawaySettingsForUpdate(value: unknown): LayawaySettings {
+  const payload =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const minimumDepositPercent = Number(
+    payload.minimumDepositPercent ?? defaultLayawaySettings.minimumDepositPercent
+  );
+  const cancellationFeeType =
+    payload.cancellationFeeType ?? defaultLayawaySettings.cancellationFeeType;
+  const cancellationFeeValue = Number(
+    payload.cancellationFeeValue ?? defaultLayawaySettings.cancellationFeeValue
+  );
+
+  if (
+    !Number.isFinite(minimumDepositPercent) ||
+    minimumDepositPercent < 0 ||
+    minimumDepositPercent > 100
+  ) {
+    throw new Error("Layaway minimum deposit must be between 0% and 100%.");
+  }
+
+  if (cancellationFeeType !== "PERCENTAGE" && cancellationFeeType !== "FIXED_AMOUNT") {
+    throw new Error("Choose percentage or fixed amount for the layaway cancellation fee.");
+  }
+
+  if (
+    !Number.isFinite(cancellationFeeValue) ||
+    cancellationFeeValue < 0 ||
+    (cancellationFeeType === "PERCENTAGE" && cancellationFeeValue > 100)
+  ) {
+    throw new Error(
+      cancellationFeeType === "PERCENTAGE"
+        ? "Layaway cancellation fee must be between 0% and 100%."
+        : "Layaway cancellation fee cannot be negative."
+    );
+  }
+
+  return normalizeLayawaySettings(payload);
+}
 
 export type DocumentNumberFormatKey =
   | "productCode"
@@ -401,6 +446,7 @@ function readCompanyProfileSettings(
     posDiscountRates: normalizePosDiscountRates(payload.posDiscountRates),
     posExpressChargeRates: normalizePosDiscountRates(payload.posExpressChargeRates),
     salesOrderFulfilmentStoreId: readString(payload, "salesOrderFulfilmentStoreId"),
+    layawaySettings: normalizeLayawaySettings(payload.layawaySettings),
     phone: readString(payload, "phone"),
     email: readString(payload, "email"),
     website: readString(payload, "website"),
@@ -969,6 +1015,7 @@ export function buildUnavailableEnterpriseSettingsWorkspace(
       posDiscountRates: [],
       posExpressChargeRates: [],
       salesOrderFulfilmentStoreId: "",
+      layawaySettings: defaultLayawaySettings,
       phone: "",
       email: "",
       website: "",
@@ -1239,6 +1286,9 @@ export async function updateEnterpriseCompanyProfile(
           input.posExpressChargeRates ?? previousJson.posExpressChargeRates
         ),
         salesOrderFulfilmentStoreId,
+        layawaySettings: normalizeLayawaySettingsForUpdate(
+          input.layawaySettings ?? previousJson.layawaySettings
+        ),
         phone: normalizeOptionalText(input.phone ?? previousJson.phone) ?? "",
         email: normalizeOptionalText(input.email ?? previousJson.email) ?? "",
         website: normalizeOptionalText(input.website ?? previousJson.website) ?? "",

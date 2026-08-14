@@ -10,7 +10,9 @@ import {
   FuelOperationsWorkspace,
   type ViewKey as FuelOperationsViewKey
 } from "@/components/enterprise/erp-fuel-operations-workspace";
+import { OnlineStoreEcommerceWorkspace } from "@/components/ecommerce/online-store-ecommerce-workspace";
 import { ConfirmationDialog } from "@/components/dialogs/confirmation-dialog";
+import type { OnlineStoreEcommerceWorkspaceData } from "@/server/ecommerce/ecommerce.repository";
 import {
   defaultAccountPaymentReceiptTemplateHtml,
   defaultThermalReceiptTemplateHtml,
@@ -50,7 +52,7 @@ type TenderMethod = OnlineStoreWorkspaceData["tenderMethods"][number];
 type Receipt = CreateOnlineStoreSaleResponse["receipt"];
 type AccountPaymentReceipt = RecordOnlineStoreAccountPaymentResponse["receipt"];
 type OnlineShift = NonNullable<OnlineStoreWorkspaceData["shift"]>;
-type WorkspaceId = "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
+type WorkspaceId = "dashboard" | "pos" | "ecommerce" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
 type ManagerTab = "shift" | "eod" | "banking" | "summary";
 type ReportId = "sales" | "products" | "orders" | "tenders" | "inventory" | "banking" | "shifts";
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
@@ -228,11 +230,19 @@ const workspaceNav: Array<{
   id: WorkspaceId;
   label: string;
   detail: string;
-  icon: "dashboard" | "pos" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
+  icon: "dashboard" | "pos" | "ecommerce" | "inventory" | "expenses" | "manager" | "reversals" | "reports" | "settings" | "fuel";
+  requiresEcommerceConsoleAccess?: boolean;
   requiresFuelOperationsVisibility?: boolean;
 }> = [
   { id: "dashboard", label: "Dashboard", detail: "Shop pulse, sales, stock", icon: "dashboard" },
   { id: "pos", label: "POS", detail: "Sales, orders, shifts", icon: "pos" },
+  {
+    id: "ecommerce",
+    label: "Ecommerce",
+    detail: "Orders, catalog, storefront",
+    icon: "ecommerce",
+    requiresEcommerceConsoleAccess: true
+  },
   { id: "inventory", label: "Inventory", detail: "Request, receive, count", icon: "inventory" },
   { id: "expenses", label: "Expenses", detail: "Store expense capture", icon: "expenses" },
   {
@@ -694,6 +704,13 @@ function SidebarIcon({ name }: { name: (typeof workspaceNav)[number]["icon"] }) 
         <path d="M14 3v4h4" />
         <path d="M9 13h6" />
         <path d="M9 17h6" />
+      </>
+    ),
+    ecommerce: (
+      <>
+        <path d="M4 8h16l-1 12H5z" />
+        <path d="M8 8a4 4 0 0 1 8 0" />
+        <path d="M9 13h6" />
       </>
     ),
     settings: (
@@ -1668,12 +1685,13 @@ function EmptyState({ title, detail }: { title: string; detail?: string }) {
   );
 }
 
-type OnlinePosSettingsTab = "sizes" | "discounts" | "express-charges" | "options";
+type OnlinePosSettingsTab = "sizes" | "discounts" | "express-charges" | "layaway" | "options";
 
 const onlinePosSettingsTabs: Array<{ id: OnlinePosSettingsTab; label: string }> = [
   { id: "sizes", label: "Product sizes" },
   { id: "discounts", label: "POS discounts" },
   { id: "express-charges", label: "Express charges" },
+  { id: "layaway", label: "Layaway" },
   { id: "options", label: "Options" }
 ];
 
@@ -1739,6 +1757,41 @@ function OnlineStorePosSettingsWorkspace({
   const expressRates = settings.posExpressChargeRates ?? [];
   const discountRates = settings.posDiscountRates ?? [];
   const productSizes = settings.productSizes ?? [];
+  const layawayRows = [
+    {
+      label: "Layaway",
+      value: formatToggleSetting(settings.layawaySettings.enabled),
+      tone: settings.layawaySettings.enabled ? "good" : "neutral"
+    },
+    {
+      label: "Reserve stock on deposit",
+      value: formatToggleSetting(settings.layawaySettings.reserveStockOnDeposit),
+      tone: settings.layawaySettings.reserveStockOnDeposit ? "good" : "warning"
+    },
+    {
+      label: "Minimum deposit",
+      value: `${formatNumber.format(settings.layawaySettings.minimumDepositPercent)}%`,
+      tone: "neutral"
+    },
+    {
+      label: "Full payment before fulfilment",
+      value: formatToggleSetting(settings.layawaySettings.requireFullPaymentBeforeFulfilment),
+      tone: settings.layawaySettings.requireFullPaymentBeforeFulfilment ? "good" : "warning"
+    },
+    {
+      label: "Refund payments on cancellation",
+      value: formatToggleSetting(settings.layawaySettings.refundPaymentsOnCancellation),
+      tone: settings.layawaySettings.refundPaymentsOnCancellation ? "good" : "neutral"
+    },
+    {
+      label: "Cancellation fee",
+      value:
+        settings.layawaySettings.cancellationFeeType === "PERCENTAGE"
+          ? `${formatNumber.format(settings.layawaySettings.cancellationFeeValue)}%`
+          : formatMoney(settings.layawaySettings.cancellationFeeValue, currencyCode),
+      tone: "neutral"
+    }
+  ];
   const optionRows = [
     {
       label: "Allow negative inventory",
@@ -1860,6 +1913,19 @@ function OnlineStorePosSettingsWorkspace({
         {activeTab === "options" ? (
           <div className="rms-list rms-settings-list">
             {optionRows.map((row) => (
+              <ReadonlySettingRow
+                key={row.label}
+                label={row.label}
+                tone={row.tone as "neutral" | "good" | "warning"}
+                value={row.value}
+              />
+            ))}
+          </div>
+        ) : null}
+
+        {activeTab === "layaway" ? (
+          <div className="rms-list rms-settings-list">
+            {layawayRows.map((row) => (
               <ReadonlySettingRow
                 key={row.label}
                 label={row.label}
@@ -2193,7 +2259,13 @@ function OnlineInventoryStartupAlertsDialog({
   );
 }
 
-export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWorkspaceData }) {
+export function OnlineStoreWorkspace({
+  workspace,
+  initialWorkspace = "dashboard"
+}: {
+  workspace: OnlineStoreWorkspaceData;
+  initialWorkspace?: "dashboard" | "ecommerce";
+}) {
   const router = useRouter();
   const currencyCode = workspace.store?.currencyCode ?? "GHS";
   const activeDate = formatDateInput(new Date());
@@ -2211,7 +2283,16 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     defaultSalesLocationId;
   const configuredShiftOpeningFloat = (workspace.optionSettings?.shiftFloatPromptAmount ?? 0).toFixed(2);
   const initialReportCriteria = workspace.reporting.lastCriteria;
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>("dashboard");
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(() =>
+    initialWorkspace === "ecommerce" && workspace.capabilities.canAccessEcommerceConsole
+      ? "ecommerce"
+      : "dashboard"
+  );
+  const [ecommerceWorkspace, setEcommerceWorkspace] =
+    useState<OnlineStoreEcommerceWorkspaceData | null>(null);
+  const [ecommerceLoadError, setEcommerceLoadError] = useState("");
+  const [isLoadingEcommerce, setIsLoadingEcommerce] = useState(false);
+  const [ecommerceLoadAttempt, setEcommerceLoadAttempt] = useState(0);
   const [managerTab, setManagerTab] = useState<ManagerTab>("shift");
   const [activeReport, setActiveReport] = useState<ReportId>("sales");
   const [inventoryTab, setInventoryTab] = useState<InventoryTab>("stock");
@@ -2385,6 +2466,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [transferSourceLocationId, setTransferSourceLocationId] = useState(workspace.transferStores[0]?.defaultLocationId ?? "");
   const [transferDestinationLocationId, setTransferDestinationLocationId] = useState(defaultReceivingLocationId);
   const [transferQuantity, setTransferQuantity] = useState("1");
+  const [transferUnitOfMeasure, setTransferUnitOfMeasure] = useState("");
   const [transferReference, setTransferReference] = useState("");
   const [transferRequiredDate, setTransferRequiredDate] = useState(activeDate);
   const [transferDeliveryNoteNo, setTransferDeliveryNoteNo] = useState("");
@@ -2395,7 +2477,16 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [transferNote, setTransferNote] = useState("");
   const [transferRequestDialogOpen, setTransferRequestDialogOpen] = useState(false);
   const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<TransferEntryTab>("header");
-  const [transferRequestLines, setTransferRequestLines] = useState<Array<{ id: string; productId: string; productCode: string; productName: string; quantity: number }>>([]);
+  const [transferRequestLines, setTransferRequestLines] = useState<Array<{
+    id: string;
+    productId: string;
+    productCode: string;
+    productName: string;
+    quantity: number;
+    unitOfMeasure: string;
+    baseQuantity: number;
+    baseUnitOfMeasure: string;
+  }>>([]);
   const [selectedTransferDocumentKey, setSelectedTransferDocumentKey] = useState<string | null>(null);
   const [transferReceiptQuantities, setTransferReceiptQuantities] = useState<Record<string, string>>({});
   const [transferActionNote, setTransferActionNote] = useState("");
@@ -2442,13 +2533,22 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   const [isLoadingRemoteInventory, setIsLoadingRemoteInventory] = useState(false);
   const [inventoryMessage, setInventoryMessage] = useState("");
   const [isPostingInventory, setIsPostingInventory] = useState(false);
+  useEffect(() => {
+    setSalesOrders(workspace.salesOrders);
+  }, [workspace.salesOrders]);
   const visibleWorkspaceNav = useMemo(
     () =>
       workspaceNav.filter(
         (item) =>
-          !item.requiresFuelOperationsVisibility || workspace.capabilities.hasFuelOperationsVisibility
+          (!item.requiresEcommerceConsoleAccess ||
+            workspace.capabilities.canAccessEcommerceConsole) &&
+          (!item.requiresFuelOperationsVisibility ||
+            workspace.capabilities.hasFuelOperationsVisibility)
       ),
-    [workspace.capabilities.hasFuelOperationsVisibility]
+    [
+      workspace.capabilities.canAccessEcommerceConsole,
+      workspace.capabilities.hasFuelOperationsVisibility
+    ]
   );
   const onlineStoreFuelViews = useMemo<FuelOperationsViewKey[]>(() => {
     const views: FuelOperationsViewKey[] = [];
@@ -2782,6 +2882,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
   });
   const salesOrderRows = salesOrders.filter((order) => {
     const query = salesOrderQuery.trim().toLowerCase();
+
+    if (order.status !== "OPEN") {
+      return false;
+    }
 
     if (!isWithinWindow(order.createdAt, salesOrderWindowDays)) {
       return false;
@@ -3222,6 +3326,59 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
       setSidebarCollapsed(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (
+      activeWorkspace !== "ecommerce" ||
+      !workspace.capabilities.canAccessEcommerceConsole ||
+      ecommerceWorkspace
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsLoadingEcommerce(true);
+    setEcommerceLoadError("");
+
+    void fetch("/api/online-store/ecommerce", { signal: controller.signal })
+      .then(async (response) => {
+        const payload = (await response.json().catch(() => ({}))) as
+          | OnlineStoreEcommerceWorkspaceData
+          | { message?: string };
+
+        if (!response.ok || !("store" in payload)) {
+          throw new Error(
+            "message" in payload && payload.message
+              ? payload.message
+              : "Flash ERP could not load the ecommerce console."
+          );
+        }
+
+        setIsLoadingEcommerce(false);
+        setEcommerceWorkspace(payload);
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setEcommerceLoadError(
+            error instanceof Error
+              ? error.message
+              : "Flash ERP could not load the ecommerce console."
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingEcommerce(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [
+    activeWorkspace,
+    ecommerceLoadAttempt,
+    ecommerceWorkspace,
+    workspace.capabilities.canAccessEcommerceConsole
+  ]);
   const basketPricingLines = useMemo(
     () =>
       basket.map((line) => {
@@ -3470,7 +3627,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         ? [{ ...drafts[0], tenderMethodCode: drafts[0].tenderMethodCode || defaultTenderCode, amount: payableTotal.toFixed(2) }]
         : drafts
     );
-  }, [defaultTenderCode, payableTotal]);
+  }, [defaultTenderCode, fulfillingSalesOrderId, payableTotal]);
 
   useEffect(() => {
     if (accountPaymentTenderCode && nonCreditTenderMethods.some((tender) => tender.tenderMethodCode === accountPaymentTenderCode)) {
@@ -3859,6 +4016,29 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setPaymentDrafts([createPaymentDraft(defaultTenderCode, "0.00")]);
   }
 
+  async function refreshPendingSalesOrders() {
+    try {
+      const response = await fetch("/api/online-store/sales-orders", { cache: "no-store" });
+      const payload = (await response.json()) as {
+        salesOrders?: SalesOrder[];
+        message?: string;
+      };
+
+      if (!response.ok || !payload.salesOrders) {
+        throw new Error(payload.message ?? "Flash ERP could not refresh pending orders.");
+      }
+
+      setSalesOrders((current) => [
+        ...payload.salesOrders!,
+        ...current.filter((order) => order.status !== "OPEN")
+      ]);
+    } catch (error) {
+      setCheckoutMessage(
+        error instanceof Error ? error.message : "Flash ERP could not refresh pending orders."
+      );
+    }
+  }
+
   function applyLocalReceiptLogo(receipt: Receipt): Receipt {
     return {
       ...receipt,
@@ -4168,12 +4348,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     setCustomerQuery(customer ? `${customer.customerNo} · ${customer.fullName}` : order.customerName);
     setSourceTransactionId(order.sourceTransactionId);
     setFulfillingSalesOrderId(order.orderId);
-    setPaymentDrafts([
-      createPaymentDraft(
-        defaultTenderCode,
-        Math.max(0, order.balanceAmount).toFixed(2)
-      )
-    ]);
+    // The payable amount is populated from the freshly repriced basket effect.
+    setPaymentDrafts([createPaymentDraft(defaultTenderCode, "0.00")]);
     setLoyaltyPointsToRedeem("0");
     setSaleMode("SALE");
     resetTransactionDetails();
@@ -6059,7 +6235,10 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         productId: product.productId,
         productCode: product.productCode,
         productName: product.productName,
-        quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1
+        quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+        unitOfMeasure: product.baseUnitOfMeasure,
+        baseQuantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+        baseUnitOfMeasure: product.baseUnitOfMeasure
       }
     ]);
     setTransferNote(`HQ lookup found ${formatNumber.format(row.quantityOnHand)} unit(s) at ${row.storeName}.`);
@@ -6089,10 +6268,25 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
         productId: selectedInventoryProduct.productId,
         productCode: selectedInventoryProduct.productCode,
         productName: selectedInventoryProduct.productName,
-        quantity
+        quantity,
+        unitOfMeasure:
+          transferUnitOfMeasure || selectedInventoryProduct.baseUnitOfMeasure,
+        baseQuantity: Number(
+          (
+            quantity *
+            (selectedInventoryProduct.uomConversions.find(
+              (unit) =>
+                unit.uomCode ===
+                (transferUnitOfMeasure ||
+                  selectedInventoryProduct.baseUnitOfMeasure)
+            )?.conversionFactor ?? 1)
+          ).toFixed(3)
+        ),
+        baseUnitOfMeasure: selectedInventoryProduct.baseUnitOfMeasure
       }
     ]);
     setInventoryProductId("");
+    setTransferUnitOfMeasure("");
     setTransferQuantity("1");
   }
 
@@ -6100,7 +6294,11 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
     const inlineQuantity = Number(transferQuantity);
     const lines =
       transferRequestLines.length > 0
-        ? transferRequestLines.map((line) => ({ productId: line.productId, quantity: line.quantity }))
+        ? transferRequestLines.map((line) => ({
+            productId: line.productId,
+            quantity: line.quantity,
+            unitOfMeasure: line.unitOfMeasure
+          }))
         : inventoryProductId && Number.isFinite(inlineQuantity) && inlineQuantity > 0
           ? [{ productId: inventoryProductId, quantity: inlineQuantity }]
           : [];
@@ -7654,6 +7852,18 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               key={item.id}
               onClick={() => {
                 setActiveWorkspace(item.id);
+                if (item.id === "pos") {
+                  void refreshPendingSalesOrders();
+                }
+                if (typeof window !== "undefined") {
+                  window.history.replaceState(
+                    window.history.state,
+                    "",
+                    item.id === "ecommerce"
+                      ? "/online-store?workspace=ecommerce"
+                      : "/online-store"
+                  );
+                }
                 if (
                   typeof window !== "undefined" &&
                   window.matchMedia("(max-width: 760px)").matches
@@ -8230,7 +8440,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
               <button className="rms-action-button is-clear" disabled={!hasSaleScreenState} onClick={clearSaleScreen} type="button">{activeSalesOrder ? "Exit fulfilment" : "Clear screen"}</button>
               <button className="rms-action-button is-hold" disabled={isPostingPosAction || isRecalledBasket || !hasOpenShift || !basket.length} onClick={() => void holdSale()} type="button">Hold sale</button>
               <button className="rms-action-button is-details" disabled={isRecalledBasket} onClick={() => setActiveDrawer("details")} type="button">Details</button>
-              <button className="rms-action-button is-pending-orders" onClick={() => setActiveDrawer("orders")} type="button">Pending orders</button>
+              <button className="rms-action-button is-pending-orders" onClick={() => { setActiveDrawer("orders"); void refreshPendingSalesOrders(); }} type="button">Pending orders</button>
               <button className="rms-action-button is-account-pay" disabled={!hasOpenShift || !workspace.tenderMethods.length} onClick={() => setActiveDrawer("account")} type="button">Account pay</button>
               <button className="rms-action-button is-recall" disabled={!heldSales.length} onClick={() => setActiveDrawer("held")} type="button">Recall held</button>
               <button className="rms-action-button is-receipts" onClick={() => setActiveDrawer("receipts")} type="button">Receipts</button>
@@ -9069,7 +9279,8 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                         {activeTransferEntryTab === "details" ? (
                           <div className="rms-transfer-detail-pane">
                             <div className="rms-form-grid rms-transfer-line-entry">
-                              <label><span>Product</span><select onChange={(event) => setInventoryProductId(event.target.value)} value={inventoryProductId}><option value="">Select item</option>{workspace.inventoryProducts.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {product.productCode}</option>)}</select></label>
+                              <label><span>Product</span><select onChange={(event) => { const productId = event.target.value; const product = workspace.inventoryProducts.find((item) => item.productId === productId); setInventoryProductId(productId); setTransferUnitOfMeasure(product?.baseUnitOfMeasure ?? ""); }} value={inventoryProductId}><option value="">Select item</option>{workspace.inventoryProducts.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {product.productCode}</option>)}</select></label>
+                              <label><span>Unit</span><select disabled={!selectedInventoryProduct} onChange={(event) => setTransferUnitOfMeasure(event.target.value)} value={transferUnitOfMeasure}>{(selectedInventoryProduct?.uomConversions.length ? selectedInventoryProduct.uomConversions : selectedInventoryProduct ? [{ uomCode: selectedInventoryProduct.baseUnitOfMeasure, uomName: selectedInventoryProduct.baseUnitOfMeasure, conversionFactor: 1 }] : []).map((unit) => <option key={unit.uomCode} value={unit.uomCode}>{unit.uomName} ({unit.uomCode}){unit.conversionFactor !== 1 ? ` = ${formatNumber.format(unit.conversionFactor)} ${selectedInventoryProduct?.baseUnitOfMeasure}` : ""}</option>)}</select></label>
                               <label><span>Quantity</span><input min="0.001" onChange={(event) => setTransferQuantity(event.target.value)} step="0.001" type="number" value={transferQuantity} /></label>
                               <button className="rms-button" onClick={addTransferRequestLine} type="button">Add line</button>
                             </div>
@@ -9078,7 +9289,7 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
                               {transferRequestLines.map((line) => (
                                 <div className="rms-table-row" key={line.id}>
                                   <div><strong>{line.productName}</strong><small>{line.productCode}</small></div>
-                                  <strong>{formatNumber.format(line.quantity)}</strong>
+                                  <strong>{formatNumber.format(line.quantity)} {line.unitOfMeasure}{line.unitOfMeasure !== line.baseUnitOfMeasure ? ` = ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}` : ""}</strong>
                                   <button
                                     aria-label={`Remove ${line.productName}`}
                                     className="rms-icon-button is-danger"
@@ -9746,6 +9957,37 @@ export function OnlineStoreWorkspace({ workspace }: { workspace: OnlineStoreWork
 
         {activeWorkspace === "settings" ? (
           <OnlineStorePosSettingsWorkspace currencyCode={currencyCode} workspace={workspace} />
+        ) : null}
+
+        {activeWorkspace === "ecommerce" ? (
+          ecommerceWorkspace ? (
+            <div className="rms-workspace rms-ecommerce-workspace">
+              <OnlineStoreEcommerceWorkspace embedded initialWorkspace={ecommerceWorkspace} />
+            </div>
+          ) : (
+            <div className="rms-workspace">
+              <section className="rms-panel">
+                <div className="rms-panel-title">
+                  <span>Customer ordering</span>
+                  <h2>{isLoadingEcommerce ? "Loading ecommerce" : "Ecommerce unavailable"}</h2>
+                </div>
+                {ecommerceLoadError ? (
+                  <>
+                    <p>{ecommerceLoadError}</p>
+                    <button
+                      className="rms-button is-primary"
+                      onClick={() => setEcommerceLoadAttempt((attempt) => attempt + 1)}
+                      type="button"
+                    >
+                      Retry
+                    </button>
+                  </>
+                ) : (
+                  <p>Loading customer orders, products, payments, and storefront settings.</p>
+                )}
+              </section>
+            </div>
+          )
         ) : null}
       </section>
       <ConfirmationDialog

@@ -184,6 +184,15 @@ const defaultPasswordPolicy: PasswordPolicySettings = {
 
 const explicitSecurityPermissionFallbacks: SecurityPermissionDefinition[] = [
   {
+    code: "ecommerce.console.access",
+    name: "Access ecommerce staff console",
+    description: "Open and operate customer orders, catalog publication, payment options, and storefront setup.",
+    domain: "Operations",
+    group: "Ecommerce",
+    surface: "store",
+    sortOrder: 321
+  },
+  {
     code: "sync.store.operate",
     name: "Operate store sync",
     description: "Open the store desktop sync workspace, run manual sync, and recover local sync queues.",
@@ -409,25 +418,37 @@ async function getWritableEnterpriseNode(tx: Prisma.TransactionClient) {
 
 async function ensureEnterprisePermissionCatalog() {
   await ensurePermissionCatalogSchemaCompatibility();
-
-  await prisma.$transaction(
-    getEnterpriseSecurityPermissionCatalog().map((permission) =>
-      prisma.permission.upsert({
-        where: {
-          code: permission.code
-        },
-        update: {
-          name: permission.name,
-          description: permission.description
-        },
-        create: {
-          code: permission.code,
-          name: permission.name,
-          description: permission.description
-        }
-      })
-    )
+  const catalog = getEnterpriseSecurityPermissionCatalog();
+  const existingPermissions = await prisma.permission.findMany({
+    where: { code: { in: catalog.map((permission) => permission.code) } },
+    select: { code: true, name: true, description: true }
+  });
+  const existingByCode = new Map(
+    existingPermissions.map((permission) => [permission.code, permission] as const)
   );
+  const changedPermissions = catalog.filter((permission) => {
+    const existing = existingByCode.get(permission.code);
+    return !existing || existing.name !== permission.name || existing.description !== permission.description;
+  });
+
+  for (let index = 0; index < changedPermissions.length; index += 20) {
+    await prisma.$transaction(
+      changedPermissions.slice(index, index + 20).map((permission) =>
+        prisma.permission.upsert({
+          where: { code: permission.code },
+          update: {
+            name: permission.name,
+            description: permission.description
+          },
+          create: {
+            code: permission.code,
+            name: permission.name,
+            description: permission.description
+          }
+        })
+      )
+    );
+  }
 }
 
 async function writeSecurityLog(

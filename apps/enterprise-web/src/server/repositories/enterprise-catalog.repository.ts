@@ -8,6 +8,12 @@ import {
 } from "@/server/repositories/enterprise-settings.repository";
 import { ensureProductVariantSalesOrderDepositSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 import {
+  buildEnterprisePageInfo,
+  normalizeEnterprisePageInput,
+  type EnterprisePageInfo,
+  type EnterprisePageInput,
+} from "@/server/performance/enterprise-pagination";
+import {
   CustomerType,
   ProductType,
   RecordStatus,
@@ -784,6 +790,7 @@ export type EnterpriseCatalogWorkspaceData = {
     region: string | null;
     storeGroupLabel: string;
   }>;
+  productPage: EnterprisePageInfo;
   unitOfMeasureRows: Array<{
     uomCode: string;
     name: string;
@@ -867,7 +874,10 @@ export type EnterpriseCatalogWorkspaceData = {
 
 export function buildUnavailableEnterpriseCatalogWorkspace(
   reason: string,
+  input?: EnterprisePageInput,
 ): EnterpriseCatalogWorkspaceData {
+  const productPage = normalizeEnterprisePageInput(input);
+
   return {
     currencyCode: "USD",
     suggestedProductCode: "PRD-00001",
@@ -875,6 +885,7 @@ export function buildUnavailableEnterpriseCatalogWorkspace(
     availableCategories: [],
     availableTaxProfiles: [],
     availableStores: [],
+    productPage: buildEnterprisePageInfo(productPage, 0),
     unitOfMeasureRows: [],
     uomScheduleRows: [],
     inventoryCatalogRows: [],
@@ -902,7 +913,9 @@ export function buildUnavailableEnterpriseCatalogWorkspace(
   };
 }
 
-export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalogWorkspaceData> {
+export async function getEnterpriseCatalogWorkspace(
+  input?: EnterprisePageInput,
+): Promise<EnterpriseCatalogWorkspaceData> {
   await ensureProductVariantSalesOrderDepositSchemaCompatibility();
 
   const enterpriseNode = await getEnterpriseContext();
@@ -910,11 +923,36 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
   if (!enterpriseNode) {
     return buildUnavailableEnterpriseCatalogWorkspace(
       "No primary enterprise node is available yet, so Flash ERP cannot read catalog data.",
+      input,
     );
   }
 
+  const productPage = normalizeEnterprisePageInput(input);
+  const productBaseWhere: Prisma.ProductWhereInput = {
+    retailOrgId: enterpriseNode.retailOrgId,
+    deletedAt: null,
+  };
+  const productListWhere: Prisma.ProductWhereInput = {
+    ...productBaseWhere,
+    ...(productPage.search
+      ? {
+          OR: [
+            { code: { contains: productPage.search } },
+            { sku: { contains: productPage.search } },
+            { name: { contains: productPage.search } },
+            { status: { contains: productPage.search } },
+          ],
+        }
+      : {}),
+  };
+
   const [
     products,
+    productTotal,
+    activeProducts,
+    barcodeCoverage,
+    defaultPriceCoverage,
+    productsInOperations,
     productCodesForNumbering,
     downstreamCatalogQueue,
     availableTaxProfiles,
@@ -925,13 +963,10 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
     inventoryCatalogs,
   ] = await Promise.all([
     prisma.product.findMany({
-      where: {
-        retailOrgId: enterpriseNode.retailOrgId,
-        deletedAt: null,
-      },
-      orderBy: {
-        name: "asc",
-      },
+      where: productListWhere,
+      orderBy: [{ name: "asc" }, { code: "asc" }],
+      skip: productPage.skip,
+      take: productPage.pageSize,
       select: {
         code: true,
         sku: true,
@@ -965,6 +1000,28 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
             unitPrice: true,
           },
         },
+      },
+    }),
+    prisma.product.count({ where: productListWhere }),
+    prisma.product.count({
+      where: { ...productBaseWhere, status: RecordStatus.ACTIVE },
+    }),
+    prisma.product.count({
+      where: { ...productBaseWhere, barcodes: { some: {} } },
+    }),
+    prisma.product.count({
+      where: {
+        ...productBaseWhere,
+        priceListEntries: { some: { priceList: { isDefault: true } } },
+      },
+    }),
+    prisma.product.count({
+      where: {
+        ...productBaseWhere,
+        OR: [
+          { posTransactionLines: { some: {} } },
+          { inventoryLedgerEntries: { some: {} } },
+        ],
       },
     }),
     prisma.product.findMany({
@@ -1139,18 +1196,6 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
     updatedAtLabel: formatRelativeTime(product.updatedAt),
   }));
 
-  const activeProducts = productRows.filter(
-    (row) => row.status === RecordStatus.ACTIVE,
-  ).length;
-  const barcodeCoverage = productRows.filter(
-    (row) => row.barcodeCount > 0,
-  ).length;
-  const defaultPriceCoverage = productRows.filter(
-    (row) => row.defaultPrice !== null,
-  ).length;
-  const productsInOperations = productRows.filter(
-    (row) => row.salesLineCount > 0 || row.inventoryMovementCount > 0,
-  ).length;
   const activeCatalogs = inventoryCatalogs.filter(
     (catalog) => catalog.status === RecordStatus.ACTIVE,
   ).length;
@@ -1209,6 +1254,7 @@ export async function getEnterpriseCatalogWorkspace(): Promise<EnterpriseCatalog
         store.region ??
         "Ungrouped",
     })),
+    productPage: buildEnterprisePageInfo(productPage, productTotal),
     unitOfMeasureRows: unitOfMeasures.map((unit) => ({
       uomCode: unit.code,
       name: unit.name,

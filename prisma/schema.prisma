@@ -38,6 +38,13 @@ model RetailOrg {
   retailUserSessions                RetailUserSession[]
   roles                             Role[]
   customers                         Customer[]
+  ecommerceCustomerAccounts         EcommerceCustomerAccount[]
+  ecommerceCustomerIdentities       EcommerceCustomerIdentity[]
+  ecommerceCustomerSessions         EcommerceCustomerSession[]
+  ecommerceOtpChallenges            EcommerceOtpChallenge[]
+  ecommerceOrders                   EcommerceOrder[]
+  ecommercePaymentMethods           EcommerceStorePaymentMethod[]
+  ecommerceProductReviews           EcommerceProductReview[]
   customerAccountEntries            CustomerAccountEntry[]
   customerAccountPaymentAllocations CustomerAccountPaymentAllocation[]
   suppliers                         Supplier[]
@@ -271,15 +278,15 @@ model BankAccount {
 }
 
 model Store {
-  id                                String                  @id @default(uuid())
+  id                                String                        @id @default(uuid())
   retailOrgId                       String
   code                              String
   name                              String
   shortName                         String?
   timezone                          String
   currencyCode                      String
-  salesEnabled                      Boolean                 @default(true)
-  warehouseEnabled                  Boolean                 @default(true)
+  salesEnabled                      Boolean                       @default(true)
+  warehouseEnabled                  Boolean                       @default(true)
   phone                             String?
   email                             String?
   managerName                       String?
@@ -298,22 +305,35 @@ model Store {
   receiptHeader                     String?
   receiptFooter                     String?
   salesReceiptTemplateId            String?
-  salesReceiptTemplateHtml          String?                 @db.NVarChar(Max)
+  salesReceiptTemplateHtml          String?                       @db.NVarChar(Max)
   accountPaymentReceiptTemplateId   String?
-  accountPaymentReceiptTemplateHtml String?                 @db.NVarChar(Max)
-  licenseStatus                     String                  @default("UNLICENSED")
+  accountPaymentReceiptTemplateHtml String?                       @db.NVarChar(Max)
+  licenseStatus                     String                        @default("UNLICENSED")
   licenseKey                        String?
   licensedUntil                     DateTime?
-  catalogPolicyJson                 String?                 @db.NVarChar(Max)
-  storeMode                         String                  @default("OFFLINE_FIRST")
-  touchModeEnabled                  Boolean                 @default(true)
-  status                            String                  @default("ACTIVE")
+  catalogPolicyJson                 String?                       @db.NVarChar(Max)
+  storeMode                         String                        @default("OFFLINE_FIRST")
+  touchModeEnabled                  Boolean                       @default(true)
+  ecommerceEnabled                  Boolean                       @default(false)
+  ecommerceSlug                     String?
+  ecommerceDisplayName              String?
+  ecommerceDescription              String?                       @db.NVarChar(Max)
+  ecommerceSupportPhone             String?
+  ecommerceSupportEmail             String?
+  ecommerceHeroImageUrl             String?
+  ecommerceWhatsappPhone            String?
+  ecommerceAllowPickup              Boolean                       @default(true)
+  ecommerceAllowDelivery            Boolean                       @default(true)
+  ecommercePayOnDeliveryEnabled     Boolean                       @default(true)
+  ecommerceDeliveryFee              Decimal                       @default(0) @db.Decimal(18, 2)
+  ecommerceFreeDeliveryThreshold    Decimal?                      @db.Decimal(18, 2)
+  status                            String                        @default("ACTIVE")
   openedOn                          DateTime?
-  createdAt                         DateTime                @default(now())
-  updatedAt                         DateTime                @updatedAt
-  retailOrg                         RetailOrg               @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  salesReceiptTemplate              ReceiptTemplate?        @relation("StoreSalesReceiptTemplate", fields: [salesReceiptTemplateId], references: [id], onDelete: SetNull)
-  accountPaymentReceiptTemplate     ReceiptTemplate?        @relation("StoreAccountPaymentReceiptTemplate", fields: [accountPaymentReceiptTemplateId], references: [id], onDelete: SetNull)
+  createdAt                         DateTime                      @default(now())
+  updatedAt                         DateTime                      @updatedAt
+  retailOrg                         RetailOrg                     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  salesReceiptTemplate              ReceiptTemplate?              @relation("StoreSalesReceiptTemplate", fields: [salesReceiptTemplateId], references: [id], onDelete: SetNull)
+  accountPaymentReceiptTemplate     ReceiptTemplate?              @relation("StoreAccountPaymentReceiptTemplate", fields: [accountPaymentReceiptTemplateId], references: [id], onDelete: SetNull)
   warehouses                        Warehouse[]
   terminals                         Terminal[]
   syncNodes                         SyncNode[]
@@ -328,9 +348,9 @@ model Store {
   supplierClaims                    SupplierClaim[]
   supplierReturns                   SupplierReturn[]
   stockCountSessions                StockCountSession[]
-  outboundInterStoreTransfers       InterStoreTransfer[]    @relation("InterStoreTransferSourceStore")
-  inboundInterStoreTransfers        InterStoreTransfer[]    @relation("InterStoreTransferDestinationStore")
-  fuelStations                      ErpFuelStation[]        @relation("FuelStationStore")
+  outboundInterStoreTransfers       InterStoreTransfer[]          @relation("InterStoreTransferSourceStore")
+  inboundInterStoreTransfers        InterStoreTransfer[]          @relation("InterStoreTransferDestinationStore")
+  fuelStations                      ErpFuelStation[]              @relation("FuelStationStore")
   goodsReceipts                     GoodsReceipt[]
   posShifts                         PosShift[]
   posTransactions                   PosTransaction[]
@@ -344,9 +364,12 @@ model Store {
   hrAttendance                      ErpEmployeeAttendance[]
   inventoryCatalogLinks             InventoryCatalogStore[]
   storeProductPrices                StoreProductPrice[]
+  ecommerceOrders                   EcommerceOrder[]
+  ecommercePaymentMethods           EcommerceStorePaymentMethod[]
   licenseEvents                     LicenseEvent[]
 
   @@unique([retailOrgId, code])
+  @@index([ecommerceSlug])
   @@index([retailOrgId, storeGroupCode])
   @@index([retailOrgId, licenseStatus])
   @@index([retailOrgId, storeMode])
@@ -3463,6 +3486,7 @@ model Customer {
   accountEntries            CustomerAccountEntry[]
   accountPaymentAllocations CustomerAccountPaymentAllocation[]
   salesOrders               SalesOrder[]
+  ecommerceAccount          EcommerceCustomerAccount?
   erpAccountingProfiles     ErpPartyAccountingProfile[]
   fuelStations              ErpFuelStation[]                   @relation("FuelStationCustomer")
   fuelStationDeliveries     ErpFuelStationDelivery[]           @relation("FuelStationDeliveryCustomer")
@@ -3590,7 +3614,7 @@ model TaxProfile {
 }
 
 model TenderMethod {
-  id                       String               @id @default(uuid())
+  id                       String                        @id @default(uuid())
   retailOrgId              String
   cashbookAccountId        String?
   code                     String
@@ -3603,26 +3627,28 @@ model TenderMethod {
   gatewaySecretMask        String?
   gatewayWebhookSecretMask String?
   gatewayCallbackUrl       String?
-  gatewayActive            Boolean              @default(false)
-  gatewayStatus            String               @default("DISABLED")
-  gatewayConfigJson        String?              @db.NVarChar(Max)
+  gatewayActive            Boolean                       @default(false)
+  gatewayStatus            String                        @default("DISABLED")
+  gatewayConfigJson        String?                       @db.NVarChar(Max)
   description              String?
-  requiresReference        Boolean              @default(false)
-  allowChange              Boolean              @default(false)
-  allowRefund              Boolean              @default(true)
-  allowOpenCashDrawer      Boolean              @default(false)
-  sortOrder                Int                  @default(0)
-  status                   String               @default("ACTIVE")
+  requiresReference        Boolean                       @default(false)
+  allowChange              Boolean                       @default(false)
+  allowRefund              Boolean                       @default(true)
+  allowOpenCashDrawer      Boolean                       @default(false)
+  sortOrder                Int                           @default(0)
+  status                   String                        @default("ACTIVE")
   originNodeCode           String?
   lastModifiedByNodeCode   String?
-  recordVersion            Int                  @default(1)
-  createdAt                DateTime             @default(now())
-  updatedAt                DateTime             @updatedAt
+  recordVersion            Int                           @default(1)
+  createdAt                DateTime                      @default(now())
+  updatedAt                DateTime                      @updatedAt
   deletedAt                DateTime?
-  retailOrg                RetailOrg            @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  cashbookAccount          ErpCashbookAccount?  @relation("TenderMethodCashbookAccount", fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  retailOrg                RetailOrg                     @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  cashbookAccount          ErpCashbookAccount?           @relation("TenderMethodCashbookAccount", fields: [cashbookAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   posPayments              PosPayment[]
   fuelSalePayments         ErpFuelSalePayment[]
+  ecommercePayments        EcommercePayment[]
+  ecommerceStoreMethods    EcommerceStorePaymentMethod[]
 
   @@unique([retailOrgId, code])
   @@index([cashbookAccountId])
@@ -3835,72 +3861,80 @@ model InventoryCatalogStore {
 }
 
 model Product {
-  id                     String                    @id @default(uuid())
-  retailOrgId            String
-  taxProfileId           String?
-  baseUnitOfMeasureId    String?
-  uomScheduleId          String?
-  code                   String
-  sku                    String?
-  name                   String
-  shortName              String?
-  description            String?
-  productType            String                    @default("STOCK")
-  department             String?
-  category               String?
-  subcategory            String?
-  brand                  String?
-  seasonCode             String?
-  unitOfMeasure          String                    @default("EA")
-  packSize               String?
-  countryOfOrigin        String?
-  primaryImageUrl        String?
-  notes                  String?
-  taxable                Boolean                   @default(true)
-  trackInventory         Boolean                   @default(true)
-  isSerialized           Boolean                   @default(false)
-  trackExpiry            Boolean                   @default(false)
-  trackSize              Boolean                   @default(false)
-  trackColor             Boolean                   @default(false)
-  allowPriceOverride     Boolean                   @default(false)
-  mustEnterPriceAtPos    Boolean                   @default(false)
-  minStockLevel          Decimal?                  @db.Decimal(18, 3)
-  reorderPoint           Decimal?                  @db.Decimal(18, 3)
-  reorderQuantity        Decimal?                  @db.Decimal(18, 3)
-  safetyStockLevel       Decimal?                  @db.Decimal(18, 3)
-  shelfLifeDays          Int?
-  weightKg               Decimal?                  @db.Decimal(18, 3)
-  volumeLitres           Decimal?                  @db.Decimal(18, 3)
-  baseUnitPrice          Decimal                   @db.Decimal(18, 2)
-  baseCostPrice          Decimal?                  @db.Decimal(18, 2)
-  status                 String                    @default("ACTIVE")
-  originNodeCode         String?
-  lastModifiedByNodeCode String?
-  recordVersion          Int                       @default(1)
-  createdAt              DateTime                  @default(now())
-  updatedAt              DateTime                  @updatedAt
-  deletedAt              DateTime?
-  retailOrg              RetailOrg                 @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
-  taxProfile             TaxProfile?               @relation(fields: [taxProfileId], references: [id], onDelete: SetNull)
-  baseUnitOfMeasure      UnitOfMeasure?            @relation("ProductBaseUnitOfMeasure", fields: [baseUnitOfMeasureId], references: [id], onDelete: SetNull)
-  uomSchedule            UnitOfMeasureSchedule?    @relation(fields: [uomScheduleId], references: [id], onDelete: SetNull)
-  barcodes               Barcode[]
-  priceListEntries       PriceListEntry[]
-  storeProductPrices     StoreProductPrice[]
-  matrixAttributes       ProductMatrixAttribute[]
-  matrixVariants         ProductMatrixVariant[]
-  supplierLinks          ProductSupplier[]
-  inventoryCatalogLinks  InventoryCatalogProduct[]
-  inventoryLedgerEntries InventoryLedgerEntry[]
-  inventorySerialUnits   InventorySerialUnit[]
-  inventoryBatches       InventoryBatch[]
-  purchaseOrderLines     PurchaseOrderLine[]
-  supplierClaimLines     SupplierClaimLine[]
-  supplierReturnLines    SupplierReturnLine[]
-  stockCountSessions     StockCountSession[]
-  interStoreTransfers    InterStoreTransfer[]
-  goodsReceiptLines      GoodsReceiptLine[]
-  posTransactionLines    PosTransactionLine[]
+  id                          String                    @id @default(uuid())
+  retailOrgId                 String
+  taxProfileId                String?
+  baseUnitOfMeasureId         String?
+  uomScheduleId               String?
+  code                        String
+  sku                         String?
+  name                        String
+  shortName                   String?
+  description                 String?
+  productType                 String                    @default("STOCK")
+  department                  String?
+  category                    String?
+  subcategory                 String?
+  brand                       String?
+  seasonCode                  String?
+  unitOfMeasure               String                    @default("EA")
+  packSize                    String?
+  countryOfOrigin             String?
+  primaryImageUrl             String?
+  notes                       String?
+  taxable                     Boolean                   @default(true)
+  trackInventory              Boolean                   @default(true)
+  isSerialized                Boolean                   @default(false)
+  trackExpiry                 Boolean                   @default(false)
+  trackSize                   Boolean                   @default(false)
+  trackColor                  Boolean                   @default(false)
+  allowPriceOverride          Boolean                   @default(false)
+  mustEnterPriceAtPos         Boolean                   @default(false)
+  ecommercePublished          Boolean                   @default(false)
+  ecommerceFeatured           Boolean                   @default(false)
+  ecommerceSortOrder          Int                       @default(0)
+  ecommerceDescription        String?                   @db.NVarChar(Max)
+  ecommerceCompareAtPrice     Decimal?                  @db.Decimal(18, 2)
+  ecommerceSpecificationsJson String?                   @db.NVarChar(Max)
+  ecommerceGalleryJson        String?                   @db.NVarChar(Max)
+  minStockLevel               Decimal?                  @db.Decimal(18, 3)
+  reorderPoint                Decimal?                  @db.Decimal(18, 3)
+  reorderQuantity             Decimal?                  @db.Decimal(18, 3)
+  safetyStockLevel            Decimal?                  @db.Decimal(18, 3)
+  shelfLifeDays               Int?
+  weightKg                    Decimal?                  @db.Decimal(18, 3)
+  volumeLitres                Decimal?                  @db.Decimal(18, 3)
+  baseUnitPrice               Decimal                   @db.Decimal(18, 2)
+  baseCostPrice               Decimal?                  @db.Decimal(18, 2)
+  status                      String                    @default("ACTIVE")
+  originNodeCode              String?
+  lastModifiedByNodeCode      String?
+  recordVersion               Int                       @default(1)
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+  deletedAt                   DateTime?
+  retailOrg                   RetailOrg                 @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  taxProfile                  TaxProfile?               @relation(fields: [taxProfileId], references: [id], onDelete: SetNull)
+  baseUnitOfMeasure           UnitOfMeasure?            @relation("ProductBaseUnitOfMeasure", fields: [baseUnitOfMeasureId], references: [id], onDelete: SetNull)
+  uomSchedule                 UnitOfMeasureSchedule?    @relation(fields: [uomScheduleId], references: [id], onDelete: SetNull)
+  barcodes                    Barcode[]
+  priceListEntries            PriceListEntry[]
+  storeProductPrices          StoreProductPrice[]
+  matrixAttributes            ProductMatrixAttribute[]
+  matrixVariants              ProductMatrixVariant[]
+  supplierLinks               ProductSupplier[]
+  inventoryCatalogLinks       InventoryCatalogProduct[]
+  inventoryLedgerEntries      InventoryLedgerEntry[]
+  inventorySerialUnits        InventorySerialUnit[]
+  inventoryBatches            InventoryBatch[]
+  purchaseOrderLines          PurchaseOrderLine[]
+  supplierClaimLines          SupplierClaimLine[]
+  supplierReturnLines         SupplierReturnLine[]
+  stockCountSessions          StockCountSession[]
+  interStoreTransfers         InterStoreTransfer[]
+  goodsReceiptLines           GoodsReceiptLine[]
+  posTransactionLines         PosTransactionLine[]
+  ecommerceReviews            EcommerceProductReview[]
 
   @@unique([retailOrgId, code])
   @@unique([retailOrgId, sku])
@@ -4336,6 +4370,10 @@ model InterStoreTransfer {
   origin                           String
   status                           String            @default("REQUESTED")
   requestedQuantity                Decimal           @db.Decimal(18, 3)
+  requestedUnitOfMeasure           String            @default("EA")
+  requestedUnitQuantity            Decimal           @default(0) @db.Decimal(18, 3)
+  uomConversionFactor              Decimal           @default(1) @db.Decimal(18, 6)
+  baseUnitOfMeasure                String            @default("EA")
   issuedQuantity                   Decimal           @default(0) @db.Decimal(18, 3)
   receivedQuantity                 Decimal           @default(0) @db.Decimal(18, 3)
   unitCost                         Decimal?          @db.Decimal(18, 2)
@@ -4828,6 +4866,7 @@ model SalesOrder {
   terminal                        Terminal         @relation(fields: [terminalId], references: [id], onDelete: Cascade)
   customer                        Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
   lines                           SalesOrderLine[]
+  ecommerceOrder                  EcommerceOrder?
 
   @@unique([retailOrgId, orderNo])
   @@index([storeId, status, updatedAt])
@@ -4856,6 +4895,275 @@ model SalesOrderLine {
 
   @@index([salesOrderId])
   @@index([productCodeSnapshot])
+}
+
+model EcommerceCustomerAccount {
+  id                  String                      @id @default(uuid())
+  retailOrgId         String
+  customerId          String                      @unique
+  passwordHash        String
+  status              String                      @default("PENDING_VERIFICATION")
+  passwordUpdatedAt   DateTime                    @default(now())
+  failedLoginAttempts Int                         @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+  retailOrg           RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  customer            Customer                    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  identities          EcommerceCustomerIdentity[]
+  sessions            EcommerceCustomerSession[]
+  addresses           EcommerceCustomerAddress[]
+  orders              EcommerceOrder[]
+  reviews             EcommerceProductReview[]
+
+  @@index([retailOrgId, status])
+}
+
+model EcommerceCustomerIdentity {
+  id                   String                   @id @default(uuid())
+  retailOrgId          String
+  customerAccountId    String
+  identityType         String
+  identifier           String
+  identifierNormalized String
+  isPrimary            Boolean                  @default(false)
+  verifiedAt           DateTime?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  retailOrg            RetailOrg                @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  customerAccount      EcommerceCustomerAccount @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([retailOrgId, identityType, identifierNormalized])
+  @@index([customerAccountId, isPrimary])
+}
+
+model EcommerceCustomerSession {
+  id                String                   @id @default(uuid())
+  retailOrgId       String
+  customerAccountId String
+  tokenHash         String                   @unique
+  expiresAt         DateTime
+  lastSeenAt        DateTime                 @default(now())
+  revokedAt         DateTime?
+  ipAddress         String?
+  userAgent         String?
+  createdAt         DateTime                 @default(now())
+  retailOrg         RetailOrg                @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  customerAccount   EcommerceCustomerAccount @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([customerAccountId, expiresAt])
+  @@index([retailOrgId, expiresAt])
+}
+
+model EcommerceOtpChallenge {
+  id                   String    @id @default(uuid())
+  retailOrgId          String
+  identityType         String
+  identifier           String
+  identifierNormalized String
+  purpose              String
+  codeHash             String
+  attemptCount         Int       @default(0)
+  maxAttempts          Int       @default(5)
+  expiresAt            DateTime
+  resendAvailableAt    DateTime
+  consumedAt           DateTime?
+  ipAddress            String?
+  userAgent            String?
+  createdAt            DateTime  @default(now())
+  retailOrg            RetailOrg @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+
+  @@index([retailOrgId, identityType, identifierNormalized, purpose, createdAt])
+  @@index([expiresAt, consumedAt])
+}
+
+model EcommerceCustomerAddress {
+  id                String                   @id @default(uuid())
+  customerAccountId String
+  label             String?
+  recipientName     String
+  phone             String
+  addressLine1      String
+  addressLine2      String?
+  city              String
+  region            String?
+  countryCode       String                   @default("GH")
+  postalCode        String?
+  deliveryNote      String?                  @db.NVarChar(Max)
+  isDefault         Boolean                  @default(false)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  customerAccount   EcommerceCustomerAccount @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([customerAccountId, isDefault])
+}
+
+model EcommerceOrder {
+  id                        String                      @id @default(uuid())
+  retailOrgId               String
+  storeId                   String
+  salesOrderId              String                      @unique
+  customerAccountId         String
+  orderNo                   String
+  checkoutRequestKey        String                      @unique @db.NVarChar(160)
+  checkoutRequestHash       String                      @db.NVarChar(64)
+  status                    String                      @default("PLACED")
+  paymentStatus             String                      @default("UNPAID")
+  deliveryStatus            String                      @default("PENDING")
+  fulfilmentMethod          String                      @default("DELIVERY")
+  currencyCode              String
+  itemsSubtotalAmount       Decimal                     @db.Decimal(18, 2)
+  discountAmount            Decimal                     @default(0) @db.Decimal(18, 2)
+  taxAmount                 Decimal                     @default(0) @db.Decimal(18, 2)
+  deliveryFeeAmount         Decimal                     @default(0) @db.Decimal(18, 2)
+  totalAmount               Decimal                     @db.Decimal(18, 2)
+  paidAmount                Decimal                     @default(0) @db.Decimal(18, 2)
+  balanceAmount             Decimal                     @db.Decimal(18, 2)
+  recipientName             String
+  deliveryPhone             String
+  deliveryAddressLine1      String?
+  deliveryAddressLine2      String?
+  deliveryCity              String?
+  deliveryRegion            String?
+  deliveryCountryCode       String?
+  deliveryPostalCode        String?
+  deliveryNote              String?                     @db.NVarChar(Max)
+  customerNote              String?                     @db.NVarChar(Max)
+  trackingReference         String?
+  paymentTiming             String                      @default("ON_DELIVERY")
+  selectedPaymentMethodCode String?
+  selectedPaymentMethodName String?
+  placedAt                  DateTime                    @default(now())
+  confirmedAt               DateTime?
+  processingAt              DateTime?
+  readyAt                   DateTime?
+  dispatchedAt              DateTime?
+  deliveredAt               DateTime?
+  cancelledAt               DateTime?
+  createdAt                 DateTime                    @default(now())
+  updatedAt                 DateTime                    @updatedAt
+  retailOrg                 RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store                     Store                       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  salesOrder                SalesOrder                  @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  customerAccount           EcommerceCustomerAccount    @relation(fields: [customerAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payments                  EcommercePayment[]
+  refundRequests            EcommerceRefundRequest[]
+  statusEvents              EcommerceOrderStatusEvent[]
+  reviews                   EcommerceProductReview[]
+
+  @@unique([retailOrgId, orderNo])
+  @@index([storeId, status, updatedAt])
+  @@index([customerAccountId, placedAt])
+  @@index([paymentStatus, updatedAt])
+  @@index([deliveryStatus, updatedAt])
+}
+
+model EcommercePayment {
+  id                  String                   @id @default(uuid())
+  ecommerceOrderId    String
+  tenderMethodId      String?
+  reference           String                   @unique
+  initializationRequestKey  String             @unique @db.NVarChar(160)
+  initializationRequestHash String             @db.NVarChar(64)
+  provider            String?
+  providerReference   String?
+  method              String
+  currencyCode        String
+  amount              Decimal                  @db.Decimal(18, 2)
+  status              String                   @default("PENDING")
+  checkoutUrl         String?                  @db.NVarChar(Max)
+  gatewayResponseJson String?                  @db.NVarChar(Max)
+  failureMessage      String?                  @db.NVarChar(Max)
+  initializedAt       DateTime                 @default(now())
+  verifiedAt          DateTime?
+  paidAt              DateTime?
+  failedAt            DateTime?
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  ecommerceOrder      EcommerceOrder           @relation(fields: [ecommerceOrderId], references: [id], onDelete: Cascade)
+  tenderMethod        TenderMethod?            @relation(fields: [tenderMethodId], references: [id], onDelete: SetNull)
+  refundRequests      EcommerceRefundRequest[]
+
+  @@index([ecommerceOrderId, status])
+  @@index([provider, providerReference])
+}
+
+model EcommerceStorePaymentMethod {
+  id             String       @id @default(uuid())
+  retailOrgId    String
+  storeId        String
+  tenderMethodId String
+  enabled        Boolean      @default(true)
+  sortOrder      Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  retailOrg      RetailOrg    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  store          Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  tenderMethod   TenderMethod @relation(fields: [tenderMethodId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, tenderMethodId])
+  @@index([retailOrgId, storeId, enabled, sortOrder])
+  @@index([tenderMethodId])
+}
+
+model EcommerceProductReview {
+  id                String                   @id @default(uuid())
+  retailOrgId       String
+  productId         String
+  customerAccountId String
+  ecommerceOrderId  String?
+  rating            Int
+  title             String?
+  body              String?                  @db.NVarChar(Max)
+  status            String                   @default("PUBLISHED")
+  verifiedPurchase  Boolean                  @default(true)
+  publishedAt       DateTime?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  retailOrg         RetailOrg                @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  product           Product                  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customerAccount   EcommerceCustomerAccount @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  ecommerceOrder    EcommerceOrder?          @relation(fields: [ecommerceOrderId], references: [id], onDelete: SetNull)
+
+  @@unique([productId, customerAccountId])
+  @@index([retailOrgId, productId, status, createdAt])
+  @@index([ecommerceOrderId])
+}
+
+model EcommerceRefundRequest {
+  id               String            @id @default(uuid())
+  ecommerceOrderId String
+  paymentId        String?
+  amount           Decimal           @db.Decimal(18, 2)
+  reason           String
+  details          String?           @db.NVarChar(Max)
+  status           String            @default("REQUESTED")
+  resolutionNote   String?           @db.NVarChar(Max)
+  requestedAt      DateTime          @default(now())
+  reviewedAt       DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  ecommerceOrder   EcommerceOrder    @relation(fields: [ecommerceOrderId], references: [id], onDelete: Cascade)
+  payment          EcommercePayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([ecommerceOrderId, status])
+  @@index([paymentId])
+}
+
+model EcommerceOrderStatusEvent {
+  id               String         @id @default(uuid())
+  ecommerceOrderId String
+  status           String
+  label            String
+  note             String?        @db.NVarChar(Max)
+  actorType        String         @default("SYSTEM")
+  actorLabel       String?
+  createdAt        DateTime       @default(now())
+  ecommerceOrder   EcommerceOrder @relation(fields: [ecommerceOrderId], references: [id], onDelete: Cascade)
+
+  @@index([ecommerceOrderId, createdAt])
 }
 
 model EodReconciliation {

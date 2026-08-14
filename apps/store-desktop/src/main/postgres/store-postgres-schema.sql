@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS product_snapshot (
   category_code TEXT,
   subcategory TEXT,
   unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  uom_conversions_json TEXT NOT NULL DEFAULT '[]',
   taxable INTEGER NOT NULL DEFAULT 1,
   tax_profile_code TEXT,
   tax_profile_name TEXT,
@@ -428,6 +430,10 @@ CREATE TABLE IF NOT EXISTS inter_store_transfer_snapshot (
   subcategory TEXT,
   is_serialized INTEGER NOT NULL DEFAULT 0,
   requested_quantity NUMERIC NOT NULL DEFAULT 0,
+  requested_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  requested_unit_quantity NUMERIC NOT NULL DEFAULT 0,
+  uom_conversion_factor NUMERIC NOT NULL DEFAULT 1,
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
   issued_quantity NUMERIC NOT NULL DEFAULT 0,
   received_quantity NUMERIC NOT NULL DEFAULT 0,
   outstanding_issue_quantity NUMERIC NOT NULL DEFAULT 0,
@@ -488,6 +494,10 @@ CREATE TABLE IF NOT EXISTS inter_store_transfer_request_draft (
   subcategory TEXT,
   is_serialized INTEGER NOT NULL DEFAULT 0,
   quantity NUMERIC NOT NULL,
+  requested_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  requested_unit_quantity NUMERIC NOT NULL DEFAULT 0,
+  uom_conversion_factor NUMERIC NOT NULL DEFAULT 1,
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
   external_reference TEXT,
   note TEXT,
   operator_name TEXT NOT NULL,
@@ -980,6 +990,16 @@ ALTER TABLE local_supplier_return_line ADD COLUMN IF NOT EXISTS batch_allocation
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS track_expiry INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS issued_batch_allocations_json TEXT;
 ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS received_batch_allocations_json TEXT;
+ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS base_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE product_snapshot ADD COLUMN IF NOT EXISTS uom_conversions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS requested_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS requested_unit_quantity NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS uom_conversion_factor NUMERIC NOT NULL DEFAULT 1;
+ALTER TABLE inter_store_transfer_snapshot ADD COLUMN IF NOT EXISTS base_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS requested_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
+ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS requested_unit_quantity NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS uom_conversion_factor NUMERIC NOT NULL DEFAULT 1;
+ALTER TABLE inter_store_transfer_request_draft ADD COLUMN IF NOT EXISTS base_unit_of_measure TEXT NOT NULL DEFAULT 'EA';
 ALTER TABLE stock_count_session ADD COLUMN IF NOT EXISTS previous_batch_quantities_json TEXT;
 ALTER TABLE stock_count_session ADD COLUMN IF NOT EXISTS counted_batch_quantities_json TEXT;
 ALTER TABLE pos_transaction_line ADD COLUMN IF NOT EXISTS batch_allocations_json TEXT;

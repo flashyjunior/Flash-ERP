@@ -48,6 +48,24 @@ const weekdayOptions = [
   { value: "SUNDAY", label: "Sunday" }
 ];
 
+function minutesToTimeValue(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "";
+  }
+
+  const minutes = Math.min(1439, Math.max(0, Math.trunc(value)));
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function timeValueToMinutes(value: string) {
+  const match = /^(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
 const emptyPromotion = (): CreateEnterprisePromotionRequest => ({
   promotionCode: "",
   name: "",
@@ -118,7 +136,7 @@ function DialogTextInput({
   label: string;
   value: string | number;
   onChange: (value: string) => void;
-  type?: "text" | "number" | "datetime-local";
+  type?: "text" | "number" | "time" | "datetime-local";
   disabled?: boolean;
 }) {
   return (
@@ -740,26 +758,26 @@ export function EnterprisePromotionPanel({
               value={promotionDraft.activeDaysOfWeek}
             />
             <DialogTextInput
-              label="Active from minute"
+              label="Active from time"
               onChange={(value) =>
                 setPromotionDraft((current) => ({
                   ...current,
-                  activeFromMinutes: value.trim() ? Number(value) : null
+                  activeFromMinutes: timeValueToMinutes(value)
                 }))
               }
-              type="number"
-              value={promotionDraft.activeFromMinutes ?? ""}
+              type="time"
+              value={minutesToTimeValue(promotionDraft.activeFromMinutes)}
             />
             <DialogTextInput
-              label="Active to minute"
+              label="Active to time"
               onChange={(value) =>
                 setPromotionDraft((current) => ({
                   ...current,
-                  activeToMinutes: value.trim() ? Number(value) : null
+                  activeToMinutes: timeValueToMinutes(value)
                 }))
               }
-              type="number"
-              value={promotionDraft.activeToMinutes ?? ""}
+              type="time"
+              value={minutesToTimeValue(promotionDraft.activeToMinutes)}
             />
             <DialogTextInput
               label="Coupon code"

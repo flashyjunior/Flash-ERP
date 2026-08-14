@@ -82,7 +82,8 @@ const onlineCashierPermissionCodes = [
 ] as const;
 
 const onlineSupervisorPermissionCodes = [
-  ...supervisorPermissionCodes
+  ...supervisorPermissionCodes,
+  "ecommerce.console.access"
 ] as const;
 
 async function ensurePermissionCatalog() {

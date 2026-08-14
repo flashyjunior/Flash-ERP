@@ -11,7 +11,10 @@ import type { SheetData } from "write-excel-file/browser";
 
 import retailLoginBackgroundUrl from "../assets/retail-login-bg.jpg";
 import { buildGoodsReceiptPrintWindowHtml } from "../shared/receipt-printing";
-import { computeNextStoreSyncAt } from "../shared/desktop-runtime";
+import {
+  computeNextStoreSyncAt,
+  resolveInventoryTransferUom,
+} from "../shared/desktop-runtime";
 import type {
   DesktopRuntimeApi,
   StoreBasketCheckoutPayment,
@@ -3163,6 +3166,7 @@ export function ModernDesktopApp() {
   const [transferDestinationLocation, setTransferDestinationLocation] =
     useState("");
   const [transferProductCode, setTransferProductCode] = useState("");
+  const [transferUnitOfMeasure, setTransferUnitOfMeasure] = useState("");
   const [transferQuantity, setTransferQuantity] = useState("1");
   const [remoteInventoryQuery, setRemoteInventoryQuery] = useState("");
   const [remoteInventoryStoreFilter, setRemoteInventoryStoreFilter] =
@@ -6685,6 +6689,7 @@ export function ModernDesktopApp() {
     destinationLocationCode?: string;
     productCode?: string;
     quantity?: number;
+    unitOfMeasure?: string | null;
     externalReference?: string | null;
     note?: string | null;
   }): Promise<boolean> {
@@ -6705,6 +6710,8 @@ export function ModernDesktopApp() {
           input?.destinationLocationCode ?? transferDestinationLocation,
         productCode: nextProductCode.toUpperCase(),
         quantity: nextQuantity,
+        unitOfMeasure:
+          input?.unitOfMeasure ?? (transferUnitOfMeasure || null),
         externalReference: input?.externalReference ?? null,
         note: input?.note ?? null,
         operatorName: operatorName ?? undefined,
@@ -8168,6 +8175,7 @@ export function ModernDesktopApp() {
             createTransferRequest={createTransferRequest}
             inventorySerialDraft={inventorySerialDraft}
             inventoryItems={inventoryItems}
+            catalogItems={catalogItems}
             inventoryLocation={inventoryLocation}
             inventoryQuery={inventoryQuery}
             issueInterStoreTransfer={issueInterStoreTransfer}
@@ -8204,6 +8212,7 @@ export function ModernDesktopApp() {
             setStockCountRows={setStockCountRows}
             setTransferDestinationLocation={setTransferDestinationLocation}
             setTransferProductCode={setTransferProductCode}
+            setTransferUnitOfMeasure={setTransferUnitOfMeasure}
             setTransferQuantity={setTransferQuantity}
             setTransferSourceLocation={setTransferSourceLocation}
             snapshot={snapshot}
@@ -8213,6 +8222,7 @@ export function ModernDesktopApp() {
             stockCountRows={stockCountRows}
             transferDestinationLocation={transferDestinationLocation}
             transferProductCode={transferProductCode}
+            transferUnitOfMeasure={transferUnitOfMeasure}
             transferQuantity={transferQuantity}
             transferSourceLocation={transferSourceLocation}
             transfers={transfers}
@@ -18422,12 +18432,13 @@ function ReportsLandingWorkspace(props: {
   );
 }
 
-type PosSettingsTab = "sizes" | "discounts" | "express-charges" | "options";
+type PosSettingsTab = "sizes" | "discounts" | "express-charges" | "layaway" | "options";
 
 const posSettingsTabs: Array<{ id: PosSettingsTab; label: string }> = [
   { id: "sizes", label: "Product sizes" },
   { id: "discounts", label: "POS discounts" },
   { id: "express-charges", label: "Express charges" },
+  { id: "layaway", label: "Layaway" },
   { id: "options", label: "Options" },
 ];
 
@@ -18513,6 +18524,17 @@ function StorePosSettingsWorkspace({
   const [sizeDraft, setSizeDraft] = useState<string[]>(productSizes);
   const [discountDraft, setDiscountDraft] = useState<number[]>(discountRates);
   const [expressDraft, setExpressDraft] = useState<number[]>(expressRates);
+  const [layawayDraft, setLayawayDraft] = useState(
+    settings?.layawaySettings ?? {
+      enabled: false,
+      reserveStockOnDeposit: true,
+      minimumDepositPercent: 20,
+      requireFullPaymentBeforeFulfilment: true,
+      refundPaymentsOnCancellation: true,
+      cancellationFeeType: "PERCENTAGE" as const,
+      cancellationFeeValue: 0,
+    },
+  );
   const [entryDraft, setEntryDraft] = useState("");
   const [optionDraft, setOptionDraft] = useState(() => ({
     allowNegativeInventory: settings?.allowNegativeInventory ?? false,
@@ -18541,6 +18563,7 @@ function StorePosSettingsWorkspace({
     setSizeDraft(settings.productSizes);
     setDiscountDraft(settings.posDiscountRates);
     setExpressDraft(settings.posExpressChargeRates);
+    setLayawayDraft(settings.layawaySettings);
     setOptionDraft({
       allowNegativeInventory: settings.allowNegativeInventory,
       allowOfflineSales: settings.allowOfflineSales,
@@ -19046,6 +19069,112 @@ function StorePosSettingsWorkspace({
               ))}
             </div>
           ) : null}
+
+          {settings && activeTab === "layaway" && standalone ? (
+            <div className="rms-settings-editor">
+              <div className="rms-settings-option-grid">
+                {[
+                  ["enabled", "Enable layaway"],
+                  ["reserveStockOnDeposit", "Reserve stock when deposit is accepted"],
+                  ["requireFullPaymentBeforeFulfilment", "Require full payment before fulfilment"],
+                  ["refundPaymentsOnCancellation", "Refund payments on cancellation"],
+                ].map(([key, label]) => (
+                  <label className="rms-settings-option-toggle" key={key}>
+                    <input
+                      checked={Boolean(layawayDraft[key as keyof typeof layawayDraft])}
+                      onChange={(event) =>
+                        setLayawayDraft((current) => ({
+                          ...current,
+                          [key]: event.target.checked,
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                    <span><strong>{label}</strong></span>
+                  </label>
+                ))}
+                <label className="rms-settings-number-field">
+                  <span>Minimum deposit percent</span>
+                  <input
+                    max={100}
+                    min={0}
+                    onChange={(event) =>
+                      setLayawayDraft((current) => ({
+                        ...current,
+                        minimumDepositPercent: Number(event.target.value),
+                      }))
+                    }
+                    step={0.01}
+                    type="number"
+                    value={layawayDraft.minimumDepositPercent}
+                  />
+                </label>
+                <label className="rms-settings-number-field">
+                  <span>Cancellation fee method</span>
+                  <select
+                    disabled={!layawayDraft.refundPaymentsOnCancellation}
+                    onChange={(event) =>
+                      setLayawayDraft((current) => ({
+                        ...current,
+                        cancellationFeeType:
+                          event.target.value === "FIXED_AMOUNT" ? "FIXED_AMOUNT" : "PERCENTAGE",
+                      }))
+                    }
+                    value={layawayDraft.cancellationFeeType}
+                  >
+                    <option value="PERCENTAGE">Percentage of payments</option>
+                    <option value="FIXED_AMOUNT">Fixed amount</option>
+                  </select>
+                </label>
+                <label className="rms-settings-number-field">
+                  <span>{layawayDraft.cancellationFeeType === "PERCENTAGE" ? "Cancellation fee percent" : "Cancellation fee amount"}</span>
+                  <input
+                    disabled={!layawayDraft.refundPaymentsOnCancellation}
+                    max={layawayDraft.cancellationFeeType === "PERCENTAGE" ? 100 : undefined}
+                    min={0}
+                    onChange={(event) =>
+                      setLayawayDraft((current) => ({
+                        ...current,
+                        cancellationFeeValue: Number(event.target.value),
+                      }))
+                    }
+                    step={0.01}
+                    type="number"
+                    value={layawayDraft.cancellationFeeValue}
+                  />
+                </label>
+              </div>
+              <div className="rms-settings-form-actions">
+                <button
+                  className="rms-button is-primary"
+                  disabled={isBusy}
+                  onClick={() =>
+                    void runAction((runtime) =>
+                      runtime.saveStandaloneSettings({ layawaySettings: layawayDraft }),
+                    )
+                  }
+                  type="button"
+                >
+                  Save layaway policy
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {settings && activeTab === "layaway" && !standalone ? (
+            <div className="rms-list rms-settings-list">
+              {[
+                ["Layaway", formatToggleSetting(settings.layawaySettings.enabled)],
+                ["Reserve stock on deposit", formatToggleSetting(settings.layawaySettings.reserveStockOnDeposit)],
+                ["Minimum deposit", `${formatNumber(settings.layawaySettings.minimumDepositPercent)}%`],
+                ["Full payment before fulfilment", formatToggleSetting(settings.layawaySettings.requireFullPaymentBeforeFulfilment)],
+                ["Refund payments on cancellation", formatToggleSetting(settings.layawaySettings.refundPaymentsOnCancellation)],
+                ["Cancellation fee", settings.layawaySettings.cancellationFeeType === "PERCENTAGE" ? `${formatNumber(settings.layawaySettings.cancellationFeeValue)}%` : formatMoney(settings.layawaySettings.cancellationFeeValue)],
+              ].map(([label, value]) => (
+                <ReadonlySettingRow key={label} label={label} value={value} />
+              ))}
+            </div>
+          ) : null}
         </section>
       </div>
     </div>
@@ -19237,6 +19366,7 @@ function ReportsView(props: {
 
 function InventoryWorkspace(props: {
   snapshot: StoreSyncSnapshot | null;
+  catalogItems: StoreCatalogBrowseItem[];
   inventoryItems: StoreInventoryBrowseItem[];
   purchaseOrders: StorePurchaseOrderSummary[];
   transfers: StoreInterStoreTransferSummary[];
@@ -19256,6 +19386,7 @@ function InventoryWorkspace(props: {
   transferSourceLocation: string;
   transferDestinationLocation: string;
   transferProductCode: string;
+  transferUnitOfMeasure: string;
   transferQuantity: string;
   setInventoryQuery: (value: string) => void;
   setInventoryLocation: (value: string) => void;
@@ -19270,6 +19401,7 @@ function InventoryWorkspace(props: {
   setTransferSourceLocation: (value: string) => void;
   setTransferDestinationLocation: (value: string) => void;
   setTransferProductCode: (value: string) => void;
+  setTransferUnitOfMeasure: (value: string) => void;
   setTransferQuantity: (value: string) => void;
   setError: (value: string | null) => void;
   setInventorySerialDraft: Dispatch<
@@ -19296,6 +19428,7 @@ function InventoryWorkspace(props: {
     destinationLocationCode?: string;
     productCode?: string;
     quantity?: number;
+    unitOfMeasure?: string | null;
     externalReference?: string | null;
     note?: string | null;
   }) => Promise<boolean>;
@@ -19405,6 +19538,10 @@ function InventoryWorkspace(props: {
       productCode: string;
       productName: string;
       quantity: number;
+      requestedUnitOfMeasure: string;
+      uomConversionFactor: number;
+      baseUnitOfMeasure: string;
+      baseQuantity: number;
       unitPrice: number;
     }>
   >([]);
@@ -19561,14 +19698,37 @@ function InventoryWorkspace(props: {
   ]);
   const requestableProducts = Array.from(
     new Map(
-      props.inventoryItems.map((item) => [
-        item.productCode,
-        {
+      props.inventoryItems.map((item) => {
+        const catalogItem = props.catalogItems.find(
+          (candidate) => candidate.productCode === item.productCode,
+        );
+        const baseUnitOfMeasure =
+          catalogItem?.baseUnitOfMeasure || catalogItem?.unitOfMeasure || "EA";
+        const uomConversions = catalogItem?.uomConversions?.length
+          ? catalogItem.uomConversions
+          : [
+              {
+                uomCode: baseUnitOfMeasure,
+                uomName: baseUnitOfMeasure,
+                conversionFactor: 1,
+                isBaseUnit: true,
+                allowSale: true,
+                allowPurchase: true,
+              },
+            ];
+
+        return [
+          item.productCode,
+          {
           productCode: item.productCode,
           productName: item.productName,
           unitPrice: item.unitPrice,
-        },
-      ]),
+            unitOfMeasure: catalogItem?.unitOfMeasure ?? baseUnitOfMeasure,
+            baseUnitOfMeasure,
+            uomConversions,
+          },
+        ] as const;
+      }),
     ).values(),
   ).sort((left, right) => left.productName.localeCompare(right.productName));
   const selectedTransferProduct = requestableProducts.find(
@@ -19833,6 +19993,14 @@ function InventoryWorkspace(props: {
       return;
     }
 
+    const transferUom = resolveInventoryTransferUom({
+      enteredQuantity: quantity,
+      requestedUnitOfMeasure: props.transferUnitOfMeasure,
+      unitOfMeasure: selectedTransferProduct.unitOfMeasure,
+      baseUnitOfMeasure: selectedTransferProduct.baseUnitOfMeasure,
+      uomConversions: selectedTransferProduct.uomConversions,
+    });
+
     setTransferRequestLines((currentLines) => [
       ...currentLines.filter(
         (line) => line.productCode !== selectedTransferProduct.productCode,
@@ -19842,10 +20010,15 @@ function InventoryWorkspace(props: {
         productCode: selectedTransferProduct.productCode,
         productName: selectedTransferProduct.productName,
         quantity,
+        requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+        uomConversionFactor: transferUom.uomConversionFactor,
+        baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
+        baseQuantity: transferUom.baseQuantity,
         unitPrice: selectedTransferProduct.unitPrice,
       },
     ]);
     props.setTransferProductCode("");
+    props.setTransferUnitOfMeasure("");
     props.setTransferQuantity("1");
   }
 
@@ -20003,6 +20176,7 @@ function InventoryWorkspace(props: {
         destinationLocationCode: props.transferDestinationLocation,
         productCode: line.productCode,
         quantity: line.quantity,
+        unitOfMeasure: line.requestedUnitOfMeasure,
         externalReference: transferRequestReference.trim() || null,
         note: note || null,
       });
@@ -22065,9 +22239,18 @@ function InventoryWorkspace(props: {
                     <label>
                       <span>Item</span>
                       <select
-                        onChange={(event) =>
-                          props.setTransferProductCode(event.target.value)
-                        }
+                        onChange={(event) => {
+                          const productCode = event.target.value;
+                          const product = requestableProducts.find(
+                            (item) => item.productCode === productCode,
+                          );
+                          props.setTransferProductCode(productCode);
+                          props.setTransferUnitOfMeasure(
+                            product?.baseUnitOfMeasure ||
+                              product?.unitOfMeasure ||
+                              "",
+                          );
+                        }}
                         value={props.transferProductCode}
                       >
                         <option value="">Select item</option>
@@ -22077,6 +22260,41 @@ function InventoryWorkspace(props: {
                             value={item.productCode}
                           >
                             {item.productName} · {item.productCode}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Unit</span>
+                      <select
+                        disabled={!selectedTransferProduct}
+                        onChange={(event) =>
+                          props.setTransferUnitOfMeasure(event.target.value)
+                        }
+                        value={props.transferUnitOfMeasure}
+                      >
+                        {(selectedTransferProduct?.uomConversions.length
+                          ? selectedTransferProduct.uomConversions
+                          : selectedTransferProduct
+                            ? [
+                                {
+                                  uomCode:
+                                    selectedTransferProduct.baseUnitOfMeasure,
+                                  uomName:
+                                    selectedTransferProduct.baseUnitOfMeasure,
+                                  conversionFactor: 1,
+                                  isBaseUnit: true,
+                                  allowSale: true,
+                                  allowPurchase: true,
+                                },
+                              ]
+                            : []
+                        ).map((uom) => (
+                          <option key={uom.uomCode} value={uom.uomCode}>
+                            {uom.uomName} ({uom.uomCode})
+                            {uom.conversionFactor !== 1
+                              ? ` = ${formatNumber(uom.conversionFactor)} ${selectedTransferProduct?.baseUnitOfMeasure}`
+                              : ""}
                           </option>
                         ))}
                       </select>
@@ -22117,7 +22335,14 @@ function InventoryWorkspace(props: {
                         <div className="rms-table-row" key={line.id}>
                           <strong>{line.productName}</strong>
                           <span>{line.productCode}</span>
-                          <span>{formatNumber(line.quantity)}</span>
+                          <span>
+                            {formatNumber(line.quantity)} {line.requestedUnitOfMeasure}
+                            {line.uomConversionFactor !== 1 ? (
+                              <small>
+                                {` = ${formatNumber(line.baseQuantity)} ${line.baseUnitOfMeasure}`}
+                              </small>
+                            ) : null}
+                          </span>
                           <button
                             className="rms-row-button"
                             onClick={() =>
@@ -22150,12 +22375,12 @@ function InventoryWorkspace(props: {
                 />
                 <Stat
                   label="Request qty"
-                  value={formatNumber(
+                  value={`${formatNumber(
                     transferRequestLines.reduce(
-                      (sum, line) => sum + line.quantity,
+                      (sum, line) => sum + line.baseQuantity,
                       0,
                     ),
-                  )}
+                  )} base unit(s)`}
                 />
                 <Stat
                   label="Date required"

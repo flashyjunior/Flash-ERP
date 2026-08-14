@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/db/prisma";
+import { isEnterpriseSqlServerDatabase, prisma } from "@/lib/db/prisma";
 
 let interStoreTransferSchemaReady: Promise<void> | null = null;
 let permissionCatalogSchemaReady: Promise<void> | null = null;
@@ -7,13 +7,9 @@ let productVariantSalesOrderDepositSchemaReady: Promise<void> | null = null;
 let operatingExpenseSchemaReady: Promise<void> | null = null;
 let inventoryExpirySchemaReady: Promise<void> | null = null;
 
-function isSqlServerDatabase() {
-  return (process.env.DATABASE_URL ?? "").trim().toLowerCase().startsWith("sqlserver://");
-}
-
 export function ensureInterStoreTransferSchemaCompatibility() {
   interStoreTransferSchemaReady ??= (async () => {
-    if (isSqlServerDatabase()) {
+    if (isEnterpriseSqlServerDatabase()) {
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InterStoreTransfer', N'transferBatchNo') IS NULL
         BEGIN
@@ -66,6 +62,46 @@ export function ensureInterStoreTransferSchemaCompatibility() {
         BEGIN
           ALTER TABLE [dbo].[InterStoreTransfer] ADD [deliveryNoteNo] NVARCHAR(1000) NULL;
         END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'requestedUnitOfMeasure') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer]
+            ADD [requestedUnitOfMeasure] NVARCHAR(1000) NOT NULL
+              CONSTRAINT [InterStoreTransfer_requestedUnitOfMeasure_df] DEFAULT N'EA';
+        END
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'requestedUnitQuantity') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer]
+            ADD [requestedUnitQuantity] DECIMAL(18, 3) NOT NULL
+              CONSTRAINT [InterStoreTransfer_requestedUnitQuantity_df] DEFAULT 0;
+          UPDATE [dbo].[InterStoreTransfer]
+            SET [requestedUnitQuantity] = [requestedQuantity];
+        END
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'uomConversionFactor') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer]
+            ADD [uomConversionFactor] DECIMAL(18, 6) NOT NULL
+              CONSTRAINT [InterStoreTransfer_uomConversionFactor_df] DEFAULT 1;
+        END
+        IF COL_LENGTH(N'dbo.InterStoreTransfer', N'baseUnitOfMeasure') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[InterStoreTransfer]
+            ADD [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL
+              CONSTRAINT [InterStoreTransfer_baseUnitOfMeasure_df] DEFAULT N'EA';
+        END
+        UPDATE transferRow
+          SET [requestedUnitOfMeasure] = product.[unitOfMeasure],
+              [baseUnitOfMeasure] = product.[unitOfMeasure],
+              [requestedUnitQuantity] = CASE
+                WHEN transferRow.[requestedUnitQuantity] <= 0 THEN transferRow.[requestedQuantity]
+                ELSE transferRow.[requestedUnitQuantity]
+              END
+        FROM [dbo].[InterStoreTransfer] AS transferRow
+        INNER JOIN [dbo].[Product] AS product ON product.[id] = transferRow.[productId]
+        WHERE transferRow.[requestedUnitOfMeasure] = N'EA'
+          AND transferRow.[baseUnitOfMeasure] = N'EA'
+          AND product.[unitOfMeasure] <> N'EA';
       `);
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InterStoreTransfer', N'feedbackDipReading') IS NULL
@@ -132,6 +168,35 @@ export function ensureInterStoreTransferSchemaCompatibility() {
         'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "deliveryNoteNo" TEXT'
       );
       await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "requestedUnitOfMeasure" TEXT NOT NULL DEFAULT \'EA\''
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "requestedUnitQuantity" DECIMAL(18,3) NOT NULL DEFAULT 0'
+      );
+      await prisma.$executeRawUnsafe(
+        'UPDATE "InterStoreTransfer" SET "requestedUnitQuantity" = "requestedQuantity" WHERE "requestedUnitQuantity" <= 0'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "uomConversionFactor" DECIMAL(18,6) NOT NULL DEFAULT 1'
+      );
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "baseUnitOfMeasure" TEXT NOT NULL DEFAULT \'EA\''
+      );
+      await prisma.$executeRawUnsafe(`
+        UPDATE "InterStoreTransfer" AS transfer_row
+        SET "requestedUnitOfMeasure" = product."unitOfMeasure",
+            "baseUnitOfMeasure" = product."unitOfMeasure",
+            "requestedUnitQuantity" = CASE
+              WHEN transfer_row."requestedUnitQuantity" <= 0 THEN transfer_row."requestedQuantity"
+              ELSE transfer_row."requestedUnitQuantity"
+            END
+        FROM "Product" AS product
+        WHERE product."id" = transfer_row."productId"
+          AND transfer_row."requestedUnitOfMeasure" = 'EA'
+          AND transfer_row."baseUnitOfMeasure" = 'EA'
+          AND product."unitOfMeasure" <> 'EA'
+      `);
+      await prisma.$executeRawUnsafe(
         'ALTER TABLE "InterStoreTransfer" ADD COLUMN IF NOT EXISTS "feedbackDipReading" DECIMAL(18,3)'
       );
       await prisma.$executeRawUnsafe(
@@ -154,7 +219,7 @@ export function ensureInterStoreTransferSchemaCompatibility() {
 
 export function ensureOperatingExpenseSchemaCompatibility() {
   operatingExpenseSchemaReady ??= (async () => {
-    if (isSqlServerDatabase()) {
+    if (isEnterpriseSqlServerDatabase()) {
       const columns = [
         ["attachmentFileName", "NVARCHAR(1000) NULL"],
         ["attachmentUrl", "NVARCHAR(1000) NULL"],
@@ -210,7 +275,7 @@ export function ensureOperatingExpenseSchemaCompatibility() {
 
 export function ensurePermissionCatalogSchemaCompatibility() {
   permissionCatalogSchemaReady ??= (async () => {
-    if (isSqlServerDatabase()) {
+    if (isEnterpriseSqlServerDatabase()) {
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.Permission', N'name') IS NULL
         BEGIN
@@ -255,7 +320,7 @@ export function ensurePermissionCatalogSchemaCompatibility() {
 
 export function ensureInventoryLocationSalesOrderSchemaCompatibility() {
   inventoryLocationSalesOrderSchemaReady ??= (async () => {
-    if (isSqlServerDatabase()) {
+    if (isEnterpriseSqlServerDatabase()) {
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.InventoryLocation', N'useForSalesOrderDefault') IS NULL
         BEGIN
@@ -359,7 +424,7 @@ export function ensureInventoryLocationSalesOrderSchemaCompatibility() {
 
 export function ensureProductVariantSalesOrderDepositSchemaCompatibility() {
   productVariantSalesOrderDepositSchemaReady ??= (async () => {
-    if (isSqlServerDatabase()) {
+    if (isEnterpriseSqlServerDatabase()) {
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.Product', N'trackSize') IS NULL
         BEGIN
@@ -689,7 +754,7 @@ export function ensureProductVariantSalesOrderDepositSchemaCompatibility() {
 
 export function ensureInventoryExpirySchemaCompatibility() {
   inventoryExpirySchemaReady ??= (async () => {
-    if (isSqlServerDatabase()) {
+    if (isEnterpriseSqlServerDatabase()) {
       await prisma.$executeRawUnsafe(`
         IF COL_LENGTH(N'dbo.Product', N'trackExpiry') IS NULL
         BEGIN
