@@ -385,7 +385,7 @@ export function EnterpriseInventoryWorkspace({
     tone: "idle" | "success" | "error";
     message: string;
   }>({ tone: "idle", message: "" });
-  const [transferSourceLocation, setTransferSourceLocation] = useState("");
+  const [transferSourceStore, setTransferSourceStore] = useState("");
   const [transferDestinationLocation, setTransferDestinationLocation] = useState("");
   const [transferProductCode, setTransferProductCode] = useState("");
   const [transferQuantity, setTransferQuantity] = useState("1");
@@ -625,6 +625,20 @@ export function EnterpriseInventoryWorkspace({
         .sort((left, right) => left.label.localeCompare(right.label)),
     [workspace.transferLocationOptions]
   );
+  const interStoreSourceShopOptions = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          workspace.transferLocationOptions.map((row) => [
+            row.storeCode,
+            row.storeName
+          ] as const)
+        ).entries()
+      )
+        .map(([value, label]) => ({ value, label }))
+        .sort((left, right) => left.label.localeCompare(right.label)),
+    [workspace.transferLocationOptions]
+  );
   const interStoreProductOptions = useMemo(
     () =>
       workspace.transferProductOptions
@@ -687,8 +701,8 @@ export function EnterpriseInventoryWorkspace({
   const selectedTransferUom = selectedTransferProduct?.uomConversions.find(
     (option) => option.uomCode === transferUnitOfMeasure
   );
-  const selectedSourceLocation = interStoreLocationOptions.find(
-    (option) => option.value === transferSourceLocation
+  const selectedSourceStore = interStoreSourceShopOptions.find(
+    (option) => option.value === transferSourceStore
   );
   const selectedDestinationLocation = interStoreLocationOptions.find(
     (option) => option.value === transferDestinationLocation
@@ -723,17 +737,15 @@ export function EnterpriseInventoryWorkspace({
     ? "Transfer request is already saving."
     : isTransferFeedbackFinal
       ? "This transfer already has confirmed filling-station feedback, so it is read-only."
-    : !transferSourceLocation
-      ? "Choose the source shop/location."
+    : !transferSourceStore
+      ? "Choose the source shop."
         : !transferDestinationLocation
           ? "Choose the destination shop/location."
-          : !selectedSourceLocation
-            ? "Choose a valid source shop/location."
+          : !selectedSourceStore
+            ? "Choose a valid source shop."
             : !selectedDestinationLocation
               ? "Choose a valid destination shop/location."
-              : transferSourceLocation === transferDestinationLocation
-                ? "Source and destination locations must be different."
-                : selectedSourceLocation.storeCode === selectedDestinationLocation.storeCode
+              : selectedSourceStore.value === selectedDestinationLocation.storeCode
                   ? "Inter-store transfers need different source and destination shops. Use the local inter-location transfer flow for locations inside the same shop."
                   : transferLines.length === 0
                     ? "Add at least one item line before saving."
@@ -816,7 +828,7 @@ export function EnterpriseInventoryWorkspace({
 
   function resetTransferDraft() {
     setEditingTransferBatchNo(null);
-    setTransferSourceLocation("");
+    setTransferSourceStore("");
     setTransferDestinationLocation("");
     setTransferProductCode("");
     setTransferQuantity("1");
@@ -846,7 +858,7 @@ export function EnterpriseInventoryWorkspace({
       .sort((left, right) => left.lineNo - right.lineNo);
 
     setEditingTransferBatchNo(transferBatchNo);
-    setTransferSourceLocation(row.sourceLocationCode);
+    setTransferSourceStore(row.sourceStoreCode);
     setTransferDestinationLocation(row.destinationLocationCode);
     setTransferReference(row.externalReference ?? "");
     setTransferNote("");
@@ -1081,7 +1093,7 @@ export function EnterpriseInventoryWorkspace({
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          sourceLocationCode: transferSourceLocation,
+          sourceStoreCode: transferSourceStore,
           destinationLocationCode: transferDestinationLocation,
           externalReference: transferReference.trim() || null,
           transporterName: transferTransporterName.trim() || null,
@@ -1432,7 +1444,10 @@ export function EnterpriseInventoryWorkspace({
           <div className="min-w-0">
             <p className="truncate font-medium text-stone-900">{row.original.sourceStoreName}</p>
             <p className="truncate text-xs text-stone-500">
-              {row.original.sourceLocationName} ({row.original.sourceLocationCode})
+              {row.original.sourceLocationName}
+              {row.original.sourceLocationCode
+                ? ` (${row.original.sourceLocationCode})`
+                : ""}
             </p>
           </div>
         ),
@@ -2004,15 +2019,15 @@ export function EnterpriseInventoryWorkspace({
             {activeTransferEntryTab === "header" ? (
               <div className="grid gap-3 lg:grid-cols-3">
                 <label className="grid gap-1 text-sm font-semibold text-stone-700">
-                  Ship from
+                  Source shop
                   <select
                     className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
                     disabled={isTransferHeaderLocked || isTransferCommitted}
-                    onChange={(event) => setTransferSourceLocation(event.target.value)}
-                    value={transferSourceLocation}
+                    onChange={(event) => setTransferSourceStore(event.target.value)}
+                    value={transferSourceStore}
                   >
-                    <option value="">Source shop/location</option>
-                    {interStoreLocationOptions.map((option) => (
+                    <option value="">Select source shop</option>
+                    {interStoreSourceShopOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
@@ -2887,7 +2902,11 @@ export function EnterpriseInventoryWorkspace({
               data={interStoreTransferHeaderRows}
               emptyLabel="No inter-store transfer instructions are available yet."
               exportFileName="flash-erp-inter-store-transfers"
-              getRowHref={(row) => `/inventory/locations/${encodeURIComponent(row.sourceLocationCode)}`}
+              getRowHref={(row) =>
+                row.sourceLocationCode
+                  ? `/inventory/locations/${encodeURIComponent(row.sourceLocationCode)}`
+                  : null
+              }
               globalFilterFn={interStoreTransferFilter}
               initialPageSize={25}
               pageSizeOptions={[25, 50, 100]}

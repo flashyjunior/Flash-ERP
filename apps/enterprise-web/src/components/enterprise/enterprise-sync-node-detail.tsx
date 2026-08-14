@@ -146,7 +146,8 @@ const downstreamFilter: FilterFn<DownstreamRow> = (row, _columnId, filterValue) 
     row.original.aggregateId,
     row.original.status,
     row.original.idempotencyKey,
-    row.original.diagnosticSummary
+    row.original.diagnosticSummary,
+    row.original.errorMessage ?? ""
   ]
     .join(" ")
     .toLowerCase()
@@ -350,7 +351,17 @@ export function EnterpriseSyncNodeDetail({
       {
         accessorKey: "payloadPreview",
         header: "Details",
-        cell: ({ row }) => <PayloadPreview value={row.original.payloadPreview} />,
+        cell: ({ row }) => (
+          <div className="min-w-0 space-y-2">
+            {row.original.errorMessage ? (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-800">
+                <span className="block font-semibold">Failure reason</span>
+                <span className="break-words">{row.original.errorMessage}</span>
+              </div>
+            ) : null}
+            <PayloadPreview value={row.original.payloadPreview} />
+          </div>
+        ),
         meta: {
           disableTruncate: true
         }
@@ -358,7 +369,14 @@ export function EnterpriseSyncNodeDetail({
       {
         accessorKey: "status",
         header: "Status",
-        cell: ({ row }) => <StatusBadge value={row.original.status} />,
+        cell: ({ row }) => (
+          <div className="space-y-1">
+            <StatusBadge value={row.original.status} />
+            <p className="text-xs text-stone-500">
+              {row.original.attemptCount} {row.original.attemptCount === 1 ? "attempt" : "attempts"}
+            </p>
+          </div>
+        ),
         meta: {
           disableTruncate: true
         }
@@ -1208,8 +1226,14 @@ export function EnterpriseSyncNodeDetail({
                         </p>
                         <p className="mt-1 text-xs">
                           {toLabel(row.status)} • Created {row.createdAtLabel} • Last attempt{" "}
-                          {row.lastAttemptAtLabel}
+                          {row.lastAttemptAtLabel} • {row.attemptCount} {row.attemptCount === 1 ? "attempt" : "attempts"}
                         </p>
+                        {row.errorMessage ? (
+                          <div className="mt-2 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-medium text-rose-900">
+                            <span className="block font-semibold">Failure reason</span>
+                            <span className="break-words">{row.errorMessage}</span>
+                          </div>
+                        ) : null}
                         <PayloadPreview value={row.payloadPreview} />
                         <div className="mt-3">
                           <button

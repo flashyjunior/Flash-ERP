@@ -1,18 +1,42 @@
-ALTER TABLE "InterStoreTransfer"
-  ADD COLUMN IF NOT EXISTS "requestedUnitOfMeasure" TEXT NOT NULL DEFAULT 'EA',
-  ADD COLUMN IF NOT EXISTS "requestedUnitQuantity" DECIMAL(18,3) NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS "uomConversionFactor" DECIMAL(18,6) NOT NULL DEFAULT 1,
-  ADD COLUMN IF NOT EXISTS "baseUnitOfMeasure" TEXT NOT NULL DEFAULT 'EA';
+IF COL_LENGTH(N'dbo.InterStoreTransfer', N'requestedUnitOfMeasure') IS NULL
+BEGIN
+  ALTER TABLE [dbo].[InterStoreTransfer]
+    ADD [requestedUnitOfMeasure] NVARCHAR(1000) NOT NULL
+      CONSTRAINT [InterStoreTransfer_requestedUnitOfMeasure_df] DEFAULT N'EA';
+END;
 
-UPDATE "InterStoreTransfer"
-SET "requestedUnitQuantity" = "requestedQuantity"
-WHERE "requestedUnitQuantity" <= 0;
+IF COL_LENGTH(N'dbo.InterStoreTransfer', N'requestedUnitQuantity') IS NULL
+BEGIN
+  ALTER TABLE [dbo].[InterStoreTransfer]
+    ADD [requestedUnitQuantity] DECIMAL(18, 3) NOT NULL
+      CONSTRAINT [InterStoreTransfer_requestedUnitQuantity_df] DEFAULT 0;
+END;
 
-UPDATE "InterStoreTransfer" AS transfer_row
-SET "requestedUnitOfMeasure" = product."unitOfMeasure",
-    "baseUnitOfMeasure" = product."unitOfMeasure"
-FROM "Product" AS product
-WHERE product."id" = transfer_row."productId"
-  AND transfer_row."requestedUnitOfMeasure" = 'EA'
-  AND transfer_row."baseUnitOfMeasure" = 'EA'
-  AND product."unitOfMeasure" <> 'EA';
+IF COL_LENGTH(N'dbo.InterStoreTransfer', N'uomConversionFactor') IS NULL
+BEGIN
+  ALTER TABLE [dbo].[InterStoreTransfer]
+    ADD [uomConversionFactor] DECIMAL(18, 6) NOT NULL
+      CONSTRAINT [InterStoreTransfer_uomConversionFactor_df] DEFAULT 1;
+END;
+
+IF COL_LENGTH(N'dbo.InterStoreTransfer', N'baseUnitOfMeasure') IS NULL
+BEGIN
+  ALTER TABLE [dbo].[InterStoreTransfer]
+    ADD [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL
+      CONSTRAINT [InterStoreTransfer_baseUnitOfMeasure_df] DEFAULT N'EA';
+END;
+
+EXEC(N'
+  UPDATE transferRow
+    SET [requestedUnitOfMeasure] = product.[unitOfMeasure],
+        [baseUnitOfMeasure] = product.[unitOfMeasure],
+        [requestedUnitQuantity] = CASE
+          WHEN transferRow.[requestedUnitQuantity] <= 0 THEN transferRow.[requestedQuantity]
+          ELSE transferRow.[requestedUnitQuantity]
+        END
+  FROM [dbo].[InterStoreTransfer] AS transferRow
+  INNER JOIN [dbo].[Product] AS product ON product.[id] = transferRow.[productId]
+  WHERE transferRow.[requestedUnitOfMeasure] = N''EA''
+    AND transferRow.[baseUnitOfMeasure] = N''EA''
+    AND product.[unitOfMeasure] <> N''EA'';
+');

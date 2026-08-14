@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 
 import { Prisma } from "@prisma/client";
+import {
+  calculateLayawayAvailableBaseQuantity,
+  normalizeLayawaySettings,
+} from "@flash-erp/domain";
 
 import { prisma } from "@/lib/db/prisma";
 import {
@@ -12,8 +16,10 @@ import {
   isUniqueConstraintError,
   requireEcommerceIdempotencyKey
 } from "@/server/ecommerce/ecommerce-idempotency";
+import { postLayawayAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
 
 type SupportedGateway = "PAYSTACK" | "FLUTTERWAVE";
+const ecommerceTerminalCode = "ecommerce-web";
 
 function optionalText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -21,6 +27,183 @@ function optionalText(value: unknown) {
 
 function toMoney(value: number) {
   return Number((Number.isFinite(value) ? value : 0).toFixed(2));
+}
+
+function toQuantity(value: number | Prisma.Decimal | null | undefined) {
+  return Number(Number(value ?? 0).toFixed(3));
+}
+
+function readJsonObject(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function activateEcommerceLayawayReservation(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    storeId: string;
+    salesOrderId: string;
+    reservationStatus: string;
+    layawayPolicySnapshotJson: string | null;
+    lines: Array<{
+      id: string;
+      productCodeSnapshot: string;
+      productVariantCodeSnapshot: string | null;
+      baseUnitOfMeasure: string;
+      baseQuantity: Prisma.Decimal;
+    }>;
+  },
+) {
+  if (input.reservationStatus === "ACTIVE") return "ACTIVE";
+  const policy = normalizeLayawaySettings(
+    readJsonObject(input.layawayPolicySnapshotJson),
+  );
+  if (!policy.reserveStockOnDeposit) return "NOT_APPLICABLE";
+
+  const location = await tx.inventoryLocation.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      storeId: input.storeId,
+      status: "ACTIVE",
+    },
+    orderBy: [
+      { useForSalesOrderDefault: "desc" },
+      { useForSalesDefault: "desc" },
+      { name: "asc" },
+    ],
+    select: { id: true, code: true },
+  });
+  if (!location) {
+    throw new EcommerceAuthError(
+      "The shop needs an active sales-order inventory location before this Layaway deposit can be accepted.",
+      409,
+    );
+  }
+
+  const productCodes = [...new Set(input.lines.map((line) => line.productCodeSnapshot))];
+  const products = await tx.product.findMany({
+    where: {
+      retailOrgId: input.retailOrgId,
+      code: { in: productCodes },
+      status: "ACTIVE",
+      deletedAt: null,
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      productType: true,
+      trackInventory: true,
+      matrixVariants: {
+        select: { id: true, code: true },
+      },
+    },
+  });
+  const productsByCode = new Map(products.map((product) => [product.code, product] as const));
+  const reservableLines = input.lines.flatMap((line) => {
+    const product = productsByCode.get(line.productCodeSnapshot);
+    if (!product || !product.trackInventory || product.productType === "SERVICE") return [];
+    const variantId = line.productVariantCodeSnapshot
+      ? product.matrixVariants.find((variant) => variant.code === line.productVariantCodeSnapshot)?.id ?? null
+      : null;
+    return [{ line, product, variantId }];
+  });
+  if (reservableLines.length === 0) return "ACTIVE";
+
+  const positionKey = (productId: string, variantId: string | null) =>
+    `${productId}:${variantId ?? ""}`;
+  const snapshotKey = (productCode: string, variantCode: string | null) =>
+    `${productCode.trim().toUpperCase()}:${variantCode?.trim().toUpperCase() ?? ""}`;
+  const requestedByPosition = new Map<string, number>();
+  for (const { line, product, variantId } of reservableLines) {
+    const key = positionKey(product.id, variantId);
+    requestedByPosition.set(
+      key,
+      toQuantity((requestedByPosition.get(key) ?? 0) + Number(line.baseQuantity)),
+    );
+  }
+  const stockPositions = await tx.inventoryLedgerEntry.groupBy({
+    by: ["productId", "productVariantId"],
+    where: {
+      retailOrgId: input.retailOrgId,
+      storeId: input.storeId,
+      inventoryLocationId: location.id,
+      productId: { in: [...new Set(reservableLines.map(({ product }) => product.id))] },
+    },
+    _sum: { quantity: true },
+  });
+  const onHandByPosition = new Map(
+    stockPositions.map((position) => [
+      positionKey(position.productId, position.productVariantId),
+      toQuantity(position._sum.quantity),
+    ] as const),
+  );
+  const activeReservations = await tx.salesOrderInventoryReservation.findMany({
+    where: {
+      inventoryLocationId: location.id,
+      status: "ACTIVE",
+      productCodeSnapshot: { in: productCodes },
+    },
+    select: {
+      productCodeSnapshot: true,
+      productVariantCodeSnapshot: true,
+      baseQuantity: true,
+    },
+  });
+  const activeReservedBySnapshot = new Map<string, number>();
+  for (const reservation of activeReservations) {
+    const key = snapshotKey(
+      reservation.productCodeSnapshot,
+      reservation.productVariantCodeSnapshot,
+    );
+    activeReservedBySnapshot.set(
+      key,
+      toQuantity((activeReservedBySnapshot.get(key) ?? 0) + Number(reservation.baseQuantity)),
+    );
+  }
+  const checkedPositions = new Set<string>();
+  for (const { line, product, variantId } of reservableLines) {
+    const key = positionKey(product.id, variantId);
+    if (checkedPositions.has(key)) continue;
+    checkedPositions.add(key);
+    const available = calculateLayawayAvailableBaseQuantity({
+      onHandBaseQuantity: onHandByPosition.get(key) ?? 0,
+      activeReservedBaseQuantity:
+        activeReservedBySnapshot.get(
+          snapshotKey(line.productCodeSnapshot, line.productVariantCodeSnapshot),
+        ) ?? 0,
+    });
+    const requested = requestedByPosition.get(key) ?? 0;
+    if (requested > available + 0.0005) {
+      throw new EcommerceAuthError(
+        `Only ${available.toFixed(3)} base unit(s) of ${product.name} remain after active Layaway reservations.`,
+        409,
+      );
+    }
+  }
+
+  await tx.salesOrderInventoryReservation.createMany({
+    data: reservableLines.map(({ line }) => ({
+      salesOrderId: input.salesOrderId,
+      salesOrderLineId: line.id,
+      inventoryLocationId: location.id,
+      inventoryLocationCodeSnapshot: location.code,
+      productCodeSnapshot: line.productCodeSnapshot,
+      productVariantCodeSnapshot: line.productVariantCodeSnapshot,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      baseQuantity: line.baseQuantity,
+      status: "ACTIVE",
+    })),
+  });
+  return "ACTIVE";
 }
 
 function normalizeEmail(value: unknown) {
@@ -95,6 +278,7 @@ export async function initializeEcommercePayment(input: {
   orderNo: string;
   tenderMethodCode: unknown;
   receiptEmail: unknown;
+  amount?: unknown;
   idempotencyKey?: unknown;
 }) {
   const session = await getEcommerceCustomerSession({ storeCode: input.storeCode, required: true });
@@ -116,7 +300,15 @@ export async function initializeEcommercePayment(input: {
     },
     include: {
       store: { select: { code: true, ecommerceDisplayName: true, name: true } },
-      salesOrder: { select: { id: true } }
+      salesOrder: {
+        select: {
+          id: true,
+          orderType: true,
+          paidAmount: true,
+          balanceAmount: true,
+          minimumDepositAmount: true,
+        },
+      }
     }
   });
 
@@ -129,12 +321,40 @@ export async function initializeEcommercePayment(input: {
   ) {
     throw new EcommerceAuthError("Use the payment option selected for this order.", 409);
   }
+  const isLayaway = order.salesOrder.orderType === "LAYAWAY";
+  const requestedAmount = input.amount === null || input.amount === undefined
+    ? null
+    : toMoney(Number(input.amount));
+  const amount = isLayaway
+    ? requestedAmount ?? (
+        Number(order.salesOrder.paidAmount) <= 0
+          ? Number(order.layawayDepositAmount) > 0
+            ? Number(order.layawayDepositAmount)
+            : Number(order.salesOrder.minimumDepositAmount)
+          : Number(order.balanceAmount)
+      )
+    : Number(order.balanceAmount);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > Number(order.balanceAmount) + 0.005) {
+    throw new EcommerceAuthError("Enter a payment amount within the outstanding balance.");
+  }
+  if (
+    isLayaway &&
+    Number(order.salesOrder.paidAmount) <= 0 &&
+    amount + 0.005 < Number(order.salesOrder.minimumDepositAmount)
+  ) {
+    throw new EcommerceAuthError(
+      `The opening Layaway deposit must be at least ${Number(order.salesOrder.minimumDepositAmount).toFixed(2)}.`,
+    );
+  }
+  if (!isLayaway && requestedAmount !== null && Math.abs(requestedAmount - amount) > 0.005) {
+    throw new EcommerceAuthError("A standard ecommerce order must be paid in full.");
+  }
   const initializationRequestHash = hashEcommerceIdempotencyPayload({
     ecommerceOrderId: order.id,
     customerAccountId: session.customerAccount.id,
     tenderMethodCode,
     receiptEmail,
-    balanceAmount: toMoney(Number(order.balanceAmount))
+    amount: toMoney(amount),
   });
   const loadExistingPayment = () => prisma.ecommercePayment.findFirst({
     where: {
@@ -203,7 +423,7 @@ export async function initializeEcommercePayment(input: {
 
   const { provider, secret } = resolveGatewaySecret(tender);
   const reference = `ECOM-${order.store.code}-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
-  const amount = toMoney(Number(order.balanceAmount));
+  const gatewayAmount = toMoney(amount);
   const returnUrl = `${callbackOrigin()}/shop/${encodeURIComponent(order.store.code)}/payment-return?reference=${encodeURIComponent(reference)}&provider=${provider}`;
   let payment: { id: string };
   try {
@@ -217,7 +437,7 @@ export async function initializeEcommercePayment(input: {
         provider,
         method: tender.paymentMethod,
         currencyCode: order.currencyCode,
-        amount,
+        amount: gatewayAmount,
         status: "INITIALIZING"
       },
       select: { id: true }
@@ -244,7 +464,7 @@ export async function initializeEcommercePayment(input: {
         },
         body: JSON.stringify({
           email: receiptEmail,
-          amount: String(Math.round(amount * 100)),
+          amount: String(Math.round(gatewayAmount * 100)),
           currency: order.currencyCode,
           reference,
           callback_url: returnUrl,
@@ -268,7 +488,7 @@ export async function initializeEcommercePayment(input: {
         },
         body: JSON.stringify({
           tx_ref: reference,
-          amount,
+          amount: gatewayAmount,
           currency: order.currencyCode,
           redirect_url: returnUrl,
           customer: {
@@ -322,7 +542,7 @@ export async function initializeEcommercePayment(input: {
       reference,
       provider,
       checkoutUrl,
-      amount,
+      amount: gatewayAmount,
       currencyCode: order.currencyCode,
       idempotentReplay: false
     };
@@ -402,7 +622,9 @@ export async function verifyEcommercePayment(input: {
       tenderMethod: true,
       ecommerceOrder: {
         include: {
-          salesOrder: true
+          salesOrder: {
+            include: { lines: true },
+          }
         }
       }
     }
@@ -458,12 +680,31 @@ export async function verifyEcommercePayment(input: {
       };
     }
 
-    const previousPaidAmount = Number(payment.ecommerceOrder.paidAmount);
+    const currentSalesOrder = await tx.salesOrder.findUnique({
+      where: { id: payment.ecommerceOrder.salesOrderId },
+      include: { lines: true },
+    });
+    if (!currentSalesOrder || currentSalesOrder.status !== "OPEN") {
+      throw new EcommerceAuthError("This order can no longer receive a payment.", 409);
+    }
+    const isLayaway = currentSalesOrder.orderType === "LAYAWAY";
+    const previousPaidAmount = Number(currentSalesOrder.paidAmount);
     const nextPaidAmount = toMoney(
-      Math.min(Number(payment.ecommerceOrder.totalAmount), previousPaidAmount + expectedAmount)
+      Math.min(Number(currentSalesOrder.totalAmount), previousPaidAmount + expectedAmount)
     );
-    const nextBalanceAmount = toMoney(Number(payment.ecommerceOrder.totalAmount) - nextPaidAmount);
+    const nextBalanceAmount = toMoney(Number(currentSalesOrder.totalAmount) - nextPaidAmount);
     const paymentStatus = nextBalanceAmount <= 0 ? "PAID" : "PARTIALLY_PAID";
+    const isOpeningLayawayDeposit = isLayaway && previousPaidAmount <= 0.005;
+    const reservationStatus = isOpeningLayawayDeposit
+      ? await activateEcommerceLayawayReservation(tx, {
+          retailOrgId: currentSalesOrder.retailOrgId,
+          storeId: currentSalesOrder.storeId,
+          salesOrderId: currentSalesOrder.id,
+          reservationStatus: currentSalesOrder.reservationStatus,
+          layawayPolicySnapshotJson: currentSalesOrder.layawayPolicySnapshotJson,
+          lines: currentSalesOrder.lines,
+        })
+      : currentSalesOrder.reservationStatus;
 
     await tx.ecommercePayment.update({
       where: { id: payment.id },
@@ -502,7 +743,13 @@ export async function verifyEcommercePayment(input: {
           method: payment.method,
           amount: expectedAmount,
           reference: payment.reference,
-          paymentPurpose: "SALES_ORDER_DEPOSIT",
+          paymentPurpose: isLayaway
+            ? isOpeningLayawayDeposit
+              ? "LAYAWAY_DEPOSIT"
+              : "LAYAWAY_INSTALLMENT"
+            : "SALES_ORDER_DEPOSIT",
+          receivedTerminalCodeSnapshot: ecommerceTerminalCode,
+          receivedCashierCodeSnapshot: "ECOMMERCE",
           receivedAt: now
         }
       });
@@ -514,13 +761,22 @@ export async function verifyEcommercePayment(input: {
     await tx.salesOrder.update({
       where: { id: payment.ecommerceOrder.salesOrderId },
       data: {
-        depositAmount: nextPaidAmount,
+        paidAmount: nextPaidAmount,
         balanceAmount: nextBalanceAmount,
-        depositTenderMethodCodeSnapshot: payment.tenderMethod?.code ?? null,
-        depositTenderMethodNameSnapshot: payment.tenderMethod?.name ?? null,
-        depositPaymentMethodSnapshot: payment.method,
-        depositReference: payment.reference,
-        depositPaidAt: now,
+        reservationStatus,
+        ...(reservationStatus === "ACTIVE" && currentSalesOrder.reservationStatus !== "ACTIVE"
+          ? { reservationCreatedAt: now }
+          : {}),
+        ...(!isLayaway || isOpeningLayawayDeposit
+          ? {
+              depositAmount: isLayaway ? expectedAmount : nextPaidAmount,
+              depositTenderMethodCodeSnapshot: payment.tenderMethod?.code ?? null,
+              depositTenderMethodNameSnapshot: payment.tenderMethod?.name ?? null,
+              depositPaymentMethodSnapshot: payment.method,
+              depositReference: payment.reference,
+              depositPaidAt: now,
+            }
+          : {}),
         recordVersion: { increment: 1 }
       }
     });
@@ -528,12 +784,26 @@ export async function verifyEcommercePayment(input: {
       data: {
         ecommerceOrderId: payment.ecommerceOrder.id,
         status: paymentStatus,
-        label: paymentStatus === "PAID" ? "Payment received" : "Part payment received",
+        label: isLayaway
+          ? isOpeningLayawayDeposit
+            ? "Layaway deposit received"
+            : "Layaway installment received"
+          : paymentStatus === "PAID"
+            ? "Payment received"
+            : "Part payment received",
         note: `${payment.currencyCode} ${expectedAmount.toFixed(2)} via ${payment.tenderMethod?.name ?? payment.provider ?? "online payment"}`,
         actorType: "PAYMENT_GATEWAY",
         actorLabel: payment.provider
       }
     });
+
+    if (isLayaway) {
+      await postLayawayAccountingInTransaction(tx, {
+        retailOrgId: currentSalesOrder.retailOrgId,
+        salesOrderId: currentSalesOrder.id,
+        postedBy: "Public ecommerce payment verification",
+      });
+    }
 
     return {
       status: "PAID",

@@ -123,14 +123,14 @@ requireIncludes(
 );
 requireIncludes(
   desktopRenderer,
-  'deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER"',
-  "desktop sales-order basket edits must defer inventory validation."
+  'deferInventoryValidationForSalesOrder: saleMode !== "SALE"',
+  "desktop sales-order and layaway basket edits must defer inventory validation."
 );
 requireIncludes(
   desktopRenderer,
   `lineId: line.lineId,
         quantity: line.quantity,
-        deferInventoryValidationForSalesOrder: saleMode === "SALES_ORDER",
+        deferInventoryValidationForSalesOrder: saleMode !== "SALE",
         serialNumbers: line.serialNumbers,
         overrideDiscountAmount: discountAmount`,
   "desktop sales-order line discounts must not trigger inventory validation."
@@ -272,9 +272,25 @@ requireIncludes(
 );
 requireIncludes(
   onlineWorkspace,
-  'saleMode !== "SALES_ORDER" &&',
-  "online-store sales orders must defer matrix stock validation until fulfilment."
+  'saleMode === "SALE" &&',
+  "online-store sales orders and layaways must defer matrix stock validation until fulfilment."
 );
+for (const layawayAnchor of [
+  'type SaleMode = "SALE" | "SALES_ORDER" | "LAYAWAY"',
+  "activateLayawayMode",
+  "layawayMinimumDepositAmount",
+  "openLayawayAction",
+  'kind === "PAYMENT"',
+  'kind === "RELEASE"',
+  'kind === "EXPIRE"',
+  "Payment history"
+]) {
+  requireIncludes(
+    onlineWorkspace,
+    layawayAnchor,
+    `online-store Layaway UI must retain ${layawayAnchor}.`
+  );
+}
 requireIncludes(
   onlineRepository,
   'by: ["productId", "productVariantId"]',
@@ -304,6 +320,9 @@ for (const route of [
   "apps/enterprise-web/src/app/api/online-store/held-sales/route.ts",
   "apps/enterprise-web/src/app/api/online-store/sales-orders/route.ts",
   "apps/enterprise-web/src/app/api/online-store/sales-orders/[orderId]/cancel/route.ts",
+  "apps/enterprise-web/src/app/api/online-store/sales-orders/[orderId]/payments/route.ts",
+  "apps/enterprise-web/src/app/api/online-store/sales-orders/[orderId]/release/route.ts",
+  "apps/enterprise-web/src/app/api/online-store/sales-orders/[orderId]/expire/route.ts",
   "apps/enterprise-web/src/app/api/online-store/account-payments/route.ts",
   "apps/enterprise-web/src/app/api/online-store/corrections/route.ts",
   "apps/enterprise-web/src/app/api/online-store/shifts/open/route.ts",

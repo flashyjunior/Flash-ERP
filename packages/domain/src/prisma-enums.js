@@ -118,6 +118,7 @@ export const SalesOrderStatus = makeEnum({
     OPEN: "OPEN",
     FULFILLED: "FULFILLED",
     CANCELLED: "CANCELLED",
+    EXPIRED: "EXPIRED",
 });
 export const PaymentMethod = makeEnum({
     CASH: "CASH",

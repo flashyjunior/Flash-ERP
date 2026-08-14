@@ -194,6 +194,615 @@ test.describe("public ecommerce extension", () => {
     await page.screenshot({ path: testInfo.outputPath("product-details-mobile.png"), fullPage: false });
   });
 
+  test("keeps alternate selling UOM price and base conversion through the storefront cart", async ({
+    page
+  }) => {
+    test.setTimeout(900_000);
+    const suffix = crypto.randomBytes(5).toString("hex").toUpperCase();
+    const normalizedStoreCode = (storeCode ?? "").trim();
+    const store = await prisma.store.findFirstOrThrow({
+      where: {
+        OR: [
+          { code: normalizedStoreCode.toUpperCase() },
+          { ecommerceSlug: normalizedStoreCode.toLowerCase() }
+        ]
+      },
+      select: {
+        id: true,
+        code: true,
+        retailOrgId: true,
+        inventoryCatalogLinks: {
+          where: { catalog: { status: "ACTIVE", deletedAt: null } },
+          orderBy: { createdAt: "asc" },
+          take: 1,
+          select: { catalogId: true }
+        }
+      }
+    });
+    const baseUnitCode = `E${suffix.slice(0, 7)}`;
+    const cartonUnitCode = `C${suffix.slice(0, 7)}`;
+    const scheduleCode = `E2E-UOM-${suffix}`;
+    const productCode = `E2E-UOM-PRODUCT-${suffix}`;
+    let baseUnitId: string | null = null;
+    let cartonUnitId: string | null = null;
+    let scheduleId: string | null = null;
+    let productId: string | null = null;
+    let ecommerceOrderId: string | null = null;
+    let salesOrderId: string | null = null;
+    let sourceTransactionId: string | null = null;
+
+    try {
+      const baseUnit = await prisma.unitOfMeasure.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          code: baseUnitCode,
+          name: "Each QA",
+          status: "ACTIVE",
+          originNodeCode: "E2E",
+          lastModifiedByNodeCode: "E2E"
+        },
+        select: { id: true }
+      });
+      baseUnitId = baseUnit.id;
+      const cartonUnit = await prisma.unitOfMeasure.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          code: cartonUnitCode,
+          name: "Carton QA",
+          status: "ACTIVE",
+          originNodeCode: "E2E",
+          lastModifiedByNodeCode: "E2E"
+        },
+        select: { id: true }
+      });
+      cartonUnitId = cartonUnit.id;
+      const schedule = await prisma.unitOfMeasureSchedule.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          code: scheduleCode,
+          name: "Alternate UOM browser QA",
+          baseUnitOfMeasureId: baseUnit.id,
+          status: "ACTIVE",
+          originNodeCode: "E2E",
+          lastModifiedByNodeCode: "E2E",
+          lines: {
+            create: [{
+              unitOfMeasureId: baseUnit.id,
+              conversionFactor: 1,
+              isBaseUnit: true,
+              allowSale: true,
+              allowPurchase: true,
+              sortOrder: 0
+            }, {
+              unitOfMeasureId: cartonUnit.id,
+              conversionFactor: 24,
+              allowSale: true,
+              allowPurchase: true,
+              sortOrder: 1
+            }]
+          }
+        },
+        select: { id: true }
+      });
+      scheduleId = schedule.id;
+      const product = await prisma.product.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          baseUnitOfMeasureId: baseUnit.id,
+          uomScheduleId: schedule.id,
+          code: productCode,
+          sku: productCode,
+          name: "Alternate UOM Browser QA",
+          productType: "STOCK",
+          unitOfMeasure: baseUnitCode,
+          baseUnitPrice: 2,
+          taxable: false,
+          trackInventory: true,
+          ecommercePublished: true,
+          ecommerceFeatured: false,
+          status: "ACTIVE",
+          originNodeCode: "E2E",
+          lastModifiedByNodeCode: "E2E"
+        },
+        select: { id: true }
+      });
+      productId = product.id;
+      const salesLocation = await prisma.inventoryLocation.findFirstOrThrow({
+        where: {
+          retailOrgId: store.retailOrgId,
+          storeId: store.id,
+          status: "ACTIVE"
+        },
+        orderBy: [
+          { useForSalesOrderDefault: "desc" },
+          { useForSalesDefault: "desc" },
+          { createdAt: "asc" }
+        ],
+        select: { id: true, warehouseId: true }
+      });
+      await prisma.inventoryLedgerEntry.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          storeId: store.id,
+          warehouseId: salesLocation.warehouseId,
+          inventoryLocationId: salesLocation.id,
+          productId: product.id,
+          movementType: "OPENING_BALANCE",
+          quantity: 100,
+          unitCost: 1,
+          referenceType: "E2E_ALTERNATE_UOM",
+          referenceId: product.id,
+          externalReference: productCode,
+          sourceNodeCode: "E2E",
+          occurredAt: new Date()
+        }
+      });
+      const catalogId = store.inventoryCatalogLinks[0]?.catalogId;
+      if (catalogId) {
+        await prisma.inventoryCatalogProduct.create({
+          data: {
+            retailOrgId: store.retailOrgId,
+            catalogId,
+            productId: product.id,
+            sortOrder: 999_999
+          }
+        });
+      }
+
+      await completeStaffSignIn(page, securityAdminLogin, securityAdminPassword);
+      for (const sellingUnit of [{
+        unitOfMeasureCode: baseUnitCode,
+        unitPrice: 2,
+        isDefault: true
+      }, {
+        unitOfMeasureCode: cartonUnitCode,
+        unitPrice: 48,
+        isDefault: false
+      }, {
+        unitOfMeasureCode: cartonUnitCode,
+        unitPrice: 49,
+        isDefault: false
+      }, {
+        unitOfMeasureCode: cartonUnitCode,
+        unitPrice: 48,
+        isDefault: false
+      }]) {
+        const saveResponse = await page.request.post("/api/catalog/store-selling-units", {
+          data: {
+            targetId: productCode,
+            ...sellingUnit,
+            storeCodes: [store.code]
+          }
+        });
+        expect(saveResponse.ok(), await saveResponse.text()).toBeTruthy();
+      }
+      const invalidUnitResponse = await page.request.post("/api/catalog/store-selling-units", {
+        data: {
+          targetId: productCode,
+          unitOfMeasureCode: `INVALID-${suffix}`,
+          unitPrice: 1,
+          storeCodes: [store.code]
+        }
+      });
+      expect(invalidUnitResponse.status()).toBe(400);
+      await expect(invalidUnitResponse.json()).resolves.toMatchObject({
+        message: expect.stringContaining("not an active sale unit")
+      });
+
+      await page.goto(
+        `/shop/${encodeURIComponent(storeCode ?? "")}/products/${encodeURIComponent(productCode)}`
+      );
+      await expect(page.getByRole("heading", { name: "Alternate UOM Browser QA", level: 1 })).toBeVisible();
+      const sellingUnitGroup = page.locator('[aria-label="Selling unit"]');
+      await expect(sellingUnitGroup).toBeVisible();
+      await expect(sellingUnitGroup.getByRole("button")).toHaveCount(2);
+      await sellingUnitGroup.getByRole("button", { name: /Carton QA/ }).click();
+
+      const productPage = page.locator("article").filter({
+        has: page.getByRole("heading", { name: "Alternate UOM Browser QA", level: 1 })
+      });
+      const addButton = productPage.getByRole("button", { name: /Add/ });
+      await expect(addButton).toContainText("48.00");
+      await addButton.click();
+      await page.getByRole("button", { name: "Open cart" }).click();
+
+      const cartLine = page.locator("article").filter({
+        has: page.getByRole("button", { name: "Remove item" }),
+        hasText: "Alternate UOM Browser QA"
+      });
+      await expect(cartLine).toHaveCount(1);
+      await expect(cartLine).toContainText("Carton QA");
+      await expect(cartLine).toContainText(`24 ${baseUnitCode}`);
+      await expect(cartLine).toContainText("48.00");
+
+      await page.goto("/inventory/shop-prices");
+      await expect(page.getByRole("heading", { name: "Shop Prices", level: 1 })).toBeVisible();
+      await page.getByRole("tab", { name: "Selling units" }).click();
+      const sellingUnitSearch = page.getByPlaceholder("Search selling units");
+      await sellingUnitSearch.fill(productCode);
+      const sellingUnitRow = page.locator("tbody tr").filter({ hasText: productCode });
+      await expect(sellingUnitRow).toHaveCount(2);
+      await expect(sellingUnitRow.filter({ hasText: "Carton QA" })).toContainText(
+        `1 ${cartonUnitCode} = 24 ${baseUnitCode}`
+      );
+      await expect(sellingUnitRow.filter({ hasText: "Carton QA" })).toContainText("48.00");
+
+      await page.reload();
+      await page.getByRole("tab", { name: "Selling units" }).click();
+      await page.getByPlaceholder("Search selling units").fill(productCode);
+      await expect(page.locator("tbody tr").filter({ hasText: productCode })).toHaveCount(2);
+      for (const viewport of [
+        { width: 390, height: 844 },
+        { width: 820, height: 1180 }
+      ]) {
+        await page.setViewportSize(viewport);
+        expect(
+          await page.evaluate(
+            () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+          )
+        ).toBeLessThanOrEqual(1);
+      }
+
+      await page.request.post("/api/auth/sign-out");
+      const staffSignInResponse = await page.request.post("/api/auth/sign-in", {
+        data: { loginId: staffLogin, password: staffPassword }
+      });
+      expect(staffSignInResponse.ok(), await staffSignInResponse.text()).toBeTruthy();
+      await expect(staffSignInResponse.json()).resolves.toMatchObject({ requiresMfa: false });
+      if (process.env.FLASH_ERP_E2E_SKIP_ONLINE_UOM_UI !== "true") {
+        await page.goto("/online-store");
+        await dismissInventoryStartupAlert(page);
+        const onlineStoreNavigation = page.getByRole("navigation", {
+          name: "Desktop workspaces"
+        });
+        await onlineStoreNavigation.getByRole("button", { name: "POS", exact: true }).click();
+        await page.locator(".rms-scan-strip input").first().fill("Alternate UOM Browser QA");
+        const productSuggestion = page
+          .locator(".rms-customer-suggestions.is-product button")
+          .filter({ hasText: "Alternate UOM Browser QA" });
+        await expect(productSuggestion).toHaveCount(1);
+        await productSuggestion.click();
+
+        const itemDialog = page.getByRole("dialog").filter({
+          has: page.getByRole("heading", { name: "Alternate UOM Browser QA" })
+        });
+        await expect(itemDialog).toBeVisible();
+        const sellingUnitSelect = itemDialog
+          .locator("label")
+          .filter({ hasText: "Selling unit" })
+          .locator("select");
+        await sellingUnitSelect.selectOption(cartonUnitCode);
+        await expect(sellingUnitSelect).toHaveValue(cartonUnitCode);
+        await expect(
+          itemDialog.locator("label").filter({ hasText: "Unit price" }).locator('input[type="number"]')
+        ).toHaveValue("48.00");
+        await itemDialog.getByRole("button", { name: "Add item", exact: true }).click();
+
+        const basketLine = page
+          .locator(".rms-cart-table .rms-table-row")
+          .filter({ hasText: "Alternate UOM Browser QA" });
+        await expect(basketLine).toHaveCount(1);
+        await expect(basketLine).toContainText(cartonUnitCode);
+        await expect(basketLine).toContainText(`24 ${baseUnitCode}`);
+      }
+
+      const customerPhone = `+23324${String(Date.now()).slice(-7)}`;
+      const customerPassword = `UomQa${Date.now()}Secure`;
+      const customerOtpResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/auth/request-otp`,
+        {
+          headers: {
+            "x-forwarded-for": `203.0.${crypto.randomInt(1, 255)}.${crypto.randomInt(1, 255)}`
+          },
+          data: { identifier: customerPhone, purpose: "SIGN_UP" }
+        }
+      );
+      expect(customerOtpResponse.ok(), await customerOtpResponse.text()).toBeTruthy();
+      const customerOtp = (await customerOtpResponse.json()) as {
+        challengeId: string;
+        developmentCode?: string;
+      };
+      test.skip(
+        !customerOtp.developmentCode,
+        "Development OTP exposure is disabled for the alternate-UOM order test."
+      );
+      const customerSignupResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/auth/verify-signup`,
+        {
+          data: {
+            challengeId: customerOtp.challengeId,
+            code: customerOtp.developmentCode,
+            fullName: "Alternate UOM Ecommerce QA",
+            password: customerPassword
+          }
+        }
+      );
+      expect(customerSignupResponse.ok(), await customerSignupResponse.text()).toBeTruthy();
+
+      const catalogResponse = await page.request.get(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+      );
+      expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+      const catalog = (await catalogResponse.json()) as {
+        store: {
+          allowDelivery: boolean;
+          payOnDeliveryEnabled: boolean;
+        };
+        paymentMethods: Array<{ code: string }>;
+      };
+      const paymentMethodCode = catalog.store.payOnDeliveryEnabled
+        ? "PAY_ON_DELIVERY"
+        : catalog.paymentMethods[0]?.code;
+      expect(paymentMethodCode).toBeTruthy();
+      const orderRequest = {
+        lines: [{
+          productId: product.id,
+          quantity: 1,
+          sellingUnitOfMeasure: cartonUnitCode
+        }],
+        delivery: {
+          fulfilmentMethod: catalog.store.allowDelivery ? "DELIVERY" : "PICKUP",
+          recipientName: "Alternate UOM Ecommerce QA",
+          phone: customerPhone,
+          ...(catalog.store.allowDelivery
+            ? {
+                addressLine1: "24 Alternate UOM Street",
+                city: "Accra",
+                region: "Greater Accra",
+                countryCode: "GH"
+              }
+            : {})
+        },
+        paymentMethodCode,
+        customerNote: "Alternate-UOM persisted-order acceptance"
+      };
+      const checkoutRequestKey = `e2e-uom-checkout-${crypto.randomUUID()}`;
+      const createOrderResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
+        {
+          headers: { "idempotency-key": checkoutRequestKey },
+          data: orderRequest
+        }
+      );
+      expect(createOrderResponse.ok(), await createOrderResponse.text()).toBeTruthy();
+      const createdOrder = (await createOrderResponse.json()) as {
+        orderId: string;
+        orderNo: string;
+        totalAmount: number;
+      };
+      ecommerceOrderId = createdOrder.orderId;
+
+      const replayResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
+        {
+          headers: { "idempotency-key": checkoutRequestKey },
+          data: orderRequest
+        }
+      );
+      expect(replayResponse.ok(), await replayResponse.text()).toBeTruthy();
+      await expect(replayResponse.json()).resolves.toMatchObject({
+        orderId: createdOrder.orderId,
+        idempotentReplay: true
+      });
+      const changedUomReplayResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
+        {
+          headers: { "idempotency-key": checkoutRequestKey },
+          data: {
+            ...orderRequest,
+            lines: [{
+              productId: product.id,
+              quantity: 1,
+              sellingUnitOfMeasure: baseUnitCode
+            }]
+          }
+        }
+      );
+      expect(changedUomReplayResponse.status()).toBe(409);
+
+      const persistedOrder = await prisma.ecommerceOrder.findUniqueOrThrow({
+        where: { id: createdOrder.orderId },
+        select: {
+          id: true,
+          status: true,
+          salesOrderId: true,
+          salesOrder: {
+            select: {
+              sourceTransactionId: true,
+              status: true,
+              lines: {
+                select: {
+                  quantity: true,
+                  sellingUnitOfMeasure: true,
+                  baseUnitOfMeasure: true,
+                  uomConversionFactor: true,
+                  baseQuantity: true,
+                  unitPrice: true
+                }
+              }
+            }
+          }
+        }
+      });
+      salesOrderId = persistedOrder.salesOrderId;
+      sourceTransactionId = persistedOrder.salesOrder.sourceTransactionId;
+      expect(persistedOrder.status).toBe("PLACED");
+      expect(persistedOrder.salesOrder.status).toBe("OPEN");
+      expect(persistedOrder.salesOrder.lines).toHaveLength(1);
+      expect({
+        quantity: Number(persistedOrder.salesOrder.lines[0]?.quantity),
+        sellingUnitOfMeasure: persistedOrder.salesOrder.lines[0]?.sellingUnitOfMeasure,
+        baseUnitOfMeasure: persistedOrder.salesOrder.lines[0]?.baseUnitOfMeasure,
+        uomConversionFactor: Number(persistedOrder.salesOrder.lines[0]?.uomConversionFactor),
+        baseQuantity: Number(persistedOrder.salesOrder.lines[0]?.baseQuantity),
+        unitPrice: Number(persistedOrder.salesOrder.lines[0]?.unitPrice)
+      }).toEqual({
+        quantity: 1,
+        sellingUnitOfMeasure: cartonUnitCode,
+        baseUnitOfMeasure: baseUnitCode,
+        uomConversionFactor: 24,
+        baseQuantity: 24,
+        unitPrice: 48
+      });
+      const parkedLine = await prisma.posTransactionLine.findFirstOrThrow({
+        where: { posTransactionId: persistedOrder.salesOrder.sourceTransactionId },
+        select: {
+          quantity: true,
+          sellingUnitOfMeasure: true,
+          baseUnitOfMeasure: true,
+          uomConversionFactor: true,
+          baseQuantity: true
+        }
+      });
+      expect({
+        quantity: Number(parkedLine.quantity),
+        sellingUnitOfMeasure: parkedLine.sellingUnitOfMeasure,
+        baseUnitOfMeasure: parkedLine.baseUnitOfMeasure,
+        uomConversionFactor: Number(parkedLine.uomConversionFactor),
+        baseQuantity: Number(parkedLine.baseQuantity)
+      }).toEqual({
+        quantity: 1,
+        sellingUnitOfMeasure: cartonUnitCode,
+        baseUnitOfMeasure: baseUnitCode,
+        uomConversionFactor: 24,
+        baseQuantity: 24
+      });
+
+      for (const status of ["CONFIRMED", "PROCESSING", "READY"]) {
+        const statusResponse = await page.request.patch(
+          `/api/online-store/ecommerce/orders/${encodeURIComponent(createdOrder.orderId)}`,
+          { data: { status } }
+        );
+        expect(statusResponse.ok(), await statusResponse.text()).toBeTruthy();
+      }
+
+      const fulfilResponse = await page.request.post("/api/online-store/sales", {
+        data: {
+          salesOrderId: persistedOrder.salesOrderId,
+          lines: [],
+          payments: createdOrder.totalAmount > 0
+            ? [{
+                paymentMethod: "CASH",
+                amount: createdOrder.totalAmount,
+                reference: "E2E-UOM-ECOMMERCE-BALANCE"
+              }]
+            : []
+        }
+      });
+      expect(fulfilResponse.ok(), await fulfilResponse.text()).toBeTruthy();
+      const fulfilment = (await fulfilResponse.json()) as {
+        totalAmount: number;
+        receipt: {
+          lines: Array<{
+            productCode: string;
+            quantity: number;
+            sellingUnitOfMeasure: string;
+            baseUnitOfMeasure: string;
+            uomConversionFactor: number;
+            baseQuantity: number;
+          }>;
+        };
+      };
+      const fulfilledReceiptLine = fulfilment.receipt.lines.find(
+        (line) => line.productCode === productCode
+      );
+      expect(fulfilledReceiptLine).toMatchObject({
+        quantity: 1,
+        sellingUnitOfMeasure: cartonUnitCode,
+        baseUnitOfMeasure: baseUnitCode,
+        uomConversionFactor: 24,
+        baseQuantity: 24
+      });
+
+      const fulfilledState = await prisma.ecommerceOrder.findUniqueOrThrow({
+        where: { id: createdOrder.orderId },
+        select: {
+          status: true,
+          statusEvents: { orderBy: { createdAt: "asc" }, select: { status: true } },
+          salesOrder: {
+            select: {
+              sourceTransactionId: true,
+              status: true,
+              balanceAmount: true
+            }
+          }
+        }
+      });
+      expect(fulfilledState.status).toBe("READY");
+      expect(fulfilledState.statusEvents.map((event) => event.status)).toEqual([
+        "PLACED",
+        "CONFIRMED",
+        "PROCESSING",
+        "READY"
+      ]);
+      expect(fulfilledState.salesOrder.status).toBe("FULFILLED");
+      expect(Number(fulfilledState.salesOrder.balanceAmount)).toBe(0);
+      const fulfilledTransaction = await prisma.posTransaction.findUniqueOrThrow({
+        where: { id: fulfilledState.salesOrder.sourceTransactionId },
+        select: {
+          status: true,
+          lines: {
+            select: {
+              quantity: true,
+              sellingUnitOfMeasure: true,
+              baseUnitOfMeasure: true,
+              uomConversionFactor: true,
+              baseQuantity: true
+            }
+          }
+        }
+      });
+      expect(fulfilledTransaction.status).toBe("COMPLETED");
+      const fulfilledLine = fulfilledTransaction.lines[0];
+      expect({
+        quantity: Number(fulfilledLine?.quantity),
+        sellingUnitOfMeasure: fulfilledLine?.sellingUnitOfMeasure,
+        baseUnitOfMeasure: fulfilledLine?.baseUnitOfMeasure,
+        uomConversionFactor: Number(fulfilledLine?.uomConversionFactor),
+        baseQuantity: Number(fulfilledLine?.baseQuantity)
+      }).toEqual({
+        quantity: 1,
+        sellingUnitOfMeasure: cartonUnitCode,
+        baseUnitOfMeasure: baseUnitCode,
+        uomConversionFactor: 24,
+        baseQuantity: 24
+      });
+      const stockAfterFulfilment = await prisma.inventoryLedgerEntry.aggregate({
+        where: {
+          productId: product.id,
+          inventoryLocationId: salesLocation.id
+        },
+        _sum: { quantity: true }
+      });
+      expect(Number(stockAfterFulfilment._sum.quantity)).toBe(76);
+    } finally {
+      if (ecommerceOrderId) {
+        await prisma.ecommerceOrder.deleteMany({ where: { id: ecommerceOrderId } });
+      }
+      if (salesOrderId) {
+        await prisma.salesOrder.deleteMany({ where: { id: salesOrderId } });
+      }
+      if (sourceTransactionId) {
+        await prisma.customerAccountEntry.deleteMany({ where: { posTransactionId: sourceTransactionId } });
+        await prisma.posTransaction.deleteMany({ where: { id: sourceTransactionId } });
+      }
+      if (productId) {
+        await prisma.inventoryLedgerEntry.deleteMany({ where: { productId } });
+        await prisma.storeProductSellingUnit.deleteMany({ where: { productId } });
+        await prisma.product.delete({ where: { id: productId } });
+      }
+      if (scheduleId) {
+        await prisma.unitOfMeasureSchedule.delete({ where: { id: scheduleId } });
+      }
+      if (cartonUnitId) {
+        await prisma.unitOfMeasure.delete({ where: { id: cartonUnitId } });
+      }
+      if (baseUnitId) {
+        await prisma.unitOfMeasure.delete({ where: { id: baseUnitId } });
+      }
+    }
+  });
+
   test("advertises an eligible promotion before checkout", async ({ page }, testInfo) => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -586,6 +1195,7 @@ test.describe("public ecommerce extension", () => {
     const orderResponse = await page.request.post(
       `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
       {
+        headers: { "idempotency-key": `e2e-checkout-${crypto.randomUUID()}` },
         data: {
           lines: [{ productId: orderProduct.id, quantity: 1 }],
           delivery: {
@@ -1031,6 +1641,346 @@ test.describe("public ecommerce extension", () => {
       );
     }
     expect(pageErrors.filter((message) => /error in input stream/i.test(message))).toEqual([]);
+  });
+
+  test("offers ecommerce Layaway only when configured and preserves the unpaid opening state", async ({
+    page
+  }) => {
+    test.setTimeout(300_000);
+    await completeStaffSignIn(page);
+    await page.goto("/online-store?workspace=ecommerce");
+    await dismissInventoryStartupAlert(page);
+    await page.getByRole("tab", { name: "Payments", exact: true }).click();
+    await expect(page.getByText("Offer Layaway online", { exact: true })).toBeVisible();
+    const normalizedStoreCode = (storeCode ?? "").trim();
+    const store = await prisma.store.findFirstOrThrow({
+      where: {
+        OR: [
+          { code: normalizedStoreCode.toUpperCase() },
+          { ecommerceSlug: normalizedStoreCode.toLowerCase() }
+        ]
+      },
+      select: {
+        id: true,
+        code: true,
+        retailOrgId: true,
+        ecommerceLayawayEnabled: true,
+        retailOrg: { select: { companySettingsJson: true } }
+      }
+    });
+    const workspaceResponse = await page.request.get("/api/online-store/ecommerce");
+    expect(workspaceResponse.ok(), await workspaceResponse.text()).toBeTruthy();
+    const workspace = (await workspaceResponse.json()) as {
+      paymentMethods: Array<{
+        id: string;
+        code: string;
+        enabled: boolean;
+        gatewayActive: boolean;
+        gatewayStatus: string;
+        sortOrder: number;
+      }>;
+    };
+    let gatewayMethod = workspace.paymentMethods.find(
+      (method) => method.gatewayActive && method.gatewayStatus === "READY"
+    );
+    let temporaryTenderMethodId: string | null = null;
+    if (!gatewayMethod) {
+      const temporaryTender = await prisma.tenderMethod.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          code: `E2E-LAYAWAY-${crypto.randomBytes(4).toString("hex").toUpperCase()}`,
+          name: "E2E Layaway gateway",
+          paymentMethod: "MOBILE_MONEY",
+          gatewayProvider: "PAYSTACK",
+          gatewayMode: "TEST",
+          gatewayPublicKey: "pk_test_ecommerce_layaway_qa",
+          gatewaySecretMask: "sk_test_ecommerce_layaway_qa",
+          gatewayActive: true,
+          gatewayStatus: "READY",
+          requiresReference: true,
+          allowChange: false,
+          status: "ACTIVE",
+          originNodeCode: "E2E",
+          lastModifiedByNodeCode: "E2E"
+        },
+        select: { id: true, code: true }
+      });
+      temporaryTenderMethodId = temporaryTender.id;
+      gatewayMethod = {
+        id: temporaryTender.id,
+        code: temporaryTender.code,
+        enabled: false,
+        gatewayActive: true,
+        gatewayStatus: "READY",
+        sortOrder: 999
+      };
+    }
+    const originalCompanySettings = store.retailOrg.companySettingsJson;
+    const companySettings = (() => {
+      try {
+        return JSON.parse(originalCompanySettings ?? "{}") as Record<string, unknown>;
+      } catch {
+        return {} as Record<string, unknown>;
+      }
+    })();
+    const originalMethod = gatewayMethod!;
+    let ecommerceOrderId: string | null = null;
+    let salesOrderId: string | null = null;
+    let sourceTransactionId: string | null = null;
+    let customerAccountId: string | null = null;
+    let customerId: string | null = null;
+
+    try {
+      await prisma.retailOrg.update({
+        where: { id: store.retailOrgId },
+        data: {
+          companySettingsJson: JSON.stringify({
+            ...companySettings,
+            layawaySettings: {
+              enabled: true,
+              reserveStockOnDeposit: true,
+              minimumDepositPercent: 20,
+              requireFullPaymentBeforeFulfilment: true,
+              refundPaymentsOnCancellation: true,
+              cancellationFeeType: "PERCENTAGE",
+              cancellationFeeValue: 5
+            }
+          })
+        }
+      });
+      const enableResponse = await page.request.patch(
+        "/api/online-store/ecommerce/payment-methods",
+        {
+          data: {
+            layawayEnabled: true,
+            payOnDeliveryEnabled: true,
+            methods: [{
+              tenderMethodId: originalMethod.id,
+              enabled: true,
+              sortOrder: originalMethod.sortOrder
+            }]
+          }
+        }
+      );
+      expect(enableResponse.ok(), await enableResponse.text()).toBeTruthy();
+
+      const catalogResponse = await page.request.get(
+        `/api/ecommerce/${encodeURIComponent(store.code)}/catalog`
+      );
+      expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+      const catalog = (await catalogResponse.json()) as {
+        store: {
+          allowDelivery: boolean;
+          layawayOffer: { enabled: boolean; minimumDepositPercent: number };
+        };
+        paymentMethods: Array<{ code: string }>;
+        products: Array<{
+          id: string;
+          code: string;
+          name: string;
+          availableQuantity: number | null;
+          unitPrice: number;
+          variants: Array<{ id: string }>;
+        }>;
+      };
+      expect(catalog.store.layawayOffer).toMatchObject({
+        enabled: true,
+        minimumDepositPercent: 20
+      });
+      const product = catalog.products.find(
+        (candidate) =>
+          candidate.variants.length === 0 &&
+          (candidate.availableQuantity === null || candidate.availableQuantity > 0)
+      );
+      expect(product).toBeTruthy();
+
+      const identifier = `+23324${String(Date.now()).slice(-7)}`;
+      const otpResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(store.code)}/auth/request-otp`,
+        {
+          headers: { "x-forwarded-for": `203.0.113.${crypto.randomInt(1, 250)}` },
+          data: { identifier, purpose: "SIGN_UP" }
+        }
+      );
+      expect(otpResponse.ok(), await otpResponse.text()).toBeTruthy();
+      const otp = (await otpResponse.json()) as { challengeId: string; developmentCode?: string };
+      test.skip(!otp.developmentCode, "Development OTP exposure is required for ecommerce Layaway UAT.");
+      const signupResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(store.code)}/auth/verify-signup`,
+        {
+          data: {
+            challengeId: otp.challengeId,
+            code: otp.developmentCode,
+            fullName: "Ecommerce Layaway QA",
+            password: `Qa${Date.now()}Layaway`
+          }
+        }
+      );
+      expect(signupResponse.ok(), await signupResponse.text()).toBeTruthy();
+
+      const quoteResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(store.code)}/quote`,
+        { data: { lines: [{ productId: product!.id, quantity: 1 }] } }
+      );
+      expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
+      const quote = (await quoteResponse.json()) as { totalAmount: number };
+      test.skip(quote.totalAmount <= 0, "A positive ecommerce product total is required for Layaway UAT.");
+      const minimumDeposit = Number((quote.totalAmount * 0.2).toFixed(2));
+
+      await page.setViewportSize({ width: 390, height: 844 });
+      const sessionRefresh = page.waitForResponse(
+        (response) =>
+          response.url().toLowerCase().includes(
+            `/api/ecommerce/${encodeURIComponent(store.code).toLowerCase()}/auth/session`
+          ) && response.request().method() === "GET"
+      );
+      await page.goto(
+        `/shop/${encodeURIComponent(store.code)}/products/${encodeURIComponent(product!.code)}`
+      );
+      await sessionRefresh;
+      const productPage = page.locator("article").filter({
+        has: page.getByRole("heading", { name: product!.name, level: 1 })
+      });
+      await productPage.getByRole("button", { name: /Add/ }).click();
+      await page.getByRole("button", { name: "Open cart" }).click();
+      await page.getByRole("button", { name: /Checkout/ }).click();
+      const layawayButton = page.getByRole("button", { name: "Layaway", exact: true });
+      await expect(layawayButton).toBeVisible();
+      await layawayButton.click();
+      await expect(page.getByText("20% minimum deposit", { exact: true })).toBeVisible();
+      const depositInput = page.getByLabel("Deposit to pay now");
+      await expect(depositInput).toBeVisible();
+      expect(Number(await depositInput.inputValue())).toBe(minimumDeposit);
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+        )
+      ).toBeLessThanOrEqual(1);
+
+      const delivery = {
+        fulfilmentMethod: catalog.store.allowDelivery ? "DELIVERY" : "PICKUP",
+        recipientName: "Ecommerce Layaway QA",
+        phone: identifier,
+        ...(catalog.store.allowDelivery
+          ? { addressLine1: "15 Independence Avenue", city: "Accra", region: "Greater Accra" }
+          : {})
+      };
+      const lowDepositResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(store.code)}/orders`,
+        {
+          headers: { "idempotency-key": `layaway-low-${crypto.randomUUID()}` },
+          data: {
+            lines: [{ productId: product!.id, quantity: 1 }],
+            delivery,
+            paymentMethodCode: originalMethod.code,
+            orderType: "LAYAWAY",
+            layawayDepositAmount: Math.max(0, minimumDeposit - 0.01)
+          }
+        }
+      );
+      expect(lowDepositResponse.status()).toBe(400);
+      expect(await lowDepositResponse.text()).toContain("opening deposit");
+
+      const orderResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(store.code)}/orders`,
+        {
+          headers: { "idempotency-key": `layaway-valid-${crypto.randomUUID()}` },
+          data: {
+            lines: [{ productId: product!.id, quantity: 1 }],
+            delivery,
+            paymentMethodCode: originalMethod.code,
+            orderType: "LAYAWAY",
+            layawayDepositAmount: minimumDeposit
+          }
+        }
+      );
+      expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
+      const created = (await orderResponse.json()) as {
+        orderId: string;
+        orderNo: string;
+        orderType: string;
+        paymentAmountDueNow: number;
+      };
+      expect(created).toMatchObject({
+        orderType: "LAYAWAY",
+        paymentAmountDueNow: minimumDeposit
+      });
+      const persisted = await prisma.ecommerceOrder.findUniqueOrThrow({
+        where: { id: created.orderId },
+        include: { salesOrder: true }
+      });
+      ecommerceOrderId = persisted.id;
+      salesOrderId = persisted.salesOrderId;
+      sourceTransactionId = persisted.salesOrder.sourceTransactionId;
+      customerAccountId = persisted.customerAccountId;
+      const customerAccount = await prisma.ecommerceCustomerAccount.findUniqueOrThrow({
+        where: { id: persisted.customerAccountId },
+        select: { customerId: true }
+      });
+      customerId = customerAccount.customerId;
+      expect(persisted.salesOrder).toMatchObject({
+        orderType: "LAYAWAY",
+        reservationStatus: "NOT_APPLICABLE"
+      });
+      expect(Number(persisted.salesOrder.paidAmount)).toBe(0);
+      expect(Number(persisted.layawayDepositAmount)).toBe(minimumDeposit);
+      expect(JSON.parse(persisted.salesOrder.layawayPolicySnapshotJson ?? "{}")).toMatchObject({
+        minimumDepositPercent: 20,
+        reserveStockOnDeposit: true
+      });
+
+      const prematureAcceptance = await page.request.patch(
+        `/api/online-store/ecommerce/orders/${encodeURIComponent(persisted.id)}`,
+        { data: { status: "CONFIRMED" } }
+      );
+      expect(prematureAcceptance.status()).toBe(409);
+      expect(await prematureAcceptance.text()).toContain("minimum opening deposit");
+
+    } finally {
+      if (ecommerceOrderId) {
+        await prisma.ecommerceOrderStatusEvent.deleteMany({ where: { ecommerceOrderId } });
+        await prisma.ecommerceRefundRequest.deleteMany({ where: { ecommerceOrderId } });
+        await prisma.ecommercePayment.deleteMany({ where: { ecommerceOrderId } });
+        await prisma.ecommerceOrder.deleteMany({ where: { id: ecommerceOrderId } });
+      }
+      if (salesOrderId) {
+        await prisma.salesOrderInventoryReservation.deleteMany({ where: { salesOrderId } });
+        await prisma.salesOrderLine.deleteMany({ where: { salesOrderId } });
+        await prisma.salesOrder.deleteMany({ where: { id: salesOrderId } });
+      }
+      if (sourceTransactionId) {
+        await prisma.posPayment.deleteMany({ where: { posTransactionId: sourceTransactionId } });
+        await prisma.posTransactionLine.deleteMany({ where: { posTransactionId: sourceTransactionId } });
+        await prisma.posTransaction.deleteMany({ where: { id: sourceTransactionId } });
+      }
+      if (customerAccountId) {
+        await prisma.ecommerceCustomerSession.deleteMany({ where: { customerAccountId } });
+        await prisma.ecommerceCustomerIdentity.deleteMany({ where: { customerAccountId } });
+        await prisma.ecommerceCustomerAddress.deleteMany({ where: { customerAccountId } });
+        await prisma.ecommerceCustomerAccount.deleteMany({ where: { id: customerAccountId } });
+      }
+      if (customerId) {
+        await prisma.customer.deleteMany({ where: { id: customerId } });
+      }
+      await prisma.retailOrg.update({
+        where: { id: store.retailOrgId },
+        data: { companySettingsJson: originalCompanySettings }
+      });
+      await prisma.store.update({
+        where: { id: store.id },
+        data: { ecommerceLayawayEnabled: store.ecommerceLayawayEnabled }
+      });
+      await prisma.ecommerceStorePaymentMethod.updateMany({
+        where: { storeId: store.id, tenderMethodId: originalMethod.id },
+        data: { enabled: originalMethod.enabled, sortOrder: originalMethod.sortOrder }
+      });
+      if (temporaryTenderMethodId) {
+        await prisma.ecommerceStorePaymentMethod.deleteMany({
+          where: { storeId: store.id, tenderMethodId: temporaryTenderMethodId }
+        });
+        await prisma.tenderMethod.deleteMany({ where: { id: temporaryTenderMethodId } });
+      }
+    }
   });
 
   test("shows the ecommerce staff-console privilege in the role editor", async ({ page }) => {

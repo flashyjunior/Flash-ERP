@@ -153,11 +153,14 @@ import {
   resolveStoreReceiptTemplateSelection,
 } from "@/server/repositories/receipt-template-support";
 import {
+  ensureAlternateUomSellingSchemaCompatibility,
   ensureInterStoreTransferSchemaCompatibility,
   ensureInventoryExpirySchemaCompatibility,
   ensureInventoryLocationSalesOrderSchemaCompatibility,
+  ensureLayawayLifecycleSchemaCompatibility,
   ensureOperatingExpenseSchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility,
+  ensureSyncOutboxFailureSchemaCompatibility,
 } from "@/server/repositories/schema-compatibility.repository";
 import {
   captureTransactionReference,
@@ -169,7 +172,10 @@ import {
   STOCK_UPDATE_STATUS_PENDING,
   STOCK_UPDATE_STATUS_POSTED
 } from "@/server/repositories/inventory-stock-policy.repository";
-import { postPosTransactionAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
+import {
+  postLayawayAccountingInTransaction,
+  postPosTransactionAccountingInTransaction,
+} from "@/server/services/erp-pos-sale-accounting";
 
 const allowedAggregateTypes = new Set([
   "retailOrg",
@@ -419,6 +425,38 @@ function readStorePosOptionSettings(value: Prisma.JsonValue | null | undefined) 
   };
 }
 const maxDownstreamPullLimit = 50;
+const priorityStoreTopologyEventTypes = [
+  "store.settings.published",
+  "inventory.location.published",
+] as const;
+const priorityStoreOperationsEventTypes = [
+  "security.user.published",
+  "security.role.published",
+  "setup.unit-of-measure.published",
+  "setup.tax-profile.published",
+  "setup.tender-method.published",
+  "setup.bank-account.published",
+  "inter-store-transfer.target.published",
+  "inter-store-transfer.published",
+  "supplier-return.published",
+  "sync.task.requested",
+  "database.instruction.requested",
+] as const;
+const priorityStoreCatalogEventTypes = [
+  "catalog.product.published",
+  "catalog.barcode.published",
+  "pricing.price-list.published",
+  "setup.promotion.published",
+  "inventory.serial-snapshot.published",
+  "inventory.ledger.published",
+  "purchase-order.published",
+  "gift-certificate.published",
+] as const;
+const priorityStoreSyncEventTypes = [
+  ...priorityStoreTopologyEventTypes,
+  ...priorityStoreOperationsEventTypes,
+  ...priorityStoreCatalogEventTypes,
+] as const;
 
 const syncNodePolicySelect = {
   autoSyncEnabled: true,
@@ -1220,6 +1258,10 @@ function toSalesOrderStatus(value: string): StoreSalesOrderStatus {
     return "CANCELLED";
   }
 
+  if (value === SalesOrderStatus.EXPIRED) {
+    return "EXPIRED";
+  }
+
   throw new StoreProjectionError(
     "INVALID_PAYLOAD",
     `Flash ERP does not support sales-order status "${value}" from store nodes.`,
@@ -1344,7 +1386,10 @@ function toPosPaymentPurpose(
   if (
     value === "SALES_ORDER_DEPOSIT" ||
     value === "SALES_ORDER_BALANCE" ||
-    value === "TRANSACTION_SETTLEMENT"
+    value === "TRANSACTION_SETTLEMENT" ||
+    value === "LAYAWAY_DEPOSIT" ||
+    value === "LAYAWAY_INSTALLMENT" ||
+    value === "LAYAWAY_REFUND"
   ) {
     return value;
   }
@@ -1929,6 +1974,7 @@ async function queueAutomaticStoreMasterDataPublications(
                 in: [
                   "store.settings.published",
                   "inventory.location.published",
+                  "inter-store-transfer.target.published",
                   "security.permission.published",
                   "security.role.published",
                   "security.user.published",
@@ -2022,6 +2068,7 @@ async function queueAutomaticStoreMasterDataPublications(
     barcodes,
     priceLists,
     storeProductPrices,
+    storeProductSellingUnits,
     productInventorySums,
     taxProfiles,
     tenderMethods,
@@ -2623,6 +2670,36 @@ async function queueAutomaticStoreMasterDataPublications(
         },
       }),
     () =>
+      tx.storeProductSellingUnit.findMany({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          storeId: targetStore.id,
+          status: RecordStatus.ACTIVE,
+        },
+        select: {
+          productId: true,
+          productVariantId: true,
+          unitOfMeasureCodeSnapshot: true,
+          unitOfMeasureNameSnapshot: true,
+          conversionFactor: true,
+          unitPrice: true,
+          barcode: true,
+          isDefault: true,
+          updatedAt: true,
+          productVariant: {
+            select: {
+              code: true,
+            },
+          },
+          unitOfMeasure: {
+            select: {
+              allowFractionalSale: true,
+              decimalPrecision: true,
+            },
+          },
+        },
+      }),
+    () =>
       tx.inventoryLedgerEntry.groupBy({
         by: ["productId"],
         where: {
@@ -2859,6 +2936,15 @@ async function queueAutomaticStoreMasterDataPublications(
         ] as const,
     ),
   );
+  const sellingUnitsByProductId = new Map<
+    string,
+    typeof storeProductSellingUnits
+  >();
+  for (const sellingUnit of storeProductSellingUnits) {
+    const rows = sellingUnitsByProductId.get(sellingUnit.productId) ?? [];
+    rows.push(sellingUnit);
+    sellingUnitsByProductId.set(sellingUnit.productId, rows);
+  }
   const storeCatalogPolicy = resolveStoreCatalogPolicy(
     storeSettings?.catalogPolicyJson,
     storeSettings?.inventoryCatalogLinks,
@@ -3684,12 +3770,14 @@ async function queueAutomaticStoreMasterDataPublications(
 
   for (const product of productsForStore) {
     const storeProductPrice = storePriceByProductId.get(product.id);
+    const productSellingUnits = sellingUnitsByProductId.get(product.id) ?? [];
     const storeVariantVersionStamps = product.matrixVariants
       .map((variant) => storePriceByVariantId.get(variant.id)?.updatedAt.getTime() ?? 0);
     const productVersionStamp = Math.max(
       product.updatedAt.getTime(),
       storeProductPrice?.updatedAt.getTime() ?? 0,
       ...storeVariantVersionStamps,
+      ...productSellingUnits.map((sellingUnit) => sellingUnit.updatedAt.getTime()),
     );
     const shouldPublishProduct =
       mode !== "delta" ||
@@ -3729,6 +3817,17 @@ async function queueAutomaticStoreMasterDataPublications(
             allowSale: line.allowSale,
             allowPurchase: line.allowPurchase,
           })) ?? [],
+        sellingUnits: productSellingUnits.map((sellingUnit) => ({
+          productVariantCode: sellingUnit.productVariant?.code ?? null,
+          uomCode: sellingUnit.unitOfMeasureCodeSnapshot,
+          uomName: sellingUnit.unitOfMeasureNameSnapshot,
+          conversionFactor: Number(sellingUnit.conversionFactor),
+          unitPrice: Number(sellingUnit.unitPrice),
+          barcode: sellingUnit.barcode,
+          isDefault: sellingUnit.isDefault,
+          allowFractionalSale: sellingUnit.unitOfMeasure.allowFractionalSale,
+          decimalPrecision: sellingUnit.unitOfMeasure.decimalPrecision,
+        })),
         packSize: product.packSize,
         countryOfOrigin: product.countryOfOrigin,
         primaryImageUrl: product.primaryImageUrl,
@@ -4860,6 +4959,34 @@ function parseStoreSalesOrderRecordedPayload(
   );
   const rawLines = Array.isArray(payload.lines) ? payload.lines : null;
   const rawPayments = Array.isArray(payload.payments) ? payload.payments : null;
+  const rawReservations = Array.isArray(payload.reservations)
+    ? payload.reservations
+    : null;
+  const orderType = readOptionalString(payload, "orderType") ?? "SALES_ORDER";
+  const reservationStatus =
+    readOptionalString(payload, "reservationStatus") ?? "NOT_APPLICABLE";
+
+  if (orderType !== "SALES_ORDER" && orderType !== "LAYAWAY") {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Flash ERP does not support sales-order type "${orderType}" from store nodes.`,
+      false,
+    );
+  }
+
+  if (
+    reservationStatus !== "NOT_APPLICABLE" &&
+    reservationStatus !== "ACTIVE" &&
+    reservationStatus !== "RELEASED" &&
+    reservationStatus !== "CONSUMED" &&
+    reservationStatus !== "EXPIRED"
+  ) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Flash ERP does not support layaway reservation status "${reservationStatus}" from store nodes.`,
+      false,
+    );
+  }
 
   return {
     orderId: readRequiredString(
@@ -4901,11 +5028,16 @@ function parseStoreSalesOrderRecordedPayload(
     customerId: readOptionalString(payload, "customerId"),
     customerNo: readOptionalString(payload, "customerNo"),
     customerName: readOptionalString(payload, "customerName"),
+    orderType,
     subtotalAmount: readOptionalNumber(payload, "subtotalAmount") ?? totalAmount,
     discountAmount: readOptionalNumber(payload, "discountAmount") ?? 0,
     taxAmount: readOptionalNumber(payload, "taxAmount") ?? 0,
     totalAmount,
     depositAmount,
+    paidAmount: Math.max(
+      0,
+      readOptionalNumber(payload, "paidAmount") ?? depositAmount,
+    ),
     balanceAmount:
       readOptionalNumber(payload, "balanceAmount") ??
       Math.max(0, Number((totalAmount - depositAmount).toFixed(2))),
@@ -4925,6 +5057,38 @@ function parseStoreSalesOrderRecordedPayload(
       toOptionalDate(
         readOptionalString(payload, "depositPaidAt"),
       )?.toISOString() ?? null,
+    layawayPolicySnapshotJson: readOptionalString(
+      payload,
+      "layawayPolicySnapshotJson",
+    ),
+    minimumDepositAmount: Math.max(
+      0,
+      readOptionalNumber(payload, "minimumDepositAmount") ?? 0,
+    ),
+    reservationStatus,
+    reservationCreatedAt:
+      toOptionalDate(
+        readOptionalString(payload, "reservationCreatedAt"),
+      )?.toISOString() ?? null,
+    reservationReleasedAt:
+      toOptionalDate(
+        readOptionalString(payload, "reservationReleasedAt"),
+      )?.toISOString() ?? null,
+    layawayExpiresAt:
+      toOptionalDate(
+        readOptionalString(payload, "layawayExpiresAt"),
+      )?.toISOString() ?? null,
+    expiredAt:
+      toOptionalDate(readOptionalString(payload, "expiredAt"))?.toISOString() ??
+      null,
+    cancellationFeeAmount: Math.max(
+      0,
+      readOptionalNumber(payload, "cancellationFeeAmount") ?? 0,
+    ),
+    refundedAmount: Math.max(
+      0,
+      readOptionalNumber(payload, "refundedAmount") ?? 0,
+    ),
     status: toSalesOrderStatus(
       readRequiredString(
         payload,
@@ -4998,6 +5162,20 @@ function parseStoreSalesOrderRecordedPayload(
           event.aggregateType,
           lineEventType,
         ),
+        sellingUnitOfMeasure:
+          readOptionalString(line, "sellingUnitOfMeasure") ?? "EA",
+        baseUnitOfMeasure:
+          readOptionalString(line, "baseUnitOfMeasure") ?? "EA",
+        uomConversionFactor:
+          readOptionalNumber(line, "uomConversionFactor") ?? 1,
+        baseQuantity:
+          readOptionalNumber(line, "baseQuantity") ??
+          readRequiredNumber(
+            line,
+            "quantity",
+            event.aggregateType,
+            lineEventType,
+          ),
         unitPrice: readRequiredNumber(
           line,
           "unitPrice",
@@ -5040,6 +5218,79 @@ function parseStoreSalesOrderRecordedPayload(
         "SALES_ORDER_DEPOSIT",
       ),
     ),
+    reservations: rawReservations?.map((rawReservation, index) => {
+      const reservationEventType = `${event.eventType}:reservation:${index + 1}`;
+      const reservation = toJsonObject(
+        rawReservation,
+        event.aggregateType,
+        reservationEventType,
+      );
+      const status =
+        readOptionalString(reservation, "status") ?? "ACTIVE";
+
+      if (
+        status !== "NOT_APPLICABLE" &&
+        status !== "ACTIVE" &&
+        status !== "RELEASED" &&
+        status !== "CONSUMED" &&
+        status !== "EXPIRED"
+      ) {
+        throw new StoreProjectionError(
+          "INVALID_PAYLOAD",
+          `Flash ERP does not support reservation status "${status}" from store nodes.`,
+          false,
+        );
+      }
+
+      return {
+        reservationId: readRequiredString(
+          reservation,
+          "reservationId",
+          event.aggregateType,
+          reservationEventType,
+        ),
+        salesOrderLineId: readRequiredString(
+          reservation,
+          "salesOrderLineId",
+          event.aggregateType,
+          reservationEventType,
+        ),
+        inventoryLocationCode: readOptionalString(
+          reservation,
+          "inventoryLocationCode",
+        ),
+        productCode: readRequiredString(
+          reservation,
+          "productCode",
+          event.aggregateType,
+          reservationEventType,
+        ),
+        productVariantCode: readOptionalString(
+          reservation,
+          "productVariantCode",
+        ),
+        baseUnitOfMeasure:
+          readOptionalString(reservation, "baseUnitOfMeasure") ?? "EA",
+        baseQuantity: readRequiredNumber(
+          reservation,
+          "baseQuantity",
+          event.aggregateType,
+          reservationEventType,
+        ),
+        status,
+        releaseReason: readOptionalString(reservation, "releaseReason"),
+        createdAt: readRequiredDate(
+          reservation,
+          "createdAt",
+          event.aggregateType,
+          reservationEventType,
+        ).toISOString(),
+        releasedAt:
+          toOptionalDate(
+            readOptionalString(reservation, "releasedAt"),
+          )?.toISOString() ?? null,
+      };
+    }),
   };
 }
 
@@ -6091,6 +6342,8 @@ function parseStoreInterStoreTransferRequestedPayload(
       event.aggregateType,
       event.eventType,
     ),
+    transferBatchNo: readOptionalString(payload, "transferBatchNo"),
+    lineNo: readOptionalNumber(payload, "lineNo"),
     storeCode: readRequiredString(
       payload,
       "storeCode",
@@ -6103,12 +6356,13 @@ function parseStoreInterStoreTransferRequestedPayload(
       event.aggregateType,
       event.eventType,
     ),
-    sourceLocationCode: readRequiredString(
+    sourceStoreCode: readRequiredString(
       payload,
-      "sourceLocationCode",
+      "sourceStoreCode",
       event.aggregateType,
       event.eventType,
     ),
+    sourceLocationCode: readOptionalString(payload, "sourceLocationCode"),
     destinationLocationCode: readRequiredString(
       payload,
       "destinationLocationCode",
@@ -7757,6 +8011,7 @@ export async function queueInterStoreTransferPublication(
     transfer.receivedBatchAllocationsSnapshot,
   );
   const publishedAt = input.publishedAt ?? new Date();
+  const sourceLocationAssigned = issuedQuantity > 0;
   const publishToNode = async (
     targetNodeCode: string,
     storeCode: string,
@@ -7779,8 +8034,12 @@ export async function queueInterStoreTransferPublication(
       deliveryNoteNo: transfer.deliveryNoteNo,
       sourceStoreCode: transfer.sourceStore.code,
       sourceStoreName: transfer.sourceStore.name,
-      sourceLocationCode: transfer.sourceInventoryLocation.code,
-      sourceLocationName: transfer.sourceInventoryLocation.name,
+      sourceLocationCode: sourceLocationAssigned
+        ? transfer.sourceInventoryLocation.code
+        : "",
+      sourceLocationName: sourceLocationAssigned
+        ? transfer.sourceInventoryLocation.name
+        : "Selected by source shop on issue",
       destinationStoreCode: transfer.destinationStore.code,
       destinationStoreName: transfer.destinationStore.name,
       destinationLocationCode: transfer.destinationInventoryLocation.code,
@@ -8643,10 +8902,15 @@ async function projectStoreSalesOrder(
   const expectedStatus =
     event.eventType === "sales-order.recorded"
       ? SalesOrderStatus.OPEN
+      : event.eventType === "sales-order.payment-received" ||
+          event.eventType === "sales-order.reservation-released"
+        ? SalesOrderStatus.OPEN
       : event.eventType === "sales-order.fulfilled"
         ? SalesOrderStatus.FULFILLED
         : event.eventType === "sales-order.cancelled"
           ? SalesOrderStatus.CANCELLED
+          : event.eventType === "sales-order.expired"
+            ? SalesOrderStatus.EXPIRED
           : null;
 
   if (!expectedStatus) {
@@ -8686,6 +8950,14 @@ async function projectStoreSalesOrder(
     );
   }
 
+  if (payload.status === SalesOrderStatus.EXPIRED && !payload.expiredAt) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Sales order "${payload.orderNo}" needs an expiry timestamp before enterprise can project it.`,
+      false,
+    );
+  }
+
   const customer = await resolveEnterpriseCustomerForSalesOrder(
     tx,
     target.storeNode.retailOrgId,
@@ -8713,15 +8985,32 @@ async function projectStoreSalesOrder(
     sourceTransactionNo: payload.sourceTransactionNo,
     customerNoSnapshot: payload.customerNo,
     customerNameSnapshot: payload.customerName,
+    orderType: payload.orderType ?? "SALES_ORDER",
     status: payload.status,
     totalAmount: toMoneyString(payload.totalAmount),
     depositAmount: toMoneyString(payload.depositAmount ?? 0),
+    paidAmount: toMoneyString(payload.paidAmount ?? payload.depositAmount ?? 0),
     balanceAmount: toMoneyString(payload.balanceAmount ?? 0),
     depositTenderMethodCodeSnapshot: payload.depositTenderMethodCode ?? null,
     depositTenderMethodNameSnapshot: payload.depositTenderMethodName ?? null,
     depositPaymentMethodSnapshot: payload.depositPaymentMethod ?? null,
     depositReference: payload.depositReference ?? null,
     depositPaidAt: payload.depositPaidAt ? new Date(payload.depositPaidAt) : null,
+    layawayPolicySnapshotJson: payload.layawayPolicySnapshotJson ?? null,
+    minimumDepositAmount: toMoneyString(payload.minimumDepositAmount ?? 0),
+    reservationStatus: payload.reservationStatus ?? "NOT_APPLICABLE",
+    reservationCreatedAt: payload.reservationCreatedAt
+      ? new Date(payload.reservationCreatedAt)
+      : null,
+    reservationReleasedAt: payload.reservationReleasedAt
+      ? new Date(payload.reservationReleasedAt)
+      : null,
+    layawayExpiresAt: payload.layawayExpiresAt
+      ? new Date(payload.layawayExpiresAt)
+      : null,
+    expiredAt: payload.expiredAt ? new Date(payload.expiredAt) : null,
+    cancellationFeeAmount: toMoneyString(payload.cancellationFeeAmount ?? 0),
+    refundedAmount: toMoneyString(payload.refundedAmount ?? 0),
     operatorName: payload.operatorName,
     note: payload.note,
     fulfilledTransactionId: payload.fulfilledTransactionId,
@@ -8765,6 +9054,12 @@ async function projectStoreSalesOrder(
     });
   }
 
+  if (payload.reservations !== undefined) {
+    await tx.salesOrderInventoryReservation.deleteMany({
+      where: { salesOrderId: payload.orderId },
+    });
+  }
+
   if (payload.lines !== undefined) {
     await tx.salesOrderLine.deleteMany({
       where: {
@@ -8785,6 +9080,10 @@ async function projectStoreSalesOrder(
           variantAttributesSnapshot: line.variantAttributesSnapshot,
           lineNote: line.lineNote,
           quantity: line.quantity,
+          sellingUnitOfMeasure: line.sellingUnitOfMeasure ?? "EA",
+          baseUnitOfMeasure: line.baseUnitOfMeasure ?? "EA",
+          uomConversionFactor: line.uomConversionFactor ?? 1,
+          baseQuantity: line.baseQuantity ?? line.quantity,
           unitPrice: toMoneyString(line.unitPrice),
           discountAmount: toMoneyString(line.discountAmount),
           taxAmount: toMoneyString(line.taxAmount),
@@ -8796,8 +9095,56 @@ async function projectStoreSalesOrder(
     }
   }
 
+  if (payload.reservations !== undefined) {
+    const reservationLocationCodes = [
+      ...new Set(
+        payload.reservations
+          .map((reservation) => reservation.inventoryLocationCode)
+          .filter((code): code is string => Boolean(code)),
+      ),
+    ];
+    const reservationLocations =
+      reservationLocationCodes.length > 0
+        ? await tx.inventoryLocation.findMany({
+            where: {
+              storeId: target.storeNode.store.id,
+              code: { in: reservationLocationCodes },
+            },
+            select: { id: true, code: true },
+          })
+        : [];
+    const reservationLocationIdByCode = new Map(
+      reservationLocations.map((location) => [location.code, location.id]),
+    );
+
+    if (payload.reservations.length > 0) {
+      await tx.salesOrderInventoryReservation.createMany({
+        data: payload.reservations.map((reservation) => ({
+          id: reservation.reservationId,
+          salesOrderId: payload.orderId,
+          salesOrderLineId: reservation.salesOrderLineId,
+          inventoryLocationId: reservation.inventoryLocationCode
+            ? reservationLocationIdByCode.get(
+                reservation.inventoryLocationCode,
+              ) ?? null
+            : null,
+          inventoryLocationCodeSnapshot: reservation.inventoryLocationCode,
+          productCodeSnapshot: reservation.productCode,
+          productVariantCodeSnapshot: reservation.productVariantCode,
+          baseUnitOfMeasure: reservation.baseUnitOfMeasure,
+          baseQuantity: reservation.baseQuantity,
+          status: reservation.status,
+          releaseReason: reservation.releaseReason,
+          createdAt: new Date(reservation.createdAt),
+          releasedAt: reservation.releasedAt
+            ? new Date(reservation.releasedAt)
+            : null,
+        })),
+      });
+    }
+  }
+
   if (
-    event.eventType === "sales-order.recorded" &&
     payload.payments &&
     payload.payments.length > 0
   ) {
@@ -8817,6 +9164,7 @@ async function projectStoreSalesOrder(
         storeId: true,
         originNodeCode: true,
         status: true,
+        recordVersion: true,
       },
     });
 
@@ -8831,13 +9179,6 @@ async function projectStoreSalesOrder(
           `Flash ERP already has source transaction "${sourceTransactionNo}" from another store event.`,
           false,
         );
-      }
-
-      if (
-        existingSourceTransaction.status === PosTransactionStatus.PARKED ||
-        existingSourceTransaction.status === PosTransactionStatus.COMPLETED
-      ) {
-        return true;
       }
     }
 
@@ -8891,69 +9232,127 @@ async function projectStoreSalesOrder(
             ).map((method) => [method.code.toUpperCase(), method.id] as const),
           )
         : new Map<string, string>();
+    const projectedPaidAmount = Math.max(
+      0,
+      (payload.paidAmount ?? payload.depositAmount ?? 0) -
+        (payload.refundedAmount ?? 0),
+    );
+    const paymentRows = payload.payments.map((payment) => ({
+      id: payment.paymentId,
+      tenderMethodId: payment.tenderMethodCode
+        ? tenderMethodIdByCode.get(
+            payment.tenderMethodCode.trim().toUpperCase(),
+          ) ?? null
+        : null,
+      ...(payment.bankAccountId
+        ? { bankAccountId: payment.bankAccountId }
+        : {}),
+      tenderMethodCodeSnapshot: payment.tenderMethodCode,
+      tenderMethodNameSnapshot: payment.tenderMethodName,
+      bankCodeSnapshot: payment.bankCode,
+      bankNameSnapshot: payment.bankName,
+      bankBranchCodeSnapshot: payment.bankBranchCode,
+      bankBranchNameSnapshot: payment.bankBranchName,
+      bankAccountNumberSnapshot: payment.bankAccountNumber,
+      bankAccountNameSnapshot: payment.bankAccountName,
+      method: payment.method,
+      amount: toMoneyString(payment.amount),
+      reference: payment.reference,
+      paymentPurpose:
+        payment.paymentPurpose ??
+        (payload.orderType === "LAYAWAY"
+          ? "LAYAWAY_DEPOSIT"
+          : "SALES_ORDER_DEPOSIT"),
+      receivedShiftId:
+        payment.receivedShiftId &&
+        validPaymentShiftIds.has(payment.receivedShiftId)
+          ? payment.receivedShiftId
+          : null,
+      receivedShiftNoSnapshot: payment.receivedShiftNo,
+      receivedTerminalCodeSnapshot: payment.receivedTerminalCode,
+      receivedCashierCodeSnapshot: payment.receivedCashierCode,
+      receivedAt: new Date(payment.receivedAt),
+    }));
 
-    await tx.posTransaction.create({
-      data: {
-        id: payload.sourceTransactionId,
-        retailOrgId: target.storeNode.retailOrgId,
-        storeId: target.storeNode.store.id,
-        terminalId: target.storeNode.terminal.id,
-        posShiftId: firstReceivedShiftId ?? null,
-        customerId: customer?.id ?? null,
-        transactionNo: sourceTransactionNo,
-        transactionType: PosTransactionType.SALE,
-        status: PosTransactionStatus.PARKED,
-        customerNameSnapshot: payload.customerName ?? null,
-        cashierCodeSnapshot:
-          payload.payments[0]?.receivedCashierCode ?? payload.operatorName,
-        subtotalAmount: toMoneyString(
-          payload.subtotalAmount ?? payload.totalAmount,
-        ),
-        discountAmount: toMoneyString(payload.discountAmount ?? 0),
-        taxAmount: toMoneyString(payload.taxAmount ?? 0),
-        totalAmount: toMoneyString(payload.totalAmount),
-        paidAmount: toMoneyString(payload.depositAmount ?? 0),
-        changeAmount: toMoneyString(0),
-        notes: payload.note,
-        originNodeCode: target.storeNode.code,
-        recordVersion: nextRecordVersion,
-        payments: {
-          createMany: {
-            data: payload.payments.map((payment) => ({
-              id: payment.paymentId,
-              tenderMethodId: payment.tenderMethodCode
-                ? tenderMethodIdByCode.get(
-                    payment.tenderMethodCode.trim().toUpperCase(),
-                  ) ?? null
-                : null,
-              ...(payment.bankAccountId
-                ? { bankAccountId: payment.bankAccountId }
-                : {}),
-              tenderMethodCodeSnapshot: payment.tenderMethodCode,
-              tenderMethodNameSnapshot: payment.tenderMethodName,
-              bankCodeSnapshot: payment.bankCode,
-              bankNameSnapshot: payment.bankName,
-              bankBranchCodeSnapshot: payment.bankBranchCode,
-              bankBranchNameSnapshot: payment.bankBranchName,
-              bankAccountNumberSnapshot: payment.bankAccountNumber,
-              bankAccountNameSnapshot: payment.bankAccountName,
-              method: payment.method,
-              amount: toMoneyString(payment.amount),
-              reference: payment.reference,
-              paymentPurpose: "SALES_ORDER_DEPOSIT",
-              receivedShiftId:
-                payment.receivedShiftId &&
-                validPaymentShiftIds.has(payment.receivedShiftId)
-                  ? payment.receivedShiftId
-                  : null,
-              receivedShiftNoSnapshot: payment.receivedShiftNo,
-              receivedTerminalCodeSnapshot: payment.receivedTerminalCode,
-              receivedCashierCodeSnapshot: payment.receivedCashierCode,
-              receivedAt: new Date(payment.receivedAt),
-            })),
+    if (!existingSourceTransaction) {
+      await tx.posTransaction.create({
+        data: {
+          id: payload.sourceTransactionId,
+          retailOrgId: target.storeNode.retailOrgId,
+          storeId: target.storeNode.store.id,
+          terminalId: target.storeNode.terminal.id,
+          posShiftId: firstReceivedShiftId ?? null,
+          customerId: customer?.id ?? null,
+          transactionNo: sourceTransactionNo,
+          transactionType: PosTransactionType.SALE,
+          status: PosTransactionStatus.PARKED,
+          customerNameSnapshot: payload.customerName ?? null,
+          cashierCodeSnapshot:
+            payload.payments[0]?.receivedCashierCode ?? payload.operatorName,
+          subtotalAmount: toMoneyString(
+            payload.subtotalAmount ?? payload.totalAmount,
+          ),
+          discountAmount: toMoneyString(payload.discountAmount ?? 0),
+          taxAmount: toMoneyString(payload.taxAmount ?? 0),
+          totalAmount: toMoneyString(payload.totalAmount),
+          paidAmount: toMoneyString(projectedPaidAmount),
+          changeAmount: toMoneyString(0),
+          notes: payload.note,
+          originNodeCode: target.storeNode.code,
+          recordVersion: nextRecordVersion,
+          payments: {
+            createMany: { data: paymentRows },
           },
         },
-      },
+      });
+    } else {
+      await tx.posTransaction.update({
+        where: { id: existingSourceTransaction.id },
+        data: {
+          posShiftId: firstReceivedShiftId ?? undefined,
+          customerId: customer?.id ?? undefined,
+          customerNameSnapshot: payload.customerName ?? undefined,
+          paidAmount: toMoneyString(projectedPaidAmount),
+          notes: payload.note,
+          recordVersion: Math.max(
+            existingSourceTransaction.recordVersion,
+            nextRecordVersion,
+          ),
+        },
+      });
+      const existingPaymentIds = new Set(
+        (
+          await tx.posPayment.findMany({
+            where: {
+              id: { in: paymentRows.map((payment) => payment.id) },
+              posTransactionId: existingSourceTransaction.id,
+            },
+            select: { id: true },
+          })
+        ).map((payment) => payment.id),
+      );
+      const missingPayments = paymentRows.filter(
+        (payment) => !existingPaymentIds.has(payment.id),
+      );
+
+      if (missingPayments.length > 0) {
+        await tx.posPayment.createMany({
+          data: missingPayments.map((payment) => ({
+            ...payment,
+            posTransactionId: existingSourceTransaction.id,
+          })),
+        });
+      }
+    }
+  }
+
+  if ((payload.orderType ?? "SALES_ORDER") === "LAYAWAY") {
+    await postLayawayAccountingInTransaction(tx as Prisma.TransactionClient, {
+      retailOrgId: target.storeNode.retailOrgId,
+      salesOrderId: payload.orderId,
+      postedBy:
+        payload.operatorName?.trim() ||
+        `Store sync ${target.storeNode.code}`,
     });
   }
 
@@ -10775,21 +11174,25 @@ async function projectStoreInterStoreTransferRequest(
     );
   }
 
-  const sourceLocation = await tx.inventoryLocation.findFirst({
+  const sourceStore = await tx.store.findFirst({
     where: {
       retailOrgId: target.storeNode.retailOrgId,
-      code: payload.sourceLocationCode,
+      code: payload.sourceStoreCode,
       status: RecordStatus.ACTIVE,
-      storeId: {
-        not: target.storeNode.store.id,
-      },
+      id: { not: target.storeNode.store.id },
     },
     select: {
       id: true,
       code: true,
       name: true,
-      storeId: true,
-      store: {
+      inventoryLocations: {
+        where: { status: RecordStatus.ACTIVE },
+        orderBy: [
+          { useForSalesDefault: "desc" },
+          { useForReceivingDefault: "desc" },
+          { name: "asc" },
+        ],
+        take: 1,
         select: {
           id: true,
           code: true,
@@ -10799,10 +11202,12 @@ async function projectStoreInterStoreTransferRequest(
     },
   });
 
-  if (!sourceLocation || !sourceLocation.storeId || !sourceLocation.store) {
+  const sourceLocation = sourceStore?.inventoryLocations[0];
+
+  if (!sourceStore || !sourceLocation) {
     throw new StoreProjectionError(
       "DEPENDENCY_MISSING",
-      `Flash ERP could not find active source location "${payload.sourceLocationCode}" in another store.`,
+      `Flash ERP could not find active source shop "${payload.sourceStoreCode}" with an inventory location.`,
       false,
     );
   }
@@ -10860,22 +11265,29 @@ async function projectStoreInterStoreTransferRequest(
   }
 
   const occurredAt = new Date(payload.occurredAt);
-  const transferNo = buildInterStoreTransferNo(
-    sourceLocation.code,
-    destinationLocation.code,
-    occurredAt,
-  );
+  const transferBatchNo =
+    payload.transferBatchNo?.trim() || payload.requestNo.trim();
+  const lineNo = Math.max(1, Math.trunc(payload.lineNo ?? 1));
+  const transferNo = payload.transferBatchNo
+    ? `${transferBatchNo}-L${String(lineNo).padStart(2, "0")}`
+    : buildInterStoreTransferNo(
+        sourceStore.code,
+        destinationLocation.code,
+        occurredAt,
+      );
 
   await tx.interStoreTransfer.create({
     data: {
       id: payload.requestId,
       retailOrgId: target.storeNode.retailOrgId,
-      sourceStoreId: sourceLocation.storeId,
+      sourceStoreId: sourceStore.id,
       destinationStoreId: target.storeNode.store.id,
       sourceInventoryLocationId: sourceLocation.id,
       destinationInventoryLocationId: destinationLocation.id,
       productId: product.id,
       transferNo,
+      transferBatchNo,
+      lineNo,
       externalReference: payload.externalReference?.trim() || payload.requestNo,
       origin: InterStoreTransferOrigin.STORE_REQUEST,
       status: InterStoreTransferStatus.REQUESTED,
@@ -10892,7 +11304,7 @@ async function projectStoreInterStoreTransferRequest(
       requestOperatorName: payload.operatorName,
       requestNote:
         payload.note?.trim() ||
-        `${target.storeNode.store.code} requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.baseQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.store.name} / ${sourceLocation.name}.`,
+        `${target.storeNode.store.code} requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.baseQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceStore.name}. The source shop will select the dispatch location when issuing.`,
       requestedByNodeCode: target.storeNode.code,
       requestedAt: occurredAt,
     },
@@ -11032,14 +11444,47 @@ async function projectStoreInterStoreTransferIssue(
     );
   }
 
+  const sourceInventoryLocation = await tx.inventoryLocation.findFirst({
+    where: {
+      retailOrgId: transfer.retailOrgId,
+      storeId: transfer.sourceStoreId,
+      code: payload.sourceLocationCode,
+      status: RecordStatus.ACTIVE,
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      warehouseId: true,
+    },
+  });
+
+  if (!sourceInventoryLocation) {
+    throw new StoreProjectionError(
+      "INVALID_PAYLOAD",
+      `Flash ERP could not find active dispatch location "${payload.sourceLocationCode}" in the source shop for transfer "${transfer.transferNo}".`,
+      false,
+    );
+  }
+
   if (
-    payload.sourceLocationCode !== transfer.sourceInventoryLocation.code ||
+    Number(transfer.issuedQuantity) > 0 &&
+    transfer.sourceInventoryLocationId !== sourceInventoryLocation.id
+  ) {
+    throw new StoreProjectionError(
+      "POLICY_REJECTED",
+      `Inter-store transfer "${transfer.transferNo}" has already been partly issued from ${transfer.sourceInventoryLocation.name}. Continue issuing from the same location.`,
+      false,
+    );
+  }
+
+  if (
     payload.destinationLocationCode !==
       transfer.destinationInventoryLocation.code
   ) {
     throw new StoreProjectionError(
       "INVALID_PAYLOAD",
-      `Inter-store transfer "${transfer.transferNo}" targeted different locations than the enterprise document.`,
+      `Inter-store transfer "${transfer.transferNo}" targeted a different destination location than the enterprise document.`,
       false,
     );
   }
@@ -11112,13 +11557,13 @@ async function projectStoreInterStoreTransferIssue(
     const invalidSerials = existingSerialUnits.filter(
       (serialUnit) =>
         serialUnit.status !== SerialInventoryStatus.AVAILABLE ||
-        serialUnit.inventoryLocationId !== transfer.sourceInventoryLocationId,
+        serialUnit.inventoryLocationId !== sourceInventoryLocation.id,
     );
 
     if (invalidSerials.length > 0) {
       throw new StoreProjectionError(
         "POLICY_REJECTED",
-        `Serial number(s) ${invalidSerials.map((serialUnit) => serialUnit.serialNumber).join(", ")} are not currently available to issue from ${transfer.sourceInventoryLocation.name}.`,
+        `Serial number(s) ${invalidSerials.map((serialUnit) => serialUnit.serialNumber).join(", ")} are not currently available to issue from ${sourceInventoryLocation.name}.`,
         false,
       );
     }
@@ -11132,14 +11577,14 @@ async function projectStoreInterStoreTransferIssue(
     const onHandQuantity = await getInventoryLocationOnHandQuantity(
       tx,
       transfer.retailOrgId,
-      transfer.sourceInventoryLocationId,
+      sourceInventoryLocation.id,
       transfer.productId,
     );
 
     if (payload.quantity - onHandQuantity > 0.0001) {
       throw new StoreProjectionError(
         "POLICY_REJECTED",
-        `Only ${onHandQuantity.toFixed(3)} unit(s) of ${transfer.product.name} are currently available at ${transfer.sourceInventoryLocation.name}.`,
+        `Only ${onHandQuantity.toFixed(3)} unit(s) of ${transfer.product.name} are currently available at ${sourceInventoryLocation.name}.`,
         false,
       );
     }
@@ -11174,8 +11619,8 @@ async function projectStoreInterStoreTransferIssue(
           {
             retailOrgId: transfer.retailOrgId,
             storeId: transfer.sourceStoreId,
-            warehouseId: transfer.sourceInventoryLocation.warehouseId,
-            inventoryLocationId: transfer.sourceInventoryLocationId,
+            warehouseId: sourceInventoryLocation.warehouseId,
+            inventoryLocationId: sourceInventoryLocation.id,
             productId: transfer.productId,
             productName: transfer.product.name,
             sourceReferenceType: "INTERSTORE_TRANSFER",
@@ -11217,8 +11662,8 @@ async function projectStoreInterStoreTransferIssue(
         id: randomUUID(),
         retailOrgId: transfer.retailOrgId,
         storeId: transfer.sourceStoreId,
-        warehouseId: transfer.sourceInventoryLocation.warehouseId,
-        inventoryLocationId: transfer.sourceInventoryLocationId,
+        warehouseId: sourceInventoryLocation.warehouseId,
+        inventoryLocationId: sourceInventoryLocation.id,
         productId: transfer.productId,
         inventoryBatchId: batch.inventoryBatchId,
         batchNoSnapshot: batch.batchNo,
@@ -11263,6 +11708,7 @@ async function projectStoreInterStoreTransferIssue(
     },
     data: {
       status: nextStatus,
+      sourceInventoryLocationId: sourceInventoryLocation.id,
       issuedQuantity: toQuantityString(nextIssuedQuantity),
       ...(nextIssuedSerialNumbers.length > 0
         ? { issuedSerialNumbersSnapshot: serializeJsonField(nextIssuedSerialNumbers) }
@@ -13544,8 +13990,11 @@ async function applyStoreUpstreamEventProjection(
   if (
     event.aggregateType === "salesOrder" &&
     (event.eventType === "sales-order.recorded" ||
+      event.eventType === "sales-order.payment-received" ||
+      event.eventType === "sales-order.reservation-released" ||
       event.eventType === "sales-order.fulfilled" ||
-      event.eventType === "sales-order.cancelled")
+      event.eventType === "sales-order.cancelled" ||
+      event.eventType === "sales-order.expired")
   ) {
     return projectStoreSalesOrder(tx, target, event);
   }
@@ -13781,6 +14230,13 @@ export async function pushStoreNodeSync(
   nodeCode: string,
   input: StoreNodePushRequest,
 ): Promise<StoreNodePushResponse> {
+  await Promise.all([
+    ensureLayawayLifecycleSchemaCompatibility(),
+    ensureAlternateUomSellingSchemaCompatibility(),
+    ensureProductVariantSalesOrderDepositSchemaCompatibility(),
+    ensureSyncOutboxFailureSchemaCompatibility(),
+  ]);
+
   if (input.sourceNodeCode !== nodeCode) {
     throw new Error(
       "The request source node does not match the targeted store node.",
@@ -13836,6 +14292,47 @@ export async function pushStoreNodeSync(
       },
       select: syncNodePolicySelect,
     });
+
+    const failedDownstreamEvents = input.failedDownstreamEvents ?? [];
+
+    if (failedDownstreamEvents.length > 0) {
+      const failedEventIds = Array.from(
+        new Set(failedDownstreamEvents.map((event) => event.eventId)),
+      );
+      const failedOutboxRows = await tx.syncOutboxEvent.findMany({
+        where: {
+          id: { in: failedEventIds },
+          syncNodeId: enterpriseNode.id,
+          targetNodeCode: nodeCode,
+        },
+        select: { id: true, attemptCount: true },
+      });
+      const failedOutboxById = new Map(
+        failedOutboxRows.map((event) => [event.id, event]),
+      );
+
+      for (const failure of failedDownstreamEvents) {
+        const outboxEvent = failedOutboxById.get(failure.eventId);
+
+        if (!outboxEvent) {
+          continue;
+        }
+
+        await tx.syncOutboxEvent.update({
+          where: { id: failure.eventId },
+          data: {
+            status:
+              failure.status === "DEAD_LETTER"
+                ? SyncEventStatus.DEAD_LETTER
+                : SyncEventStatus.FAILED,
+            attemptCount: Math.max(1, outboxEvent.attemptCount),
+            errorMessage: failure.errorMessage.trim().slice(0, 8000),
+            lastAttemptAt: toOptionalDate(failure.failedAt) ?? now,
+            acknowledgedAt: null,
+          },
+        });
+      }
+    }
 
     for (const event of input.upstreamEvents) {
       if (event.originatingNodeCode !== nodeCode) {
@@ -14164,6 +14661,7 @@ export async function pushStoreNodeSync(
           data: {
             status: SyncEventStatus.ACKNOWLEDGED,
             acknowledgedAt: now,
+            errorMessage: null,
           },
         });
       }
@@ -14258,6 +14756,8 @@ export async function pullStoreNodeSync(
   input: StoreNodePullRequest,
 ): Promise<StoreNodePullResponse> {
   await Promise.all([
+    ensureAlternateUomSellingSchemaCompatibility(),
+    ensureLayawayLifecycleSchemaCompatibility(),
     ensureProductVariantSalesOrderDepositSchemaCompatibility(),
     ensureInventoryExpirySchemaCompatibility(),
   ]);
@@ -14351,15 +14851,118 @@ export async function pullStoreNodeSync(
       );
     }
 
-    const pendingEvents = await tx.syncOutboxEvent.findMany({
+    const priorityPendingEvents = await tx.syncOutboxEvent.findMany({
       where: {
         syncNodeId: enterpriseNode.id,
         targetNodeCode: nodeCode,
         status: SyncEventStatus.PENDING,
+        eventType: {
+          in: [...priorityStoreTopologyEventTypes],
+        },
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       take: limit,
     });
+    const postTopologyCapacity = Math.max(
+      0,
+      limit - priorityPendingEvents.length,
+    );
+    const operationsPendingLimit =
+      postTopologyCapacity > 0
+        ? Math.max(1, Math.ceil(postTopologyCapacity * 0.5))
+        : 0;
+    const operationsPendingEvents =
+      operationsPendingLimit > 0
+        ? await tx.syncOutboxEvent.findMany({
+            where: {
+              syncNodeId: enterpriseNode.id,
+              targetNodeCode: nodeCode,
+              status: SyncEventStatus.PENDING,
+              eventType: {
+                in: [...priorityStoreOperationsEventTypes],
+              },
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: operationsPendingLimit,
+          })
+        : [];
+    const catalogCapacity = Math.max(
+      0,
+      postTopologyCapacity - operationsPendingEvents.length,
+    );
+    const catalogPendingLimit =
+      catalogCapacity > 0
+        ? catalogCapacity === 1
+          ? 1
+          : Math.max(1, Math.floor(catalogCapacity * 0.5))
+        : 0;
+    const catalogPendingEvents =
+      catalogPendingLimit > 0
+        ? await tx.syncOutboxEvent.findMany({
+            where: {
+              syncNodeId: enterpriseNode.id,
+              targetNodeCode: nodeCode,
+              status: SyncEventStatus.PENDING,
+              eventType: {
+                in: [...priorityStoreCatalogEventTypes],
+              },
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: catalogPendingLimit,
+          })
+        : [];
+    const ordinaryCapacity = Math.max(
+      0,
+      catalogCapacity - catalogPendingEvents.length,
+    );
+    const ordinaryPendingEvents =
+      ordinaryCapacity > 0
+        ? await tx.syncOutboxEvent.findMany({
+            where: {
+              syncNodeId: enterpriseNode.id,
+              targetNodeCode: nodeCode,
+              status: SyncEventStatus.PENDING,
+              eventType: {
+                notIn: [...priorityStoreSyncEventTypes],
+              },
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: ordinaryCapacity,
+          })
+        : [];
+    const selectedPendingEvents = [
+      ...priorityPendingEvents,
+      ...operationsPendingEvents,
+      ...catalogPendingEvents,
+      ...ordinaryPendingEvents,
+    ];
+    const fallbackPendingCapacity = Math.max(
+      0,
+      limit - selectedPendingEvents.length,
+    );
+    const fallbackPendingEvents =
+      fallbackPendingCapacity > 0
+        ? await tx.syncOutboxEvent.findMany({
+            where: {
+              syncNodeId: enterpriseNode.id,
+              targetNodeCode: nodeCode,
+              status: SyncEventStatus.PENDING,
+              ...(selectedPendingEvents.length > 0
+                ? {
+                    id: {
+                      notIn: selectedPendingEvents.map((event) => event.id),
+                    },
+                  }
+                : {}),
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: fallbackPendingCapacity,
+          })
+        : [];
+    const pendingEvents = [
+      ...selectedPendingEvents,
+      ...fallbackPendingEvents,
+    ];
     const remainingLimit = Math.max(0, limit - pendingEvents.length);
     const forceInFlightRedelivery =
       input.trigger === "manual" || input.trigger === "tray";
@@ -14549,6 +15152,7 @@ export async function replayStoreNodeDownstream(
           attemptCount: 0,
           acknowledgedAt: null,
           lastAttemptAt: null,
+          errorMessage: null,
         },
       });
 
@@ -14635,6 +15239,7 @@ export async function replayStoreNodeDownstreamEvent(
         attemptCount: 0,
         acknowledgedAt: null,
         lastAttemptAt: null,
+        errorMessage: null,
       },
     });
 
@@ -15933,11 +16538,11 @@ export async function createInterStoreTransfer(
 
     const audit = toOperatorAuditInput(
       input,
-      `Creating an inter-store transfer instruction for ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+      `Creating an inter-store transfer instruction for ${product.name} from ${sourceLocation.store.name} to ${destinationLocation.name}.`,
     );
     const now = new Date();
     const transferNo = buildInterStoreTransferNo(
-      sourceLocation.code,
+      sourceLocation.store.code,
       destinationLocation.code,
       now,
     );
@@ -15964,7 +16569,7 @@ export async function createInterStoreTransfer(
         requestOperatorName: audit.operatorName,
         requestNote:
           input.note?.trim() ||
-          `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+          `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.store.name} to ${destinationLocation.name}. The source shop will select the dispatch location when issuing.`,
         requestedAt: now,
       },
     });
@@ -15977,7 +16582,8 @@ export async function createInterStoreTransfer(
     return {
       transferId: transfer.id,
       transferNo,
-      sourceLocationCode: sourceLocation.code,
+      sourceStoreCode: sourceLocation.store.code,
+      sourceLocationCode: null,
       destinationLocationCode: destinationLocation.code,
       sourceNodeCode: publication?.sourceNodeCode ?? null,
       destinationNodeCode: publication?.destinationNodeCode ?? null,
@@ -15997,7 +16603,7 @@ export async function createInterStoreTransferBatch(
   await ensureInterStoreTransferSchemaCompatibility();
 
   return prisma.$transaction(async (tx) => {
-    const sourceLocationCode = input.sourceLocationCode?.trim();
+    const sourceStoreCode = input.sourceStoreCode?.trim();
     const destinationLocationCode = input.destinationLocationCode?.trim();
     const lines =
       input.lines?.map((line, index) => ({
@@ -16022,9 +16628,9 @@ export async function createInterStoreTransferBatch(
     const deliveryNoteNo =
       input.deliveryNoteNo?.trim() || input.externalReference?.trim() || null;
 
-    if (!sourceLocationCode) {
+    if (!sourceStoreCode) {
       throw new Error(
-        "Choose the source shop/location for the inter-store request.",
+        "Choose the source shop for the inter-store request.",
       );
     }
 
@@ -16052,9 +16658,9 @@ export async function createInterStoreTransferBatch(
       );
     }
 
-    const sourceLocation = await tx.inventoryLocation.findFirst({
+    const sourceStore = await tx.store.findFirst({
       where: {
-        code: sourceLocationCode,
+        code: sourceStoreCode,
         status: RecordStatus.ACTIVE,
       },
       select: {
@@ -16062,8 +16668,14 @@ export async function createInterStoreTransferBatch(
         code: true,
         name: true,
         retailOrgId: true,
-        storeId: true,
-        store: {
+        inventoryLocations: {
+          where: { status: RecordStatus.ACTIVE },
+          orderBy: [
+            { useForSalesDefault: "desc" },
+            { useForReceivingDefault: "desc" },
+            { name: "asc" },
+          ],
+          take: 1,
           select: {
             id: true,
             code: true,
@@ -16073,21 +16685,23 @@ export async function createInterStoreTransferBatch(
       },
     });
 
-    if (!sourceLocation) {
+    if (!sourceStore) {
       throw new Error(
-        `Flash ERP could not find inventory location "${sourceLocationCode}".`,
+        `Flash ERP could not find active source shop "${sourceStoreCode}".`,
       );
     }
 
-    if (!sourceLocation.storeId || !sourceLocation.store) {
+    const sourceLocation = sourceStore.inventoryLocations[0];
+
+    if (!sourceLocation) {
       throw new Error(
-        `Inventory location "${sourceLocationCode}" is not attached to a store execution node yet.`,
+        `Source shop "${sourceStore.name}" has no active inventory location available for transfer execution.`,
       );
     }
 
     const destinationLocation = await tx.inventoryLocation.findFirst({
       where: {
-        retailOrgId: sourceLocation.retailOrgId,
+        retailOrgId: sourceStore.retailOrgId,
         code: destinationLocationCode,
         status: RecordStatus.ACTIVE,
       },
@@ -16118,13 +16732,7 @@ export async function createInterStoreTransferBatch(
       );
     }
 
-    if (destinationLocation.id === sourceLocation.id) {
-      throw new Error(
-        "Source and destination locations must be different for an inter-store transfer.",
-      );
-    }
-
-    if (destinationLocation.storeId === sourceLocation.storeId) {
+    if (destinationLocation.storeId === sourceStore.id) {
       throw new Error(
         "Use the local inter-location transfer flow for locations inside the same store. Inter-store transfers need different source and destination shops.",
       );
@@ -16135,7 +16743,7 @@ export async function createInterStoreTransferBatch(
     ] as string[];
     const products = await tx.product.findMany({
       where: {
-        retailOrgId: sourceLocation.retailOrgId,
+        retailOrgId: sourceStore.retailOrgId,
         code: {
           in: productCodes,
         },
@@ -16167,11 +16775,11 @@ export async function createInterStoreTransferBatch(
     );
     const audit = toOperatorAuditInput(
       input,
-      `Creating an inter-store transfer instruction from ${sourceLocation.name} to ${destinationLocation.name}.`,
+      `Creating an inter-store transfer request from ${sourceStore.name} to ${destinationLocation.name}.`,
     );
     const now = new Date();
     const transferBatchNo = buildInterStoreTransferBatchNo(
-      sourceLocation.code,
+      sourceStore.code,
       destinationLocation.code,
       now,
     );
@@ -16212,8 +16820,8 @@ export async function createInterStoreTransferBatch(
       const transferNo = `${transferBatchNo}-L${String(line.lineNo).padStart(2, "0")}`;
       const transfer = await tx.interStoreTransfer.create({
         data: {
-          retailOrgId: sourceLocation.retailOrgId,
-          sourceStoreId: sourceLocation.storeId,
+          retailOrgId: sourceStore.retailOrgId,
+          sourceStoreId: sourceStore.id,
           destinationStoreId: destinationLocation.storeId,
           sourceInventoryLocationId: sourceLocation.id,
           destinationInventoryLocationId: destinationLocation.id,
@@ -16242,7 +16850,7 @@ export async function createInterStoreTransferBatch(
           requestOperatorName: audit.operatorName,
           requestNote:
             line.note ||
-            `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+            `HQ requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceStore.name} to ${destinationLocation.name}. The source shop will select the dispatch location when issuing.`,
           requestedAt,
           requiredAt,
         },
@@ -16258,7 +16866,8 @@ export async function createInterStoreTransferBatch(
       transfers.push({
         transferId: transfer.id,
         transferNo,
-        sourceLocationCode: sourceLocation.code,
+        sourceStoreCode: sourceStore.code,
+        sourceLocationCode: null,
         destinationLocationCode: destinationLocation.code,
         sourceNodeCode: publication?.sourceNodeCode ?? null,
         destinationNodeCode: publication?.destinationNodeCode ?? null,
@@ -16273,14 +16882,15 @@ export async function createInterStoreTransferBatch(
     }
 
     return {
-      sourceLocationCode: sourceLocation.code,
+      sourceStoreCode: sourceStore.code,
+      sourceLocationCode: null,
       destinationLocationCode: destinationLocation.code,
       transferBatchNo,
       transferCount: transfers.length,
       transfers,
       message: saveAsDraft
         ? `Flash ERP saved ${transferBatchNo} as a draft transfer request with ${transfers.length} line(s).`
-        : `Flash ERP committed ${transferBatchNo} with ${transfers.length} transfer line(s) from ${sourceLocation.name} to ${destinationLocation.name}.`,
+        : `Flash ERP committed ${transferBatchNo} with ${transfers.length} transfer line(s) from ${sourceStore.name} to ${destinationLocation.name}. The source shop will select the dispatch location.`,
       serverProcessedAt: now.toISOString(),
     };
   });
@@ -16344,7 +16954,7 @@ export async function updateInterStoreTransferBatch(
       (transfer) => transfer.status === InterStoreTransferStatus.DRAFT,
     );
 
-    const sourceLocationCode = input.sourceLocationCode?.trim();
+    const sourceStoreCode = input.sourceStoreCode?.trim();
     const destinationLocationCode = input.destinationLocationCode?.trim();
     const lines =
       input.lines?.map((line, index) => ({
@@ -16368,9 +16978,9 @@ export async function updateInterStoreTransferBatch(
     const deliveryNoteNo =
       input.deliveryNoteNo?.trim() || input.externalReference?.trim() || null;
 
-    if (!sourceLocationCode) {
+    if (!sourceStoreCode) {
       throw new Error(
-        "Choose the source shop/location for the inter-store request.",
+        "Choose the source shop for the inter-store request.",
       );
     }
 
@@ -16398,9 +17008,9 @@ export async function updateInterStoreTransferBatch(
       );
     }
 
-    const sourceLocation = await tx.inventoryLocation.findFirst({
+    const sourceStore = await tx.store.findFirst({
       where: {
-        code: sourceLocationCode,
+        code: sourceStoreCode,
         status: RecordStatus.ACTIVE,
       },
       select: {
@@ -16408,8 +17018,14 @@ export async function updateInterStoreTransferBatch(
         code: true,
         name: true,
         retailOrgId: true,
-        storeId: true,
-        store: {
+        inventoryLocations: {
+          where: { status: RecordStatus.ACTIVE },
+          orderBy: [
+            { useForSalesDefault: "desc" },
+            { useForReceivingDefault: "desc" },
+            { name: "asc" },
+          ],
+          take: 1,
           select: {
             id: true,
             code: true,
@@ -16419,21 +17035,23 @@ export async function updateInterStoreTransferBatch(
       },
     });
 
-    if (!sourceLocation) {
+    if (!sourceStore) {
       throw new Error(
-        `Flash ERP could not find inventory location "${sourceLocationCode}".`,
+        `Flash ERP could not find active source shop "${sourceStoreCode}".`,
       );
     }
 
-    if (!sourceLocation.storeId || !sourceLocation.store) {
+    const sourceLocation = sourceStore.inventoryLocations[0];
+
+    if (!sourceLocation) {
       throw new Error(
-        `Inventory location "${sourceLocationCode}" is not attached to a store execution node yet.`,
+        `Source shop "${sourceStore.name}" has no active inventory location available for transfer execution.`,
       );
     }
 
     const destinationLocation = await tx.inventoryLocation.findFirst({
       where: {
-        retailOrgId: sourceLocation.retailOrgId,
+        retailOrgId: sourceStore.retailOrgId,
         code: destinationLocationCode,
         status: RecordStatus.ACTIVE,
       },
@@ -16464,13 +17082,7 @@ export async function updateInterStoreTransferBatch(
       );
     }
 
-    if (destinationLocation.id === sourceLocation.id) {
-      throw new Error(
-        "Source and destination locations must be different for an inter-store transfer.",
-      );
-    }
-
-    if (destinationLocation.storeId === sourceLocation.storeId) {
+    if (destinationLocation.storeId === sourceStore.id) {
       throw new Error(
         "Use the local inter-location transfer flow for locations inside the same store. Inter-store transfers need different source and destination shops.",
       );
@@ -16481,7 +17093,7 @@ export async function updateInterStoreTransferBatch(
     ] as string[];
     const products = await tx.product.findMany({
       where: {
-        retailOrgId: sourceLocation.retailOrgId,
+        retailOrgId: sourceStore.retailOrgId,
         code: {
           in: productCodes,
         },
@@ -16513,7 +17125,7 @@ export async function updateInterStoreTransferBatch(
     );
     const audit = toOperatorAuditInput(
       input,
-      `Editing an inter-store transfer instruction from ${sourceLocation.name} to ${destinationLocation.name}.`,
+      `Editing an inter-store transfer request from ${sourceStore.name} to ${destinationLocation.name}.`,
     );
     const now = new Date();
     const existingBatchNo =
@@ -16523,13 +17135,12 @@ export async function updateInterStoreTransferBatch(
     if (!isDraftBatch) {
       const sourceChanged = existingTransfers.some(
         (transfer) =>
-          transfer.sourceStoreId !== sourceLocation.storeId ||
-          transfer.sourceInventoryLocationId !== sourceLocation.id,
+          transfer.sourceStoreId !== sourceStore.id,
       );
 
       if (sourceChanged) {
         throw new Error(
-          "The source location cannot be changed after a transfer has been committed. Open a new transfer request if stock must move from another shop.",
+          "The source shop cannot be changed after a transfer has been committed. Open a new transfer request if stock must come from another shop.",
         );
       }
 
@@ -16550,7 +17161,7 @@ export async function updateInterStoreTransferBatch(
             requiredAt,
             requestNote:
               input.note?.trim() ||
-              `HQ rerouted ${transfer.transferNo} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+              `HQ rerouted ${transfer.transferNo} from ${sourceStore.name} to ${destinationLocation.name}.`,
           },
           select: {
             id: true,
@@ -16567,7 +17178,8 @@ export async function updateInterStoreTransferBatch(
         transfers.push({
           transferId: updatedTransfer.id,
           transferNo: updatedTransfer.transferNo,
-          sourceLocationCode: sourceLocation.code,
+          sourceStoreCode: sourceStore.code,
+          sourceLocationCode: null,
           destinationLocationCode: destinationLocation.code,
           sourceNodeCode: publication?.sourceNodeCode ?? null,
           destinationNodeCode: publication?.destinationNodeCode ?? null,
@@ -16578,7 +17190,8 @@ export async function updateInterStoreTransferBatch(
       }
 
       return {
-        sourceLocationCode: sourceLocation.code,
+        sourceStoreCode: sourceStore.code,
+        sourceLocationCode: null,
         destinationLocationCode: destinationLocation.code,
         transferBatchNo: existingBatchNo,
         transferCount: transfers.length,
@@ -16647,8 +17260,8 @@ export async function updateInterStoreTransferBatch(
       const transferNo = `${existingBatchNo}-L${String(line.lineNo).padStart(2, "0")}`;
       const transfer = await tx.interStoreTransfer.create({
         data: {
-          retailOrgId: sourceLocation.retailOrgId,
-          sourceStoreId: sourceLocation.storeId,
+          retailOrgId: sourceStore.retailOrgId,
+          sourceStoreId: sourceStore.id,
           destinationStoreId: destinationLocation.storeId,
           sourceInventoryLocationId: sourceLocation.id,
           destinationInventoryLocationId: destinationLocation.id,
@@ -16675,7 +17288,7 @@ export async function updateInterStoreTransferBatch(
           requestOperatorName: audit.operatorName,
           requestNote:
             line.note ||
-            `HQ instructed ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceLocation.name} to ${destinationLocation.name}.`,
+            `HQ requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceStore.name} to ${destinationLocation.name}. The source shop will select the dispatch location when issuing.`,
           requestedAt,
           requiredAt,
         },
@@ -16684,7 +17297,8 @@ export async function updateInterStoreTransferBatch(
       transfers.push({
         transferId: transfer.id,
         transferNo,
-        sourceLocationCode: sourceLocation.code,
+        sourceStoreCode: sourceStore.code,
+        sourceLocationCode: null,
         destinationLocationCode: destinationLocation.code,
         sourceNodeCode: null,
         destinationNodeCode: null,
@@ -16695,7 +17309,8 @@ export async function updateInterStoreTransferBatch(
     }
 
     return {
-      sourceLocationCode: sourceLocation.code,
+      sourceStoreCode: sourceStore.code,
+      sourceLocationCode: null,
       destinationLocationCode: destinationLocation.code,
       transferBatchNo: existingBatchNo,
       transferCount: transfers.length,
@@ -16731,6 +17346,11 @@ export async function commitInterStoreTransferBatch(
         id: true,
         transferNo: true,
         transferBatchNo: true,
+        sourceStore: {
+          select: {
+            code: true,
+          },
+        },
         sourceInventoryLocation: {
           select: {
             code: true,
@@ -16774,7 +17394,8 @@ export async function commitInterStoreTransferBatch(
       committedTransfers.push({
         transferId: transfer.id,
         transferNo: transfer.transferNo,
-        sourceLocationCode: transfer.sourceInventoryLocation.code,
+        sourceStoreCode: transfer.sourceStore.code,
+        sourceLocationCode: null,
         destinationLocationCode: transfer.destinationInventoryLocation.code,
         sourceNodeCode: publication?.sourceNodeCode ?? null,
         destinationNodeCode: publication?.destinationNodeCode ?? null,
@@ -16792,7 +17413,8 @@ export async function commitInterStoreTransferBatch(
       firstTransfer.transferBatchNo ?? firstTransfer.transferNo;
 
     return {
-      sourceLocationCode: firstTransfer.sourceInventoryLocation.code,
+      sourceStoreCode: firstTransfer.sourceStore.code,
+      sourceLocationCode: null,
       destinationLocationCode: firstTransfer.destinationInventoryLocation.code,
       transferBatchNo: committedBatchNo,
       transferCount: committedTransfers.length,
@@ -16829,7 +17451,6 @@ export async function lookupStoreNodeRemoteInventory(
   const query = input.query?.trim();
   const productCode = input.productCode?.trim();
   const storeCode = input.storeCode?.trim();
-  const locationCode = input.locationCode?.trim();
   const requestedLimit = Number(input.limit ?? 25);
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(50, Math.max(1, Math.trunc(requestedLimit)))
@@ -16886,7 +17507,6 @@ export async function lookupStoreNodeRemoteInventory(
         storeId: {
           not: requester.storeId,
         },
-        ...(locationCode ? { code: locationCode } : {}),
         store: {
           ...(storeCode ? { code: storeCode } : {}),
           status: RecordStatus.ACTIVE,
@@ -16949,42 +17569,53 @@ export async function lookupStoreNodeRemoteInventory(
   const locationsById = new Map(
     locations.map((location) => [location.id, location]),
   );
-  const rows = balances
-    .map((balance) => {
+  const rowsByStoreAndProduct = new Map<
+    string,
+    StoreRemoteInventoryLookupResponse["rows"][number]
+  >();
+
+  for (const balance of balances) {
       const product = productsById.get(balance.productId);
       const location = locationsById.get(balance.inventoryLocationId);
       const quantityOnHand = Number(
         Number(balance._sum.quantity ?? 0).toFixed(3),
       );
 
-      if (!product || !location?.store || quantityOnHand <= 0) {
-        return null;
+      if (!product || !location?.store) {
+        continue;
       }
 
-      return {
+      const key = `${location.store.code}\u0000${product.code}`;
+      const existing = rowsByStoreAndProduct.get(key);
+      const updatedAt =
+        balance._max.occurredAt?.toISOString() ?? new Date().toISOString();
+      rowsByStoreAndProduct.set(key, {
         storeCode: location.store.code,
         storeName: location.store.name,
-        locationCode: location.code,
-        locationName: location.name,
+        locationCode: "",
+        locationName: "All active locations",
         productCode: product.code,
         productName: product.name,
         departmentCode: product.department,
         categoryCode: product.category,
         subcategory: product.subcategory,
-        quantityOnHand,
+        quantityOnHand: Number(
+          ((existing?.quantityOnHand ?? 0) + quantityOnHand).toFixed(3),
+        ),
         unitPrice: Number(
           Number(
             product.priceListEntries[0]?.unitPrice ?? product.baseUnitPrice,
           ).toFixed(2),
         ),
         updatedAt:
-          balance._max.occurredAt?.toISOString() ?? new Date().toISOString(),
-      };
-    })
-    .filter(
-      (row): row is StoreRemoteInventoryLookupResponse["rows"][number] =>
-        row !== null,
-    )
+          !existing || new Date(updatedAt) > new Date(existing.updatedAt)
+            ? updatedAt
+            : existing.updatedAt,
+      });
+  }
+
+  const rows = Array.from(rowsByStoreAndProduct.values())
+    .filter((row) => row.quantityOnHand > 0)
     .sort((left, right) => right.quantityOnHand - left.quantityOnHand)
     .slice(0, limit);
 
@@ -16998,102 +17629,197 @@ export async function createStoreNodeRemoteInterStoreRequest(
   nodeCode: string,
   input: StoreRemoteInterStoreRequestInput,
 ): Promise<CreateInterStoreTransferResponse> {
-  const requester = await prisma.syncNode.findFirst({
-    where: {
-      code: nodeCode,
-      nodeType: SyncNodeType.STORE_DESKTOP,
-      status: RecordStatus.ACTIVE,
-    },
-    select: {
-      id: true,
-      retailOrgId: true,
-      storeId: true,
-    },
-  });
-
-  if (!requester?.storeId) {
-    throw new Error(
-      `Flash ERP could not find active store node "${nodeCode}" for remote stock request.`,
-    );
-  }
-
-  const [sourceLocation, destinationLocation] = await Promise.all([
-    prisma.inventoryLocation.findFirst({
+  return prisma.$transaction(async (tx) => {
+    const requester = await tx.syncNode.findFirst({
       where: {
-        retailOrgId: requester.retailOrgId,
-        code: input.sourceLocationCode?.trim(),
+        code: nodeCode,
+        nodeType: SyncNodeType.STORE_DESKTOP,
         status: RecordStatus.ACTIVE,
-        storeId: {
-          not: requester.storeId,
-        },
-        store: {
-          status: RecordStatus.ACTIVE,
-        },
       },
       select: {
-        code: true,
+        id: true,
+        retailOrgId: true,
+        storeId: true,
+        store: { select: { code: true, name: true } },
       },
-    }),
-    input.destinationLocationCode?.trim()
-      ? prisma.inventoryLocation.findFirst({
-          where: {
-            retailOrgId: requester.retailOrgId,
-            code: input.destinationLocationCode.trim(),
-            storeId: requester.storeId,
-            status: RecordStatus.ACTIVE,
-          },
-          select: {
-            code: true,
-          },
-        })
-      : prisma.inventoryLocation.findFirst({
-          where: {
-            retailOrgId: requester.retailOrgId,
-            storeId: requester.storeId,
-            status: RecordStatus.ACTIVE,
-          },
+    });
+
+    if (!requester?.storeId || !requester.store) {
+      throw new Error(
+        `Flash ERP could not find active store node "${nodeCode}" for remote stock request.`,
+      );
+    }
+
+    const sourceStoreCode = input.sourceStoreCode?.trim();
+
+    if (!sourceStoreCode) {
+      throw new Error("Choose the source shop before requesting stock.");
+    }
+
+    const sourceStore = await tx.store.findFirst({
+      where: {
+        retailOrgId: requester.retailOrgId,
+        code: sourceStoreCode,
+        status: RecordStatus.ACTIVE,
+        id: { not: requester.storeId },
+      },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        inventoryLocations: {
+          where: { status: RecordStatus.ACTIVE },
           orderBy: [
-            { useForReceivingDefault: "desc" },
             { useForSalesDefault: "desc" },
+            { useForReceivingDefault: "desc" },
             { name: "asc" },
           ],
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    const destinationLocation = await tx.inventoryLocation.findFirst({
+      where: {
+        retailOrgId: requester.retailOrgId,
+        storeId: requester.storeId,
+        status: RecordStatus.ACTIVE,
+        ...(input.destinationLocationCode?.trim()
+          ? { code: input.destinationLocationCode.trim() }
+          : {}),
+      },
+      orderBy: [
+        { useForReceivingDefault: "desc" },
+        { useForSalesDefault: "desc" },
+        { name: "asc" },
+      ],
+      select: { id: true, code: true, name: true },
+    });
+    const product = await tx.product.findFirst({
+      where: {
+        retailOrgId: requester.retailOrgId,
+        code: input.productCode.trim(),
+        status: RecordStatus.ACTIVE,
+      },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        isSerialized: true,
+        baseCostPrice: true,
+        unitOfMeasure: true,
+        baseUnitOfMeasure: { select: { code: true } },
+        uomSchedule: {
           select: {
-            code: true,
+            baseUnitOfMeasure: { select: { code: true } },
+            lines: {
+              select: {
+                conversionFactor: true,
+                unitOfMeasure: { select: { code: true } },
+              },
+            },
           },
-        }),
-  ]);
+        },
+      },
+    });
+    const provisionalSourceLocation = sourceStore?.inventoryLocations[0];
 
-  if (!sourceLocation) {
-    throw new Error(
-      "Choose an active source location from another shop before requesting stock.",
+    if (!sourceStore || !provisionalSourceLocation) {
+      throw new Error(
+        `Flash ERP could not find active source shop "${sourceStoreCode}" with an inventory location.`,
+      );
+    }
+
+    if (!destinationLocation) {
+      throw new Error(
+        "Flash ERP could not find an active destination location for this shop.",
+      );
+    }
+
+    if (!product) {
+      throw new Error(
+        `Flash ERP could not find active product "${input.productCode}" for the stock request.`,
+      );
+    }
+
+    const transferUom = resolveTransferUom(
+      product,
+      Number(input.quantity),
+      input.unitOfMeasure,
     );
-  }
 
-  if (!destinationLocation) {
-    throw new Error(
-      "Flash ERP could not find an active destination location for this shop.",
+    if (
+      product.isSerialized &&
+      !Number.isInteger(transferUom.requestedQuantity)
+    ) {
+      throw new Error(
+        `Serialized product "${product.code}" needs a whole-number requested quantity.`,
+      );
+    }
+
+    const audit = toOperatorAuditInput(
+      input,
+      `Requesting ${product.name} from ${sourceStore.name}.`,
     );
-  }
+    const now = new Date();
+    const transferNo = buildInterStoreTransferNo(
+      sourceStore.code,
+      destinationLocation.code,
+      now,
+    );
+    const transfer = await tx.interStoreTransfer.create({
+      data: {
+        retailOrgId: requester.retailOrgId,
+        sourceStoreId: sourceStore.id,
+        destinationStoreId: requester.storeId,
+        sourceInventoryLocationId: provisionalSourceLocation.id,
+        destinationInventoryLocationId: destinationLocation.id,
+        productId: product.id,
+        transferNo,
+        externalReference: input.externalReference?.trim() || null,
+        origin: InterStoreTransferOrigin.STORE_REQUEST,
+        status: InterStoreTransferStatus.REQUESTED,
+        requestedQuantity: toQuantityString(transferUom.requestedQuantity),
+        requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+        requestedUnitQuantity: toQuantityString(
+          transferUom.requestedUnitQuantity,
+        ),
+        uomConversionFactor: transferUom.uomConversionFactor.toFixed(6),
+        baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
+        issuedQuantity: toQuantityString(0),
+        receivedQuantity: toQuantityString(0),
+        unitCost: product.baseCostPrice?.toString() ?? null,
+        requestOperatorName: audit.operatorName,
+        requestNote:
+          input.note?.trim() ||
+          `${requester.store.name} requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.requestedQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceStore.name}. The source shop will select the dispatch location when issuing.`,
+        requestedByNodeCode: nodeCode,
+        requestedAt: now,
+      },
+    });
+    const publication = await queueInterStoreTransferPublication(tx, {
+      transferId: transfer.id,
+      publishedAt: now,
+    });
 
-  const response = await createInterStoreTransfer(sourceLocation.code, {
-    productCode: input.productCode,
-    destinationLocationCode: destinationLocation.code,
-    quantity: input.quantity,
-    externalReference: input.externalReference,
-    note: input.note,
-    operatorName: input.operatorName,
+    await tx.syncNode.update({
+      where: { id: requester.id },
+      data: { lastHeartbeatAt: now },
+    });
+
+    return {
+      transferId: transfer.id,
+      transferNo,
+      sourceStoreCode: sourceStore.code,
+      sourceLocationCode: null,
+      destinationLocationCode: destinationLocation.code,
+      sourceNodeCode: publication?.sourceNodeCode ?? null,
+      destinationNodeCode: publication?.destinationNodeCode ?? null,
+      status: "REQUESTED",
+      message: `${transferNo} was sent to ${sourceStore.name}. The source shop will choose the dispatch location when issuing.`,
+      serverProcessedAt: now.toISOString(),
+    };
   });
-
-  await prisma.syncNode.update({
-    where: {
-      id: requester.id,
-    },
-    data: {
-      lastHeartbeatAt: new Date(),
-    },
-  });
-
-  return response;
 }
 
 export async function createPurchaseOrder(

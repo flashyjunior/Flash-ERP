@@ -75,6 +75,16 @@ function isSyncEnvelope(value: unknown): value is SyncEnvelope {
   );
 }
 
+function isDownstreamFailure(value: unknown) {
+  return (
+    isRecord(value) &&
+    isString(value.eventId) &&
+    (value.status === "FAILED" || value.status === "DEAD_LETTER") &&
+    isString(value.errorMessage) &&
+    isString(value.failedAt)
+  );
+}
+
 export function parseStoreNodePushRequest(body: unknown): StoreNodePushRequest {
   if (!isRecord(body)) {
     throw new Error("Flash ERP expected a JSON object for the push request.");
@@ -87,6 +97,10 @@ export function parseStoreNodePushRequest(body: unknown): StoreNodePushRequest {
     !Array.isArray(body.upstreamEvents) ||
     !body.upstreamEvents.every(isSyncEnvelope) ||
     !isStringArray(body.acknowledgedDownstreamEventIds) ||
+    ("failedDownstreamEvents" in body &&
+      body.failedDownstreamEvents !== undefined &&
+      (!Array.isArray(body.failedDownstreamEvents) ||
+        !body.failedDownstreamEvents.every(isDownstreamFailure))) ||
     ("syncRunId" in body && body.syncRunId !== undefined && body.syncRunId !== null && !isString(body.syncRunId)) ||
     ("trigger" in body && body.trigger !== undefined && body.trigger !== null && !isStoreNodeSyncTrigger(body.trigger)) ||
     ("clientStartedAt" in body && body.clientStartedAt !== undefined && body.clientStartedAt !== null && !isString(body.clientStartedAt)) ||
@@ -104,6 +118,9 @@ export function parseStoreNodePushRequest(body: unknown): StoreNodePushRequest {
     clientStartedAt: isString(body.clientStartedAt) ? body.clientStartedAt : null,
     upstreamEvents: body.upstreamEvents,
     acknowledgedDownstreamEventIds: body.acknowledgedDownstreamEventIds,
+    failedDownstreamEvents: Array.isArray(body.failedDownstreamEvents)
+      ? body.failedDownstreamEvents
+      : [],
     telemetry: isStoreNodeTelemetry(body.telemetry) ? body.telemetry : null
   };
 }

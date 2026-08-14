@@ -23,8 +23,10 @@ type PosSaleAccountingResult = {
 type AccountingContext = {
   retailOrgId: string;
   companyId: string;
+  companyCode: string;
   baseCurrencyCode: string;
   arAccountCode: string;
+  customerAdvanceAccountCode: string;
   customerDiscountAccountCode: string;
   inventoryAccountCode: string;
   taxAccountCode: string;
@@ -35,8 +37,12 @@ const journalDocumentType = "JOURNAL";
 const cashbookDocumentType = "CASHBOOK_ENTRY";
 const posSaleSourceType = "POS_SALE";
 const inventoryCogsSourceType = "INVENTORY_COGS";
+const layawayPaymentSourceType = "LAYAWAY_PAYMENT";
+const layawayCancellationFeeSourceType = "LAYAWAY_CANCELLATION_FEE";
+const layawayCashbookWorkflowType = "LAYAWAY";
 const salesRevenueAccountCode = "4000";
 const serviceRevenueAccountCode = "4100";
+const cancellationFeeRevenueAccountCode = "4400";
 const cogsAccountCode = "5000";
 
 function roundMoney(value: number) {
@@ -64,6 +70,21 @@ function isStoreCreditMethod(value: string | null | undefined) {
 
 function isCashMethod(value: string | null | undefined) {
   return value === PaymentMethod.CASH || value === "CASH";
+}
+
+function accountingSourceTypeVariants(sourceType: string) {
+  return [...new Set([sourceType, sourceType.replaceAll("_", "-")])];
+}
+
+function cashbookSequencePrefix(companyCode: string) {
+  const normalizedCompanyCode = companyCode
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 20);
+
+  return normalizedCompanyCode ? `CB-${normalizedCompanyCode}` : "CB";
 }
 
 function addPostingLine(
@@ -108,6 +129,7 @@ async function getAccountingContext(
     orderBy: [{ isPrimary: "desc" }, { code: "asc" }],
     select: {
       id: true,
+      code: true,
       baseCurrencyCode: true,
       accountingSettings: {
         select: {
@@ -127,6 +149,7 @@ async function getAccountingContext(
       status: activeStatus
     },
     select: {
+      customerAdvanceAccountCode: true,
       customerDiscountAccountCode: true
     }
   });
@@ -142,10 +165,15 @@ async function getAccountingContext(
   return {
     retailOrgId,
     companyId: company.id,
+    companyCode: company.code,
     baseCurrencyCode: company.baseCurrencyCode,
     arAccountCode: normalizeRequiredText(
       company.accountingSettings.arControlAccountCode ?? "1100",
       "an AR control account"
+    ),
+    customerAdvanceAccountCode: normalizeRequiredText(
+      customerPostingProfile?.customerAdvanceAccountCode ?? "2010",
+      "a customer advance liability account"
     ),
     customerDiscountAccountCode: normalizeRequiredText(
       customerPostingProfile?.customerDiscountAccountCode ?? "8000",
@@ -216,9 +244,6 @@ async function ensureCashbookEntrySequence(
       }
     },
     update: {
-      prefix: "CB",
-      paddingLength: 6,
-      resetPolicy: "FISCAL_YEAR",
       status: activeStatus
     },
     create: {
@@ -226,7 +251,7 @@ async function ensureCashbookEntrySequence(
       companyId: context.companyId,
       fiscalYearId: fiscalYear.id,
       documentType: cashbookDocumentType,
-      prefix: "CB",
+      prefix: cashbookSequencePrefix(context.companyCode),
       paddingLength: 6,
       resetPolicy: "FISCAL_YEAR",
       status: activeStatus
@@ -402,6 +427,7 @@ async function getPostingTransaction(tx: Prisma.TransactionClient, retailOrgId: 
           method: true,
           amount: true,
           reference: true,
+          paymentPurpose: true,
           tenderMethod: {
             select: {
               id: true,
@@ -453,7 +479,7 @@ export async function postPosTransactionAccountingInTransaction(
   const existingSalesJournal = await tx.glJournalEntry.findFirst({
     where: {
       retailOrgId: input.retailOrgId,
-      sourceType: posSaleSourceType,
+      sourceType: { in: accountingSourceTypeVariants(posSaleSourceType) },
       sourceId: transaction.id
     },
     select: {
@@ -462,6 +488,14 @@ export async function postPosTransactionAccountingInTransaction(
   });
   let salesJournalCreated = false;
   let cashbookEntryCount = 0;
+  const layawayOrder = await tx.salesOrder.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      sourceTransactionId: transaction.id,
+      orderType: "LAYAWAY"
+    },
+    select: { id: true }
+  });
 
   if (!existingSalesJournal) {
     const tenderCodes = [
@@ -533,6 +567,23 @@ export async function postPosTransactionAccountingInTransaction(
       remainingChangeAmount = roundMoney(remainingChangeAmount - allocation.changeUsed);
 
       if (allocation.netAmount <= 0) {
+        continue;
+      }
+
+      if (
+        layawayOrder &&
+        (payment.paymentPurpose === "LAYAWAY_DEPOSIT" ||
+          payment.paymentPurpose === "LAYAWAY_INSTALLMENT")
+      ) {
+        settlementAmount = roundMoney(settlementAmount + allocation.netAmount);
+        addPostingLine(
+          lines,
+          context.customerAdvanceAccountCode,
+          positiveSale ? allocation.netAmount : 0,
+          positiveSale ? 0 : allocation.netAmount,
+          `${memo} customer advance applied`,
+          transaction.storeId
+        );
         continue;
       }
 
@@ -702,6 +753,319 @@ export async function postPosTransactionAccountingInTransaction(
   };
 }
 
+export async function postLayawayAccountingInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    retailOrgId: string;
+    salesOrderId: string;
+    companyId?: string | null;
+    postedBy?: string | null;
+  }
+) {
+  const order = await tx.salesOrder.findFirst({
+    where: {
+      id: input.salesOrderId,
+      retailOrgId: input.retailOrgId,
+      orderType: "LAYAWAY"
+    },
+    select: {
+      id: true,
+      orderNo: true,
+      sourceTransactionId: true,
+      status: true,
+      customerNameSnapshot: true,
+      cancellationFeeAmount: true,
+      cancelledAt: true,
+      storeId: true,
+      store: { select: { code: true, name: true } }
+    }
+  });
+
+  if (!order) {
+    return { paymentJournalCount: 0, cashbookEntryCount: 0, cancellationFeeJournalCreated: false };
+  }
+
+  const payments = await tx.posPayment.findMany({
+    where: {
+      posTransactionId: order.sourceTransactionId,
+      paymentPurpose: {
+        in: ["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"]
+      }
+    },
+    orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      tenderMethodCodeSnapshot: true,
+      tenderMethodNameSnapshot: true,
+      method: true,
+      amount: true,
+      reference: true,
+      paymentPurpose: true,
+      receivedAt: true,
+      tenderMethod: {
+        select: {
+          id: true,
+          name: true,
+          paymentMethod: true,
+          cashbookAccountId: true,
+          cashbookAccount: {
+            select: {
+              id: true,
+              companyId: true,
+              code: true,
+              name: true,
+              glAccountCode: true,
+              currencyCode: true,
+              status: true
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if (payments.length === 0 && Number(order.cancellationFeeAmount) <= 0) {
+    return { paymentJournalCount: 0, cashbookEntryCount: 0, cancellationFeeJournalCreated: false };
+  }
+
+  const context = await getAccountingContext(tx, input.retailOrgId, input.companyId);
+  const postedBy = normalizeOptionalText(input.postedBy) ?? "Layaway accounting";
+  const tenderCodes = [
+    ...new Set(
+      payments
+        .map((payment) => normalizeOptionalText(payment.tenderMethodCodeSnapshot)?.toUpperCase())
+        .filter((code): code is string => Boolean(code))
+    )
+  ];
+  const tenderMethodsByCode =
+    tenderCodes.length > 0
+      ? new Map(
+          (
+            await tx.tenderMethod.findMany({
+              where: {
+                retailOrgId: input.retailOrgId,
+                code: { in: tenderCodes },
+                status: activeStatus,
+                deletedAt: null
+              },
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                paymentMethod: true,
+                cashbookAccountId: true,
+                cashbookAccount: {
+                  select: {
+                    id: true,
+                    companyId: true,
+                    code: true,
+                    name: true,
+                    glAccountCode: true,
+                    currencyCode: true,
+                    status: true
+                  }
+                }
+              }
+            })
+          ).map((method) => [method.code.toUpperCase(), method] as const)
+        )
+      : new Map();
+  let paymentJournalCount = 0;
+  let cashbookEntryCount = 0;
+
+  for (const payment of payments) {
+    const existingJournal = await tx.glJournalEntry.findFirst({
+      where: {
+        retailOrgId: input.retailOrgId,
+        sourceType: { in: accountingSourceTypeVariants(layawayPaymentSourceType) },
+        sourceId: payment.id
+      },
+      select: { id: true }
+    });
+
+    if (existingJournal) {
+      continue;
+    }
+
+    const paymentAmount = roundMoney(Math.abs(Number(payment.amount)));
+
+    if (paymentAmount <= 0) {
+      continue;
+    }
+
+    const isRefund = payment.paymentPurpose === "LAYAWAY_REFUND" || Number(payment.amount) < 0;
+    const snapshotTenderCode = normalizeOptionalText(payment.tenderMethodCodeSnapshot)?.toUpperCase() ?? null;
+    const tender =
+      payment.tenderMethod ??
+      (snapshotTenderCode ? tenderMethodsByCode.get(snapshotTenderCode) ?? null : null);
+    const paymentMethod = tender?.paymentMethod ?? payment.method;
+    const lines: PostAccountingDocumentLine[] = [];
+    let cashbookAccount:
+      | NonNullable<NonNullable<typeof tender>["cashbookAccount"]>
+      | null = null;
+    let settlementAccountCode: string;
+
+    if (isStoreCreditMethod(paymentMethod)) {
+      settlementAccountCode = context.arAccountCode;
+    } else {
+      cashbookAccount = tender?.cashbookAccount ?? null;
+
+      if (!tender || !cashbookAccount || !tender.cashbookAccountId) {
+        throw new Error(
+          `${order.orderNo} cannot post ${payment.tenderMethodNameSnapshot ?? payment.method} because the tender method is not mapped to a Finance cashbook account.`
+        );
+      }
+
+      if (cashbookAccount.companyId !== context.companyId || cashbookAccount.status !== activeStatus) {
+        throw new Error(`${tender.name} is not mapped to an active cashbook account for the posting company.`);
+      }
+
+      settlementAccountCode = normalizeRequiredText(
+        cashbookAccount.glAccountCode,
+        `${tender.name} cashbook GL account`
+      );
+    }
+
+    addPostingLine(
+      lines,
+      settlementAccountCode,
+      isRefund ? 0 : paymentAmount,
+      isRefund ? paymentAmount : 0,
+      `${order.orderNo} ${isRefund ? "refund" : "customer payment"}`,
+      order.storeId
+    );
+    addPostingLine(
+      lines,
+      context.customerAdvanceAccountCode,
+      isRefund ? paymentAmount : 0,
+      isRefund ? 0 : paymentAmount,
+      `${order.orderNo} customer advance`,
+      order.storeId
+    );
+
+    const journal = await postAccountingDocumentInTransaction(tx, {
+      retailOrgId: input.retailOrgId,
+      companyId: context.companyId,
+      documentType: journalDocumentType,
+      batchSourceType: layawayPaymentSourceType,
+      journalType: layawayPaymentSourceType,
+      sourceType: layawayPaymentSourceType,
+      sourceId: payment.id,
+      sourceReference: order.orderNo,
+      postingDate: payment.receivedAt,
+      description: `${order.orderNo} ${isRefund ? "layaway refund" : "layaway payment"} at ${order.store.name}`,
+      postedBy,
+      lines
+    });
+    paymentJournalCount += 1;
+
+    if (cashbookAccount) {
+      await ensureCashbookEntrySequence(tx, context, payment.receivedAt);
+      const existingCashbookEntry = await tx.erpCashbookEntry.findFirst({
+        where: {
+          retailOrgId: input.retailOrgId,
+          cashbookAccountId: cashbookAccount.id,
+          workflowType: layawayCashbookWorkflowType,
+          workflowReference: order.orderNo,
+          externalReference: payment.id,
+          status: { not: "DELETED" }
+        },
+        select: { id: true }
+      });
+
+      if (!existingCashbookEntry) {
+        const entryNo = (
+          await reserveErpDocumentNumberInTransaction(tx, {
+            retailOrgId: input.retailOrgId,
+            companyId: context.companyId,
+            documentType: cashbookDocumentType
+          })
+        ).documentNo;
+        await tx.erpCashbookEntry.create({
+          data: {
+            retailOrgId: input.retailOrgId,
+            companyId: context.companyId,
+            cashbookAccountId: cashbookAccount.id,
+            postingJournalEntryId: journal.journalEntryId,
+            entryNo,
+            entryType: isRefund ? "REFUND" : "RECEIPT",
+            direction: isRefund ? "OUTFLOW" : "INFLOW",
+            entryDate: payment.receivedAt,
+            postingDate: payment.receivedAt,
+            valueDate: payment.receivedAt,
+            currencyCode: cashbookAccount.currencyCode || context.baseCurrencyCode,
+            amount: paymentAmount,
+            offsetAccountCode: context.customerAdvanceAccountCode,
+            counterpartyName: order.customerNameSnapshot ?? "Layaway customer",
+            workflowType: layawayCashbookWorkflowType,
+            workflowReference: order.orderNo,
+            providerReference: payment.reference,
+            externalReference: payment.id,
+            memo: `${order.orderNo} ${isRefund ? "layaway refund" : "layaway payment"}`,
+            reconciliationStatus: "UNRECONCILED",
+            status: "POSTED",
+            postedAt: new Date(),
+            postedBy
+          }
+        });
+        cashbookEntryCount += 1;
+      }
+    }
+  }
+
+  let cancellationFeeJournalCreated = false;
+  const cancellationFeeAmount = roundMoney(Number(order.cancellationFeeAmount));
+
+  if (order.status === "CANCELLED" && cancellationFeeAmount > 0) {
+    const existingCancellationJournal = await tx.glJournalEntry.findFirst({
+      where: {
+        retailOrgId: input.retailOrgId,
+        sourceType: { in: accountingSourceTypeVariants(layawayCancellationFeeSourceType) },
+        sourceId: order.id
+      },
+      select: { id: true }
+    });
+
+    if (!existingCancellationJournal) {
+      const memo = `${order.orderNo} cancellation fee`;
+      const lines: PostAccountingDocumentLine[] = [];
+      addPostingLine(
+        lines,
+        context.customerAdvanceAccountCode,
+        cancellationFeeAmount,
+        0,
+        memo,
+        order.storeId
+      );
+      addPostingLine(
+        lines,
+        cancellationFeeRevenueAccountCode,
+        0,
+        cancellationFeeAmount,
+        memo,
+        order.storeId
+      );
+      await postAccountingDocumentInTransaction(tx, {
+        retailOrgId: input.retailOrgId,
+        companyId: context.companyId,
+        documentType: journalDocumentType,
+        batchSourceType: layawayCancellationFeeSourceType,
+        journalType: layawayCancellationFeeSourceType,
+        sourceType: layawayCancellationFeeSourceType,
+        sourceId: order.id,
+        sourceReference: order.orderNo,
+        postingDate: order.cancelledAt ?? new Date(),
+        description: `${order.orderNo} layaway cancellation fee`,
+        postedBy,
+        lines
+      });
+      cancellationFeeJournalCreated = true;
+    }
+  }
+
+  return { paymentJournalCount, cashbookEntryCount, cancellationFeeJournalCreated };
+}
+
 export async function postPosTransactionCogsInTransaction(
   tx: Prisma.TransactionClient,
   input: {
@@ -763,7 +1127,7 @@ export async function postPosTransactionCogsInTransaction(
     const existing = await tx.glJournalEntry.findFirst({
       where: {
         retailOrgId: input.retailOrgId,
-        sourceType: inventoryCogsSourceType,
+        sourceType: { in: accountingSourceTypeVariants(inventoryCogsSourceType) },
         sourceId: entry.id
       },
       select: {

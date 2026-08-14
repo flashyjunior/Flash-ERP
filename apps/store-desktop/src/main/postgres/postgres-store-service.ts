@@ -3,9 +3,16 @@ import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import {
   allocateInventoryBatchesFefo,
+  assertLayawayFulfilmentEligible,
+  calculateLayawayAvailableBaseQuantity,
+  calculateLayawayCancellationAmounts,
+  calculatePosBaseQuantity,
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
+  evaluateLayawayOpening,
   normalizeLayawaySettings,
+  normalizePosSellingUnits,
+  resolvePosSellingUom,
   validateInventoryBatchReceipt,
 } from "@flash-erp/domain";
 import {
@@ -100,10 +107,13 @@ import type {
   StoreCatalogLookupResult,
   StoreCatalogMatrixVariant,
   StoreCreateSalesOrderRequest,
+  StoreExpireLayawayRequest,
   StoreCustomerAccountEntrySummary,
   StoreCustomerAccountPaymentRequest,
   StoreCustomerSearchRequest,
   StoreCustomerSummary,
+  StoreReceiveLayawayPaymentRequest,
+  StoreReleaseLayawayReservationRequest,
   StoreTransactionReferenceSearchRequest,
   StoreTransactionReferenceSummary,
   StoreEodReconciliationSummary,
@@ -115,6 +125,7 @@ import type {
   StoreInterStoreTransferIssueRequest,
   StoreInterStoreTransferReceiveRequest,
   StoreInterStoreTransferRequestDraftInput,
+  StoreInterStoreTransferRequestDraftLine,
   StoreInterStoreTransferRequestDraftSummary,
   StoreInterStoreTransferSummary,
   StoreLoyaltySettingsSummary,
@@ -206,6 +217,10 @@ import type {
   StoreUserSummary,
   StoreSupplierSummary,
 } from "../../shared/desktop-runtime.js";
+import {
+  readTransferRequestDraftLines,
+  writeTransferRequestDraftLines,
+} from "../transfer-request-draft.js";
 import type { StoreTerminalContext } from "../offline/local-store-service.js";
 
 const { Pool } = pg;
@@ -294,6 +309,7 @@ type ProductRow = {
   unit_of_measure: string;
   base_unit_of_measure: string;
   uom_conversions_json: string;
+  selling_units_json: string;
   taxable: string | number;
   tax_profile_code: string | null;
   tax_profile_name: string | null;
@@ -410,6 +426,10 @@ type BasketLineRow = {
   serial_numbers_json: string | null;
   batch_allocations_json: string | null;
   quantity: string | number;
+  selling_unit_of_measure: string;
+  base_unit_of_measure: string;
+  uom_conversion_factor: string | number;
+  base_quantity: string | number;
   unit_price: string | number;
   discount_amount: string | number;
   tax_amount: string | number;
@@ -503,6 +523,10 @@ type ReportProductRow = {
   product_code: string;
   product_name: string;
   quantity: string | number;
+  selling_unit_of_measure: string;
+  base_quantity: string | number;
+  base_unit_of_measure: string;
+  uom_conversion_factor: string | number;
   gross_amount: string | number;
   discount_amount: string | number;
   tax_amount: string | number;
@@ -540,15 +564,27 @@ type SalesOrderRow = {
   customer_id: string | null;
   customer_no: string | null;
   customer_name: string | null;
-  status: "OPEN" | "FULFILLED" | "CANCELLED";
+  order_type: "SALES_ORDER" | "LAYAWAY";
+  status: "OPEN" | "FULFILLED" | "CANCELLED" | "EXPIRED";
   total_amount: string | number;
   deposit_amount: string | number;
+  paid_amount: string | number;
   balance_amount: string | number;
   deposit_tender_method_code: string | null;
   deposit_tender_method_name: string | null;
   deposit_payment_method: SyncPaymentMethod | null;
   deposit_reference: string | null;
   deposit_paid_at: string | null;
+  layaway_policy_snapshot_json: string | null;
+  minimum_deposit_amount: string | number;
+  reservation_status: "NOT_APPLICABLE" | "ACTIVE" | "RELEASED" | "CONSUMED" | "EXPIRED";
+  reservation_created_at: string | null;
+  reservation_released_at: string | null;
+  layaway_expires_at: string | null;
+  expired_at: string | null;
+  cancellation_fee_amount: string | number;
+  refunded_amount: string | number;
+  record_version: string | number;
   line_count: string | number;
   item_count: string | number;
   operator_name: string | null;
@@ -919,6 +955,7 @@ type InterStoreTransferRequestDraftRow = {
   external_reference: string | null;
   note: string | null;
   operator_name: string;
+  lines_json: string;
   submitted_at: string | null;
   updated_at: string;
 };
@@ -1648,6 +1685,12 @@ const standaloneSupervisorPermissionCodes = [
   "pos.override.no-receipt-return",
   "pos.override.discount",
   "pos.override.price",
+  "pos.layaway.create",
+  "pos.layaway.payment.receive",
+  "pos.layaway.cancel-refund",
+  "pos.layaway.reservation.release",
+  "pos.layaway.policy.override",
+  "pos.layaway.fulfil",
   "inventory.view",
   "inventory.adjust",
   "inventory.count.submit",
@@ -1764,6 +1807,76 @@ function parseProductUomConversions(
     allowSale: true,
     allowPurchase: true,
   }];
+}
+
+function parseProductSellingUnits(
+  value: string | null | undefined,
+): NonNullable<StoreCatalogBrowseItem["sellingUnits"]> {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter(
+      (item): item is NonNullable<StoreCatalogBrowseItem["sellingUnits"]>[number] =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as { unitOfMeasureCode?: unknown }).unitOfMeasureCode ===
+          "string" &&
+        Number.isFinite(
+          Number((item as { conversionFactor?: unknown }).conversionFactor),
+        ) &&
+        Number.isFinite(Number((item as { unitPrice?: unknown }).unitPrice)),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function normalizePublishedSellingUnits(
+  value: unknown,
+): NonNullable<StoreCatalogBrowseItem["sellingUnits"]> {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Record<string, unknown>;
+    const unitOfMeasureCode = String(candidate.uomCode ?? "")
+      .trim()
+      .toUpperCase();
+    const conversionFactor = Number(candidate.conversionFactor);
+    const unitPrice = Number(candidate.unitPrice);
+
+    if (
+      !unitOfMeasureCode ||
+      !Number.isFinite(conversionFactor) ||
+      conversionFactor <= 0 ||
+      !Number.isFinite(unitPrice)
+    ) {
+      return [];
+    }
+
+    return [{
+      productVariantCode:
+        typeof candidate.productVariantCode === "string"
+          ? candidate.productVariantCode
+          : null,
+      unitOfMeasureCode,
+      unitOfMeasureName:
+        typeof candidate.uomName === "string" && candidate.uomName.trim()
+          ? candidate.uomName.trim()
+          : unitOfMeasureCode,
+      conversionFactor,
+      unitPrice,
+      barcode:
+        typeof candidate.barcode === "string" && candidate.barcode.trim()
+          ? candidate.barcode.trim()
+          : null,
+      isDefault: candidate.isDefault === true,
+      allowFractionalSale: candidate.allowFractionalSale === true,
+      decimalPrecision: Math.max(0, Math.trunc(Number(candidate.decimalPrecision) || 0)),
+    }];
+  });
 }
 
 function writeStringArray(values: string[]) {
@@ -2478,6 +2591,16 @@ export class PostgresStoreService {
       "uom_conversions_json",
       "TEXT NOT NULL DEFAULT '[]'",
     );
+    await this.ensureColumn(
+      "product_snapshot",
+      "selling_units_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
+    await this.ensureColumn(
+      "inter_store_transfer_request_draft",
+      "lines_json",
+      "TEXT NOT NULL DEFAULT '[]'",
+    );
     for (const tableName of [
       "inter_store_transfer_snapshot",
       "inter_store_transfer_request_draft",
@@ -2570,6 +2693,29 @@ export class PostgresStoreService {
       "pos_transaction_line",
       "variant_attributes_snapshot",
       "TEXT",
+    );
+    await this.ensureColumn(
+      "pos_transaction_line",
+      "selling_unit_of_measure",
+      "TEXT NOT NULL DEFAULT 'EA'",
+    );
+    await this.ensureColumn(
+      "pos_transaction_line",
+      "base_unit_of_measure",
+      "TEXT NOT NULL DEFAULT 'EA'",
+    );
+    await this.ensureColumn(
+      "pos_transaction_line",
+      "uom_conversion_factor",
+      "NUMERIC NOT NULL DEFAULT 1",
+    );
+    await this.ensureColumn(
+      "pos_transaction_line",
+      "base_quantity",
+      "NUMERIC NOT NULL DEFAULT 0",
+    );
+    await this.pool.query(
+      "UPDATE pos_transaction_line SET base_quantity = quantity WHERE base_quantity <= 0",
     );
     await this.pool.query(
       "CREATE TABLE IF NOT EXISTS product_variant_snapshot (id TEXT PRIMARY KEY, product_code TEXT NOT NULL, variant_code TEXT NOT NULL UNIQUE, sku TEXT, display_name TEXT, unit_price NUMERIC NOT NULL DEFAULT 0, quantity_on_hand NUMERIC NOT NULL DEFAULT 0, barcode TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', attributes_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL)",
@@ -4589,6 +4735,20 @@ export class PostgresStoreService {
         ).rows[0] ?? null
       : null;
     const barcode = optionalSetupText(input.barcode);
+    const baseUnitOfMeasure =
+      optionalSetupText(input.unitOfMeasure)?.toUpperCase() ?? "EA";
+    const sellingUnits = normalizePosSellingUnits({
+      baseUnitOfMeasure,
+      serialized: input.isSerialized === true,
+      sellingUnits: input.sellingUnits?.map((unit) => ({
+        ...unit,
+        unitOfMeasureName:
+          unit.unitOfMeasureName?.trim() || unit.unitOfMeasureCode,
+        isDefault: unit.isDefault === true,
+        allowFractionalSale: unit.allowFractionalSale === true,
+        decimalPrecision: unit.decimalPrecision ?? 0,
+      })),
+    });
     const productEvent = await this.buildLocalPublication<EnterpriseCatalogProductPublishedPayload>(
       "product",
       `standalone-product-${productCode.toLowerCase()}`,
@@ -4606,7 +4766,19 @@ export class PostgresStoreService {
         subcategory: optionalSetupText(input.subcategory),
         brand: null,
         seasonCode: null,
-        unitOfMeasure: optionalSetupText(input.unitOfMeasure)?.toUpperCase() ?? "EA",
+        unitOfMeasure: baseUnitOfMeasure,
+        baseUnitOfMeasure,
+        sellingUnits: sellingUnits.map((unit) => ({
+          productVariantCode: null,
+          uomCode: unit.unitOfMeasureCode,
+          uomName: unit.unitOfMeasureName,
+          conversionFactor: unit.conversionFactor,
+          unitPrice: unit.unitPrice,
+          barcode: unit.barcode ?? null,
+          isDefault: unit.isDefault === true,
+          allowFractionalSale: unit.allowFractionalSale === true,
+          decimalPrecision: unit.decimalPrecision ?? 0,
+        })),
         packSize: null,
         countryOfOrigin: null,
         primaryImageUrl: optionalSetupText(input.primaryImageUrl),
@@ -5583,6 +5755,7 @@ export class PostgresStoreService {
         product.unit_of_measure,
         product.base_unit_of_measure,
         product.uom_conversions_json,
+        product.selling_units_json,
         product.taxable,
         product.tax_profile_code,
         product.tax_profile_name,
@@ -5638,6 +5811,9 @@ export class PostgresStoreService {
         product.category_code,
         product.subcategory,
         product.unit_of_measure,
+        product.base_unit_of_measure,
+        product.uom_conversions_json,
+        product.selling_units_json,
         product.taxable,
         product.tax_profile_code,
         product.tax_profile_name,
@@ -5699,6 +5875,9 @@ export class PostgresStoreService {
         category_code,
         subcategory,
         unit_of_measure,
+        base_unit_of_measure,
+        uom_conversions_json,
+        selling_units_json,
         taxable,
         tax_profile_code,
         tax_profile_name,
@@ -5752,6 +5931,26 @@ export class PostgresStoreService {
     match: CatalogLookupRow,
     query: string,
   ): Promise<StoreCatalogLookupResult> {
+    const configuredSellingUnits = parseProductSellingUnits(
+      match.selling_units_json,
+    );
+    const variantCode = match.product_variant_code?.trim().toUpperCase() ?? null;
+    const scopedSellingUnits = configuredSellingUnits.filter(
+      (unit) =>
+        (unit.productVariantCode?.trim().toUpperCase() ?? null) === variantCode,
+    );
+    const barcodeSellingUnit = match.barcode_type?.startsWith("SELLING_UOM:")
+      ? match.barcode_type.slice("SELLING_UOM:".length)
+      : null;
+    const selectedSellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: match.base_unit_of_measure,
+      baseUnitPrice: asNumber(match.unit_price),
+      quantity: 1,
+      selectedUnitOfMeasure: barcodeSellingUnit,
+      scannedBarcode: match.matched_on === "barcode" ? match.barcode_code : null,
+      sellingUnits: scopedSellingUnits,
+      serialized: asBooleanFlag(match.is_serialized),
+    });
     const [department, category, availableSerialNumbers, availableBatches] = await Promise.all([
       match.department_code
         ? this.pool.query<{ department_name: string }>(
@@ -5829,7 +6028,10 @@ export class PostgresStoreService {
         quantityOnHand: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
         status: batch.status,
       })),
-      unitPrice: Number(asNumber(match.unit_price).toFixed(2)),
+      sellingUnits: configuredSellingUnits,
+      selectedSellingUnitOfMeasure:
+        selectedSellingUom.sellingUnitOfMeasure,
+      unitPrice: Number(asNumber(selectedSellingUom.unitPrice).toFixed(2)),
       quantityOnHand: Number(asNumber(match.quantity_on_hand).toFixed(3)),
       barcode: match.barcode_code,
       barcodeType: match.barcode_type,
@@ -5922,6 +6124,9 @@ export class PostgresStoreService {
         product.category_code,
         product.subcategory,
         product.unit_of_measure,
+        product.base_unit_of_measure,
+        product.uom_conversions_json,
+        product.selling_units_json,
         product.taxable,
         product.tax_profile_code,
         product.tax_profile_name,
@@ -6050,6 +6255,7 @@ export class PostgresStoreService {
             row.uom_conversions_json,
             row.base_unit_of_measure,
           ),
+          sellingUnits: parseProductSellingUnits(row.selling_units_json),
           taxable: asBooleanFlag(row.taxable),
           taxProfileCode: row.tax_profile_code,
           trackInventory: asBooleanFlag(row.track_inventory),
@@ -6564,7 +6770,15 @@ export class PostgresStoreService {
       `SELECT
         line.product_code_snapshot AS product_code,
         line.product_name_snapshot AS product_name,
+        line.selling_unit_of_measure,
+        line.base_unit_of_measure,
+        line.uom_conversion_factor,
         SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.quantity * -1 ELSE line.quantity END) AS quantity,
+        SUM(CASE
+          WHEN line.line_intent = 'RETURN'
+            THEN (CASE WHEN line.base_quantity > 0 THEN line.base_quantity ELSE line.quantity END) * -1
+          ELSE CASE WHEN line.base_quantity > 0 THEN line.base_quantity ELSE line.quantity END
+        END) AS base_quantity,
         SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.unit_price * line.quantity * -1 ELSE line.unit_price * line.quantity END) AS gross_amount,
         SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.discount_amount * -1 ELSE line.discount_amount END) AS discount_amount,
         SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.tax_amount * -1 ELSE line.tax_amount END) AS tax_amount,
@@ -6577,7 +6791,8 @@ export class PostgresStoreService {
        LEFT JOIN pos_shift AS shift
          ON shift.id = txn.shift_id
        WHERE ${salesWhere.join(" AND ")}
-       GROUP BY line.product_code_snapshot, line.product_name_snapshot
+       GROUP BY line.product_code_snapshot, line.product_name_snapshot,
+        line.selling_unit_of_measure, line.base_unit_of_measure, line.uom_conversion_factor
        ORDER BY ABS(SUM(CASE WHEN line.line_intent = 'RETURN' THEN line.line_total * -1 ELSE line.line_total END)) DESC,
         line.product_name_snapshot ASC
        LIMIT $${productLimitParams.length}`,
@@ -6764,6 +6979,12 @@ export class PostgresStoreService {
         productCode: row.product_code,
         productName: row.product_name,
         quantity: Number(asNumber(row.quantity).toFixed(3)),
+        sellingUnitOfMeasure: row.selling_unit_of_measure,
+        baseQuantity: Number(asNumber(row.base_quantity).toFixed(3)),
+        baseUnitOfMeasure: row.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(row.uom_conversion_factor).toFixed(6),
+        ),
         grossAmount: Number(asNumber(row.gross_amount).toFixed(2)),
         discountAmount: Number(asNumber(row.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(row.tax_amount).toFixed(2)),
@@ -7003,7 +7224,7 @@ export class PostgresStoreService {
     const result = await this.pool.query<InventoryBrowseRow>(
       `SELECT
         COALESCE(location.location_code, fallback_location.location_code, 'UNASSIGNED') AS location_code,
-        COALESCE(location.location_name, fallback_location.location_name, 'Store stock') AS location_name,
+        COALESCE(location.location_name, fallback_location.location_name, 'Unassigned aggregate stock') AS location_name,
         product.product_code,
         product.product_name,
         product.short_name,
@@ -7060,18 +7281,18 @@ export class PostgresStoreService {
          ON balance.product_code = product.product_code
         AND ($1::text IS NULL OR upper(balance.location_code) = upper($1::text))
        LEFT JOIN inventory_location_snapshot AS location
-         ON location.location_code = balance.location_code
+         ON upper(location.location_code) = upper(balance.location_code)
        LEFT JOIN LATERAL (
          SELECT fallback.location_code, fallback.location_name
          FROM inventory_location_snapshot AS fallback
-         WHERE (
+         WHERE fallback.status = 'ACTIVE'
+           AND ((
              $1::text IS NOT NULL
              AND upper(fallback.location_code) = upper($1::text)
            )
            OR (
              $1::text IS NULL
-             AND (fallback.is_sales_default = 1 OR fallback.is_receiving_default = 1)
-           )
+           ))
          ORDER BY
            CASE
              WHEN $1::text IS NOT NULL AND upper(fallback.location_code) = upper($1::text) THEN 0
@@ -7088,7 +7309,7 @@ export class PostgresStoreService {
          ON category.category_code = product.category_code
        ORDER BY ABS(COALESCE(balance.quantity_on_hand, product.quantity_on_hand, 0)) DESC,
          product.product_name ASC,
-         COALESCE(location.location_name, fallback_location.location_name, 'Store stock') ASC`,
+         COALESCE(location.location_name, fallback_location.location_name, 'Unassigned aggregate stock') ASC`,
       [input?.locationCode?.trim() || null],
     );
     const barcodeByProduct = await this.getRepresentativeBarcodeMap(
@@ -7250,6 +7471,8 @@ export class PostgresStoreService {
       {
         query: input?.query ?? null,
         productCode: input?.productCode ?? null,
+        storeCode: input?.storeCode ?? null,
+        locationCode: input?.locationCode ?? null,
         limit: input?.limit ?? 25,
       },
     );
@@ -8137,6 +8360,7 @@ export class PostgresStoreService {
         draft.external_reference,
         draft.note,
         draft.operator_name,
+        draft.lines_json,
         draft.submitted_at,
         draft.updated_at
        FROM inter_store_transfer_request_draft AS draft
@@ -8150,7 +8374,26 @@ export class PostgresStoreService {
        LIMIT 20`,
     );
 
-    return result.rows.map((row) => ({
+    return result.rows.map((row) => {
+      const lines = readTransferRequestDraftLines(row.lines_json, {
+        lineId: row.id,
+        lineNo: 1,
+        productCode: row.product_code,
+        productName: row.product_name,
+        departmentCode: row.department_code,
+        departmentName: row.department_name,
+        categoryCode: row.category_code,
+        categoryName: row.category_name,
+        subcategory: row.subcategory,
+        isSerialized: asBooleanFlag(row.is_serialized),
+        quantity: Number(asNumber(row.quantity).toFixed(3)),
+        requestedUnitOfMeasure: row.requested_unit_of_measure,
+        requestedUnitQuantity: Number(asNumber(row.requested_unit_quantity).toFixed(3)),
+        uomConversionFactor: Number(asNumber(row.uom_conversion_factor).toFixed(6)),
+        baseUnitOfMeasure: row.base_unit_of_measure,
+      });
+
+      return {
       draftId: row.id,
       requestNo: row.request_no,
       status: row.status,
@@ -8184,7 +8427,9 @@ export class PostgresStoreService {
       operatorName: row.operator_name,
       submittedAt: row.submitted_at,
       updatedAt: row.updated_at,
-    }));
+      lines,
+    };
+    });
   }
 
   private async getStockCountSessionSummaries(): Promise<
@@ -9335,6 +9580,10 @@ export class PostgresStoreService {
         serial_numbers_json,
         batch_allocations_json,
         quantity,
+        selling_unit_of_measure,
+        base_unit_of_measure,
+        uom_conversion_factor,
+        base_quantity,
         unit_price,
         discount_amount,
         tax_amount,
@@ -9373,7 +9622,12 @@ export class PostgresStoreService {
         variant_attributes_snapshot,
         line_note,
         serial_numbers_json,
+        batch_allocations_json,
         quantity,
+        selling_unit_of_measure,
+        base_unit_of_measure,
+        uom_conversion_factor,
+        base_quantity,
         unit_price,
         discount_amount,
         tax_amount,
@@ -9387,6 +9641,52 @@ export class PostgresStoreService {
          AND source_line_id IS NULL
        LIMIT 1`,
       [transactionId, productCode, lineIntent],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
+  private async getBasketLineBySourceLine(
+    transactionId: string,
+    sourceLineId: string,
+    lineIntent: SyncPosLineIntent,
+  ) {
+    const result = await this.pool.query<BasketLineRow>(
+      `SELECT
+        id,
+        pos_transaction_id,
+        product_id,
+        line_intent,
+        source_line_id,
+        applied_promotion_code,
+        applied_promotion_name,
+        product_code_snapshot,
+        product_variant_code_snapshot,
+        product_name_snapshot,
+        inventory_location_code,
+        variant_size,
+        variant_color,
+        variant_attributes_snapshot,
+        line_note,
+        serial_numbers_json,
+        batch_allocations_json,
+        quantity,
+        selling_unit_of_measure,
+        base_unit_of_measure,
+        uom_conversion_factor,
+        base_quantity,
+        unit_price,
+        discount_amount,
+        tax_amount,
+        line_total,
+        manual_price_override,
+        manual_discount_override
+       FROM pos_transaction_line
+       WHERE pos_transaction_id = $1
+         AND source_line_id = $2
+         AND line_intent = $3
+       LIMIT 1`,
+      [transactionId, sourceLineId, lineIntent],
     );
 
     return result.rows[0] ?? null;
@@ -9411,7 +9711,12 @@ export class PostgresStoreService {
         variant_attributes_snapshot,
         line_note,
         serial_numbers_json,
+        batch_allocations_json,
         quantity,
+        selling_unit_of_measure,
+        base_unit_of_measure,
+        uom_conversion_factor,
+        base_quantity,
         unit_price,
         discount_amount,
         tax_amount,
@@ -9582,6 +9887,12 @@ export class PostgresStoreService {
         line.batch_allocations_json,
       ),
       quantity: Number(asNumber(line.quantity).toFixed(3)),
+      sellingUnitOfMeasure: line.selling_unit_of_measure,
+      baseUnitOfMeasure: line.base_unit_of_measure,
+      uomConversionFactor: Number(
+        asNumber(line.uom_conversion_factor).toFixed(6),
+      ),
+      baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
       discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
       taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -10313,6 +10624,36 @@ export class PostgresStoreService {
     return result.rows;
   }
 
+  private async getCorrectedReceiptLineQuantities(
+    sourceTransactionId: string,
+    sourceLineId: string,
+    excludeLineId: string | null = null,
+  ) {
+    const result = await this.pool.query<{
+      returned_quantity: string | number | null;
+      pending_quantity: string | number | null;
+    }>(
+      `SELECT
+        COALESCE(SUM(CASE WHEN correction_txn.status = 'COMPLETED' THEN correction_line.quantity ELSE 0 END), 0) AS returned_quantity,
+        COALESCE(SUM(CASE WHEN correction_txn.status = 'PARKED' THEN correction_line.quantity ELSE 0 END), 0) AS pending_quantity
+       FROM pos_transaction_line AS correction_line
+       INNER JOIN pos_transaction AS correction_txn
+         ON correction_txn.id = correction_line.pos_transaction_id
+       WHERE correction_line.source_line_id = $2
+         AND correction_line.line_intent = 'RETURN'
+         AND correction_txn.source_transaction_id = $1
+         AND correction_txn.status IN ('COMPLETED', 'PARKED')
+         AND ($3::text IS NULL OR correction_line.id <> $3)`,
+      [sourceTransactionId, sourceLineId, excludeLineId],
+    );
+    const row = result.rows[0];
+
+    return {
+      returnedQuantity: Number(asNumber(row?.returned_quantity).toFixed(3)),
+      pendingQuantity: Number(asNumber(row?.pending_quantity).toFixed(3)),
+    };
+  }
+
   private async getReceiptLookupLines(
     header: ReceiptHeaderRow,
   ): Promise<StoreReceiptLookupLine[]> {
@@ -10330,6 +10671,21 @@ export class PostgresStoreService {
         const isEligible = this.isCorrectionEligibleReceiptTransactionType(
           header.transaction_type,
         );
+        const corrected = isEligible
+          ? await this.getCorrectedReceiptLineQuantities(header.id, line.id)
+          : { returnedQuantity: 0, pendingQuantity: 0 };
+        const quantityAvailableToReturn = isEligible
+          ? Math.max(
+              0,
+              Number(
+                (
+                  quantitySold -
+                  corrected.returnedQuantity -
+                  corrected.pendingQuantity
+                ).toFixed(3),
+              ),
+            )
+          : 0;
 
         return {
           sourceLineId: line.id,
@@ -10339,9 +10695,15 @@ export class PostgresStoreService {
           serialNumbers,
           availableSerialNumbersToReturn: isEligible ? serialNumbers : [],
           quantitySold,
-          quantityReturned: 0,
-          quantityPending: 0,
-          quantityAvailableToReturn: isEligible ? quantitySold : 0,
+          quantityReturned: corrected.returnedQuantity,
+          quantityPending: corrected.pendingQuantity,
+          quantityAvailableToReturn,
+          sellingUnitOfMeasure: line.selling_unit_of_measure,
+          baseUnitOfMeasure: line.base_unit_of_measure,
+          uomConversionFactor: Number(
+            asNumber(line.uom_conversion_factor).toFixed(6),
+          ),
+          baseQuantitySold: Number(asNumber(line.base_quantity).toFixed(3)),
           unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
           taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
           lineTotal: Number(asNumber(line.line_total).toFixed(2)),
@@ -10455,15 +10817,27 @@ export class PostgresStoreService {
         sales_order.customer_id,
         sales_order.customer_no,
         sales_order.customer_name,
+        sales_order.order_type,
         sales_order.status,
         sales_order.total_amount,
         sales_order.deposit_amount,
+        sales_order.paid_amount,
         sales_order.balance_amount,
         sales_order.deposit_tender_method_code,
         sales_order.deposit_tender_method_name,
         sales_order.deposit_payment_method,
         sales_order.deposit_reference,
         sales_order.deposit_paid_at,
+        sales_order.layaway_policy_snapshot_json,
+        sales_order.minimum_deposit_amount,
+        sales_order.reservation_status,
+        sales_order.reservation_created_at,
+        sales_order.reservation_released_at,
+        sales_order.layaway_expires_at,
+        sales_order.expired_at,
+        sales_order.cancellation_fee_amount,
+        sales_order.refunded_amount,
+        sales_order.record_version,
         COUNT(line.id) AS line_count,
         COALESCE(SUM(line.quantity), 0) AS item_count,
         sales_order.operator_name,
@@ -10487,15 +10861,27 @@ export class PostgresStoreService {
         sales_order.customer_id,
         sales_order.customer_no,
         sales_order.customer_name,
+        sales_order.order_type,
         sales_order.status,
         sales_order.total_amount,
         sales_order.deposit_amount,
+        sales_order.paid_amount,
         sales_order.balance_amount,
         sales_order.deposit_tender_method_code,
         sales_order.deposit_tender_method_name,
         sales_order.deposit_payment_method,
         sales_order.deposit_reference,
         sales_order.deposit_paid_at,
+        sales_order.layaway_policy_snapshot_json,
+        sales_order.minimum_deposit_amount,
+        sales_order.reservation_status,
+        sales_order.reservation_created_at,
+        sales_order.reservation_released_at,
+        sales_order.layaway_expires_at,
+        sales_order.expired_at,
+        sales_order.cancellation_fee_amount,
+        sales_order.refunded_amount,
+        sales_order.record_version,
         sales_order.operator_name,
         sales_order.note,
         sales_order.fulfilled_transaction_id,
@@ -10524,15 +10910,29 @@ export class PostgresStoreService {
       customerId: row.customer_id,
       customerNo: row.customer_no,
       customerName: row.customer_name,
+      orderType: row.order_type,
       status: row.status,
       totalAmount: Number(asNumber(row.total_amount).toFixed(2)),
       depositAmount: Number(asNumber(row.deposit_amount).toFixed(2)),
+      paidAmount: Number(asNumber(row.paid_amount).toFixed(2)),
       balanceAmount: Number(asNumber(row.balance_amount).toFixed(2)),
       depositTenderMethodCode: row.deposit_tender_method_code,
       depositTenderMethodName: row.deposit_tender_method_name,
       depositPaymentMethod: row.deposit_payment_method,
       depositReference: row.deposit_reference,
       depositPaidAt: row.deposit_paid_at,
+      minimumDepositAmount: Number(
+        asNumber(row.minimum_deposit_amount).toFixed(2),
+      ),
+      reservationStatus: row.reservation_status,
+      reservationCreatedAt: row.reservation_created_at,
+      reservationReleasedAt: row.reservation_released_at,
+      layawayExpiresAt: row.layaway_expires_at,
+      expiredAt: row.expired_at,
+      cancellationFeeAmount: Number(
+        asNumber(row.cancellation_fee_amount).toFixed(2),
+      ),
+      refundedAmount: Number(asNumber(row.refunded_amount).toFixed(2)),
       lineCount: Math.trunc(asNumber(row.line_count)),
       itemCount: Number(asNumber(row.item_count).toFixed(3)),
       operatorName: row.operator_name,
@@ -10552,6 +10952,110 @@ export class PostgresStoreService {
       orderId,
     ]);
     return rows[0] ?? null;
+  }
+
+  private async getLayawaySettings() {
+    const metadata = await this.metadata();
+
+    return normalizeLayawaySettings({
+      enabled: metadata.layaway_enabled === "1",
+      reserveStockOnDeposit: metadata.layaway_reserve_stock_on_deposit !== "0",
+      minimumDepositPercent: metadata.layaway_minimum_deposit_percent,
+      requireFullPaymentBeforeFulfilment:
+        metadata.layaway_require_full_payment_before_fulfilment !== "0",
+      refundPaymentsOnCancellation:
+        metadata.layaway_refund_payments_on_cancellation !== "0",
+      cancellationFeeType: metadata.layaway_cancellation_fee_type,
+      cancellationFeeValue: metadata.layaway_cancellation_fee_value,
+    });
+  }
+
+  private async getSalesOrderReservationPayloads(
+    salesOrderId: string,
+  ): Promise<NonNullable<StoreSalesOrderRecordedPayload["reservations"]>> {
+    const result = await this.pool.query<{
+      id: string;
+      sales_order_line_id: string;
+      inventory_location_code: string | null;
+      product_code: string;
+      product_variant_code: string | null;
+      base_unit_of_measure: string;
+      base_quantity: string | number;
+      status: NonNullable<StoreSalesOrderRecordedPayload["reservations"]>[number]["status"];
+      release_reason: string | null;
+      created_at: string;
+      released_at: string | null;
+    }>(
+      `SELECT id, sales_order_line_id, inventory_location_code, product_code,
+              product_variant_code, base_unit_of_measure, base_quantity, status,
+              release_reason, created_at, released_at
+       FROM sales_order_inventory_reservation
+       WHERE sales_order_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [salesOrderId],
+    );
+
+    return result.rows.map((row) => ({
+      reservationId: row.id,
+      salesOrderLineId: row.sales_order_line_id,
+      inventoryLocationCode: row.inventory_location_code,
+      productCode: row.product_code,
+      productVariantCode: row.product_variant_code,
+      baseUnitOfMeasure: row.base_unit_of_measure,
+      baseQuantity: Number(asNumber(row.base_quantity).toFixed(3)),
+      status: row.status,
+      releaseReason: row.release_reason,
+      createdAt: row.created_at,
+      releasedAt: row.released_at,
+    }));
+  }
+
+  private async buildSalesOrderLifecyclePayload(
+    order: SalesOrderRow,
+    overrides: Partial<StoreSalesOrderRecordedPayload> = {},
+  ): Promise<StoreSalesOrderRecordedPayload> {
+    const metadata = await this.metadata();
+
+    return {
+      orderId: order.id,
+      orderNo: order.order_no,
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      terminalCode: this.getTerminalCode(),
+      sourceTransactionId: order.source_transaction_id,
+      sourceTransactionNo: order.source_transaction_no,
+      customerId: order.customer_id,
+      customerNo: order.customer_no,
+      customerName: order.customer_name,
+      orderType: order.order_type,
+      totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
+      depositAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
+      paidAmount: Number(asNumber(order.paid_amount).toFixed(2)),
+      balanceAmount: Number(asNumber(order.balance_amount).toFixed(2)),
+      depositTenderMethodCode: order.deposit_tender_method_code,
+      depositTenderMethodName: order.deposit_tender_method_name,
+      depositPaymentMethod: order.deposit_payment_method,
+      depositReference: order.deposit_reference,
+      depositPaidAt: order.deposit_paid_at,
+      layawayPolicySnapshotJson: order.layaway_policy_snapshot_json,
+      minimumDepositAmount: Number(asNumber(order.minimum_deposit_amount).toFixed(2)),
+      reservationStatus: order.reservation_status,
+      reservationCreatedAt: order.reservation_created_at,
+      reservationReleasedAt: order.reservation_released_at,
+      layawayExpiresAt: order.layaway_expires_at,
+      expiredAt: order.expired_at,
+      cancellationFeeAmount: Number(asNumber(order.cancellation_fee_amount).toFixed(2)),
+      refundedAmount: Number(asNumber(order.refunded_amount).toFixed(2)),
+      status: order.status,
+      operatorName: order.operator_name,
+      note: order.note,
+      createdAt: order.created_at,
+      fulfilledTransactionId: order.fulfilled_transaction_id,
+      fulfilledTransactionNo: order.fulfilled_transaction_no,
+      fulfilledAt: order.fulfilled_at,
+      cancelledAt: order.cancelled_at,
+      reservations: await this.getSalesOrderReservationPayloads(order.id),
+      ...overrides,
+    };
   }
 
   private async getSalesOrderSummaries() {
@@ -10894,6 +11398,28 @@ export class PostgresStoreService {
       );
     }
 
+    const configuredSellingUnits = parseProductSellingUnits(
+      match.selling_units_json,
+    );
+    const selectedVariantCode = selectedVariant?.variant_code ?? null;
+    const scopedSellingUnits = configuredSellingUnits.filter(
+      (unit) =>
+        (unit.productVariantCode?.trim().toUpperCase() ?? null) ===
+        (selectedVariantCode?.trim().toUpperCase() ?? null),
+    );
+    const barcodeSellingUnit = match.barcode_type?.startsWith("SELLING_UOM:")
+      ? match.barcode_type.slice("SELLING_UOM:".length)
+      : null;
+    const sellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: match.base_unit_of_measure,
+      baseUnitPrice: asNumber(selectedVariant?.unit_price ?? match.unit_price),
+      quantity: normalizedQuantity,
+      selectedUnitOfMeasure: input.sellingUnitOfMeasure ?? barcodeSellingUnit,
+      scannedBarcode: match.matched_on === "barcode" ? match.barcode_code : null,
+      sellingUnits: scopedSellingUnits,
+      serialized: asBooleanFlag(match.is_serialized),
+    });
+
     const requestedUnitPrice =
       typeof input.unitPrice === "number"
         ? Number(input.unitPrice.toFixed(2))
@@ -10911,13 +11437,16 @@ export class PostgresStoreService {
     }
 
     const automaticUnitPrice =
-      lineIntent === "SALE"
+      lineIntent === "SALE" &&
+      sellingUom.sellingUnitOfMeasure ===
+        match.base_unit_of_measure.trim().toUpperCase() &&
+      sellingUom.uomConversionFactor === 1
         ? await this.resolveBasketUnitPrice(
             match.product_code,
             basket.customer_id,
             selectedVariant?.unit_price ?? match.unit_price,
           )
-        : asNumber(selectedVariant?.unit_price ?? match.unit_price);
+        : sellingUom.unitPrice;
     const unitPrice = Number(
       asNumber(requestedUnitPrice ?? automaticUnitPrice).toFixed(2),
     );
@@ -10931,7 +11460,7 @@ export class PostgresStoreService {
           line.line_intent === lineIntent &&
           line.source_line_id === null,
       )
-      .reduce((sum, line) => sum + asNumber(line.quantity), 0);
+      .reduce((sum, line) => sum + asNumber(line.base_quantity), 0);
     const isSerialized = asBooleanFlag(match.is_serialized);
     const requestedSerialNumbers = input.serialNumbers ?? [];
     const validateSerialSelection =
@@ -10940,11 +11469,11 @@ export class PostgresStoreService {
     const nextSerialNumbers = validateSerializedLineInput({
       isSerialized: validateSerialSelection,
       productName: match.product_name,
-      quantity: normalizedQuantity,
+      quantity: sellingUom.baseQuantity,
       serialNumbers: requestedSerialNumbers,
     });
     const requestedQuantity = Number(
-      (currentBasketProductQuantity + normalizedQuantity).toFixed(3),
+      (currentBasketProductQuantity + sellingUom.baseQuantity).toFixed(3),
     );
     const availableQuantity =
       selectedVariant
@@ -11018,7 +11547,7 @@ export class PostgresStoreService {
       match.sales_location_code
         ? allocateInventoryBatchesFefo({
             productName: match.product_name,
-            quantity: normalizedQuantity,
+            quantity: sellingUom.baseQuantity,
             preferredBatchId: optionalSetupText(input.preferredBatchId),
             batches: (
               await this.pool.query<{
@@ -11065,13 +11594,17 @@ export class PostgresStoreService {
         serial_numbers_json,
         batch_allocations_json,
         quantity,
+        selling_unit_of_measure,
+        base_unit_of_measure,
+        uom_conversion_factor,
+        base_quantity,
         unit_price,
         discount_amount,
         tax_amount,
         line_total,
         manual_price_override,
         manual_discount_override
-      ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0)`,
+      ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, 0)`,
       [
         randomUUID(),
         basket.id,
@@ -11087,6 +11620,10 @@ export class PostgresStoreService {
         writeSerializedLineNumbers(nextSerialNumbers),
         writeInventoryBatchAllocations(preferredBatchAllocations),
         normalizedQuantity,
+        sellingUom.sellingUnitOfMeasure,
+        sellingUom.baseUnitOfMeasure,
+        sellingUom.uomConversionFactor,
+        sellingUom.baseQuantity,
         unitPrice,
         lineAmounts.discountAmount,
         lineAmounts.taxAmount,
@@ -11284,6 +11821,28 @@ export class PostgresStoreService {
     const product = await this.requireBasketProductLookup(
       line.product_code_snapshot,
     );
+    const selectedVariant = line.product_variant_code_snapshot
+      ? await this.getMatrixVariantByCode(
+          line.product_code_snapshot,
+          line.product_variant_code_snapshot,
+        )
+      : null;
+    const scopedSellingUnits = parseProductSellingUnits(
+      product.selling_units_json,
+    ).filter(
+      (unit) =>
+        (unit.productVariantCode?.trim().toUpperCase() ?? null) ===
+        (line.product_variant_code_snapshot?.trim().toUpperCase() ?? null),
+    );
+    const standardSellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: product.base_unit_of_measure,
+      baseUnitPrice: asNumber(selectedVariant?.unit_price ?? product.unit_price),
+      quantity: normalizedQuantity,
+      selectedUnitOfMeasure: line.selling_unit_of_measure,
+      sellingUnits: scopedSellingUnits,
+      serialized: asBooleanFlag(product.is_serialized),
+    });
+    const normalizedBaseQuantity = standardSellingUom.baseQuantity;
     const requestedUnitPrice =
       typeof input.overrideUnitPrice === "number" &&
       Number.isFinite(input.overrideUnitPrice)
@@ -11300,7 +11859,9 @@ export class PostgresStoreService {
       input.configuredDiscountRate > 0
         ? Number(input.configuredDiscountRate.toFixed(2))
         : null;
-    const standardUnitPrice = Number(asNumber(product.unit_price).toFixed(2));
+    const standardUnitPrice = Number(
+      asNumber(standardSellingUom.unitPrice).toFixed(2),
+    );
     const currentUnitPrice = Number(asNumber(line.unit_price).toFixed(2));
     const currentDiscountAmount = Number(asNumber(line.discount_amount).toFixed(2));
     const unitPrice =
@@ -11326,10 +11887,26 @@ export class PostgresStoreService {
       !deferInventoryValidation
     ) {
       const availableQuantity = asNumber(
-        product.sales_location_quantity ?? product.quantity_on_hand,
+        selectedVariant?.quantity_on_hand ??
+          product.sales_location_quantity ??
+          product.quantity_on_hand,
       );
+      const basketBaseQuantity = (await this.getBasketLines(basket.id))
+        .filter(
+          (candidate) =>
+            candidate.id !== line.id &&
+            candidate.product_code_snapshot === line.product_code_snapshot &&
+            (candidate.product_variant_code_snapshot ?? null) ===
+              (line.product_variant_code_snapshot ?? null) &&
+            candidate.line_intent === "SALE" &&
+            candidate.source_line_id === null,
+        )
+        .reduce(
+          (sum, candidate) => sum + asNumber(candidate.base_quantity),
+          normalizedBaseQuantity,
+        );
 
-      if (availableQuantity < normalizedQuantity) {
+      if (availableQuantity < basketBaseQuantity) {
         throw new Error(
           `Only ${Number(asNumber(availableQuantity).toFixed(3))} unit(s) of ${product.product_name} are available in the local sales position.`,
         );
@@ -11345,7 +11922,7 @@ export class PostgresStoreService {
     const nextSerialNumbers = validateSerializedLineInput({
       isSerialized: validateSerialSelection,
       productName: product.product_name,
-      quantity: normalizedQuantity,
+      quantity: normalizedBaseQuantity,
       serialNumbers: requestedSerialNumbers,
     });
 
@@ -11408,18 +11985,20 @@ export class PostgresStoreService {
       `UPDATE pos_transaction_line
        SET serial_numbers_json = $1,
            quantity = $2,
-           unit_price = $3,
-           applied_promotion_code = $4,
-           applied_promotion_name = $5,
-           discount_amount = $6,
-           tax_amount = $7,
-           line_total = $8,
-           manual_price_override = $9,
-           manual_discount_override = $10
-       WHERE id = $11`,
+           base_quantity = $3,
+           unit_price = $4,
+           applied_promotion_code = $5,
+           applied_promotion_name = $6,
+           discount_amount = $7,
+           tax_amount = $8,
+           line_total = $9,
+           manual_price_override = $10,
+           manual_discount_override = $11
+       WHERE id = $12`,
       [
         writeSerializedLineNumbers(nextSerialNumbers),
         normalizedQuantity,
+        normalizedBaseQuantity,
         unitPrice,
         nextAppliedPromotionCode,
         nextAppliedPromotionName,
@@ -11870,29 +12449,50 @@ export class PostgresStoreService {
     const isSerialized =
       asBooleanFlag(product.is_serialized) ||
       readSerializedLineNumbers(sourceLine.serial_numbers_json).length > 0;
-    const existingLine = await this.getBasketLineByProduct(
+    const existingLine = await this.getBasketLineBySourceLine(
       basket.id,
-      sourceLine.product_code_snapshot,
+      sourceLine.id,
       "RETURN",
     );
     const currentQuantity = existingLine
       ? Number(asNumber(existingLine.quantity).toFixed(3))
       : 0;
     const sourceQuantity = Number(asNumber(sourceLine.quantity).toFixed(3));
+    const correctedQuantities =
+      await this.getCorrectedReceiptLineQuantities(
+        sourceHeader.id,
+        sourceLine.id,
+        existingLine?.id ?? null,
+      );
+    const maxReturnQuantity = Math.max(
+      0,
+      Number(
+        (
+          sourceQuantity -
+          correctedQuantities.returnedQuantity -
+          correctedQuantities.pendingQuantity
+        ).toFixed(3),
+      ),
+    );
     const requestedQuantity = Number(
       (currentQuantity + normalizedQuantity).toFixed(3),
     );
+    const uomConversionFactor = asNumber(sourceLine.uom_conversion_factor) || 1;
+    const requestedBaseQuantity = calculatePosBaseQuantity(
+      requestedQuantity,
+      uomConversionFactor,
+    );
 
-    if (requestedQuantity > sourceQuantity) {
+    if (requestedQuantity > maxReturnQuantity) {
       throw new Error(
-        `Only ${sourceQuantity.toFixed(3)} unit(s) of ${sourceLine.product_name_snapshot} can be returned from receipt ${sourceHeader.transaction_no}.`,
+        `Only ${maxReturnQuantity.toFixed(3)} unit(s) of ${sourceLine.product_name_snapshot} remain eligible to return from receipt ${sourceHeader.transaction_no}.`,
       );
     }
 
     const nextSerialNumbers = validateSerializedLineInput({
       isSerialized,
       productName: sourceLine.product_name_snapshot,
-      quantity: requestedQuantity,
+      quantity: requestedBaseQuantity,
       serialNumbers: [
         ...readSerializedLineNumbers(existingLine?.serial_numbers_json),
         ...(input.serialNumbers ?? []),
@@ -11918,16 +12518,18 @@ export class PostgresStoreService {
         `UPDATE pos_transaction_line
          SET serial_numbers_json = $1,
              quantity = $2,
-             unit_price = $3,
-             applied_promotion_code = $4,
-             applied_promotion_name = $5,
-             discount_amount = $6,
-             tax_amount = $7,
-             line_total = $8
-         WHERE id = $9`,
+             base_quantity = $3,
+             unit_price = $4,
+             applied_promotion_code = $5,
+             applied_promotion_name = $6,
+             discount_amount = $7,
+             tax_amount = $8,
+             line_total = $9
+         WHERE id = $10`,
         [
           writeSerializedLineNumbers(nextSerialNumbers),
           nextAmounts.quantity,
+          requestedBaseQuantity,
           nextAmounts.unitPrice,
           sourceLine.applied_promotion_code,
           sourceLine.applied_promotion_name,
@@ -11953,16 +12555,21 @@ export class PostgresStoreService {
           applied_promotion_code,
           applied_promotion_name,
           product_code_snapshot,
+          product_variant_code_snapshot,
           product_name_snapshot,
           serial_numbers_json,
           quantity,
+          selling_unit_of_measure,
+          base_unit_of_measure,
+          uom_conversion_factor,
+          base_quantity,
           unit_price,
           discount_amount,
           tax_amount,
           line_total,
           manual_price_override,
           manual_discount_override
-        ) VALUES ($1, $2, $3, 'RETURN', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, 0)`,
+        ) VALUES ($1, $2, $3, 'RETURN', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0, 0)`,
         [
           randomUUID(),
           basket.id,
@@ -11971,9 +12578,17 @@ export class PostgresStoreService {
           sourceLine.applied_promotion_code,
           sourceLine.applied_promotion_name,
           sourceLine.product_code_snapshot,
+          sourceLine.product_variant_code_snapshot,
           sourceLine.product_name_snapshot,
           writeSerializedLineNumbers(nextSerialNumbers),
           insertedAmounts.quantity,
+          sourceLine.selling_unit_of_measure,
+          sourceLine.base_unit_of_measure,
+          uomConversionFactor,
+          calculatePosBaseQuantity(
+            normalizedQuantity,
+            uomConversionFactor,
+          ),
           insertedAmounts.unitPrice,
           insertedAmounts.discountAmount,
           insertedAmounts.taxAmount,
@@ -12344,7 +12959,9 @@ export class PostgresStoreService {
       const lineLocationCode = isSalesOrderFulfillment
         ? salesLocationCode
         : line.inventory_location_code ?? salesLocationCode;
-      const quantity = Number(asNumber(line.quantity).toFixed(3));
+      const quantity = Number(
+        asNumber(line.base_quantity || line.quantity).toFixed(3),
+      );
       const serialNumbers = validateSerializedLineInput({
         isSerialized: asBooleanFlag(product.is_serialized),
         productName: line.product_name_snapshot,
@@ -12488,7 +13105,13 @@ export class PostgresStoreService {
           variantAttributesSnapshot: line.variant_attributes_snapshot,
           lineNote: line.line_note,
           serialNumbers,
-          quantity,
+          quantity: Number(asNumber(line.quantity).toFixed(3)),
+          sellingUnitOfMeasure: line.selling_unit_of_measure,
+          baseUnitOfMeasure: line.base_unit_of_measure,
+          uomConversionFactor: Number(
+            asNumber(line.uom_conversion_factor).toFixed(6),
+          ),
+          baseQuantity: quantity,
           unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
           discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
           taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -12899,6 +13522,18 @@ export class PostgresStoreService {
       const salesOrder = openSalesOrder;
 
       if (salesOrder) {
+        const fulfilledReservations = (
+          await this.getSalesOrderReservationPayloads(salesOrder.id)
+        ).map((reservation) =>
+          reservation.status === "ACTIVE"
+            ? {
+                ...reservation,
+                status: "CONSUMED" as const,
+                releaseReason: `Consumed by ${refreshedBasket.transaction_no}.`,
+                releasedAt: timestamp,
+              }
+            : reservation,
+        );
         const salesOrderPayload: StoreSalesOrderRecordedPayload = {
           orderId: salesOrder.id,
           orderNo: salesOrder.order_no,
@@ -12909,14 +13544,31 @@ export class PostgresStoreService {
           customerId: salesOrder.customer_id,
           customerNo: salesOrder.customer_no,
           customerName: salesOrder.customer_name,
+          orderType: salesOrder.order_type,
           totalAmount: Number(asNumber(salesOrder.total_amount).toFixed(2)),
           depositAmount: Number(asNumber(salesOrder.deposit_amount).toFixed(2)),
+          paidAmount: Number(asNumber(salesOrder.total_amount).toFixed(2)),
           balanceAmount: 0,
           depositTenderMethodCode: salesOrder.deposit_tender_method_code,
           depositTenderMethodName: salesOrder.deposit_tender_method_name,
           depositPaymentMethod: salesOrder.deposit_payment_method,
           depositReference: salesOrder.deposit_reference,
           depositPaidAt: salesOrder.deposit_paid_at,
+          layawayPolicySnapshotJson: salesOrder.layaway_policy_snapshot_json,
+          minimumDepositAmount: Number(asNumber(salesOrder.minimum_deposit_amount).toFixed(2)),
+          reservationStatus:
+            salesOrder.order_type === "LAYAWAY" && salesOrder.reservation_status === "ACTIVE"
+              ? "CONSUMED"
+              : salesOrder.reservation_status,
+          reservationCreatedAt: salesOrder.reservation_created_at,
+          reservationReleasedAt:
+            salesOrder.order_type === "LAYAWAY" && salesOrder.reservation_status === "ACTIVE"
+              ? timestamp
+              : salesOrder.reservation_released_at,
+          layawayExpiresAt: salesOrder.layaway_expires_at,
+          expiredAt: salesOrder.expired_at,
+          cancellationFeeAmount: Number(asNumber(salesOrder.cancellation_fee_amount).toFixed(2)),
+          refundedAmount: Number(asNumber(salesOrder.refunded_amount).toFixed(2)),
           status: "FULFILLED",
           operatorName: salesOrder.operator_name,
           note: salesOrder.note,
@@ -12925,15 +13577,31 @@ export class PostgresStoreService {
           fulfilledTransactionNo: refreshedBasket.transaction_no,
           fulfilledAt: timestamp,
           cancelledAt: null,
+          reservations: fulfilledReservations,
         };
+
+        await client.query(
+          `UPDATE sales_order_inventory_reservation
+           SET status = 'CONSUMED',
+               release_reason = $1,
+               released_at = $2,
+               updated_at = $2
+           WHERE sales_order_id = $3
+             AND status = 'ACTIVE'`,
+          [`Consumed by ${refreshedBasket.transaction_no}.`, timestamp, salesOrder.id],
+        );
 
         await client.query(
           `UPDATE sales_order
            SET status = 'FULFILLED',
+               paid_amount = total_amount,
                balance_amount = 0,
+               reservation_status = CASE WHEN reservation_status = 'ACTIVE' THEN 'CONSUMED' ELSE reservation_status END,
+               reservation_released_at = CASE WHEN reservation_status = 'ACTIVE' THEN $3 ELSE reservation_released_at END,
                fulfilled_transaction_id = $1,
                fulfilled_transaction_no = $2,
                fulfilled_at = $3,
+               record_version = record_version + 1,
                updated_at = $3
            WHERE id = $4`,
           [
@@ -13460,6 +14128,12 @@ export class PostgresStoreService {
         variantColor: line.variant_color,
         lineNote: line.line_note,
         quantity: Number(asNumber(line.quantity).toFixed(3)),
+        sellingUnitOfMeasure: line.selling_unit_of_measure,
+        baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
+        baseUnitOfMeasure: line.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(line.uom_conversion_factor).toFixed(6),
+        ),
         unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
         discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -13572,6 +14246,12 @@ export class PostgresStoreService {
         variantColor: line.variant_color,
         lineNote: line.line_note,
         quantity: Number(asNumber(line.quantity).toFixed(3)),
+        sellingUnitOfMeasure: line.selling_unit_of_measure,
+        baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
+        baseUnitOfMeasure: line.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(line.uom_conversion_factor).toFixed(6),
+        ),
         unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
         discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -13989,9 +14669,18 @@ export class PostgresStoreService {
     input: StoreCreateSalesOrderRequest | null = {},
   ): Promise<StoreSyncActionResult> {
     input ??= {};
+    const orderType = input.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER";
     const operatorSession = await this.requireActiveOperatorSession({
-      permissionCodes: ["pos.sale.process"],
-      purpose: "creating a sales order from the active basket",
+      permissionCodes: [
+        orderType === "LAYAWAY" ? "pos.layaway.create" : "pos.sale.process",
+        ...(orderType === "LAYAWAY" && input.policyOverrideApproved
+          ? ["pos.layaway.policy.override"]
+          : []),
+      ],
+      purpose:
+        orderType === "LAYAWAY"
+          ? "creating a layaway from the active basket"
+          : "creating a sales order from the active basket",
     });
     const openShift = await this.getOpenShiftRow();
 
@@ -14134,7 +14823,96 @@ export class PostgresStoreService {
           };
     const depositAmount = preparedDepositPayments.paidAmount;
     const primaryDepositPayment = preparedDepositPayments.payments[0] ?? null;
-    const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
+    const layawayOpening =
+      orderType === "LAYAWAY"
+        ? evaluateLayawayOpening({
+            totalAmount,
+            openingPaymentAmount: depositAmount,
+            settings: await this.getLayawaySettings(),
+            capturedAt: timestamp,
+            policyOverrideApproved: input.policyOverrideApproved === true,
+          })
+        : null;
+    const paidAmount = layawayOpening?.paidAmount ?? depositAmount;
+    const balanceAmount = Number((totalAmount - paidAmount).toFixed(2));
+    const layawayExpiresAt = input.layawayExpiresAt?.trim() || null;
+
+    if (
+      layawayExpiresAt &&
+      (!Number.isFinite(Date.parse(layawayExpiresAt)) ||
+        Date.parse(layawayExpiresAt) <= Date.parse(timestamp))
+    ) {
+      throw new Error("Choose a layaway expiry date and time in the future.");
+    }
+
+    const reservationRows: NonNullable<StoreSalesOrderRecordedPayload["reservations"]> = [];
+    const pendingReservedByKey = new Map<string, number>();
+
+    if (layawayOpening?.reservationStatus === "ACTIVE") {
+      for (const line of lines) {
+        const product = await this.getProductByCode(line.product_code_snapshot);
+
+        if (
+          !product ||
+          !asBooleanFlag(product.track_inventory) ||
+          isServiceProductType(product.product_type)
+        ) {
+          continue;
+        }
+
+        const variant = line.product_variant_code_snapshot
+          ? await this.getMatrixVariantByCode(
+              line.product_code_snapshot,
+              line.product_variant_code_snapshot,
+            )
+          : null;
+        const onHandBaseQuantity = variant
+          ? asNumber(variant.quantity_on_hand)
+          : (await this.getOptionalLocationQuantity(
+              salesOrderLocationCode,
+              line.product_code_snapshot,
+            )) ?? asNumber(product.quantity_on_hand);
+        const reservedResult = await this.pool.query<{ value: string | number }>(
+          `SELECT COALESCE(SUM(base_quantity), 0) AS value
+           FROM sales_order_inventory_reservation
+           WHERE inventory_location_code = $1
+             AND product_code = $2
+             AND (($3::text IS NULL AND product_variant_code IS NULL) OR product_variant_code = $3)
+             AND status = 'ACTIVE'`,
+          [salesOrderLocationCode, line.product_code_snapshot, line.product_variant_code_snapshot],
+        );
+        const availableBaseQuantity = calculateLayawayAvailableBaseQuantity({
+          onHandBaseQuantity,
+          activeReservedBaseQuantity: asNumber(reservedResult.rows[0]?.value),
+        });
+        const key = `${salesOrderLocationCode}:${line.product_code_snapshot}:${line.product_variant_code_snapshot ?? ""}`;
+        const lineBaseQuantity = Number(asNumber(line.base_quantity || line.quantity).toFixed(3));
+        const requestedBaseQuantity = Number(
+          ((pendingReservedByKey.get(key) ?? 0) + lineBaseQuantity).toFixed(3),
+        );
+
+        if (requestedBaseQuantity > availableBaseQuantity) {
+          throw new Error(
+            `${line.product_name_snapshot} needs ${requestedBaseQuantity.toFixed(3)} available unit(s) for this layaway, but only ${availableBaseQuantity.toFixed(3)} unit(s) remain after active reservations.`,
+          );
+        }
+
+        pendingReservedByKey.set(key, requestedBaseQuantity);
+        reservationRows.push({
+          reservationId: randomUUID(),
+          salesOrderLineId: line.id,
+          inventoryLocationCode: salesOrderLocationCode,
+          productCode: line.product_code_snapshot,
+          productVariantCode: line.product_variant_code_snapshot,
+          baseUnitOfMeasure: line.base_unit_of_measure,
+          baseQuantity: lineBaseQuantity,
+          status: "ACTIVE",
+          releaseReason: null,
+          createdAt: timestamp,
+          releasedAt: null,
+        });
+      }
+    }
 
     const payload: StoreSalesOrderRecordedPayload = {
       orderId,
@@ -14146,17 +14924,30 @@ export class PostgresStoreService {
       customerId: refreshedBasket.customer_id,
       customerNo: refreshedBasket.customer_no,
       customerName: refreshedBasket.customer_name,
+      orderType,
       subtotalAmount: Number(asNumber(refreshedBasket.subtotal_amount).toFixed(2)),
       discountAmount: Number(asNumber(refreshedBasket.discount_amount).toFixed(2)),
       taxAmount: Number(asNumber(refreshedBasket.tax_amount).toFixed(2)),
       totalAmount,
       depositAmount,
+      paidAmount,
       balanceAmount,
       depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
       depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
       depositPaymentMethod: primaryDepositPayment?.method ?? null,
       depositReference: primaryDepositPayment?.reference ?? null,
       depositPaidAt: depositAmount > 0 ? timestamp : null,
+      layawayPolicySnapshotJson: layawayOpening
+        ? JSON.stringify(layawayOpening.policySnapshot)
+        : null,
+      minimumDepositAmount: layawayOpening?.minimumDepositAmount ?? 0,
+      reservationStatus: layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
+      reservationCreatedAt: reservationRows.length > 0 ? timestamp : null,
+      reservationReleasedAt: null,
+      layawayExpiresAt,
+      expiredAt: null,
+      cancellationFeeAmount: 0,
+      refundedAmount: 0,
       status: "OPEN",
       operatorName,
       note,
@@ -14175,6 +14966,12 @@ export class PostgresStoreService {
         variantAttributesSnapshot: line.variant_attributes_snapshot,
         lineNote: line.line_note,
         quantity: Number(asNumber(line.quantity).toFixed(3)),
+        sellingUnitOfMeasure: line.selling_unit_of_measure,
+        baseUnitOfMeasure: line.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(line.uom_conversion_factor).toFixed(6),
+        ),
+        baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
         unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
         discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -14196,13 +14993,15 @@ export class PostgresStoreService {
         bankAccountName: payment.bankAccountName,
         amount: payment.amount,
         reference: payment.reference,
-        paymentPurpose: "SALES_ORDER_DEPOSIT",
+        paymentPurpose:
+          orderType === "LAYAWAY" ? "LAYAWAY_DEPOSIT" : "SALES_ORDER_DEPOSIT",
         receivedShiftId: openShift.id,
         receivedShiftNo: openShift.shift_no,
         receivedTerminalCode: terminalCode,
         receivedCashierCode: operatorSession.loginId,
         receivedAt: payment.receivedAt,
       })),
+      reservations: reservationRows,
     };
     const client = await this.pool.connect();
 
@@ -14217,15 +15016,26 @@ export class PostgresStoreService {
           customer_id,
           customer_no,
           customer_name,
+          order_type,
           status,
           total_amount,
           deposit_amount,
+          paid_amount,
           balance_amount,
           deposit_tender_method_code,
           deposit_tender_method_name,
           deposit_payment_method,
           deposit_reference,
           deposit_paid_at,
+          layaway_policy_snapshot_json,
+          minimum_deposit_amount,
+          reservation_status,
+          reservation_created_at,
+          reservation_released_at,
+          layaway_expires_at,
+          expired_at,
+          cancellation_fee_amount,
+          refunded_amount,
           operator_name,
           note,
           fulfilled_transaction_id,
@@ -14235,7 +15045,7 @@ export class PostgresStoreService {
           fulfilled_at,
           cancelled_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NULL, NULL, NULL, $18, NULL, NULL, $18)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'OPEN', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NULL, $22, NULL, 0, 0, $23, $24, NULL, NULL, NULL, $25, NULL, NULL, $25)`,
         [
           orderId,
           orderNo,
@@ -14244,19 +15054,46 @@ export class PostgresStoreService {
           refreshedBasket.customer_id,
           refreshedBasket.customer_no,
           refreshedBasket.customer_name,
+          orderType,
           totalAmount,
           depositAmount,
+          paidAmount,
           balanceAmount,
           primaryDepositPayment?.tenderMethodCode ?? null,
           primaryDepositPayment?.tenderMethodName ?? null,
           primaryDepositPayment?.method ?? null,
           primaryDepositPayment?.reference ?? null,
           depositAmount > 0 ? timestamp : null,
+          layawayOpening ? JSON.stringify(layawayOpening.policySnapshot) : null,
+          layawayOpening?.minimumDepositAmount ?? 0,
+          layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
+          reservationRows.length > 0 ? timestamp : null,
+          layawayExpiresAt,
           operatorName,
           note,
           timestamp,
         ],
       );
+      for (const reservation of reservationRows) {
+        await client.query(
+          `INSERT INTO sales_order_inventory_reservation (
+            id, sales_order_id, sales_order_line_id, inventory_location_code,
+            product_code, product_variant_code, base_unit_of_measure, base_quantity,
+            status, release_reason, created_at, released_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', NULL, $9, NULL, $9)`,
+          [
+            reservation.reservationId,
+            orderId,
+            reservation.salesOrderLineId,
+            reservation.inventoryLocationCode,
+            reservation.productCode,
+            reservation.productVariantCode,
+            reservation.baseUnitOfMeasure,
+            reservation.baseQuantity,
+            timestamp,
+          ],
+        );
+      }
       for (const payment of preparedDepositPayments.payments) {
         await client.query(
           `INSERT INTO pos_payment (
@@ -14280,7 +15117,7 @@ export class PostgresStoreService {
             received_terminal_code,
             received_cashier_code,
             received_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'SALES_ORDER_DEPOSIT', $13, $14, $15, $16, $17, $18, $19)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
           [
             payment.paymentId,
             refreshedBasket.id,
@@ -14294,6 +15131,7 @@ export class PostgresStoreService {
             payment.bankAccountNumber,
             payment.bankAccountName,
             payment.method,
+            orderType === "LAYAWAY" ? "LAYAWAY_DEPOSIT" : "SALES_ORDER_DEPOSIT",
             payment.amount,
             payment.reference,
             openShift.id,
@@ -14404,9 +15242,23 @@ export class PostgresStoreService {
     }
 
     await this.requireActiveOperatorSession({
-      permissionCodes: ["pos.sale.process"],
-      purpose: "fulfilling a sales order",
+      permissionCodes: [
+        order.order_type === "LAYAWAY" ? "pos.layaway.fulfil" : "pos.sale.process",
+      ],
+      purpose:
+        order.order_type === "LAYAWAY"
+          ? "fulfilling a layaway"
+          : "fulfilling a sales order",
     });
+
+    if (order.order_type === "LAYAWAY") {
+      assertLayawayFulfilmentEligible({
+        balanceAmount: asNumber(order.balance_amount),
+        policySnapshot: order.layaway_policy_snapshot_json
+          ? JSON.parse(order.layaway_policy_snapshot_json)
+          : await this.getLayawaySettings(),
+      });
+    }
 
     const basket = await this.getBasketHeader(order.source_transaction_id);
 
@@ -14439,6 +15291,295 @@ export class PostgresStoreService {
     };
   }
 
+  async receiveLayawayPayment(
+    input: StoreReceiveLayawayPaymentRequest,
+  ): Promise<StoreSyncActionResult> {
+    const order = await this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN" || order.order_type !== "LAYAWAY") {
+      throw new Error("Flash ERP could not find that open layaway in PostgreSQL.");
+    }
+
+    const operatorSession = await this.requireActiveOperatorSession({
+      permissionCodes: ["pos.layaway.payment.receive"],
+      purpose: "receiving a layaway installment",
+    });
+    const shift = await this.getOpenShiftRow();
+
+    if (!shift) {
+      throw new Error("Open a cashier shift before receiving a layaway payment.");
+    }
+
+    const timestamp = isoNow();
+    const requestedAmount = Number(
+      input.payments.reduce((sum, payment) => sum + Number(payment.amount ?? 0), 0).toFixed(2),
+    );
+    const currentBalance = Number(asNumber(order.balance_amount).toFixed(2));
+
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new Error("Enter a layaway installment greater than zero.");
+    }
+
+    if (requestedAmount > currentBalance + 0.005) {
+      throw new Error(`The installment cannot exceed the ${currentBalance.toFixed(2)} layaway balance.`);
+    }
+
+    const preparedPayments = await this.normalizeCheckoutPayments(
+      { payments: input.payments },
+      requestedAmount,
+      order.order_no,
+      timestamp,
+      "SALE",
+    );
+    const nextPaidAmount = Number((asNumber(order.paid_amount) + preparedPayments.paidAmount).toFixed(2));
+    const nextBalanceAmount = Number(Math.max(0, asNumber(order.total_amount) - nextPaidAmount).toFixed(2));
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const metadata = await this.metadata();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const operatorName = input.operatorName?.trim() || order.operator_name;
+    const note = input.note?.trim() || order.note;
+    const eventId = randomUUID();
+    const paymentPayloads: NonNullable<StoreSalesOrderRecordedPayload["payments"]> =
+      preparedPayments.payments.map((payment) => ({
+        paymentId: payment.paymentId,
+        method: payment.method,
+        tenderMethodCode: payment.tenderMethodCode,
+        tenderMethodName: payment.tenderMethodName,
+        bankAccountId: payment.bankAccountId,
+        bankCode: payment.bankCode,
+        bankName: payment.bankName,
+        bankBranchCode: payment.bankBranchCode,
+        bankBranchName: payment.bankBranchName,
+        bankAccountNumber: payment.bankAccountNumber,
+        bankAccountName: payment.bankAccountName,
+        amount: payment.amount,
+        reference: payment.reference,
+        paymentPurpose: "LAYAWAY_INSTALLMENT",
+        receivedShiftId: shift.id,
+        receivedShiftNo: shift.shift_no,
+        receivedTerminalCode: this.getTerminalCode(),
+        receivedCashierCode: operatorSession.loginId,
+        receivedAt: payment.receivedAt,
+      }));
+    const payload = await this.buildSalesOrderLifecyclePayload(
+      {
+        ...order,
+        paid_amount: nextPaidAmount,
+        balance_amount: nextBalanceAmount,
+        operator_name: operatorName,
+        note,
+        record_version: nextRecordVersion,
+        updated_at: timestamp,
+      },
+      { payments: paymentPayloads },
+    );
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      for (const payment of preparedPayments.payments) {
+        await client.query(
+          `INSERT INTO pos_payment (
+            id, pos_transaction_id, tender_method_code, tender_method_name,
+            bank_account_id, bank_code, bank_name, bank_branch_code, bank_branch_name,
+            bank_account_number, bank_account_name, method, payment_purpose, amount,
+            reference, received_shift_id, received_shift_no, received_terminal_code,
+            received_cashier_code, received_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'LAYAWAY_INSTALLMENT',$13,$14,$15,$16,$17,$18,$19)`,
+          [
+            payment.paymentId, order.source_transaction_id, payment.tenderMethodCode,
+            payment.tenderMethodName, payment.bankAccountId, payment.bankCode,
+            payment.bankName, payment.bankBranchCode, payment.bankBranchName,
+            payment.bankAccountNumber, payment.bankAccountName, payment.method,
+            payment.amount, payment.reference, shift.id, shift.shift_no,
+            this.getTerminalCode(), operatorSession.loginId, payment.receivedAt,
+          ],
+        );
+      }
+      await client.query(
+        `UPDATE pos_transaction SET paid_amount = $1, updated_at = $2 WHERE id = $3`,
+        [nextPaidAmount, timestamp, order.source_transaction_id],
+      );
+      await client.query(
+        `UPDATE sales_order
+         SET paid_amount = $1, balance_amount = $2, operator_name = $3, note = $4,
+             record_version = $5, updated_at = $6
+         WHERE id = $7 AND status = 'OPEN'`,
+        [nextPaidAmount, nextBalanceAmount, operatorName, note, nextRecordVersion, timestamp, order.id],
+      );
+      if (!this.isStandaloneDeployment()) {
+        await client.query(
+          `INSERT INTO sync_outbox (
+            id, target_node_code, aggregate_type, aggregate_id, event_type,
+            idempotency_key, payload_json, status, attempt_count, record_version,
+            created_at, updated_at
+          ) VALUES ($1,$2,'salesOrder',$3,'sales-order.payment-received',$4,$5,'PENDING',0,$6,$7,$7)`,
+          [eventId, ENTERPRISE_NODE_CODE, order.id, `${nodeCode}:salesOrder:${order.order_no}:payment:${eventId}`, JSON.stringify(payload), nextRecordVersion, timestamp],
+        );
+      }
+      await client.query(
+        `INSERT INTO app_metadata (key, value) VALUES ('last_local_write_at', $1)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        [timestamp],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    return {
+      message: `${preparedPayments.paidAmount.toFixed(2)} was received for ${order.order_no}; balance ${nextBalanceAmount.toFixed(2)}.`,
+      snapshot: await this.getSyncSnapshot(),
+      salesOrderNo: order.order_no,
+    };
+  }
+
+  async releaseLayawayReservation(
+    input: StoreReleaseLayawayReservationRequest,
+  ): Promise<StoreSyncActionResult> {
+    const order = await this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN" || order.order_type !== "LAYAWAY") {
+      throw new Error("Flash ERP could not find that open layaway in PostgreSQL.");
+    }
+
+    await this.requireActiveOperatorSession({
+      permissionCodes: ["pos.layaway.reservation.release"],
+      purpose: "releasing a layaway stock reservation",
+    });
+    const reason = input.reason.trim();
+
+    if (!reason) {
+      throw new Error("Enter why the layaway reservation is being released.");
+    }
+
+    const timestamp = isoNow();
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const metadata = await this.metadata();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
+      reservation_status: "RELEASED",
+      reservation_released_at: timestamp,
+      operator_name: input.operatorName?.trim() || order.operator_name,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, {
+      reservations: (await this.getSalesOrderReservationPayloads(order.id)).map((reservation) =>
+        reservation.status === "ACTIVE"
+          ? { ...reservation, status: "RELEASED", releaseReason: reason, releasedAt: timestamp }
+          : reservation,
+      ),
+    });
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE sales_order_inventory_reservation
+         SET status = 'RELEASED', release_reason = $1, released_at = $2, updated_at = $2
+         WHERE sales_order_id = $3 AND status = 'ACTIVE'`,
+        [reason, timestamp, order.id],
+      );
+      await client.query(
+        `UPDATE sales_order SET reservation_status = 'RELEASED', reservation_released_at = $1,
+             operator_name = $2, record_version = $3, updated_at = $1
+         WHERE id = $4 AND status = 'OPEN'`,
+        [timestamp, input.operatorName?.trim() || order.operator_name, nextRecordVersion, order.id],
+      );
+      if (!this.isStandaloneDeployment()) {
+        await client.query(
+          `INSERT INTO sync_outbox (id,target_node_code,aggregate_type,aggregate_id,event_type,idempotency_key,payload_json,status,attempt_count,record_version,created_at,updated_at)
+           VALUES ($1,$2,'salesOrder',$3,'sales-order.reservation-released',$4,$5,'PENDING',0,$6,$7,$7)`,
+          [randomUUID(), ENTERPRISE_NODE_CODE, order.id, `${nodeCode}:salesOrder:${order.order_no}:reservation-released:${nextRecordVersion}`, JSON.stringify(payload), nextRecordVersion, timestamp],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    return { message: `${order.order_no} stock reservation was released.`, snapshot: await this.getSyncSnapshot(), salesOrderNo: order.order_no };
+  }
+
+  async expireLayaway(input: StoreExpireLayawayRequest): Promise<StoreSyncActionResult> {
+    const order = await this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN" || order.order_type !== "LAYAWAY") {
+      throw new Error("Flash ERP could not find that open layaway in PostgreSQL.");
+    }
+
+    await this.requireActiveOperatorSession({ permissionCodes: ["pos.layaway.reservation.release"], purpose: "expiring a layaway" });
+    const timestamp = isoNow();
+
+    if (!order.layaway_expires_at) {
+      throw new Error(`${order.order_no} does not have an expiry date.`);
+    }
+    if (Date.parse(order.layaway_expires_at) > Date.parse(timestamp)) {
+      throw new Error(`${order.order_no} is not due to expire yet.`);
+    }
+
+    const reason = input.reason?.trim() || "Layaway expired before fulfilment.";
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const metadata = await this.metadata();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
+      status: "EXPIRED",
+      reservation_status: "EXPIRED",
+      reservation_released_at: timestamp,
+      expired_at: timestamp,
+      operator_name: input.operatorName?.trim() || order.operator_name,
+      note: reason,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, {
+      reservations: (await this.getSalesOrderReservationPayloads(order.id)).map((reservation) =>
+        reservation.status === "ACTIVE"
+          ? { ...reservation, status: "EXPIRED", releaseReason: reason, releasedAt: timestamp }
+          : reservation,
+      ),
+    });
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE sales_order_inventory_reservation SET status = 'EXPIRED', release_reason = $1,
+             released_at = $2, updated_at = $2 WHERE sales_order_id = $3 AND status = 'ACTIVE'`,
+        [reason, timestamp, order.id],
+      );
+      await client.query(
+        `UPDATE sales_order SET status = 'EXPIRED', reservation_status = 'EXPIRED',
+             reservation_released_at = $1, expired_at = $1, operator_name = $2, note = $3,
+             record_version = $4, updated_at = $1 WHERE id = $5 AND status = 'OPEN'`,
+        [timestamp, input.operatorName?.trim() || order.operator_name, reason, nextRecordVersion, order.id],
+      );
+      await client.query(`UPDATE pos_transaction SET status = 'CANCELLED', updated_at = $1 WHERE id = $2`, [timestamp, order.source_transaction_id]);
+      if (!this.isStandaloneDeployment()) {
+        await client.query(
+          `INSERT INTO sync_outbox (id,target_node_code,aggregate_type,aggregate_id,event_type,idempotency_key,payload_json,status,attempt_count,record_version,created_at,updated_at)
+           VALUES ($1,$2,'salesOrder',$3,'sales-order.expired',$4,$5,'PENDING',0,$6,$7,$7)`,
+          [randomUUID(), ENTERPRISE_NODE_CODE, order.id, `${nodeCode}:salesOrder:${order.order_no}:expired`, JSON.stringify(payload), nextRecordVersion, timestamp],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    return { message: `${order.order_no} expired and its stock reservation was released.`, snapshot: await this.getSyncSnapshot(), salesOrderNo: order.order_no };
+  }
+
   async cancelSalesOrder(
     input: StoreCancelSalesOrderRequest,
   ): Promise<StoreSyncActionResult> {
@@ -14450,57 +15591,139 @@ export class PostgresStoreService {
       );
     }
 
-    await this.requireActiveOperatorSession({
-      permissionCodes: ["pos.sale.process"],
-      purpose: "cancelling a sales order",
+    const isLayaway = order.order_type === "LAYAWAY";
+    const operatorSession = await this.requireActiveOperatorSession({
+      permissionCodes: [
+        isLayaway ? "pos.layaway.cancel-refund" : "pos.sale.process",
+        ...(isLayaway && input.policyOverrideApproved
+          ? ["pos.layaway.policy.override"]
+          : []),
+      ],
+      purpose: isLayaway ? "cancelling and refunding a layaway" : "cancelling a sales order",
     });
-
     const timestamp = isoNow();
+    const cancellationAmounts = isLayaway
+      ? calculateLayawayCancellationAmounts({
+          paidAmount: asNumber(order.paid_amount),
+          policySnapshot: order.layaway_policy_snapshot_json
+            ? JSON.parse(order.layaway_policy_snapshot_json)
+            : await this.getLayawaySettings(),
+        })
+      : { cancellationFeeAmount: 0, refundAmount: 0 };
+    const refundShift = cancellationAmounts.refundAmount > 0 ? await this.getOpenShiftRow() : null;
+
+    if (cancellationAmounts.refundAmount > 0 && !refundShift) {
+      throw new Error("Open a cashier shift before refunding the layaway.");
+    }
+    if (
+      cancellationAmounts.refundAmount > 0 &&
+      (!input.refundPayments || input.refundPayments.length === 0)
+    ) {
+      throw new Error(`Choose refund tenders totalling ${cancellationAmounts.refundAmount.toFixed(2)} before cancelling this layaway.`);
+    }
+
+    const preparedRefundPayments = cancellationAmounts.refundAmount > 0
+      ? await this.normalizeCheckoutPayments(
+          { payments: input.refundPayments ?? [] },
+          cancellationAmounts.refundAmount,
+          order.order_no,
+          timestamp,
+          "RETURN",
+        )
+      : { payments: [] as NormalizedCheckoutPayment[], paidAmount: 0, changeAmount: 0 };
     const metadata = await this.metadata();
-    const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
-    const terminalCode = this.getTerminalCode();
     const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
     const operatorName = input.operatorName?.trim() || order.operator_name;
     const note = input.note?.trim() || order.note;
-    const payload: StoreSalesOrderRecordedPayload = {
-      orderId: order.id,
-      orderNo: order.order_no,
-      storeCode,
-      terminalCode,
-      sourceTransactionId: order.source_transaction_id,
-      sourceTransactionNo: order.source_transaction_no,
-      customerId: order.customer_id,
-      customerNo: order.customer_no,
-      customerName: order.customer_name,
-      totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
-      depositAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
-      balanceAmount: Number(asNumber(order.balance_amount).toFixed(2)),
-      depositTenderMethodCode: order.deposit_tender_method_code,
-      depositTenderMethodName: order.deposit_tender_method_name,
-      depositPaymentMethod: order.deposit_payment_method,
-      depositReference: order.deposit_reference,
-      depositPaidAt: order.deposit_paid_at,
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const refundPayloads: NonNullable<StoreSalesOrderRecordedPayload["payments"]> =
+      preparedRefundPayments.payments.map((payment) => ({
+        paymentId: payment.paymentId,
+        method: payment.method,
+        tenderMethodCode: payment.tenderMethodCode,
+        tenderMethodName: payment.tenderMethodName,
+        bankAccountId: payment.bankAccountId,
+        bankCode: payment.bankCode,
+        bankName: payment.bankName,
+        bankBranchCode: payment.bankBranchCode,
+        bankBranchName: payment.bankBranchName,
+        bankAccountNumber: payment.bankAccountNumber,
+        bankAccountName: payment.bankAccountName,
+        amount: Number((payment.amount * -1).toFixed(2)),
+        reference: payment.reference,
+        paymentPurpose: "LAYAWAY_REFUND",
+        receivedShiftId: refundShift?.id ?? null,
+        receivedShiftNo: refundShift?.shift_no ?? null,
+        receivedTerminalCode: this.getTerminalCode(),
+        receivedCashierCode: operatorSession.loginId,
+        receivedAt: payment.receivedAt,
+      }));
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
       status: "CANCELLED",
-      operatorName,
+      reservation_status:
+        isLayaway && order.reservation_status === "ACTIVE" ? "RELEASED" : order.reservation_status,
+      reservation_released_at:
+        isLayaway && order.reservation_status === "ACTIVE" ? timestamp : order.reservation_released_at,
+      cancellation_fee_amount: cancellationAmounts.cancellationFeeAmount,
+      refunded_amount: cancellationAmounts.refundAmount,
+      operator_name: operatorName,
       note,
-      createdAt: order.created_at,
-      fulfilledTransactionId: null,
-      fulfilledTransactionNo: null,
-      fulfilledAt: null,
-      cancelledAt: timestamp,
-    };
+      cancelled_at: timestamp,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, {
+      payments: refundPayloads,
+      reservations: (await this.getSalesOrderReservationPayloads(order.id)).map((reservation) =>
+        isLayaway && reservation.status === "ACTIVE"
+          ? { ...reservation, status: "RELEASED", releaseReason: `Released when ${order.order_no} was cancelled.`, releasedAt: timestamp }
+          : reservation,
+      ),
+    });
     const client = await this.pool.connect();
 
     try {
       await client.query("BEGIN");
+      for (const payment of preparedRefundPayments.payments) {
+        await client.query(
+          `INSERT INTO pos_payment (
+            id,pos_transaction_id,tender_method_code,tender_method_name,bank_account_id,
+            bank_code,bank_name,bank_branch_code,bank_branch_name,bank_account_number,
+            bank_account_name,method,payment_purpose,amount,reference,received_shift_id,
+            received_shift_no,received_terminal_code,received_cashier_code,received_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'LAYAWAY_REFUND',$13,$14,$15,$16,$17,$18,$19)`,
+          [
+            payment.paymentId, order.source_transaction_id, payment.tenderMethodCode,
+            payment.tenderMethodName, payment.bankAccountId, payment.bankCode,
+            payment.bankName, payment.bankBranchCode, payment.bankBranchName,
+            payment.bankAccountNumber, payment.bankAccountName, payment.method,
+            Number((payment.amount * -1).toFixed(2)), payment.reference,
+            refundShift?.id ?? null, refundShift?.shift_no ?? null, this.getTerminalCode(),
+            operatorSession.loginId, payment.receivedAt,
+          ],
+        );
+      }
+      if (isLayaway) {
+        await client.query(
+          `UPDATE sales_order_inventory_reservation
+           SET status = 'RELEASED', release_reason = $1, released_at = $2, updated_at = $2
+           WHERE sales_order_id = $3 AND status = 'ACTIVE'`,
+          [`Released when ${order.order_no} was cancelled.`, timestamp, order.id],
+        );
+      }
       await client.query(
-        "UPDATE sales_order SET status = 'CANCELLED', operator_name = $1, note = $2, cancelled_at = $3, updated_at = $3 WHERE id = $4",
-        [operatorName, note, timestamp, order.id],
+        `UPDATE sales_order SET status = 'CANCELLED',
+             reservation_status = CASE WHEN order_type = 'LAYAWAY' AND reservation_status = 'ACTIVE' THEN 'RELEASED' ELSE reservation_status END,
+             reservation_released_at = CASE WHEN order_type = 'LAYAWAY' AND reservation_status = 'ACTIVE' THEN $1 ELSE reservation_released_at END,
+             cancellation_fee_amount = $2, refunded_amount = $3, operator_name = $4,
+             note = $5, cancelled_at = $1, record_version = $6, updated_at = $1
+         WHERE id = $7`,
+        [timestamp, cancellationAmounts.cancellationFeeAmount, cancellationAmounts.refundAmount, operatorName, note, nextRecordVersion, order.id],
       );
       await client.query(
-        "UPDATE pos_transaction SET status = 'CANCELLED', updated_at = $1 WHERE id = $2",
-        [timestamp, order.source_transaction_id],
+        "UPDATE pos_transaction SET status = 'CANCELLED', paid_amount = $1, updated_at = $2 WHERE id = $3",
+        [Math.max(0, asNumber(order.paid_amount) - cancellationAmounts.refundAmount), timestamp, order.source_transaction_id],
       );
 
       if ((await this.getActiveBasketId()) === order.source_transaction_id) {
@@ -14524,13 +15747,14 @@ export class PostgresStoreService {
             record_version,
             created_at,
             updated_at
-          ) VALUES ($1, $2, 'salesOrder', $3, 'sales-order.cancelled', $4, $5, 'PENDING', 0, 2, $6, $6)`,
+          ) VALUES ($1, $2, 'salesOrder', $3, 'sales-order.cancelled', $4, $5, 'PENDING', 0, $6, $7, $7)`,
           [
             randomUUID(),
             ENTERPRISE_NODE_CODE,
             order.id,
             `${nodeCode}:salesOrder:${order.order_no}:cancelled`,
             JSON.stringify(payload),
+            nextRecordVersion,
             timestamp,
           ],
         );
@@ -14561,8 +15785,11 @@ export class PostgresStoreService {
     }
 
     return {
-      message: `${order.order_no} was cancelled locally.`,
+      message: isLayaway
+        ? `${order.order_no} was cancelled; fee ${cancellationAmounts.cancellationFeeAmount.toFixed(2)}, refund ${cancellationAmounts.refundAmount.toFixed(2)}.`
+        : `${order.order_no} was cancelled locally.`,
       snapshot: await this.getSyncSnapshot(),
+      salesOrderNo: order.order_no,
     };
   }
 
@@ -15417,32 +16644,33 @@ export class PostgresStoreService {
       permissionCodes: ["inventory.transfer.request"],
       purpose: "saving an inter-store transfer request",
     });
-    const sourceLocationCode = input.sourceLocationCode.trim().toUpperCase();
-    const destinationLocationCode = input.destinationLocationCode
-      .trim()
-      .toUpperCase();
-    const productCode = input.productCode.trim().toUpperCase();
-    const quantity = Number(Number(input.quantity).toFixed(3));
+    const sourceStoreCode = input.sourceStoreCode?.trim() ?? "";
+    const destinationLocationCode = input.destinationLocationCode.trim();
+    const requestedLines =
+      input.lines && input.lines.length > 0
+        ? input.lines
+        : input.productCode
+          ? [{ productCode: input.productCode, quantity: Number(input.quantity ?? 0), unitOfMeasure: input.unitOfMeasure }]
+          : [];
 
     if (
-      !sourceLocationCode ||
-      !destinationLocationCode ||
-      sourceLocationCode === destinationLocationCode
+      !sourceStoreCode ||
+      !destinationLocationCode
     ) {
       throw new Error(
-        "Choose different source and destination locations before saving the transfer request.",
+        "Choose a source shop and local destination location before saving the transfer request.",
       );
     }
 
-    if (!productCode) {
-      throw new Error("Choose a product before saving the transfer request.");
+    if (requestedLines.length === 0) {
+      throw new Error("Add at least one item before saving the transfer request.");
     }
 
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      throw new Error("Enter a transfer request quantity greater than zero.");
+    if (requestedLines.length > 50) {
+      throw new Error("A transfer request can contain up to 50 item lines.");
     }
 
-    const [metadata, targetResult, locationResult, product] = await Promise.all(
+    const [metadata, targetResult, locationResult] = await Promise.all(
       [
         this.metadata(),
         this.pool.query<TransferRequestTargetSnapshotRow>(
@@ -15462,9 +16690,12 @@ export class PostgresStoreService {
           use_for_receiving_default,
           updated_at
          FROM inter_store_transfer_request_target_snapshot
-         WHERE source_location_code = $1
+         WHERE UPPER(source_store_code) = UPPER($1)
+         ORDER BY use_for_sales_default DESC,
+                  use_for_receiving_default DESC,
+                  source_location_name
          LIMIT 1`,
-          [sourceLocationCode],
+          [sourceStoreCode],
         ),
         this.pool.query<{
           location_code: string;
@@ -15472,11 +16703,10 @@ export class PostgresStoreService {
         }>(
           `SELECT location_code, location_name
          FROM inventory_location_snapshot
-         WHERE location_code = $1
+         WHERE UPPER(location_code) = UPPER($1)
          LIMIT 1`,
           [destinationLocationCode],
         ),
-        this.getProductByCode(productCode),
       ],
     );
     const target = targetResult.rows[0] ?? null;
@@ -15484,7 +16714,7 @@ export class PostgresStoreService {
 
     if (!target) {
       throw new Error(
-        `Flash ERP has no enterprise transfer source target for ${sourceLocationCode}. Pull the latest sync before requesting stock.`,
+        `Flash ERP has no synced enterprise transfer source shop for ${sourceStoreCode}. Pull the latest sync and select the source again.`,
       );
     }
 
@@ -15494,47 +16724,150 @@ export class PostgresStoreService {
       );
     }
 
-    if (!product) {
-      throw new Error(
-        `Flash ERP could not find local product "${productCode}".`,
-      );
-    }
+    const products = await Promise.all(
+      requestedLines.map((line) => this.getProductByCode(line.productCode)),
+    );
+    const lines = requestedLines.map<StoreInterStoreTransferRequestDraftLine>(
+      (line, index) => {
+        const product = products[index];
+        const quantity = Number(Number(line.quantity).toFixed(3));
 
-    const transferUom = resolveInventoryTransferUom({
-      enteredQuantity: quantity,
-      requestedUnitOfMeasure: input.unitOfMeasure,
-      unitOfMeasure: product.unit_of_measure,
-      baseUnitOfMeasure: product.base_unit_of_measure,
-      uomConversions: parseProductUomConversions(
-        product.uom_conversions_json,
-        product.base_unit_of_measure,
-      ),
-    });
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${line.productCode}" on line ${index + 1}.`,
+          );
+        }
 
-    if (
-      asBooleanFlag(product.is_serialized) &&
-      !Number.isInteger(transferUom.baseQuantity)
-    ) {
-      throw new Error(
-        `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
-      );
+        if (!asBooleanFlag(product.track_inventory)) {
+          throw new Error(
+            `${product.product_name} is not configured for tracked inventory, so it cannot be requested through inter-store movement.`,
+          );
+        }
+
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          throw new Error(`Transfer request line ${index + 1} needs a quantity greater than zero.`);
+        }
+
+        const transferUom = resolveInventoryTransferUom({
+          enteredQuantity: quantity,
+          requestedUnitOfMeasure: line.unitOfMeasure,
+          unitOfMeasure: product.unit_of_measure,
+          baseUnitOfMeasure: product.base_unit_of_measure,
+          uomConversions: parseProductUomConversions(
+            product.uom_conversions_json,
+            product.base_unit_of_measure,
+          ),
+        });
+
+        if (asBooleanFlag(product.is_serialized) && !Number.isInteger(transferUom.baseQuantity)) {
+          throw new Error(
+            `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
+          );
+        }
+
+        return {
+          lineId: randomUUID(),
+          lineNo: index + 1,
+          productCode: product.product_code,
+          productName: product.product_name,
+          departmentCode: product.department_code,
+          departmentName: null,
+          categoryCode: product.category_code,
+          categoryName: null,
+          subcategory: product.subcategory,
+          isSerialized: asBooleanFlag(product.is_serialized),
+          quantity: transferUom.baseQuantity,
+          requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+          requestedUnitQuantity: transferUom.requestedUnitQuantity,
+          uomConversionFactor: transferUom.uomConversionFactor,
+          baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
+        };
+      },
+    );
+    const firstLine = lines[0];
+
+    if (!firstLine) {
+      throw new Error("Add at least one valid item before saving the transfer request.");
     }
 
     const timestamp = isoNow();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
-    const requestId = randomUUID();
-    const requestNo = buildLocalDocumentNo(
-      "TRQ",
-      storeCode,
-      await this.nextSequence("inter_store_transfer_request_sequence"),
-      timestamp,
-    );
+    const existingDraft = input.draftId?.trim()
+      ? (
+          await this.pool.query<InterStoreTransferRequestDraftRow>(
+            "SELECT * FROM inter_store_transfer_request_draft WHERE id = $1 LIMIT 1",
+            [input.draftId.trim()],
+          )
+        ).rows[0] ?? null
+      : null;
+
+    if (input.draftId?.trim() && !existingDraft) {
+      throw new Error("Flash ERP could not find that saved transfer request draft in PostgreSQL.");
+    }
+
+    if (existingDraft && existingDraft.status !== "DRAFT") {
+      throw new Error(`${existingDraft.request_no} has already been sent and cannot be amended.`);
+    }
+
+    const requestId = existingDraft?.id ?? randomUUID();
+    const requestNo =
+      existingDraft?.request_no ??
+      buildLocalDocumentNo(
+        "TRQ",
+        storeCode,
+        await this.nextSequence("inter_store_transfer_request_sequence"),
+        timestamp,
+      );
     const operatorName =
       input.operatorName?.trim() || this.formatOperatorLabel(operatorSession);
     const externalReference = input.externalReference?.trim() || null;
     const note = input.note?.trim() || null;
+    const linesJson = writeTransferRequestDraftLines(lines);
 
-    await this.pool.query(
+    if (existingDraft) {
+      await this.pool.query(
+        `UPDATE inter_store_transfer_request_draft
+         SET source_store_code = $1, source_store_name = $2,
+             source_location_code = $3, source_location_name = $4,
+             destination_store_code = $5, destination_store_name = $6,
+             destination_location_code = $7, destination_location_name = $8,
+             product_code = $9, product_name = $10, department_code = $11,
+             category_code = $12, subcategory = $13, is_serialized = $14,
+             quantity = $15, requested_unit_of_measure = $16,
+             requested_unit_quantity = $17, uom_conversion_factor = $18,
+             base_unit_of_measure = $19, external_reference = $20, note = $21,
+             operator_name = $22, lines_json = $23, updated_at = $24
+         WHERE id = $25 AND status = 'DRAFT'`,
+        [
+          target.source_store_code,
+          target.source_store_name,
+          target.source_location_code,
+          target.source_location_name,
+          storeCode,
+          metadata.store_name ?? defaultStoreConfig.storeName,
+          destinationLocation.location_code,
+          destinationLocation.location_name,
+          firstLine.productCode,
+          firstLine.productName,
+          firstLine.departmentCode,
+          firstLine.categoryCode,
+          firstLine.subcategory,
+          firstLine.isSerialized ? 1 : 0,
+          firstLine.quantity,
+          firstLine.requestedUnitOfMeasure,
+          firstLine.requestedUnitQuantity,
+          firstLine.uomConversionFactor,
+          firstLine.baseUnitOfMeasure,
+          externalReference,
+          note,
+          operatorName,
+          linesJson,
+          timestamp,
+          requestId,
+        ],
+      );
+    } else {
+      await this.pool.query(
       `INSERT INTO inter_store_transfer_request_draft (
         id,
         request_no,
@@ -15561,9 +16894,10 @@ export class PostgresStoreService {
         external_reference,
         note,
         operator_name,
+        lines_json,
         submitted_at,
         updated_at
-      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NULL, $25)`,
+      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NULL, $26)`,
       [
         requestId,
         requestNo,
@@ -15575,32 +16909,34 @@ export class PostgresStoreService {
         metadata.store_name ?? defaultStoreConfig.storeName,
         destinationLocation.location_code,
         destinationLocation.location_name,
-        product.product_code,
-        product.product_name,
-        product.department_code,
-        product.category_code,
-        product.subcategory,
-        asBooleanFlag(product.is_serialized) ? 1 : 0,
-        transferUom.baseQuantity,
-        transferUom.requestedUnitOfMeasure,
-        transferUom.requestedUnitQuantity,
-        transferUom.uomConversionFactor,
-        transferUom.baseUnitOfMeasure,
+        firstLine.productCode,
+        firstLine.productName,
+        firstLine.departmentCode,
+        firstLine.categoryCode,
+        firstLine.subcategory,
+        firstLine.isSerialized ? 1 : 0,
+        firstLine.quantity,
+        firstLine.requestedUnitOfMeasure,
+        firstLine.requestedUnitQuantity,
+        firstLine.uomConversionFactor,
+        firstLine.baseUnitOfMeasure,
         externalReference,
         note,
         operatorName,
+        linesJson,
         timestamp,
       ],
     );
+    }
     await this.setMetadata("last_local_write_at", timestamp);
     await this.insertRunLog({
       runKind: "LOCAL_WRITE",
-      summary: `${requestNo} was saved as a PostgreSQL inter-store transfer request draft.`,
+      summary: `${requestNo} was ${existingDraft ? "amended" : "saved"} as a PostgreSQL inter-store transfer request draft with ${lines.length} line(s).`,
       startedAt: timestamp,
     });
 
     return {
-      message: `${requestNo} was saved locally. Submit it when the request is ready for enterprise creation.`,
+      message: `${requestNo} was ${existingDraft ? "updated" : "saved"} locally with ${lines.length} line(s). Send it when the request is ready for enterprise creation.`,
       snapshot: await this.getSyncSnapshot(),
     };
   }
@@ -15650,6 +16986,7 @@ export class PostgresStoreService {
         draft.external_reference,
         draft.note,
         draft.operator_name,
+        draft.lines_json,
         draft.submitted_at,
         draft.updated_at
        FROM inter_store_transfer_request_draft AS draft
@@ -15683,21 +17020,27 @@ export class PostgresStoreService {
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
     const operatorName =
       draft.operator_name || this.formatOperatorLabel(operatorSession);
-    const payload: StoreInterStoreTransferRequestedPayload = {
-      requestId: draft.id,
-      requestNo: draft.request_no,
-      storeCode,
-      terminalCode,
-      sourceLocationCode: draft.source_location_code,
-      destinationLocationCode: draft.destination_location_code,
+    const lines = readTransferRequestDraftLines(draft.lines_json, {
+      lineId: draft.id,
+      lineNo: 1,
       productCode: draft.product_code,
-      quantity: Number(asNumber(draft.requested_unit_quantity).toFixed(3)),
-      unitOfMeasure: draft.requested_unit_of_measure,
-      externalReference: draft.external_reference,
-      operatorName,
-      note: draft.note,
-      occurredAt: timestamp,
-    };
+      productName: draft.product_name,
+      departmentCode: draft.department_code,
+      departmentName: draft.department_name,
+      categoryCode: draft.category_code,
+      categoryName: draft.category_name,
+      subcategory: draft.subcategory,
+      isSerialized: asBooleanFlag(draft.is_serialized),
+      quantity: Number(asNumber(draft.quantity).toFixed(3)),
+      requestedUnitOfMeasure: draft.requested_unit_of_measure,
+      requestedUnitQuantity: Number(
+        asNumber(draft.requested_unit_quantity).toFixed(3),
+      ),
+      uomConversionFactor: Number(
+        asNumber(draft.uom_conversion_factor).toFixed(6),
+      ),
+      baseUnitOfMeasure: draft.base_unit_of_measure,
+    });
     const client = await this.pool.connect();
 
     try {
@@ -15707,30 +17050,50 @@ export class PostgresStoreService {
         [timestamp, draft.id],
       );
       if (shouldQueueEnterprise) {
-        await client.query(
-          `INSERT INTO sync_outbox (
-            id,
-            target_node_code,
-            aggregate_type,
-            aggregate_id,
-            event_type,
-            idempotency_key,
-            payload_json,
-            status,
-            attempt_count,
-            record_version,
-            created_at,
-            updated_at
-          ) VALUES ($1, $2, 'interStoreTransfer', $3, 'inter-store-transfer.requested', $4, $5, 'PENDING', 0, 1, $6, $6)`,
-          [
-            randomUUID(),
-            ENTERPRISE_NODE_CODE,
-            draft.id,
-            `${nodeCode}:interStoreTransfer:${draft.id}:requested:${timestamp}`,
-            JSON.stringify(payload),
-            timestamp,
-          ],
-        );
+        for (const line of lines) {
+          const payload: StoreInterStoreTransferRequestedPayload = {
+            requestId: line.lineId,
+            requestNo: draft.request_no,
+            transferBatchNo: draft.request_no,
+            lineNo: line.lineNo,
+            storeCode,
+            terminalCode,
+            sourceStoreCode: draft.source_store_code,
+            destinationLocationCode: draft.destination_location_code,
+            productCode: line.productCode,
+            quantity: line.requestedUnitQuantity,
+            unitOfMeasure: line.requestedUnitOfMeasure,
+            externalReference: draft.external_reference,
+            operatorName,
+            note: draft.note,
+            occurredAt: timestamp,
+          };
+
+          await client.query(
+            `INSERT INTO sync_outbox (
+              id,
+              target_node_code,
+              aggregate_type,
+              aggregate_id,
+              event_type,
+              idempotency_key,
+              payload_json,
+              status,
+              attempt_count,
+              record_version,
+              created_at,
+              updated_at
+            ) VALUES ($1, $2, 'interStoreTransfer', $3, 'inter-store-transfer.requested', $4, $5, 'PENDING', 0, 1, $6, $6)`,
+            [
+              randomUUID(),
+              ENTERPRISE_NODE_CODE,
+              line.lineId,
+              `${nodeCode}:interStoreTransfer:${line.lineId}:requested`,
+              JSON.stringify(payload),
+              timestamp,
+            ],
+          );
+        }
       }
       await client.query(
         `INSERT INTO app_metadata (key, value)
@@ -15744,7 +17107,7 @@ export class PostgresStoreService {
         [
           randomUUID(),
           shouldQueueEnterprise
-            ? `${draft.request_no} was submitted from PostgreSQL and queued upstream as an inter-store transfer request.`
+            ? `${draft.request_no} was sent from PostgreSQL and queued upstream as one ${lines.length}-line inter-store transfer request.`
             : `${draft.request_no} was submitted from PostgreSQL for standalone transfer tracking.`,
           timestamp,
         ],
@@ -15759,7 +17122,7 @@ export class PostgresStoreService {
 
     return {
       message: shouldQueueEnterprise
-        ? `${draft.request_no} was submitted and queued for enterprise creation.`
+        ? `${draft.request_no} was sent with ${lines.length} line(s) and queued for enterprise creation.`
         : `${draft.request_no} was submitted locally for standalone transfer tracking.`,
       snapshot: await this.getSyncSnapshot(),
     };
@@ -15805,7 +17168,7 @@ export class PostgresStoreService {
     const [metadata, locationResult, product] = await Promise.all([
       this.metadata(),
       this.pool.query<{ location_code: string; location_name: string }>(
-        "SELECT location_code, location_name FROM inventory_location_snapshot WHERE location_code = $1 LIMIT 1",
+        "SELECT location_code, location_name FROM inventory_location_snapshot WHERE upper(location_code) = upper($1) AND status = 'ACTIVE' LIMIT 1",
         [locationCode],
       ),
       this.getProductByCode(productCode),
@@ -15962,13 +17325,17 @@ export class PostgresStoreService {
 
     const timestamp = isoNow();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
-    const sessionId = randomUUID();
-    const sessionNo = buildLocalDocumentNo(
-      "CNT",
-      storeCode,
-      await this.nextSequence("stock_count_session_sequence"),
-      timestamp,
-    );
+    const sessionId = input.sessionId?.trim() || randomUUID();
+    const requestedSheetNo = input.sheetNo?.trim().toUpperCase() || null;
+    const requestedLineNo = Math.max(1, Math.trunc(input.lineNo ?? 1));
+    const sessionNo = requestedSheetNo
+      ? `${requestedSheetNo}-L${String(requestedLineNo).padStart(3, "0")}`
+      : buildLocalDocumentNo(
+          "CNT",
+          storeCode,
+          await this.nextSequence("stock_count_session_sequence"),
+          timestamp,
+        );
     const operatorName =
       input.operatorName?.trim() || this.formatOperatorLabel(operatorSession);
     const note = input.note?.trim() || null;
@@ -16001,7 +17368,28 @@ export class PostgresStoreService {
         submitted_at,
         committed_at,
         updated_at
-      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20)`,
+      ) VALUES ($1, $2, 'DRAFT', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20)
+      ON CONFLICT (id) DO UPDATE SET
+        session_no = excluded.session_no,
+        inventory_location_code = excluded.inventory_location_code,
+        inventory_location_name = excluded.inventory_location_name,
+        product_code = excluded.product_code,
+        product_name = excluded.product_name,
+        department_code = excluded.department_code,
+        category_code = excluded.category_code,
+        subcategory = excluded.subcategory,
+        is_serialized = excluded.is_serialized,
+        previous_quantity = excluded.previous_quantity,
+        counted_quantity = excluded.counted_quantity,
+        variance_quantity = excluded.variance_quantity,
+        previous_serial_numbers_json = excluded.previous_serial_numbers_json,
+        counted_serial_numbers_json = excluded.counted_serial_numbers_json,
+        previous_batch_quantities_json = excluded.previous_batch_quantities_json,
+        counted_batch_quantities_json = excluded.counted_batch_quantities_json,
+        note = excluded.note,
+        operator_name = excluded.operator_name,
+        updated_at = excluded.updated_at
+      WHERE stock_count_session.status = 'DRAFT'`,
       [
         sessionId,
         sessionNo,
@@ -17991,6 +19379,7 @@ export class PostgresStoreService {
       purpose: "issuing an inter-store transfer",
     });
     const transferId = input.transferId.trim();
+    const sourceLocationCode = input.sourceLocationCode.trim();
     const quantity = Number(Number(input.quantity).toFixed(3));
 
     if (!transferId) {
@@ -18002,6 +19391,12 @@ export class PostgresStoreService {
     if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new Error(
         "Enter an issued quantity greater than zero before syncing the transfer.",
+      );
+    }
+
+    if (!sourceLocationCode) {
+      throw new Error(
+        "Select the source shop dispatch location before issuing stock.",
       );
     }
 
@@ -18093,6 +19488,35 @@ export class PostgresStoreService {
         );
       }
 
+      const sourceLocationResult = await client.query<{
+        location_code: string;
+        location_name: string;
+      }>(
+        `SELECT location_code, location_name
+         FROM inventory_location_snapshot
+         WHERE UPPER(location_code) = UPPER($1)
+           AND status = 'ACTIVE'
+         LIMIT 1`,
+        [sourceLocationCode],
+      );
+      const sourceLocation = sourceLocationResult.rows[0] ?? null;
+
+      if (!sourceLocation) {
+        throw new Error(
+          `Flash ERP could not find active dispatch location "${sourceLocationCode}" in this shop.`,
+        );
+      }
+
+      if (
+        asNumber(transfer.issued_quantity) > 0 &&
+        transfer.source_location_code.toUpperCase() !==
+          sourceLocation.location_code.toUpperCase()
+      ) {
+        throw new Error(
+          `${transfer.transfer_no} has already been partly issued from ${transfer.source_location_name}. Continue issuing from the same location.`,
+        );
+      }
+
       const outstandingIssueQuantity = Number(
         asNumber(transfer.outstanding_issue_quantity).toFixed(3),
       );
@@ -18115,14 +19539,14 @@ export class PostgresStoreService {
       }
 
       const sourceLocationQuantity = await this.getLocationQuantity(
-        transfer.source_location_code,
+        sourceLocation.location_code,
         transfer.product_code,
         client,
       );
 
       if (quantity - sourceLocationQuantity > 0.0001) {
         throw new Error(
-          `Only ${sourceLocationQuantity.toFixed(3)} unit(s) of ${transfer.product_name} are available in ${transfer.source_location_code}.`,
+          `Only ${sourceLocationQuantity.toFixed(3)} unit(s) of ${transfer.product_name} are available in ${sourceLocation.location_name}.`,
         );
       }
 
@@ -18144,7 +19568,7 @@ export class PostgresStoreService {
           selectedSerialNumbers: serialNumbers,
           allowedSerialNumbers: await this.listAvailableRegistrySerialNumbers(
             transfer.product_code,
-            transfer.source_location_code,
+            sourceLocation.location_code,
             client,
           ),
         });
@@ -18185,7 +19609,7 @@ export class PostgresStoreService {
                    AND quantity_on_hand > 0
                  ORDER BY expiry_date ASC, manufactured_at ASC, batch_no ASC
                  FOR UPDATE`,
-                [transfer.source_location_code, transfer.product_code],
+                [sourceLocation.location_code, transfer.product_code],
               )
             ).rows.map((batch) => ({
               batchId: batch.id,
@@ -18264,7 +19688,7 @@ export class PostgresStoreService {
       ];
       const issueNote =
         input.note?.trim() ||
-        `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${transfer.source_location_code}.`;
+        `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${sourceLocation.location_name}.`;
       const operatorName =
         input.operatorName?.trim() || this.formatOperatorLabel(operatorSession);
 
@@ -18273,7 +19697,7 @@ export class PostgresStoreService {
         [quantity, timestamp, product.id],
       );
       await this.applyLocationBalanceDelta({
-        locationCode: transfer.source_location_code,
+        locationCode: sourceLocation.location_code,
         productCode: transfer.product_code,
         delta: quantity * -1,
         updatedAt: timestamp,
@@ -18290,9 +19714,11 @@ export class PostgresStoreService {
              issue_note = $7,
              issue_operator_name = $8,
              source_node_code = $9,
-             issued_at = $10,
-             updated_at = $10
-         WHERE id = $11`,
+             source_location_code = $10,
+             source_location_name = $11,
+             issued_at = $12,
+             updated_at = $12
+         WHERE id = $13`,
         [
           nextStatus,
           nextIssuedQuantity,
@@ -18310,6 +19736,8 @@ export class PostgresStoreService {
           issueNote,
           operatorName,
           nodeCode,
+          sourceLocation.location_code,
+          sourceLocation.location_name,
           timestamp,
           transfer.id,
         ],
@@ -18320,7 +19748,7 @@ export class PostgresStoreService {
         transferNo: transfer.transfer_no,
         storeCode,
         terminalCode,
-        sourceLocationCode: transfer.source_location_code,
+        sourceLocationCode: sourceLocation.location_code,
         destinationLocationCode: transfer.destination_location_code,
         productCode: transfer.product_code,
         quantity,
@@ -19459,6 +20887,23 @@ export class PostgresStoreService {
     const acknowledgedDownstreamIdsForPush = [
       ...new Set([...acknowledgedDownstreamIds, ...appliedDownstreamIds]),
     ];
+    const failedDownstreamResult = await this.pool.query<{
+      event_id: string;
+      status: "FAILED" | "DEAD_LETTER";
+      error_message: string;
+      failed_at: string;
+    }>(
+      `SELECT
+         id AS event_id,
+         status,
+         error_message,
+         COALESCE(applied_at, received_at) AS failed_at
+       FROM sync_inbox
+       WHERE status IN ('FAILED', 'DEAD_LETTER')
+         AND error_message IS NOT NULL
+       ORDER BY received_at ASC
+       LIMIT 100`,
+    );
     const pushPayload: StoreNodePushRequest = {
       sourceNodeCode: nodeCode,
       sentAt: pushStartedAt,
@@ -19470,6 +20915,12 @@ export class PostgresStoreService {
         this.toSyncEnvelope(row, nodeCode),
       ),
       acknowledgedDownstreamEventIds: acknowledgedDownstreamIdsForPush,
+      failedDownstreamEvents: failedDownstreamResult.rows.map((event) => ({
+        eventId: event.event_id,
+        status: event.status,
+        errorMessage: event.error_message,
+        failedAt: event.failed_at,
+      })),
       telemetry: await this.buildStoreNodeTelemetry(),
     };
     await this.markOutboxAttemptStarted(
@@ -19577,7 +21028,20 @@ export class PostgresStoreService {
        WHERE status IN ('PENDING', 'IN_FLIGHT', 'FAILED')
          AND attempt_count < $1
          AND (next_retry_at IS NULL OR next_retry_at <= $2)
-       ORDER BY created_at ASC
+       ORDER BY CASE aggregate_type
+         WHEN 'interStoreTransfer' THEN 0
+         WHEN 'posTransaction' THEN 1
+         WHEN 'salesOrder' THEN 1
+         WHEN 'inventoryLedgerEntry' THEN 2
+         WHEN 'goodsReceipt' THEN 2
+         WHEN 'supplierReturn' THEN 2
+         WHEN 'stockCountSession' THEN 2
+         WHEN 'customerAccountEntry' THEN 3
+         WHEN 'eodReconciliation' THEN 3
+         WHEN 'bankingDeposit' THEN 3
+         WHEN 'storeExpense' THEN 3
+         ELSE 4
+       END, created_at ASC, record_version ASC, id ASC
        LIMIT $3`,
       [MAX_SYNC_RETRY_ATTEMPTS, isoNow(), limit],
     );
@@ -21521,6 +22985,7 @@ export class PostgresStoreService {
           category_code,
           subcategory,
           is_serialized,
+          track_expiry,
           requested_quantity,
           requested_unit_of_measure,
           requested_unit_quantity,
@@ -21533,6 +22998,8 @@ export class PostgresStoreService {
           unit_cost,
           issued_serial_numbers_json,
           received_serial_numbers_json,
+          issued_batch_allocations_json,
+          received_batch_allocations_json,
           request_note,
           issue_note,
           receipt_note,
@@ -21548,7 +23015,7 @@ export class PostgresStoreService {
           received_at,
           closed_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52)
         ON CONFLICT (id) DO UPDATE SET
           transfer_no = excluded.transfer_no,
           transfer_batch_no = excluded.transfer_batch_no,
@@ -21571,6 +23038,7 @@ export class PostgresStoreService {
           category_code = excluded.category_code,
           subcategory = excluded.subcategory,
           is_serialized = excluded.is_serialized,
+          track_expiry = excluded.track_expiry,
           requested_quantity = excluded.requested_quantity,
           requested_unit_of_measure = excluded.requested_unit_of_measure,
           requested_unit_quantity = excluded.requested_unit_quantity,
@@ -21583,6 +23051,8 @@ export class PostgresStoreService {
           unit_cost = excluded.unit_cost,
           issued_serial_numbers_json = excluded.issued_serial_numbers_json,
           received_serial_numbers_json = excluded.received_serial_numbers_json,
+          issued_batch_allocations_json = excluded.issued_batch_allocations_json,
+          received_batch_allocations_json = excluded.received_batch_allocations_json,
           request_note = excluded.request_note,
           issue_note = excluded.issue_note,
           receipt_note = excluded.receipt_note,
@@ -21647,6 +23117,7 @@ export class PostgresStoreService {
             : null,
           typeof payload.subcategory === "string" ? payload.subcategory : null,
           payload.isSerialized === true ? 1 : 0,
+          payload.trackExpiry === true ? 1 : 0,
           typeof payload.requestedQuantity === "number"
             ? payload.requestedQuantity
             : 0,
@@ -21689,6 +23160,16 @@ export class PostgresStoreService {
                 ),
               )
             : null,
+          writeInventoryBatchAllocations(
+            Array.isArray(payload.issuedBatchAllocations)
+              ? payload.issuedBatchAllocations
+              : [],
+          ),
+          writeInventoryBatchAllocations(
+            Array.isArray(payload.receivedBatchAllocations)
+              ? payload.receivedBatchAllocations
+              : [],
+          ),
           typeof payload.requestNote === "string" ? payload.requestNote : null,
           typeof payload.issueNote === "string" ? payload.issueNote : null,
           typeof payload.receiptNote === "string" ? payload.receiptNote : null,
@@ -22153,6 +23634,7 @@ export class PostgresStoreService {
               typeof variant.unitPrice === "number",
           )
         : [];
+      const sellingUnits = normalizePublishedSellingUnits(payload.sellingUnits);
       const nextQuantity =
         matrixVariants.length > 0
           ? matrixVariants.reduce(
@@ -22181,6 +23663,7 @@ export class PostgresStoreService {
           unit_of_measure,
           base_unit_of_measure,
           uom_conversions_json,
+          selling_units_json,
           taxable,
           tax_profile_code,
           tax_profile_name,
@@ -22201,7 +23684,7 @@ export class PostgresStoreService {
           unit_price,
           quantity_on_hand,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
         ON CONFLICT (product_code) DO UPDATE SET
           product_name = excluded.product_name,
           product_type = excluded.product_type,
@@ -22214,6 +23697,7 @@ export class PostgresStoreService {
           unit_of_measure = excluded.unit_of_measure,
           base_unit_of_measure = excluded.base_unit_of_measure,
           uom_conversions_json = excluded.uom_conversions_json,
+          selling_units_json = excluded.selling_units_json,
           taxable = excluded.taxable,
           tax_profile_code = excluded.tax_profile_code,
           tax_profile_name = excluded.tax_profile_name,
@@ -22256,6 +23740,7 @@ export class PostgresStoreService {
             ? payload.baseUnitOfMeasure
             : payload.unitOfMeasure ?? "EA",
           JSON.stringify(payload.uomConversions ?? []),
+          JSON.stringify(sellingUnits),
           payload.taxable === false ? 0 : 1,
           typeof payload.taxProfileCode === "string"
             ? payload.taxProfileCode
@@ -22334,6 +23819,32 @@ export class PostgresStoreService {
             writeMatrixVariantAttributes(
               Array.isArray(variant.attributes) ? variant.attributes : [],
             ),
+            appliedAt,
+          ],
+        );
+      }
+
+      await runner.query(
+        "DELETE FROM barcode_snapshot WHERE product_code = $1 AND barcode_type LIKE 'SELLING_UOM:%'",
+        [payload.productCode],
+      );
+
+      for (const sellingUnit of sellingUnits) {
+        if (!sellingUnit.barcode?.trim()) continue;
+
+        await runner.query(
+          `INSERT INTO barcode_snapshot (
+            id, barcode_code, product_code, barcode_type, updated_at
+          ) VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (barcode_code) DO UPDATE SET
+            product_code = excluded.product_code,
+            barcode_type = excluded.barcode_type,
+            updated_at = excluded.updated_at`,
+          [
+            randomUUID(),
+            sellingUnit.barcode.trim(),
+            payload.productCode,
+            `SELLING_UOM:${sellingUnit.unitOfMeasureCode}`,
             appliedAt,
           ],
         );

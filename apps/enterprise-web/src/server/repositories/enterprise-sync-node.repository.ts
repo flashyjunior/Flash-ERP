@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma";
 import { RecordStatus, SyncEventStatus, SyncNodeType } from "@flash-erp/domain";
+import { ensureSyncOutboxFailureSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 
 
 const queueStatuses: SyncEventStatus[] = [SyncEventStatus.PENDING, SyncEventStatus.IN_FLIGHT];
@@ -389,6 +390,8 @@ export type EnterpriseSyncNodeDetailData = {
     aggregateId: string;
     eventType: string;
     status: string;
+    attemptCount: number;
+    errorMessage: string | null;
     createdAt: string;
     createdAtLabel: string;
     lastAttemptAt: string | null;
@@ -405,6 +408,8 @@ export type EnterpriseSyncNodeDetailData = {
     aggregateId: string;
     eventType: string;
     status: string;
+    attemptCount: number;
+    errorMessage: string | null;
     idempotencyKey: string;
     diagnosticSummary: string;
     payloadPreview: string;
@@ -420,6 +425,8 @@ export type EnterpriseSyncNodeDetailData = {
 export async function getEnterpriseSyncNodeDetail(
   nodeCode: string
 ): Promise<EnterpriseSyncNodeDetailData | null> {
+  await ensureSyncOutboxFailureSchemaCompatibility();
+
   const storeNode = await prisma.syncNode.findUnique({
     where: {
       code: nodeCode
@@ -582,6 +589,8 @@ export async function getEnterpriseSyncNodeDetail(
         aggregateId: true,
         eventType: true,
         status: true,
+        attemptCount: true,
+        errorMessage: true,
         createdAt: true,
         lastAttemptAt: true,
         acknowledgedAt: true,
@@ -605,6 +614,8 @@ export async function getEnterpriseSyncNodeDetail(
         aggregateId: true,
         eventType: true,
         status: true,
+        attemptCount: true,
+        errorMessage: true,
         idempotencyKey: true,
         payload: true,
         createdAt: true,
@@ -741,6 +752,8 @@ export async function getEnterpriseSyncNodeDetail(
       aggregateId: event.aggregateId,
       eventType: event.eventType,
       status: event.status,
+      attemptCount: event.attemptCount,
+      errorMessage: event.errorMessage,
       createdAt: event.createdAt.toISOString(),
       createdAtLabel: formatRelativeTime(event.createdAt),
       lastAttemptAt: toIsoString(event.lastAttemptAt),
@@ -757,6 +770,8 @@ export async function getEnterpriseSyncNodeDetail(
       aggregateId: event.aggregateId,
       eventType: event.eventType,
       status: event.status,
+      attemptCount: event.attemptCount,
+      errorMessage: event.errorMessage,
       idempotencyKey: event.idempotencyKey,
       diagnosticSummary: describeSyncPayload(event.aggregateType, event.eventType, event.payload),
       payloadPreview: formatPayloadPreview(event.payload),

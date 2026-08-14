@@ -31,7 +31,6 @@ import type {
   StoreSerialRegistryBrowseItem,
   StoreSerialRegistryStatus,
   StoreStockCountSessionSummary,
-  StoreTransferRequestTargetSummary,
   StoreSyncActionResult,
   StoreSyncSnapshot,
   StoreUserSummary
@@ -560,22 +559,6 @@ function formatStockCountSessionStatusLabel(status: StoreStockCountSessionSummar
   return "Draft";
 }
 
-function formatTransferRequestSourceModeLabel(target: StoreTransferRequestTargetSummary) {
-  if (target.sourceStoreWarehouseEnabled && target.sourceStoreSalesEnabled) {
-    return "Hybrid site";
-  }
-
-  if (target.sourceStoreWarehouseEnabled) {
-    return "Warehouse";
-  }
-
-  if (target.sourceStoreSalesEnabled) {
-    return "Sales store";
-  }
-
-  return "Store";
-}
-
 function getTaskActionLabel(taskType: string) {
   if (taskType === "APPLY_INVENTORY_ADJUSTMENT") {
     return "Apply stock adjustment";
@@ -840,7 +823,7 @@ export function App() {
     StoreInterStoreTransferSummary[]
   >([]);
   const [isTransferBrowseBusy, setIsTransferBrowseBusy] = useState(false);
-  const [transferRequestSourceLocationCode, setTransferRequestSourceLocationCode] = useState("");
+  const [transferRequestSourceStoreCode, setTransferRequestSourceStoreCode] = useState("");
   const [transferRequestDestinationLocationCode, setTransferRequestDestinationLocationCode] =
     useState("");
   const [transferRequestProductCode, setTransferRequestProductCode] = useState("");
@@ -864,6 +847,9 @@ export function App() {
     {}
   );
   const [transferIssueOperatorDrafts, setTransferIssueOperatorDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [transferIssueLocationDrafts, setTransferIssueLocationDrafts] = useState<
     Record<string, string>
   >({});
   const [transferReceiveQuantityDrafts, setTransferReceiveQuantityDrafts] = useState<
@@ -1929,7 +1915,7 @@ export function App() {
 
     try {
       const result = await window.desktopRuntime.saveInterStoreTransferRequestDraft({
-        sourceLocationCode: transferRequestSourceLocationCode,
+        sourceStoreCode: transferRequestSourceStoreCode,
         destinationLocationCode: transferRequestDestinationLocationCode,
         productCode,
         quantity: Number(transferRequestQuantity),
@@ -1942,7 +1928,7 @@ export function App() {
         setSnapshot(result.snapshot);
         setBanner(result.message);
         setError(null);
-        setTransferRequestSourceLocationCode("");
+        setTransferRequestSourceStoreCode("");
         setTransferRequestProductCode("");
         setTransferRequestQuantity("1");
         setTransferRequestExternalReference("");
@@ -2034,6 +2020,11 @@ export function App() {
     const quantity = Number(
       transferIssueQuantityDrafts[transfer.transferId] ?? transfer.outstandingIssueQuantity
     );
+    const sourceLocationCode =
+      transferIssueLocationDrafts[transfer.transferId] ??
+      (transfer.issuedQuantity > 0
+        ? transfer.sourceLocationCode
+        : snapshot?.inventoryLocations[0]?.locationCode ?? "");
 
     if (!Number.isFinite(quantity) || quantity <= 0) {
       startTransition(() => {
@@ -2042,16 +2033,24 @@ export function App() {
       return;
     }
 
+    if (!sourceLocationCode) {
+      startTransition(() => {
+        setError("Select the local dispatch location before issuing the transfer.");
+      });
+      return;
+    }
+
     await runAction(() =>
       window.desktopRuntime.issueInterStoreTransfer({
         transferId: transfer.transferId,
+        sourceLocationCode,
         quantity,
         serialNumbers: parseSerialDraft(transferIssueSerialDrafts[transfer.transferId] ?? ""),
         operatorName:
           (transferIssueOperatorDrafts[transfer.transferId] ?? "").trim() || "Flash ERP issuer",
         note:
           (transferIssueNoteDrafts[transfer.transferId] ?? "").trim() ||
-          `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.productName} from ${transfer.sourceLocationName}.`
+          `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.productName} from ${sourceLocationCode}.`
       })
     );
 
@@ -4155,6 +4154,12 @@ export function App() {
     (category) => !taskBrowseDepartment || category.departmentCode === taskBrowseDepartment
   );
   const transferRequestTargets = snapshot?.transferRequestTargets ?? [];
+  const transferRequestSourceStores = transferRequestTargets.filter(
+    (target, index, targets) =>
+      targets.findIndex(
+        (candidate) => candidate.sourceStoreCode === target.sourceStoreCode
+      ) === index
+  );
   const transferRequestDrafts = snapshot?.transferRequestDrafts ?? [];
   const stockCountSessions = snapshot?.stockCountSessions ?? [];
   const selectedStockCountLocation =
@@ -4162,7 +4167,7 @@ export function App() {
     null;
   const selectedTransferRequestTarget =
     transferRequestTargets.find(
-      (target) => target.sourceLocationCode === transferRequestSourceLocationCode
+      (target) => target.sourceStoreCode === transferRequestSourceStoreCode
     ) ?? null;
   const selectedTransferRequestDestination =
     snapshot?.inventoryLocations.find(
@@ -9066,16 +9071,16 @@ export function App() {
                 </div>
                 <div className="desktop-filter-grid">
                   <label className="desktop-field">
-                    <span>Source shop/location</span>
+                    <span>Source shop</span>
                     <select
                       className="desktop-input desktop-select"
-                      onChange={(event) => setTransferRequestSourceLocationCode(event.target.value)}
-                      value={transferRequestSourceLocationCode}
+                      onChange={(event) => setTransferRequestSourceStoreCode(event.target.value)}
+                      value={transferRequestSourceStoreCode}
                     >
-                      <option value="">Select source location</option>
-                      {transferRequestTargets.map((target) => (
-                        <option key={target.sourceLocationCode} value={target.sourceLocationCode}>
-                          {target.sourceStoreName} • {target.sourceLocationName}
+                      <option value="">Select source shop</option>
+                      {transferRequestSourceStores.map((target) => (
+                        <option key={target.sourceStoreCode} value={target.sourceStoreCode}>
+                          {target.sourceStoreName}
                         </option>
                       ))}
                     </select>
@@ -9158,13 +9163,9 @@ export function App() {
                   <div className="desktop-task-meta">
                     {selectedTransferRequestTarget ? (
                       <span>
-                        Source: {selectedTransferRequestTarget.sourceStoreName} /{" "}
-                        {selectedTransferRequestTarget.sourceLocationName} •{" "}
-                        {formatTransferRequestSourceModeLabel(selectedTransferRequestTarget)}
+                        Source: {selectedTransferRequestTarget.sourceStoreName}. The source shop
+                        selects its dispatch location when issuing.
                       </span>
-                    ) : null}
-                    {selectedTransferRequestTarget?.sourceWarehouseName ? (
-                      <span>Warehouse: {selectedTransferRequestTarget.sourceWarehouseName}</span>
                     ) : null}
                     {selectedTransferRequestDestination ? (
                       <span>
@@ -9179,7 +9180,7 @@ export function App() {
                     className="desktop-secondary-button"
                     disabled={
                       isBusy ||
-                      !transferRequestSourceLocationCode ||
+                      !transferRequestSourceStoreCode ||
                       !transferRequestDestinationLocationCode ||
                       !transferRequestProductCode.trim() ||
                       Number(transferRequestQuantity) <= 0
@@ -9343,7 +9344,10 @@ export function App() {
                           <div className="desktop-task-meta">
                             <span>Role: {formatInterStoreTransferRoleLabel(transfer.role)}</span>
                             <span>
-                              Route: {transfer.sourceStoreName} / {transfer.sourceLocationName} to{" "}
+                              Route: {transfer.sourceStoreName}
+                              {transfer.issuedQuantity > 0
+                                ? ` / ${transfer.sourceLocationName}`
+                                : " / dispatch location pending"} to{" "}
                               {transfer.destinationStoreName} / {transfer.destinationLocationName}
                             </span>
                             <span>Requested: {numberFormatter.format(transfer.requestedQuantity)}</span>
@@ -9363,7 +9367,7 @@ export function App() {
                             <strong>Execution signal</strong>
                             <span>
                               {transfer.role === "SOURCE"
-                                ? `${numberFormatter.format(transfer.outstandingIssueQuantity)} unit(s) are still waiting to issue from ${transfer.sourceLocationCode}.`
+                                ? `${numberFormatter.format(transfer.outstandingIssueQuantity)} unit(s) are still waiting for this shop to dispatch.`
                                 : `${numberFormatter.format(transfer.outstandingReceiptQuantity)} unit(s) are still waiting to receive into ${transfer.destinationLocationCode}.`}{" "}
                               Updated {formatRelativeTime(transfer.updatedAt)}.
                             </span>
@@ -9395,6 +9399,35 @@ export function App() {
                           {canIssueLocally ? (
                             <>
                               <div className="desktop-filter-grid">
+                                <label className="desktop-field">
+                                  <span>Dispatch location</span>
+                                  <select
+                                    className="desktop-input desktop-select"
+                                    disabled={transfer.issuedQuantity > 0}
+                                    onChange={(event) =>
+                                      setTransferIssueLocationDrafts((current) => ({
+                                        ...current,
+                                        [transfer.transferId]: event.target.value
+                                      }))
+                                    }
+                                    value={
+                                      transferIssueLocationDrafts[transfer.transferId] ??
+                                      (transfer.issuedQuantity > 0
+                                        ? transfer.sourceLocationCode
+                                        : snapshot.inventoryLocations[0]?.locationCode ?? "")
+                                    }
+                                  >
+                                    <option value="">Select dispatch location</option>
+                                    {snapshot.inventoryLocations.map((location) => (
+                                      <option
+                                        key={location.locationCode}
+                                        value={location.locationCode}
+                                      >
+                                        {location.locationName}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
                                 <label className="desktop-field">
                                   <span>Issue qty</span>
                                   <input
@@ -9466,7 +9499,15 @@ export function App() {
                               <div className="desktop-task-actions">
                                 <button
                                   className="desktop-secondary-button desktop-compact-button"
-                                  disabled={isBusy}
+                                  disabled={
+                                    isBusy ||
+                                    !(
+                                      transferIssueLocationDrafts[transfer.transferId] ??
+                                      (transfer.issuedQuantity > 0
+                                        ? transfer.sourceLocationCode
+                                        : snapshot.inventoryLocations[0]?.locationCode ?? "")
+                                    )
+                                  }
                                   onClick={() => void issueInterStoreTransfer(transfer)}
                                   type="button"
                                 >

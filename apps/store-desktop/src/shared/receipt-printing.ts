@@ -388,9 +388,15 @@ function renderReceiptItemRows(
             }</span>`
           : "";
       const friendlyColour = formatFriendlyColour(line.variantColor);
+      const conversionLabel =
+        line.sellingUnitOfMeasure !== line.baseUnitOfMeasure ||
+        line.uomConversionFactor !== 1
+          ? `1 ${line.sellingUnitOfMeasure} = ${formatQuantity(line.uomConversionFactor)} ${line.baseUnitOfMeasure} · ${formatQuantity(line.baseQuantity)} ${line.baseUnitOfMeasure} base`
+          : null;
       const variantLabels = [
         line.variantSize ? `Size ${line.variantSize}` : null,
         friendlyColour ? `Colour ${friendlyColour}` : null,
+        conversionLabel,
         line.discountAmount > 0
           ? `${line.appliedPromotionName ?? "Discount"} -${formatLineMoney(line.discountAmount)}`
           : null,
@@ -411,7 +417,7 @@ function renderReceiptItemRows(
           ${serialHtml}
         </td>
         <td style="padding:0.28rem 0.2rem 0.24rem 0; border-top:1px dashed #e7e5e4; text-align:right; white-space:nowrap;">${escapeHtml(
-          formatQuantity(line.quantity)
+          `${formatQuantity(line.quantity)} ${line.sellingUnitOfMeasure}`
         )}</td>
         <td style="padding:0.28rem 0 0.24rem 0.42rem; border-top:1px dashed #e7e5e4; text-align:right; white-space:nowrap;">${escapeHtml(
           formatLineMoney(line.lineTotal)

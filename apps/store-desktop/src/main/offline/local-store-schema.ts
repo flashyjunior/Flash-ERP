@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS product_snapshot (
   unit_of_measure TEXT NOT NULL DEFAULT 'EA',
   base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
   uom_conversions_json TEXT NOT NULL DEFAULT '[]',
+  selling_units_json TEXT NOT NULL DEFAULT '[]',
   taxable INTEGER NOT NULL DEFAULT 1,
   tax_profile_code TEXT,
   tax_profile_name TEXT,
@@ -475,6 +476,7 @@ CREATE TABLE IF NOT EXISTS inter_store_transfer_request_draft (
   external_reference TEXT,
   note TEXT,
   operator_name TEXT NOT NULL,
+  lines_json TEXT NOT NULL DEFAULT '[]',
   submitted_at TEXT,
   updated_at TEXT NOT NULL
 );
@@ -758,6 +760,10 @@ CREATE TABLE IF NOT EXISTS pos_transaction_line (
   serial_numbers_json TEXT,
   batch_allocations_json TEXT,
   quantity NUMERIC NOT NULL,
+  selling_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  uom_conversion_factor NUMERIC NOT NULL DEFAULT 1,
+  base_quantity NUMERIC NOT NULL DEFAULT 0,
   unit_price NUMERIC NOT NULL,
   discount_amount NUMERIC NOT NULL,
   tax_amount NUMERIC NOT NULL,
@@ -797,15 +803,27 @@ CREATE TABLE IF NOT EXISTS sales_order (
   customer_id TEXT,
   customer_no TEXT,
   customer_name TEXT,
+  order_type TEXT NOT NULL DEFAULT 'SALES_ORDER',
   status TEXT NOT NULL DEFAULT 'OPEN',
   total_amount NUMERIC NOT NULL,
   deposit_amount NUMERIC NOT NULL DEFAULT 0,
+  paid_amount NUMERIC NOT NULL DEFAULT 0,
   balance_amount NUMERIC NOT NULL DEFAULT 0,
   deposit_tender_method_code TEXT,
   deposit_tender_method_name TEXT,
   deposit_payment_method TEXT,
   deposit_reference TEXT,
   deposit_paid_at TEXT,
+  layaway_policy_snapshot_json TEXT,
+  minimum_deposit_amount NUMERIC NOT NULL DEFAULT 0,
+  reservation_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
+  reservation_created_at TEXT,
+  reservation_released_at TEXT,
+  layaway_expires_at TEXT,
+  expired_at TEXT,
+  cancellation_fee_amount NUMERIC NOT NULL DEFAULT 0,
+  refunded_amount NUMERIC NOT NULL DEFAULT 0,
+  record_version INTEGER NOT NULL DEFAULT 1,
   operator_name TEXT,
   note TEXT,
   fulfilled_transaction_id TEXT,
@@ -815,6 +833,23 @@ CREATE TABLE IF NOT EXISTS sales_order (
   fulfilled_at TEXT,
   cancelled_at TEXT,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sales_order_inventory_reservation (
+  id TEXT PRIMARY KEY,
+  sales_order_id TEXT NOT NULL,
+  sales_order_line_id TEXT NOT NULL,
+  inventory_location_code TEXT,
+  product_code TEXT NOT NULL,
+  product_variant_code TEXT,
+  base_unit_of_measure TEXT NOT NULL DEFAULT 'EA',
+  base_quantity NUMERIC NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  release_reason TEXT,
+  created_at TEXT NOT NULL,
+  released_at TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (sales_order_id, sales_order_line_id)
 );
 
 CREATE TABLE IF NOT EXISTS eod_reconciliation (
@@ -946,6 +981,8 @@ CREATE INDEX IF NOT EXISTS idx_pos_transaction_shift ON pos_transaction(shift_id
 CREATE INDEX IF NOT EXISTS idx_pos_transaction_status ON pos_transaction(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_sales_order_status ON sales_order(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_order_source_transaction ON sales_order(source_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_order_status ON sales_order_inventory_reservation(sales_order_id, status);
+CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_stock ON sales_order_inventory_reservation(inventory_location_code, product_code, product_variant_code, status);
 CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_synced ON eod_reconciliation(synced_at, reconciled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_banking_deposit_reconciliation ON banking_deposit(reconciliation_id, deposited_at DESC);

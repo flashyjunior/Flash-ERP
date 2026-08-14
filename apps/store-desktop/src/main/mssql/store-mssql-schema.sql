@@ -31,6 +31,7 @@ BEGIN
     [unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_uom] DEFAULT N'EA',
     [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_base_uom] DEFAULT N'EA',
     [uom_conversions_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_uom_conversions] DEFAULT N'[]',
+    [selling_units_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_selling_units] DEFAULT N'[]',
     [taxable] int NOT NULL CONSTRAINT [DF_product_snapshot_taxable] DEFAULT 1,
     [tax_profile_code] nvarchar(100) NULL,
     [tax_profile_name] nvarchar(200) NULL,
@@ -116,6 +117,8 @@ IF COL_LENGTH(N'[dbo].[product_snapshot]', N'base_unit_of_measure') IS NULL
   ALTER TABLE [dbo].[product_snapshot] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_base_uom_existing] DEFAULT N'EA';
 IF COL_LENGTH(N'[dbo].[product_snapshot]', N'uom_conversions_json') IS NULL
   ALTER TABLE [dbo].[product_snapshot] ADD [uom_conversions_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_uom_conversions_existing] DEFAULT N'[]';
+IF COL_LENGTH(N'[dbo].[product_snapshot]', N'selling_units_json') IS NULL
+  ALTER TABLE [dbo].[product_snapshot] ADD [selling_units_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_selling_units_existing] DEFAULT N'[]';
 
 IF OBJECT_ID(N'[dbo].[product_department_snapshot]', N'U') IS NULL
 BEGIN
@@ -648,6 +651,7 @@ BEGIN
     [external_reference] nvarchar(200) NULL,
     [note] nvarchar(max) NULL,
     [operator_name] nvarchar(200) NOT NULL,
+    [lines_json] nvarchar(max) NOT NULL CONSTRAINT [DF_inter_store_transfer_request_draft_lines] DEFAULT N'[]',
     [submitted_at] nvarchar(40) NULL,
     [updated_at] nvarchar(40) NOT NULL,
     CONSTRAINT [UQ_inter_store_transfer_request_draft_no] UNIQUE ([request_no])
@@ -855,6 +859,10 @@ BEGIN
     [line_note] nvarchar(max) NULL,
     [serial_numbers_json] nvarchar(max) NULL,
     [quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_pos_transaction_line_quantity] DEFAULT 0,
+    [selling_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_transaction_line_selling_uom] DEFAULT N'EA',
+    [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_transaction_line_base_uom] DEFAULT N'EA',
+    [uom_conversion_factor] decimal(18, 6) NOT NULL CONSTRAINT [DF_pos_transaction_line_uom_factor] DEFAULT 1,
+    [base_quantity] decimal(18, 3) NOT NULL CONSTRAINT [DF_pos_transaction_line_base_qty] DEFAULT 0,
     [unit_price] decimal(18, 4) NOT NULL CONSTRAINT [DF_pos_transaction_line_unit_price] DEFAULT 0,
     [discount_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_pos_transaction_line_discount] DEFAULT 0,
     [tax_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_pos_transaction_line_tax] DEFAULT 0,
@@ -899,6 +907,18 @@ BEGIN
   ALTER TABLE [dbo].[pos_transaction_line]
   ADD [line_note] nvarchar(max) NULL;
 END;
+
+IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'selling_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[pos_transaction_line] ADD [selling_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_transaction_line_selling_uom_existing] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'base_unit_of_measure') IS NULL
+  ALTER TABLE [dbo].[pos_transaction_line] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_transaction_line_base_uom_existing] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'uom_conversion_factor') IS NULL
+  ALTER TABLE [dbo].[pos_transaction_line] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_pos_transaction_line_uom_factor_existing] DEFAULT 1;
+IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'base_quantity') IS NULL
+  ALTER TABLE [dbo].[pos_transaction_line] ADD [base_quantity] decimal(18,3) NOT NULL CONSTRAINT [DF_pos_transaction_line_base_qty_existing] DEFAULT 0;
+UPDATE [dbo].[pos_transaction_line]
+SET [base_quantity] = [quantity]
+WHERE [base_quantity] <= 0;
 
 IF OBJECT_ID(N'[dbo].[pos_payment]', N'U') IS NULL
 BEGIN
@@ -1000,15 +1020,27 @@ BEGIN
     [customer_id] nvarchar(100) NULL,
     [customer_no] nvarchar(100) NULL,
     [customer_name] nvarchar(200) NULL,
+    [order_type] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_order_type] DEFAULT N'SALES_ORDER',
     [status] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_status] DEFAULT N'OPEN',
     [total_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_total] DEFAULT 0,
     [deposit_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_deposit] DEFAULT 0,
+    [paid_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_paid] DEFAULT 0,
     [balance_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_balance] DEFAULT 0,
     [deposit_tender_method_code] nvarchar(100) NULL,
     [deposit_tender_method_name] nvarchar(200) NULL,
     [deposit_payment_method] nvarchar(50) NULL,
     [deposit_reference] nvarchar(200) NULL,
     [deposit_paid_at] nvarchar(40) NULL,
+    [layaway_policy_snapshot_json] nvarchar(max) NULL,
+    [minimum_deposit_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_minimum_deposit] DEFAULT 0,
+    [reservation_status] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_reservation_status] DEFAULT N'NOT_APPLICABLE',
+    [reservation_created_at] nvarchar(40) NULL,
+    [reservation_released_at] nvarchar(40) NULL,
+    [layaway_expires_at] nvarchar(40) NULL,
+    [expired_at] nvarchar(40) NULL,
+    [cancellation_fee_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_cancellation_fee] DEFAULT 0,
+    [refunded_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_refunded] DEFAULT 0,
+    [record_version] int NOT NULL CONSTRAINT [DF_sales_order_record_version] DEFAULT 1,
     [operator_name] nvarchar(200) NULL,
     [note] nvarchar(max) NULL,
     [fulfilled_transaction_id] nvarchar(100) NULL,
@@ -1021,6 +1053,58 @@ BEGIN
     CONSTRAINT [UQ_sales_order_no] UNIQUE ([order_no])
   );
 END;
+
+IF COL_LENGTH(N'[dbo].[sales_order]', N'order_type') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [order_type] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_order_type_existing] DEFAULT N'SALES_ORDER';
+IF COL_LENGTH(N'[dbo].[sales_order]', N'paid_amount') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [paid_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_paid_existing] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'layaway_policy_snapshot_json') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [layaway_policy_snapshot_json] nvarchar(max) NULL;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'minimum_deposit_amount') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [minimum_deposit_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_minimum_deposit_existing] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'reservation_status') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [reservation_status] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_reservation_status_existing] DEFAULT N'NOT_APPLICABLE';
+IF COL_LENGTH(N'[dbo].[sales_order]', N'reservation_created_at') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [reservation_created_at] nvarchar(40) NULL;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'reservation_released_at') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [reservation_released_at] nvarchar(40) NULL;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'layaway_expires_at') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [layaway_expires_at] nvarchar(40) NULL;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'expired_at') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [expired_at] nvarchar(40) NULL;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'cancellation_fee_amount') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [cancellation_fee_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_cancellation_fee_existing] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'refunded_amount') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [refunded_amount] decimal(18, 4) NOT NULL CONSTRAINT [DF_sales_order_refunded_existing] DEFAULT 0;
+IF COL_LENGTH(N'[dbo].[sales_order]', N'record_version') IS NULL
+  ALTER TABLE [dbo].[sales_order] ADD [record_version] int NOT NULL CONSTRAINT [DF_sales_order_record_version_existing] DEFAULT 1;
+
+EXEC(N'UPDATE [dbo].[sales_order] SET [paid_amount] = [deposit_amount] WHERE [paid_amount] = 0 AND [deposit_amount] > 0;');
+
+IF OBJECT_ID(N'[dbo].[sales_order_inventory_reservation]', N'U') IS NULL
+BEGIN
+  CREATE TABLE [dbo].[sales_order_inventory_reservation] (
+    [id] nvarchar(100) NOT NULL CONSTRAINT [PK_sales_order_inventory_reservation] PRIMARY KEY,
+    [sales_order_id] nvarchar(100) NOT NULL,
+    [sales_order_line_id] nvarchar(100) NOT NULL,
+    [inventory_location_code] nvarchar(100) NULL,
+    [product_code] nvarchar(100) NOT NULL,
+    [product_variant_code] nvarchar(100) NULL,
+    [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_reservation_base_uom] DEFAULT N'EA',
+    [base_quantity] decimal(18, 4) NOT NULL,
+    [status] nvarchar(50) NOT NULL CONSTRAINT [DF_sales_order_reservation_status_row] DEFAULT N'ACTIVE',
+    [release_reason] nvarchar(500) NULL,
+    [created_at] nvarchar(40) NOT NULL,
+    [released_at] nvarchar(40) NULL,
+    [updated_at] nvarchar(40) NOT NULL,
+    CONSTRAINT [UQ_sales_order_inventory_reservation_line] UNIQUE ([sales_order_id], [sales_order_line_id])
+  );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'idx_sales_order_reservation_order_status' AND [object_id] = OBJECT_ID(N'[dbo].[sales_order_inventory_reservation]'))
+  CREATE INDEX [idx_sales_order_reservation_order_status] ON [dbo].[sales_order_inventory_reservation]([sales_order_id], [status]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'idx_sales_order_reservation_stock' AND [object_id] = OBJECT_ID(N'[dbo].[sales_order_inventory_reservation]'))
+  CREATE INDEX [idx_sales_order_reservation_stock] ON [dbo].[sales_order_inventory_reservation]([inventory_location_code], [product_code], [product_variant_code], [status]);
 
 IF COL_LENGTH(N'[dbo].[sales_order]', N'deposit_amount') IS NULL
 BEGIN
@@ -1387,6 +1471,8 @@ IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'uom_conversion_fa
   ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_transfer_draft_uom_factor] DEFAULT 1;
 IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'base_unit_of_measure') IS NULL
   ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_transfer_draft_base_uom] DEFAULT N'EA';
+IF COL_LENGTH(N'[dbo].[inter_store_transfer_request_draft]', N'lines_json') IS NULL
+  ALTER TABLE [dbo].[inter_store_transfer_request_draft] ADD [lines_json] nvarchar(max) NOT NULL CONSTRAINT [DF_transfer_draft_lines_json] DEFAULT N'[]';
 IF COL_LENGTH(N'[dbo].[stock_count_session]', N'previous_batch_quantities_json') IS NULL
   ALTER TABLE [dbo].[stock_count_session] ADD [previous_batch_quantities_json] nvarchar(max) NULL;
 IF COL_LENGTH(N'[dbo].[stock_count_session]', N'counted_batch_quantities_json') IS NULL

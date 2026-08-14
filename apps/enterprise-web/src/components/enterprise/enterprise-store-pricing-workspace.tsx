@@ -1,7 +1,7 @@
 "use client";
 
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
-import { BadgeDollarSign, Save, Store } from "lucide-react";
+import { BadgeDollarSign, PackageOpen, Save, Store } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
@@ -10,6 +10,7 @@ import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import type { EnterpriseStorePricingWorkspaceData } from "@/server/repositories/enterprise-store-pricing.repository";
 
 type PriceRow = EnterpriseStorePricingWorkspaceData["priceRows"][number];
+type SellingUnitRow = EnterpriseStorePricingWorkspaceData["sellingUnitRows"][number];
 type TargetRow = EnterpriseStorePricingWorkspaceData["targets"][number];
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -49,6 +50,28 @@ const priceFilter: FilterFn<PriceRow> = (row, _columnId, filterValue) => {
     .some((value) => String(value).toLowerCase().includes(query));
 };
 
+const sellingUnitFilter: FilterFn<SellingUnitRow> = (row, _columnId, filterValue) => {
+  const query = String(filterValue ?? "").trim().toLowerCase();
+
+  if (!query) return true;
+
+  const original = row.original;
+  return [
+    original.productCode,
+    original.productName,
+    original.productVariantCode,
+    original.productVariantName,
+    original.storeCode,
+    original.storeName,
+    original.unitOfMeasureCode,
+    original.unitOfMeasureName,
+    original.barcode,
+    original.status
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(query));
+};
+
 export function EnterpriseStorePricingWorkspace({
   workspace
 }: {
@@ -56,6 +79,10 @@ export function EnterpriseStorePricingWorkspace({
 }) {
   const router = useRouter();
   const firstTarget = workspace.targets[0] ?? null;
+  const firstSellingUnit = firstTarget?.sellingUnitOptions[0] ?? null;
+  const [workspaceMode, setWorkspaceMode] = useState<"prices" | "selling-units">(
+    "prices"
+  );
   const [targetId, setTargetId] = useState(firstTarget?.targetId ?? "");
   const [unitPrice, setUnitPrice] = useState(
     firstTarget ? firstTarget.baseUnitPrice.toFixed(2) : ""
@@ -63,12 +90,23 @@ export function EnterpriseStorePricingWorkspace({
   const [selectedStoreCodes, setSelectedStoreCodes] = useState<string[]>(
     workspace.stores.map((store) => store.storeCode)
   );
+  const [sellingUnitCode, setSellingUnitCode] = useState(
+    firstSellingUnit?.unitOfMeasureCode ?? ""
+  );
+  const [sellingUnitPrice, setSellingUnitPrice] = useState(
+    firstTarget ? firstTarget.baseUnitPrice.toFixed(2) : ""
+  );
+  const [sellingUnitBarcode, setSellingUnitBarcode] = useState("");
+  const [sellingUnitDefault, setSellingUnitDefault] = useState(false);
   const [state, setState] = useState<{
     status: "idle" | "submitting" | "success" | "error";
     message: string;
   }>({ status: "idle", message: "" });
   const selectedTarget =
     workspace.targets.find((target) => target.targetId === targetId) ?? firstTarget;
+  const selectedSellingUnit = selectedTarget?.sellingUnitOptions.find(
+    (unit) => unit.unitOfMeasureCode === sellingUnitCode
+  );
 
   const priceColumns = useMemo<ColumnDef<PriceRow>[]>(
     () => [
@@ -125,6 +163,87 @@ export function EnterpriseStorePricingWorkspace({
                 label: "Remove price",
                 tone: "danger",
                 onSelect: () => void removePrice(row.original.priceId)
+              }
+            ]}
+          />
+        )
+      }
+    ],
+    [workspace.currencyCode]
+  );
+
+  const sellingUnitColumns = useMemo<ColumnDef<SellingUnitRow>[]>(
+    () => [
+      {
+        accessorKey: "productName",
+        header: "Product",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-stone-950">{row.original.productName}</p>
+            <p className="truncate text-xs text-stone-500">
+              {[row.original.productCode, row.original.productVariantName ?? row.original.productVariantCode]
+                .filter(Boolean)
+                .join(" / ")}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "storeName",
+        header: "Shop",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-stone-900">{row.original.storeName}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.storeCode}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "unitOfMeasureCode",
+        header: "Selling unit",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-semibold text-stone-900">
+              {row.original.unitOfMeasureCode} / {row.original.unitOfMeasureName}
+              {row.original.isDefault ? " / Default" : ""}
+            </p>
+            <p className="text-xs text-stone-500">
+              1 {row.original.unitOfMeasureCode} = {row.original.conversionFactor}{" "}
+              {row.original.baseUnitOfMeasure}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "unitPrice",
+        header: "Selling price",
+        cell: ({ row }) => formatMoney(row.original.unitPrice, workspace.currencyCode)
+      },
+      {
+        accessorKey: "barcode",
+        header: "Barcode",
+        cell: ({ row }) => row.original.barcode ?? "-"
+      },
+      {
+        accessorKey: "updatedAt",
+        header: "Updated",
+        cell: ({ row }) => new Date(row.original.updatedAt).toLocaleString()
+      },
+      {
+        id: "actions",
+        header: "",
+        enableHiding: false,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <GridRowActions
+            actions={[
+              {
+                label: "Remove selling unit",
+                tone: "danger",
+                onSelect: () => void removeSellingUnit(row.original.sellingUnitId)
               }
             ]}
           />
@@ -196,6 +315,75 @@ export function EnterpriseStorePricingWorkspace({
     }
   }
 
+  async function saveSellingUnits() {
+    setState({ status: "submitting", message: "" });
+
+    try {
+      const response = await fetch("/api/catalog/store-selling-units", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetId,
+          unitOfMeasureCode: sellingUnitCode,
+          unitPrice: Number(sellingUnitPrice),
+          barcode: sellingUnitBarcode,
+          isDefault: sellingUnitDefault,
+          storeCodes: selectedStoreCodes
+        })
+      });
+      const payload = (await response.json()) as { message?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not save that selling unit.");
+      }
+
+      setState({
+        status: "success",
+        message: payload.message ?? "Flash ERP saved that selling unit."
+      });
+      setSellingUnitBarcode("");
+      router.refresh();
+    } catch (error) {
+      setState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not save that selling unit."
+      });
+    }
+  }
+
+  async function removeSellingUnit(sellingUnitId: string) {
+    setState({ status: "submitting", message: "" });
+
+    try {
+      const response = await fetch(
+        `/api/catalog/store-selling-units/${encodeURIComponent(sellingUnitId)}`,
+        { method: "DELETE" }
+      );
+      const payload = (await response.json()) as { message?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not remove that selling unit.");
+      }
+
+      setState({
+        status: "success",
+        message: payload.message ?? "Flash ERP removed that selling unit."
+      });
+      router.refresh();
+    } catch (error) {
+      setState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not remove that selling unit."
+      });
+    }
+  }
+
   function toggleStore(storeCode: string) {
     setSelectedStoreCodes((current) =>
       current.includes(storeCode)
@@ -211,6 +399,48 @@ export function EnterpriseStorePricingWorkspace({
       eyebrow="Inventory"
       heading="Shop Prices"
     >
+      <div
+        aria-label="Shop price configuration"
+        className="mb-4 inline-flex w-fit gap-1 rounded-lg border border-stone-200 bg-white p-1"
+        role="tablist"
+      >
+        <button
+          aria-selected={workspaceMode === "prices"}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition ${
+            workspaceMode === "prices"
+              ? "bg-stone-900 text-white"
+              : "text-stone-600 hover:bg-stone-100 hover:text-stone-950"
+          }`}
+          onClick={() => {
+            setWorkspaceMode("prices");
+            setState({ status: "idle", message: "" });
+          }}
+          role="tab"
+          type="button"
+        >
+          <BadgeDollarSign className="h-4 w-4" />
+          Price overrides
+        </button>
+        <button
+          aria-selected={workspaceMode === "selling-units"}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition ${
+            workspaceMode === "selling-units"
+              ? "bg-stone-900 text-white"
+              : "text-stone-600 hover:bg-stone-100 hover:text-stone-950"
+          }`}
+          onClick={() => {
+            setWorkspaceMode("selling-units");
+            setState({ status: "idle", message: "" });
+          }}
+          role="tab"
+          type="button"
+        >
+          <PackageOpen className="h-4 w-4" />
+          Selling units
+        </button>
+      </div>
+
+      {workspaceMode === "prices" ? (
       <section className="grid gap-4 xl:grid-cols-[minmax(24rem,0.8fr)_minmax(0,1.2fr)]">
         <form
           className="glass-panel h-fit rounded-[1.35rem] p-5"
@@ -244,6 +474,10 @@ export function EnterpriseStorePricingWorkspace({
 
                   setTargetId(nextTargetId);
                   setUnitPrice(nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : "");
+                  setSellingUnitCode(
+                    nextTarget?.sellingUnitOptions[0]?.unitOfMeasureCode ?? ""
+                  );
+                  setSellingUnitPrice(nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : "");
                 }}
                 value={targetId}
               >
@@ -378,6 +612,231 @@ export function EnterpriseStorePricingWorkspace({
           />
         </div>
       </section>
+      ) : (
+        <section className="grid gap-4 xl:grid-cols-[minmax(25rem,0.82fr)_minmax(0,1.18fr)]">
+          <form
+            className="glass-panel h-fit rounded-lg p-5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveSellingUnits();
+            }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase text-stone-500">
+                  Store selling unit
+                </p>
+                <h2 className="mt-2 text-xl font-semibold text-stone-950">
+                  Configure product UOM
+                </h2>
+              </div>
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+                <PackageOpen className="h-5 w-5" />
+              </span>
+            </div>
+
+            <div className="mt-5 grid gap-4">
+              <label className="grid gap-2 text-sm font-semibold text-stone-700">
+                Product
+                <select
+                  className="rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--brand)]"
+                  onChange={(event) => {
+                    const nextTargetId = event.target.value;
+                    const nextTarget = workspace.targets.find(
+                      (target) => target.targetId === nextTargetId
+                    );
+
+                    setTargetId(nextTargetId);
+                    setSellingUnitCode(
+                      nextTarget?.sellingUnitOptions[0]?.unitOfMeasureCode ?? ""
+                    );
+                    setSellingUnitPrice(
+                      nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : ""
+                    );
+                    setSellingUnitBarcode("");
+                    setSellingUnitDefault(false);
+                  }}
+                  value={targetId}
+                >
+                  {workspace.targets.map((target) => (
+                    <option key={target.targetId} value={target.targetId}>
+                      {targetLabel(target)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="grid gap-2 text-sm font-semibold text-stone-700">
+                  Selling unit
+                  <select
+                    className="rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--brand)]"
+                    disabled={!selectedTarget?.sellingUnitOptions.length}
+                    onChange={(event) => setSellingUnitCode(event.target.value)}
+                    value={sellingUnitCode}
+                  >
+                    {selectedTarget?.sellingUnitOptions.map((unit) => (
+                      <option key={unit.unitOfMeasureId} value={unit.unitOfMeasureCode}>
+                        {unit.unitOfMeasureCode} / {unit.unitOfMeasureName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-2 text-sm font-semibold text-stone-700">
+                  Selling price
+                  <input
+                    className="rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--brand)]"
+                    min="0.01"
+                    onChange={(event) => setSellingUnitPrice(event.target.value)}
+                    step="0.01"
+                    type="number"
+                    value={sellingUnitPrice}
+                  />
+                </label>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <label className="grid gap-2 text-sm font-semibold text-stone-700">
+                  Barcode (optional)
+                  <input
+                    className="rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--brand)]"
+                    maxLength={450}
+                    onChange={(event) => setSellingUnitBarcode(event.target.value)}
+                    placeholder="Scan or enter package barcode"
+                    value={sellingUnitBarcode}
+                  />
+                </label>
+                <label className="flex min-h-11 items-center gap-2 self-end rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm font-semibold text-stone-700">
+                  <input
+                    checked={sellingUnitDefault}
+                    className="h-4 w-4"
+                    onChange={(event) => setSellingUnitDefault(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Default at POS
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm">
+                <div>
+                  <p className="text-xs font-semibold uppercase text-stone-500">Conversion</p>
+                  <p className="mt-1 font-semibold text-stone-950">
+                    1 {selectedSellingUnit?.unitOfMeasureCode ?? "-"} ={" "}
+                    {selectedSellingUnit?.conversionFactor ?? 0}{" "}
+                    {selectedTarget?.baseUnitOfMeasure ?? "base unit(s)"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase text-stone-500">Quantity</p>
+                  <p className="mt-1 font-semibold text-stone-950">
+                    {selectedSellingUnit?.allowFractionalSale
+                      ? `Up to ${selectedSellingUnit.decimalPrecision} decimals`
+                      : "Whole units"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-stone-700">Shops</p>
+                  <button
+                    className="text-xs font-semibold text-[var(--brand)] transition hover:text-[var(--brand-deep)]"
+                    onClick={() =>
+                      setSelectedStoreCodes(
+                        selectedStoreCodes.length === workspace.stores.length
+                          ? []
+                          : workspace.stores.map((store) => store.storeCode)
+                      )
+                    }
+                    type="button"
+                  >
+                    {selectedStoreCodes.length === workspace.stores.length
+                      ? "Clear"
+                      : "Select all"}
+                  </button>
+                </div>
+                <div className="grid max-h-64 gap-2 overflow-y-auto rounded-lg border border-stone-200 bg-white p-2">
+                  {workspace.stores.map((store) => (
+                    <label
+                      className="flex items-center justify-between gap-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-sm text-stone-700"
+                      key={store.storeCode}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-semibold text-stone-900">
+                          {store.storeName}
+                        </span>
+                        <span className="block truncate text-xs text-stone-500">
+                          {store.storeCode} / {store.storeMode}
+                        </span>
+                      </span>
+                      <input
+                        checked={selectedStoreCodes.includes(store.storeCode)}
+                        className="h-4 w-4 shrink-0"
+                        onChange={() => toggleStore(store.storeCode)}
+                        type="checkbox"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {state.message ? (
+                <div
+                  className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+                    state.status === "error"
+                      ? "border-rose-200 bg-rose-50 text-rose-700"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  }`}
+                >
+                  {state.message}
+                </div>
+              ) : null}
+
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--brand)] px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={
+                  state.status === "submitting" ||
+                  !targetId ||
+                  !sellingUnitCode ||
+                  selectedStoreCodes.length === 0 ||
+                  Number(sellingUnitPrice) <= 0
+                }
+                type="submit"
+              >
+                <Save className="h-4 w-4" />
+                Save selling unit
+              </button>
+            </div>
+          </form>
+
+          <div className="space-y-4">
+            <section className="grid gap-3 sm:grid-cols-3">
+              {[
+                ["Products", numberFormatter.format(workspace.metrics.targets)],
+                ["Shops", numberFormatter.format(workspace.metrics.stores)],
+                ["Selling units", numberFormatter.format(workspace.metrics.activeSellingUnits)]
+              ].map(([label, value]) => (
+                <article className="glass-panel rounded-lg p-4" key={label}>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs font-semibold uppercase text-stone-500">{label}</p>
+                    <PackageOpen className="h-4 w-4 text-stone-400" />
+                  </div>
+                  <p className="mt-3 text-2xl font-semibold text-stone-950">{value}</p>
+                </article>
+              ))}
+            </section>
+
+            <SharedDataGrid
+              columns={sellingUnitColumns}
+              data={workspace.sellingUnitRows}
+              emptyLabel="No shop selling units are configured. Base-unit sales remain active."
+              exportFileName="flash-erp-shop-selling-units"
+              globalFilterFn={sellingUnitFilter}
+              searchPlaceholder="Search selling units"
+            />
+          </div>
+        </section>
+      )}
     </EnterpriseShell>
   );
 }

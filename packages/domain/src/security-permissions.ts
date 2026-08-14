@@ -518,6 +518,60 @@ const catalog: SecurityPermissionDefinition[] = [
     sortOrder: 440
   },
   {
+    code: "pos.layaway.create",
+    name: "Create layaways",
+    description: "Create a layaway and accept its opening deposit subject to company policy.",
+    domain: "POS",
+    group: "Layaway",
+    surface: "store",
+    sortOrder: 442
+  },
+  {
+    code: "pos.layaway.payment.receive",
+    name: "Receive layaway payments",
+    description: "Receive and attribute installment payments against an active layaway.",
+    domain: "POS",
+    group: "Layaway",
+    surface: "store",
+    sortOrder: 443
+  },
+  {
+    code: "pos.layaway.cancel-refund",
+    name: "Cancel and refund layaways",
+    description: "Cancel a layaway and process its policy-governed refund and cancellation fee.",
+    domain: "POS",
+    group: "Layaway",
+    surface: "store",
+    sortOrder: 444
+  },
+  {
+    code: "pos.layaway.reservation.release",
+    name: "Release layaway reservations",
+    description: "Release reserved layaway stock without completing the layaway sale.",
+    domain: "POS",
+    group: "Layaway",
+    surface: "store",
+    sortOrder: 445
+  },
+  {
+    code: "pos.layaway.policy.override",
+    name: "Override layaway policy",
+    description: "Approve an exception to deposit, reservation, cancellation, or fulfilment policy.",
+    domain: "POS",
+    group: "Layaway",
+    surface: "store",
+    sortOrder: 446
+  },
+  {
+    code: "pos.layaway.fulfil",
+    name: "Fulfil layaways",
+    description: "Convert a fully eligible layaway into a completed sale and release its reservation.",
+    domain: "POS",
+    group: "Layaway",
+    surface: "store",
+    sortOrder: 447
+  },
+  {
     code: "sync.monitor",
     name: "Monitor sync",
     description: "Review sync topology, queue posture, and node health.",

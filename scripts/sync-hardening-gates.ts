@@ -76,6 +76,41 @@ requireIncludes(
   "checkpointHasAppliedWork",
   "enterprise must not overwrite checkpoints on telemetry-only pushes."
 );
+requireIncludes(
+  enterpriseSync,
+  "priorityStoreTopologyEventTypes",
+  "enterprise pull must prioritize store settings and inventory locations ahead of bulk master-data backlogs."
+);
+requireIncludes(
+  enterpriseSync,
+  "priorityStoreOperationsEventTypes",
+  "enterprise pull must prioritize operator access, selling setup, transfers, and recovery instructions."
+);
+requireIncludes(
+  enterpriseSync,
+  "priorityStoreCatalogEventTypes",
+  "enterprise pull must give catalog, price, serial, stock, and purchasing packets protected capacity."
+);
+requireIncludes(
+  enterpriseSync,
+  "Math.ceil(postTopologyCapacity * 0.5)",
+  "enterprise pull must reserve capacity instead of allowing operational priority traffic to starve other data."
+);
+requireIncludes(
+  enterpriseSync,
+  "notIn: [...priorityStoreSyncEventTypes]",
+  "enterprise pull must fill remaining packet capacity without duplicating any prioritized event tier."
+);
+requireIncludes(
+  enterpriseSync,
+  "fallbackPendingEvents",
+  "enterprise pull must backfill unused tier capacity so packets are not left waiting behind empty priority classes."
+);
+requireIncludes(
+  enterpriseSync,
+  '"inter-store-transfer.target.published",\n                  "security.permission.published"',
+  "automatic master publication deduplication must include transfer-target directory packets."
+);
 
 for (const [source, label] of [
   [sqliteStore, "SQLite desktop store"],

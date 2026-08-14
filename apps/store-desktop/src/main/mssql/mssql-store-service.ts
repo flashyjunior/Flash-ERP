@@ -4,9 +4,16 @@ import bcrypt from "bcryptjs";
 import sql from "mssql";
 import {
   allocateInventoryBatchesFefo,
+  assertLayawayFulfilmentEligible,
+  calculateLayawayAvailableBaseQuantity,
+  calculateLayawayCancellationAmounts,
+  calculatePosBaseQuantity,
   deriveInventoryBatchStatus,
   deriveRetailUserCapabilities,
+  evaluateLayawayOpening,
   normalizeLayawaySettings,
+  normalizePosSellingUnits,
+  resolvePosSellingUom,
   validateInventoryBatchReceipt,
 } from "@flash-erp/domain";
 import {
@@ -106,6 +113,9 @@ import type {
   StoreTransactionReferenceSummary,
   StoreCancelSalesOrderRequest,
   StoreCreateSalesOrderRequest,
+  StoreExpireLayawayRequest,
+  StoreReceiveLayawayPaymentRequest,
+  StoreReleaseLayawayReservationRequest,
   StoreDeploymentMode,
   StoreAccountPaymentReportRow,
   StoreBankingDepositSummary,
@@ -118,6 +128,7 @@ import type {
   StoreInventoryReportRow,
   StoreInterStoreTransferBrowseRequest,
   StoreInterStoreTransferRequestDraftInput,
+  StoreInterStoreTransferRequestDraftLine,
   StoreInterStoreTransferRequestDraftSummary,
   StoreInterStoreTransferSummary,
   StoreLocalGoodsReceiptSummary,
@@ -200,6 +211,10 @@ import type {
   StoreTransactionSummary,
   StoreUserSummary,
 } from "../../shared/desktop-runtime.js";
+import {
+  readTransferRequestDraftLines,
+  writeTransferRequestDraftLines,
+} from "../transfer-request-draft.js";
 import type { StoreTerminalContext } from "../offline/local-store-service.js";
 import { normalizeStoreMssqlConnectionString } from "./store-mssql-adapter.js";
 
@@ -309,6 +324,7 @@ type ProductRow = {
   unit_of_measure: string;
   base_unit_of_measure: string;
   uom_conversions_json: string;
+  selling_units_json: string;
   taxable: string | number;
   tax_profile_code: string | null;
   tax_profile_name: string | null;
@@ -574,6 +590,7 @@ type InterStoreTransferRequestDraftRow = {
   external_reference: string | null;
   note: string | null;
   operator_name: string;
+  lines_json: string;
   submitted_at: string | null;
   updated_at: string;
 };
@@ -824,6 +841,10 @@ type BasketLineRow = {
   serial_numbers_json: string | null;
   batch_allocations_json: string | null;
   quantity: string | number;
+  selling_unit_of_measure: string;
+  base_unit_of_measure: string;
+  uom_conversion_factor: string | number;
+  base_quantity: string | number;
   unit_price: string | number;
   discount_amount: string | number;
   tax_amount: string | number;
@@ -938,6 +959,10 @@ type ReportProductRow = {
   product_code: string;
   product_name: string;
   quantity: string | number;
+  selling_unit_of_measure: string;
+  base_quantity: string | number;
+  base_unit_of_measure: string;
+  uom_conversion_factor: string | number;
   gross_amount: string | number;
   discount_amount: string | number;
   tax_amount: string | number;
@@ -1018,15 +1043,27 @@ type SalesOrderRow = {
   customer_id: string | null;
   customer_no: string | null;
   customer_name: string | null;
-  status: "OPEN" | "FULFILLED" | "CANCELLED";
+  order_type: "SALES_ORDER" | "LAYAWAY";
+  status: "OPEN" | "FULFILLED" | "CANCELLED" | "EXPIRED";
   total_amount: string | number;
   deposit_amount: string | number;
+  paid_amount: string | number;
   balance_amount: string | number;
   deposit_tender_method_code: string | null;
   deposit_tender_method_name: string | null;
   deposit_payment_method: SyncPaymentMethod | null;
   deposit_reference: string | null;
   deposit_paid_at: string | null;
+  layaway_policy_snapshot_json: string | null;
+  minimum_deposit_amount: string | number;
+  reservation_status: "NOT_APPLICABLE" | "ACTIVE" | "RELEASED" | "CONSUMED" | "EXPIRED";
+  reservation_created_at: string | null;
+  reservation_released_at: string | null;
+  layaway_expires_at: string | null;
+  expired_at: string | null;
+  cancellation_fee_amount: string | number;
+  refunded_amount: string | number;
+  record_version: string | number;
   line_count: string | number;
   item_count: string | number;
   operator_name: string | null;
@@ -1687,6 +1724,76 @@ function parseProductUomConversions(
   }];
 }
 
+function parseProductSellingUnits(
+  value: string | null | undefined,
+): NonNullable<StoreCatalogBrowseItem["sellingUnits"]> {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter(
+      (item): item is NonNullable<StoreCatalogBrowseItem["sellingUnits"]>[number] =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as { unitOfMeasureCode?: unknown }).unitOfMeasureCode ===
+          "string" &&
+        Number.isFinite(
+          Number((item as { conversionFactor?: unknown }).conversionFactor),
+        ) &&
+        Number.isFinite(Number((item as { unitPrice?: unknown }).unitPrice)),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function normalizePublishedSellingUnits(
+  value: unknown,
+): NonNullable<StoreCatalogBrowseItem["sellingUnits"]> {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Record<string, unknown>;
+    const unitOfMeasureCode = String(candidate.uomCode ?? "")
+      .trim()
+      .toUpperCase();
+    const conversionFactor = Number(candidate.conversionFactor);
+    const unitPrice = Number(candidate.unitPrice);
+
+    if (
+      !unitOfMeasureCode ||
+      !Number.isFinite(conversionFactor) ||
+      conversionFactor <= 0 ||
+      !Number.isFinite(unitPrice)
+    ) {
+      return [];
+    }
+
+    return [{
+      productVariantCode:
+        typeof candidate.productVariantCode === "string"
+          ? candidate.productVariantCode
+          : null,
+      unitOfMeasureCode,
+      unitOfMeasureName:
+        typeof candidate.uomName === "string" && candidate.uomName.trim()
+          ? candidate.uomName.trim()
+          : unitOfMeasureCode,
+      conversionFactor,
+      unitPrice,
+      barcode:
+        typeof candidate.barcode === "string" && candidate.barcode.trim()
+          ? candidate.barcode.trim()
+          : null,
+      isDefault: candidate.isDefault === true,
+      allowFractionalSale: candidate.allowFractionalSale === true,
+      decimalPrecision: Math.max(0, Math.trunc(Number(candidate.decimalPrecision) || 0)),
+    }];
+  });
+}
+
 function normalizePolicyInteger(
   value: number | string | null | undefined,
   fallback: number,
@@ -1698,32 +1805,67 @@ function normalizePolicyInteger(
   return Math.min(maximum, Math.max(minimum, normalized));
 }
 
+const standaloneCashierPermissionCodes = [
+  "pos.shift.open",
+  "pos.shift.close",
+  "pos.sale.process",
+  "pos.receipt.search",
+  "pos.customer.attach",
+] as const;
+
+const standaloneSupervisorPermissionCodes = [
+  ...standaloneCashierPermissionCodes,
+  "pos.return.process",
+  "pos.exchange.process",
+  "pos.receipt.reprint",
+  "pos.customer.account.collect",
+  "pos.loyalty.redeem",
+  "pos.override.no-receipt-return",
+  "pos.override.discount",
+  "pos.override.price",
+  "pos.layaway.create",
+  "pos.layaway.payment.receive",
+  "pos.layaway.cancel-refund",
+  "pos.layaway.reservation.release",
+  "pos.layaway.policy.override",
+  "pos.layaway.fulfil",
+  "inventory.view",
+  "inventory.adjust",
+  "inventory.count.submit",
+  "inventory.count.commit",
+  "inventory.transfer.request",
+  "inventory.transfer.issue",
+  "inventory.transfer.receive",
+  "inventory.grn.receive",
+  "inventory.supplier-return.manage",
+  "sync.store.operate",
+] as const;
+
 function standalonePermissionCodes(input: {
   permissionCodes?: string[] | null;
   cashierEligible?: boolean | null;
   supervisorEligible?: boolean | null;
 }) {
-  const permissionCodes = new Set(
-    (input.permissionCodes ?? []).filter(
-      (permissionCode): permissionCode is string =>
-        typeof permissionCode === "string" && permissionCode.trim().length > 0,
+  const explicitPermissionCodes = Array.from(
+    new Set(
+      (input.permissionCodes ?? [])
+        .map((permissionCode) => permissionCode.trim())
+        .filter(Boolean),
     ),
   );
 
-  if (input.cashierEligible !== false) {
-    permissionCodes.add("pos.sell");
-    permissionCodes.add("pos.shift.open");
+  if (explicitPermissionCodes.length > 0) {
+    return explicitPermissionCodes.sort();
   }
 
-  if (input.supervisorEligible !== false) {
-    permissionCodes.add("sync.store.operate");
-    permissionCodes.add("inventory.grn.receive");
-    permissionCodes.add("inventory.transfer.issue");
-    permissionCodes.add("inventory.transfer.receive");
-    permissionCodes.add("inventory.supplier-return.manage");
-  }
+  const source =
+    input.supervisorEligible === true
+      ? standaloneSupervisorPermissionCodes
+      : input.cashierEligible === false
+        ? []
+        : standaloneCashierPermissionCodes;
 
-  return [...permissionCodes].sort();
+  return [...source];
 }
 
 function deriveLocalInterStoreTransferStatus(input: {
@@ -2061,6 +2203,8 @@ export class MssqlStoreService {
         ALTER TABLE [dbo].[product_snapshot] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_product_snapshot_base_uom_runtime] DEFAULT N'EA';
       IF COL_LENGTH(N'[dbo].[product_snapshot]', N'uom_conversions_json') IS NULL
         ALTER TABLE [dbo].[product_snapshot] ADD [uom_conversions_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_uom_conversions_runtime] DEFAULT N'[]';
+      IF COL_LENGTH(N'[dbo].[product_snapshot]', N'selling_units_json') IS NULL
+        ALTER TABLE [dbo].[product_snapshot] ADD [selling_units_json] nvarchar(max) NOT NULL CONSTRAINT [DF_product_snapshot_selling_units_runtime] DEFAULT N'[]';
     `);
     await this.query(`
       IF COL_LENGTH(N'[dbo].[inter_store_transfer_snapshot]', N'requested_unit_of_measure') IS NULL
@@ -2097,6 +2241,17 @@ export class MssqlStoreService {
         ALTER TABLE [dbo].[pos_transaction_line]
         ADD [product_variant_code_snapshot] nvarchar(100) NULL;
       END
+    `);
+    await this.query(`
+      IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'selling_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[pos_transaction_line] ADD [selling_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_transaction_line_selling_uom_runtime] DEFAULT N'EA';
+      IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'base_unit_of_measure') IS NULL
+        ALTER TABLE [dbo].[pos_transaction_line] ADD [base_unit_of_measure] nvarchar(50) NOT NULL CONSTRAINT [DF_pos_transaction_line_base_uom_runtime] DEFAULT N'EA';
+      IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'uom_conversion_factor') IS NULL
+        ALTER TABLE [dbo].[pos_transaction_line] ADD [uom_conversion_factor] decimal(18,6) NOT NULL CONSTRAINT [DF_pos_transaction_line_uom_factor_runtime] DEFAULT 1;
+      IF COL_LENGTH(N'[dbo].[pos_transaction_line]', N'base_quantity') IS NULL
+        ALTER TABLE [dbo].[pos_transaction_line] ADD [base_quantity] decimal(18,3) NOT NULL CONSTRAINT [DF_pos_transaction_line_base_qty_runtime] DEFAULT 0;
+      UPDATE [dbo].[pos_transaction_line] SET [base_quantity] = [quantity] WHERE [base_quantity] <= 0;
     `);
     await this.query(`
       IF OBJECT_ID(N'[dbo].[pos_transaction_line]', N'U') IS NOT NULL
@@ -3710,6 +3865,10 @@ export class MssqlStoreService {
         [serial_numbers_json],
         [batch_allocations_json],
         [quantity],
+        [selling_unit_of_measure],
+        [base_unit_of_measure],
+        [uom_conversion_factor],
+        [base_quantity],
         [unit_price],
         [discount_amount],
         [tax_amount],
@@ -3749,6 +3908,10 @@ export class MssqlStoreService {
         [serial_numbers_json],
         [batch_allocations_json],
         [quantity],
+        [selling_unit_of_measure],
+        [base_unit_of_measure],
+        [uom_conversion_factor],
+        [base_quantity],
         [unit_price],
         [discount_amount],
         [tax_amount],
@@ -3786,6 +3949,10 @@ export class MssqlStoreService {
         [serial_numbers_json],
         [batch_allocations_json],
         [quantity],
+        [selling_unit_of_measure],
+        [base_unit_of_measure],
+        [uom_conversion_factor],
+        [base_quantity],
         [unit_price],
         [discount_amount],
         [tax_amount],
@@ -3814,6 +3981,12 @@ export class MssqlStoreService {
       variantAttributesSnapshot: line.variant_attributes_snapshot,
       lineNote: line.line_note,
       quantity: Number(asNumber(line.quantity).toFixed(3)),
+      sellingUnitOfMeasure: line.selling_unit_of_measure,
+      baseUnitOfMeasure: line.base_unit_of_measure,
+      uomConversionFactor: Number(
+        asNumber(line.uom_conversion_factor).toFixed(6),
+      ),
+      baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
       discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
       taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -3861,12 +4034,17 @@ export class MssqlStoreService {
         [category_code],
         [subcategory],
         [unit_of_measure],
+        [base_unit_of_measure],
+        [uom_conversions_json],
+        [selling_units_json],
         [taxable],
         [tax_profile_code],
         [tax_profile_name],
         [tax_rate_percent],
         [tax_inclusive],
         [track_inventory],
+        [track_expiry],
+        [shelf_life_days],
         [is_serialized],
         [track_size],
         [track_color],
@@ -3975,6 +4153,12 @@ export class MssqlStoreService {
         line.batch_allocations_json,
       ),
       quantity: Number(asNumber(line.quantity).toFixed(3)),
+      sellingUnitOfMeasure: line.selling_unit_of_measure,
+      baseUnitOfMeasure: line.base_unit_of_measure,
+      uomConversionFactor: Number(
+        asNumber(line.uom_conversion_factor).toFixed(6),
+      ),
+      baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
       unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
       discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
       taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -4227,15 +4411,27 @@ export class MssqlStoreService {
         sales_order.[customer_id],
         sales_order.[customer_no],
         sales_order.[customer_name],
+        sales_order.[order_type],
         sales_order.[status],
         sales_order.[total_amount],
         sales_order.[deposit_amount],
+        sales_order.[paid_amount],
         sales_order.[balance_amount],
         sales_order.[deposit_tender_method_code],
         sales_order.[deposit_tender_method_name],
         sales_order.[deposit_payment_method],
         sales_order.[deposit_reference],
         sales_order.[deposit_paid_at],
+        sales_order.[layaway_policy_snapshot_json],
+        sales_order.[minimum_deposit_amount],
+        sales_order.[reservation_status],
+        sales_order.[reservation_created_at],
+        sales_order.[reservation_released_at],
+        sales_order.[layaway_expires_at],
+        sales_order.[expired_at],
+        sales_order.[cancellation_fee_amount],
+        sales_order.[refunded_amount],
+        sales_order.[record_version],
         COUNT(line.[id]) AS [line_count],
         COALESCE(SUM(line.[quantity]), 0) AS [item_count],
         sales_order.[operator_name],
@@ -4259,15 +4455,27 @@ export class MssqlStoreService {
         sales_order.[customer_id],
         sales_order.[customer_no],
         sales_order.[customer_name],
+        sales_order.[order_type],
         sales_order.[status],
         sales_order.[total_amount],
         sales_order.[deposit_amount],
+        sales_order.[paid_amount],
         sales_order.[balance_amount],
         sales_order.[deposit_tender_method_code],
         sales_order.[deposit_tender_method_name],
         sales_order.[deposit_payment_method],
         sales_order.[deposit_reference],
         sales_order.[deposit_paid_at],
+        sales_order.[layaway_policy_snapshot_json],
+        sales_order.[minimum_deposit_amount],
+        sales_order.[reservation_status],
+        sales_order.[reservation_created_at],
+        sales_order.[reservation_released_at],
+        sales_order.[layaway_expires_at],
+        sales_order.[expired_at],
+        sales_order.[cancellation_fee_amount],
+        sales_order.[refunded_amount],
+        sales_order.[record_version],
         sales_order.[operator_name],
         sales_order.[note],
         sales_order.[fulfilled_transaction_id],
@@ -4295,15 +4503,29 @@ export class MssqlStoreService {
       customerId: row.customer_id,
       customerNo: row.customer_no,
       customerName: row.customer_name,
+      orderType: row.order_type,
       status: row.status,
       totalAmount: Number(asNumber(row.total_amount).toFixed(2)),
       depositAmount: Number(asNumber(row.deposit_amount).toFixed(2)),
+      paidAmount: Number(asNumber(row.paid_amount).toFixed(2)),
       balanceAmount: Number(asNumber(row.balance_amount).toFixed(2)),
       depositTenderMethodCode: row.deposit_tender_method_code,
       depositTenderMethodName: row.deposit_tender_method_name,
       depositPaymentMethod: row.deposit_payment_method,
       depositReference: row.deposit_reference,
       depositPaidAt: row.deposit_paid_at,
+      minimumDepositAmount: Number(
+        asNumber(row.minimum_deposit_amount).toFixed(2),
+      ),
+      reservationStatus: row.reservation_status,
+      reservationCreatedAt: row.reservation_created_at,
+      reservationReleasedAt: row.reservation_released_at,
+      layawayExpiresAt: row.layaway_expires_at,
+      expiredAt: row.expired_at,
+      cancellationFeeAmount: Number(
+        asNumber(row.cancellation_fee_amount).toFixed(2),
+      ),
+      refundedAmount: Number(asNumber(row.refunded_amount).toFixed(2)),
       lineCount: Math.trunc(asNumber(row.line_count)),
       itemCount: Number(asNumber(row.item_count).toFixed(3)),
       operatorName: row.operator_name,
@@ -4325,6 +4547,110 @@ export class MssqlStoreService {
     );
 
     return rows[0] ?? null;
+  }
+
+  private async getLayawaySettings() {
+    const metadata = await this.metadata();
+
+    return normalizeLayawaySettings({
+      enabled: metadata.layaway_enabled === "1",
+      reserveStockOnDeposit: metadata.layaway_reserve_stock_on_deposit !== "0",
+      minimumDepositPercent: metadata.layaway_minimum_deposit_percent,
+      requireFullPaymentBeforeFulfilment:
+        metadata.layaway_require_full_payment_before_fulfilment !== "0",
+      refundPaymentsOnCancellation:
+        metadata.layaway_refund_payments_on_cancellation !== "0",
+      cancellationFeeType: metadata.layaway_cancellation_fee_type,
+      cancellationFeeValue: metadata.layaway_cancellation_fee_value,
+    });
+  }
+
+  private async getSalesOrderReservationPayloads(
+    salesOrderId: string,
+  ): Promise<NonNullable<StoreSalesOrderRecordedPayload["reservations"]>> {
+    const result = await this.query<{
+      id: string;
+      sales_order_line_id: string;
+      inventory_location_code: string | null;
+      product_code: string;
+      product_variant_code: string | null;
+      base_unit_of_measure: string;
+      base_quantity: string | number;
+      status: NonNullable<StoreSalesOrderRecordedPayload["reservations"]>[number]["status"];
+      release_reason: string | null;
+      created_at: string;
+      released_at: string | null;
+    }>(
+      `SELECT [id], [sales_order_line_id], [inventory_location_code], [product_code],
+              [product_variant_code], [base_unit_of_measure], [base_quantity], [status],
+              [release_reason], [created_at], [released_at]
+       FROM [dbo].[sales_order_inventory_reservation]
+       WHERE [sales_order_id] = @salesOrderId
+       ORDER BY [created_at] ASC, [id] ASC`,
+      { salesOrderId },
+    );
+
+    return result.recordset.map((row) => ({
+      reservationId: row.id,
+      salesOrderLineId: row.sales_order_line_id,
+      inventoryLocationCode: row.inventory_location_code,
+      productCode: row.product_code,
+      productVariantCode: row.product_variant_code,
+      baseUnitOfMeasure: row.base_unit_of_measure,
+      baseQuantity: Number(asNumber(row.base_quantity).toFixed(3)),
+      status: row.status,
+      releaseReason: row.release_reason,
+      createdAt: row.created_at,
+      releasedAt: row.released_at,
+    }));
+  }
+
+  private async buildSalesOrderLifecyclePayload(
+    order: SalesOrderRow,
+    overrides: Partial<StoreSalesOrderRecordedPayload> = {},
+  ): Promise<StoreSalesOrderRecordedPayload> {
+    const metadata = await this.metadata();
+
+    return {
+      orderId: order.id,
+      orderNo: order.order_no,
+      storeCode: metadata.store_code ?? defaultStoreConfig.storeCode,
+      terminalCode: this.getTerminalCode(),
+      sourceTransactionId: order.source_transaction_id,
+      sourceTransactionNo: order.source_transaction_no,
+      customerId: order.customer_id,
+      customerNo: order.customer_no,
+      customerName: order.customer_name,
+      orderType: order.order_type,
+      totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
+      depositAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
+      paidAmount: Number(asNumber(order.paid_amount).toFixed(2)),
+      balanceAmount: Number(asNumber(order.balance_amount).toFixed(2)),
+      depositTenderMethodCode: order.deposit_tender_method_code,
+      depositTenderMethodName: order.deposit_tender_method_name,
+      depositPaymentMethod: order.deposit_payment_method,
+      depositReference: order.deposit_reference,
+      depositPaidAt: order.deposit_paid_at,
+      layawayPolicySnapshotJson: order.layaway_policy_snapshot_json,
+      minimumDepositAmount: Number(asNumber(order.minimum_deposit_amount).toFixed(2)),
+      reservationStatus: order.reservation_status,
+      reservationCreatedAt: order.reservation_created_at,
+      reservationReleasedAt: order.reservation_released_at,
+      layawayExpiresAt: order.layaway_expires_at,
+      expiredAt: order.expired_at,
+      cancellationFeeAmount: Number(asNumber(order.cancellation_fee_amount).toFixed(2)),
+      refundedAmount: Number(asNumber(order.refunded_amount).toFixed(2)),
+      status: order.status,
+      operatorName: order.operator_name,
+      note: order.note,
+      createdAt: order.created_at,
+      fulfilledTransactionId: order.fulfilled_transaction_id,
+      fulfilledTransactionNo: order.fulfilled_transaction_no,
+      fulfilledAt: order.fulfilled_at,
+      cancelledAt: order.cancelled_at,
+      reservations: await this.getSalesOrderReservationPayloads(order.id),
+      ...overrides,
+    };
   }
 
   private async getSalesOrderSummaries() {
@@ -5024,6 +5350,7 @@ export class MssqlStoreService {
       availableBankAccounts,
       inventoryLocations,
       transferRequestTargets,
+      transferRequestDrafts,
       recentEodReconciliations,
       recentBankingDepositsList,
     ] = await Promise.all([
@@ -5041,6 +5368,7 @@ export class MssqlStoreService {
       this.listActiveBankAccounts(),
       this.getInventoryLocationSummaries(),
       this.getTransferRequestTargetSummaries(),
+      this.getTransferRequestDraftSummaries(),
       this.getRecentEodReconciliationSummaries(),
       this.getRecentBankingDepositSummaries(),
     ]);
@@ -5089,10 +5417,12 @@ export class MssqlStoreService {
           ? "lagging"
           : "healthy";
     const syncPolicy = readStoreSyncPolicyFromMetadata(metadata);
+    const standaloneBootstrapAvailable =
+      this.isStandaloneDeployment() && storeUsers.length === 0;
 
     return {
       deploymentMode: this.deploymentMode,
-      standaloneBootstrapAvailable: false,
+      standaloneBootstrapAvailable,
       retailOrgName: metadata.retail_org_name ?? defaultStoreConfig.retailOrgName,
       companyLogoUrl: this.resolveStoreLogoUrl(metadata),
       loginBackgroundImageUrl: this.resolveEnterpriseMediaUrl(
@@ -5141,7 +5471,7 @@ export class MssqlStoreService {
       recentBankingDeposits: recentBankingDepositsList,
       inventoryLocations,
       transferRequestTargets,
-      transferRequestDrafts: [],
+      transferRequestDrafts,
       stockCountSessions: [],
       recentGoodsReceipts: [],
       recentSupplierReturns: [],
@@ -5935,6 +6265,7 @@ export class MssqlStoreService {
         product.[unit_of_measure],
         product.[base_unit_of_measure],
         product.[uom_conversions_json],
+        product.[selling_units_json],
         product.[taxable],
         product.[tax_profile_code],
         product.[tax_profile_name],
@@ -5992,6 +6323,9 @@ export class MssqlStoreService {
         product.[category_code],
         product.[subcategory],
         product.[unit_of_measure],
+        product.[base_unit_of_measure],
+        product.[uom_conversions_json],
+        product.[selling_units_json],
         product.[taxable],
         product.[tax_profile_code],
         product.[tax_profile_name],
@@ -6056,12 +6390,17 @@ export class MssqlStoreService {
         [category_code],
         [subcategory],
         [unit_of_measure],
+        [base_unit_of_measure],
+        [uom_conversions_json],
+        [selling_units_json],
         [taxable],
         [tax_profile_code],
         [tax_profile_name],
         [tax_rate_percent],
         [tax_inclusive],
         [track_inventory],
+        [track_expiry],
+        [shelf_life_days],
         [is_serialized],
         [track_size],
         [track_color],
@@ -6109,6 +6448,26 @@ export class MssqlStoreService {
     match: CatalogLookupRow,
     query: string,
   ): Promise<StoreCatalogLookupResult> {
+    const configuredSellingUnits = parseProductSellingUnits(
+      match.selling_units_json,
+    );
+    const variantCode = match.product_variant_code?.trim().toUpperCase() ?? null;
+    const scopedSellingUnits = configuredSellingUnits.filter(
+      (unit) =>
+        (unit.productVariantCode?.trim().toUpperCase() ?? null) === variantCode,
+    );
+    const barcodeSellingUnit = match.barcode_type?.startsWith("SELLING_UOM:")
+      ? match.barcode_type.slice("SELLING_UOM:".length)
+      : null;
+    const selectedSellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: match.base_unit_of_measure,
+      baseUnitPrice: asNumber(match.unit_price),
+      quantity: 1,
+      selectedUnitOfMeasure: barcodeSellingUnit,
+      scannedBarcode: match.matched_on === "barcode" ? match.barcode_code : null,
+      sellingUnits: scopedSellingUnits,
+      serialized: asBooleanFlag(match.is_serialized),
+    });
     const [department, category, availableSerialNumbers, availableBatches] = await Promise.all([
       match.department_code
         ? this.query<{ department_name: string }>(
@@ -6193,7 +6552,10 @@ export class MssqlStoreService {
         quantityOnHand: Number(asNumber(batch.quantity_on_hand).toFixed(3)),
         status: batch.status,
       })),
-      unitPrice: Number(asNumber(match.unit_price).toFixed(2)),
+      sellingUnits: configuredSellingUnits,
+      selectedSellingUnitOfMeasure:
+        selectedSellingUom.sellingUnitOfMeasure,
+      unitPrice: Number(asNumber(selectedSellingUom.unitPrice).toFixed(2)),
       quantityOnHand: Number(asNumber(match.quantity_on_hand).toFixed(3)),
       barcode: match.barcode_code,
       barcodeType: match.barcode_type,
@@ -6283,6 +6645,9 @@ export class MssqlStoreService {
         product.[category_code],
         product.[subcategory],
         product.[unit_of_measure],
+        product.[base_unit_of_measure],
+        product.[uom_conversions_json],
+        product.[selling_units_json],
         product.[taxable],
         product.[tax_profile_code],
         product.[tax_profile_name],
@@ -6413,6 +6778,7 @@ export class MssqlStoreService {
             row.uom_conversions_json,
             row.base_unit_of_measure,
           ),
+          sellingUnits: parseProductSellingUnits(row.selling_units_json),
           taxable: asBooleanFlag(row.taxable),
           taxProfileCode: row.tax_profile_code,
           trackInventory: asBooleanFlag(row.track_inventory),
@@ -6688,7 +7054,7 @@ export class MssqlStoreService {
     const result = await this.query<InventoryBrowseRow>(
       `SELECT TOP (300)
         ISNULL(location.[location_code], ISNULL(fallbackLocation.[location_code], N'UNASSIGNED')) AS [location_code],
-        ISNULL(location.[location_name], ISNULL(fallbackLocation.[location_name], N'Store stock')) AS [location_name],
+        ISNULL(location.[location_name], ISNULL(fallbackLocation.[location_name], N'Unassigned aggregate stock')) AS [location_name],
         product.[product_code],
         product.[product_name],
         product.[short_name],
@@ -6725,18 +7091,18 @@ export class MssqlStoreService {
          ON balance.[product_code] = product.[product_code]
         AND (@locationCode IS NULL OR UPPER(balance.[location_code]) = UPPER(@locationCode))
        LEFT JOIN [dbo].[inventory_location_snapshot] AS location
-         ON location.[location_code] = balance.[location_code]
+         ON UPPER(location.[location_code]) = UPPER(balance.[location_code])
        OUTER APPLY (
          SELECT TOP (1) fallback.[location_code], fallback.[location_name]
          FROM [dbo].[inventory_location_snapshot] AS fallback
-         WHERE (
+         WHERE fallback.[status] = N'ACTIVE'
+           AND ((
              @locationCode IS NOT NULL
              AND UPPER(fallback.[location_code]) = UPPER(@locationCode)
            )
            OR (
              @locationCode IS NULL
-             AND (fallback.[is_sales_default] = 1 OR fallback.[is_receiving_default] = 1)
-           )
+           ))
          ORDER BY
            CASE
              WHEN @locationCode IS NOT NULL AND UPPER(fallback.[location_code]) = UPPER(@locationCode) THEN 0
@@ -6937,6 +7303,8 @@ export class MssqlStoreService {
       {
         query: input?.query ?? null,
         productCode: input?.productCode ?? null,
+        storeCode: input?.storeCode ?? null,
+        locationCode: input?.locationCode ?? null,
         limit: input?.limit ?? 25,
       },
     );
@@ -7630,6 +7998,7 @@ export class MssqlStoreService {
         draft.[external_reference],
         draft.[note],
         draft.[operator_name],
+        draft.[lines_json],
         draft.[submitted_at],
         draft.[updated_at]
        FROM [dbo].[inter_store_transfer_request_draft] AS draft
@@ -7676,6 +8045,7 @@ export class MssqlStoreService {
         draft.[external_reference],
         draft.[note],
         draft.[operator_name],
+        draft.[lines_json],
         draft.[submitted_at],
         draft.[updated_at]
        FROM [dbo].[inter_store_transfer_request_draft] AS draft
@@ -7688,7 +8058,26 @@ export class MssqlStoreService {
         draft.[updated_at] DESC`,
     );
 
-    return result.recordset.map((row) => ({
+    return result.recordset.map((row) => {
+      const lines = readTransferRequestDraftLines(row.lines_json, {
+        lineId: row.id,
+        lineNo: 1,
+        productCode: row.product_code,
+        productName: row.product_name,
+        departmentCode: row.department_code,
+        departmentName: row.department_name,
+        categoryCode: row.category_code,
+        categoryName: row.category_name,
+        subcategory: row.subcategory,
+        isSerialized: asBooleanFlag(row.is_serialized),
+        quantity: Number(asNumber(row.quantity).toFixed(3)),
+        requestedUnitOfMeasure: row.requested_unit_of_measure,
+        requestedUnitQuantity: Number(asNumber(row.requested_unit_quantity).toFixed(3)),
+        uomConversionFactor: Number(asNumber(row.uom_conversion_factor).toFixed(6)),
+        baseUnitOfMeasure: row.base_unit_of_measure,
+      });
+
+      return {
       draftId: row.id,
       requestNo: row.request_no,
       status: row.status,
@@ -7722,7 +8111,9 @@ export class MssqlStoreService {
       operatorName: row.operator_name,
       submittedAt: row.submitted_at,
       updatedAt: row.updated_at,
-    }));
+      lines,
+    };
+    });
   }
 
   async saveInterStoreTransferRequestDraft(
@@ -7732,35 +8123,36 @@ export class MssqlStoreService {
       permissionCodes: ["inventory.transfer.request"],
       purpose: "saving an inter-store transfer request",
     });
-    const sourceLocationCode = input.sourceLocationCode.trim().toUpperCase();
-    const destinationLocationCode = input.destinationLocationCode
-      .trim()
-      .toUpperCase();
-    const productCode = input.productCode.trim().toUpperCase();
-    const quantity = Number(Number(input.quantity).toFixed(3));
+    const sourceStoreCode = input.sourceStoreCode?.trim() ?? "";
+    const destinationLocationCode = input.destinationLocationCode.trim();
+    const requestedLines =
+      input.lines && input.lines.length > 0
+        ? input.lines
+        : input.productCode
+          ? [{ productCode: input.productCode, quantity: Number(input.quantity ?? 0), unitOfMeasure: input.unitOfMeasure }]
+          : [];
 
     if (
-      !sourceLocationCode ||
-      !destinationLocationCode ||
-      sourceLocationCode === destinationLocationCode
+      !sourceStoreCode ||
+      !destinationLocationCode
     ) {
       throw new Error(
-        "Choose different source and destination locations before saving the transfer request.",
+        "Choose a source shop and local destination location before saving the transfer request.",
       );
     }
 
-    if (!productCode) {
-      throw new Error("Choose a product before saving the transfer request.");
+    if (requestedLines.length === 0) {
+      throw new Error("Add at least one item before saving the transfer request.");
     }
 
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      throw new Error("Enter a transfer request quantity greater than zero.");
+    if (requestedLines.length > 50) {
+      throw new Error("A transfer request can contain up to 50 item lines.");
     }
 
-    const [metadata, targetResult, locationResult, product] = await Promise.all([
+    const [metadata, targetResult, locationResult] = await Promise.all([
       this.metadata(),
       this.query<TransferRequestTargetSnapshotRow>(
-        `SELECT TOP (1)
+        `SELECT TOP (2)
           [source_store_code],
           [source_store_name],
           [source_store_sales_enabled],
@@ -7776,23 +8168,25 @@ export class MssqlStoreService {
           [use_for_receiving_default],
           [updated_at]
          FROM [dbo].[inter_store_transfer_request_target_snapshot]
-         WHERE [source_location_code] = @sourceLocationCode`,
-        { sourceLocationCode },
+         WHERE UPPER([source_store_code]) = UPPER(@sourceStoreCode)
+         ORDER BY [use_for_sales_default] DESC,
+                  [use_for_receiving_default] DESC,
+                  [source_location_name]`,
+        { sourceStoreCode },
       ),
       this.query<{ location_code: string; location_name: string }>(
         `SELECT TOP (1) [location_code], [location_name]
          FROM [dbo].[inventory_location_snapshot]
-         WHERE [location_code] = @destinationLocationCode`,
+         WHERE UPPER([location_code]) = UPPER(@destinationLocationCode)`,
         { destinationLocationCode },
       ),
-      this.findCatalogLookup(productCode),
     ]);
     const target = targetResult.recordset[0] ?? null;
     const destinationLocation = locationResult.recordset[0] ?? null;
 
     if (!target) {
       throw new Error(
-        `Flash ERP has no enterprise transfer source target for ${sourceLocationCode}. Pull the latest sync before requesting stock.`,
+        `Flash ERP has no synced enterprise transfer source shop for ${sourceStoreCode}. Pull the latest sync and select the source again.`,
       );
     }
 
@@ -7802,47 +8196,159 @@ export class MssqlStoreService {
       );
     }
 
-    if (!product) {
-      throw new Error(
-        `Flash ERP could not find local product "${productCode}".`,
-      );
-    }
+    const products = await Promise.all(
+      requestedLines.map((line) => this.findCatalogLookup(line.productCode)),
+    );
+    const lines = requestedLines.map<StoreInterStoreTransferRequestDraftLine>(
+      (line, index) => {
+        const product = products[index];
+        const quantity = Number(Number(line.quantity).toFixed(3));
 
-    const transferUom = resolveInventoryTransferUom({
-      enteredQuantity: quantity,
-      requestedUnitOfMeasure: input.unitOfMeasure,
-      unitOfMeasure: product.unit_of_measure,
-      baseUnitOfMeasure: product.base_unit_of_measure,
-      uomConversions: parseProductUomConversions(
-        product.uom_conversions_json,
-        product.base_unit_of_measure,
-      ),
-    });
+        if (!product) {
+          throw new Error(
+            `Flash ERP could not find local product "${line.productCode}" on line ${index + 1}.`,
+          );
+        }
 
-    if (
-      asBooleanFlag(product.is_serialized) &&
-      !Number.isInteger(transferUom.baseQuantity)
-    ) {
-      throw new Error(
-        `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
-      );
+        if (!asBooleanFlag(product.track_inventory)) {
+          throw new Error(
+            `${product.product_name} is not configured for tracked inventory, so it cannot be requested through inter-store movement.`,
+          );
+        }
+
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          throw new Error(`Transfer request line ${index + 1} needs a quantity greater than zero.`);
+        }
+
+        const transferUom = resolveInventoryTransferUom({
+          enteredQuantity: quantity,
+          requestedUnitOfMeasure: line.unitOfMeasure,
+          unitOfMeasure: product.unit_of_measure,
+          baseUnitOfMeasure: product.base_unit_of_measure,
+          uomConversions: parseProductUomConversions(
+            product.uom_conversions_json,
+            product.base_unit_of_measure,
+          ),
+        });
+
+        if (asBooleanFlag(product.is_serialized) && !Number.isInteger(transferUom.baseQuantity)) {
+          throw new Error(
+            `Serialized product "${product.product_code}" needs a whole-number base quantity.`,
+          );
+        }
+
+        return {
+          lineId: randomUUID(),
+          lineNo: index + 1,
+          productCode: product.product_code,
+          productName: product.product_name,
+          departmentCode: product.department_code,
+          departmentName: null,
+          categoryCode: product.category_code,
+          categoryName: null,
+          subcategory: product.subcategory,
+          isSerialized: asBooleanFlag(product.is_serialized),
+          quantity: transferUom.baseQuantity,
+          requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
+          requestedUnitQuantity: transferUom.requestedUnitQuantity,
+          uomConversionFactor: transferUom.uomConversionFactor,
+          baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
+        };
+      },
+    );
+    const firstLine = lines[0];
+
+    if (!firstLine) {
+      throw new Error("Add at least one valid item before saving the transfer request.");
     }
 
     const timestamp = isoNow();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
-    const requestId = randomUUID();
-    const requestNo = buildLocalDocumentNo(
-      "TRQ",
-      storeCode,
-      await this.nextSequence("inter_store_transfer_request_sequence"),
-      timestamp,
-    );
+    const existingDraft = input.draftId?.trim()
+      ? await this.getInterStoreTransferRequestDraftRow(input.draftId.trim())
+      : null;
+
+    if (input.draftId?.trim() && !existingDraft) {
+      throw new Error("Flash ERP could not find that saved transfer request draft in SQL Server.");
+    }
+
+    if (existingDraft && existingDraft.status !== "DRAFT") {
+      throw new Error(`${existingDraft.request_no} has already been sent and cannot be amended.`);
+    }
+
+    const requestId = existingDraft?.id ?? randomUUID();
+    const requestNo =
+      existingDraft?.request_no ??
+      buildLocalDocumentNo(
+        "TRQ",
+        storeCode,
+        await this.nextSequence("inter_store_transfer_request_sequence"),
+        timestamp,
+      );
     const operatorName =
       input.operatorName?.trim() || this.formatOperatorLabel(operatorSession);
     const externalReference = input.externalReference?.trim() || null;
     const note = input.note?.trim() || null;
+    const linesJson = writeTransferRequestDraftLines(lines);
 
-    await this.query(
+    if (existingDraft) {
+      await this.query(
+        `UPDATE [dbo].[inter_store_transfer_request_draft]
+         SET [source_store_code] = @sourceStoreCode,
+             [source_store_name] = @sourceStoreName,
+             [source_location_code] = @sourceLocationCode,
+             [source_location_name] = @sourceLocationName,
+             [destination_store_code] = @destinationStoreCode,
+             [destination_store_name] = @destinationStoreName,
+             [destination_location_code] = @destinationLocationCode,
+             [destination_location_name] = @destinationLocationName,
+             [product_code] = @productCode,
+             [product_name] = @productName,
+             [department_code] = @departmentCode,
+             [category_code] = @categoryCode,
+             [subcategory] = @subcategory,
+             [is_serialized] = @isSerialized,
+             [quantity] = @quantity,
+             [requested_unit_of_measure] = @requestedUnitOfMeasure,
+             [requested_unit_quantity] = @requestedUnitQuantity,
+             [uom_conversion_factor] = @uomConversionFactor,
+             [base_unit_of_measure] = @baseUnitOfMeasure,
+             [external_reference] = @externalReference,
+             [note] = @note,
+             [operator_name] = @operatorName,
+             [lines_json] = @linesJson,
+             [updated_at] = @timestamp
+         WHERE [id] = @requestId AND [status] = N'DRAFT'`,
+        {
+          requestId,
+          sourceStoreCode: target.source_store_code,
+          sourceStoreName: target.source_store_name,
+          sourceLocationCode: target.source_location_code,
+          sourceLocationName: target.source_location_name,
+          destinationStoreCode: storeCode,
+          destinationStoreName: metadata.store_name ?? defaultStoreConfig.storeName,
+          destinationLocationCode: destinationLocation.location_code,
+          destinationLocationName: destinationLocation.location_name,
+          productCode: firstLine.productCode,
+          productName: firstLine.productName,
+          departmentCode: firstLine.departmentCode,
+          categoryCode: firstLine.categoryCode,
+          subcategory: firstLine.subcategory,
+          isSerialized: firstLine.isSerialized ? 1 : 0,
+          quantity: firstLine.quantity,
+          requestedUnitOfMeasure: firstLine.requestedUnitOfMeasure,
+          requestedUnitQuantity: firstLine.requestedUnitQuantity,
+          uomConversionFactor: firstLine.uomConversionFactor,
+          baseUnitOfMeasure: firstLine.baseUnitOfMeasure,
+          externalReference,
+          note,
+          operatorName,
+          linesJson,
+          timestamp,
+        },
+      );
+    } else {
+      await this.query(
       `INSERT INTO [dbo].[inter_store_transfer_request_draft] (
         [id],
         [request_no],
@@ -7869,6 +8375,7 @@ export class MssqlStoreService {
         [external_reference],
         [note],
         [operator_name],
+        [lines_json],
         [submitted_at],
         [updated_at]
       ) VALUES (
@@ -7897,6 +8404,7 @@ export class MssqlStoreService {
         @externalReference,
         @note,
         @operatorName,
+        @linesJson,
         NULL,
         @timestamp
       )`,
@@ -7911,28 +8419,30 @@ export class MssqlStoreService {
         destinationStoreName: metadata.store_name ?? defaultStoreConfig.storeName,
         destinationLocationCode: destinationLocation.location_code,
         destinationLocationName: destinationLocation.location_name,
-        productCode: product.product_code,
-        productName: product.product_name,
-        departmentCode: product.department_code,
-        categoryCode: product.category_code,
-        subcategory: product.subcategory,
-        isSerialized: asBooleanFlag(product.is_serialized) ? 1 : 0,
-        quantity: transferUom.baseQuantity,
-        requestedUnitOfMeasure: transferUom.requestedUnitOfMeasure,
-        requestedUnitQuantity: transferUom.requestedUnitQuantity,
-        uomConversionFactor: transferUom.uomConversionFactor,
-        baseUnitOfMeasure: transferUom.baseUnitOfMeasure,
+        productCode: firstLine.productCode,
+        productName: firstLine.productName,
+        departmentCode: firstLine.departmentCode,
+        categoryCode: firstLine.categoryCode,
+        subcategory: firstLine.subcategory,
+        isSerialized: firstLine.isSerialized ? 1 : 0,
+        quantity: firstLine.quantity,
+        requestedUnitOfMeasure: firstLine.requestedUnitOfMeasure,
+        requestedUnitQuantity: firstLine.requestedUnitQuantity,
+        uomConversionFactor: firstLine.uomConversionFactor,
+        baseUnitOfMeasure: firstLine.baseUnitOfMeasure,
         externalReference,
         note,
         operatorName,
+        linesJson,
         timestamp,
       },
     );
+    }
     await this.setMetadata("last_local_write_at", timestamp);
     await this.insertRunLog({
       runKind: "LOCAL_WRITE",
       result: "SUCCESS",
-      summary: `${requestNo} was saved as a SQL Server inter-store transfer request draft.`,
+      summary: `${requestNo} was ${existingDraft ? "amended" : "saved"} as a SQL Server inter-store transfer request draft with ${lines.length} line(s).`,
       upstreamProcessed: 0,
       downstreamApplied: 0,
       startedAt: timestamp,
@@ -7940,7 +8450,7 @@ export class MssqlStoreService {
     });
 
     return {
-      message: `${requestNo} was saved locally. Submit it when the request is ready for enterprise creation.`,
+      message: `${requestNo} was ${existingDraft ? "updated" : "saved"} locally with ${lines.length} line(s). Send it when the request is ready for enterprise creation.`,
       snapshot: await this.getSyncSnapshot(),
     };
   }
@@ -7984,21 +8494,23 @@ export class MssqlStoreService {
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
     const operatorName =
       draft.operator_name || this.formatOperatorLabel(operatorSession);
-    const payload: StoreInterStoreTransferRequestedPayload = {
-      requestId: draft.id,
-      requestNo: draft.request_no,
-      storeCode,
-      terminalCode,
-      sourceLocationCode: draft.source_location_code,
-      destinationLocationCode: draft.destination_location_code,
+    const lines = readTransferRequestDraftLines(draft.lines_json, {
+      lineId: draft.id,
+      lineNo: 1,
       productCode: draft.product_code,
-      quantity: Number(asNumber(draft.requested_unit_quantity).toFixed(3)),
-      unitOfMeasure: draft.requested_unit_of_measure,
-      externalReference: draft.external_reference,
-      operatorName,
-      note: draft.note,
-      occurredAt: timestamp,
-    };
+      productName: draft.product_name,
+      departmentCode: draft.department_code,
+      departmentName: draft.department_name,
+      categoryCode: draft.category_code,
+      categoryName: draft.category_name,
+      subcategory: draft.subcategory,
+      isSerialized: asBooleanFlag(draft.is_serialized),
+      quantity: Number(asNumber(draft.quantity).toFixed(3)),
+      requestedUnitOfMeasure: draft.requested_unit_of_measure,
+      requestedUnitQuantity: Number(asNumber(draft.requested_unit_quantity).toFixed(3)),
+      uomConversionFactor: Number(asNumber(draft.uom_conversion_factor).toFixed(6)),
+      baseUnitOfMeasure: draft.base_unit_of_measure,
+    });
 
     await this.withTransaction(async (transaction) => {
       await this.query(
@@ -8011,19 +8523,39 @@ export class MssqlStoreService {
         transaction,
       );
       if (shouldQueueEnterprise) {
-        await this.insertOutboxEvent(
-          {
-            nodeCode,
-            timestamp,
-            aggregateType: "interStoreTransfer",
-            aggregateId: draft.id,
-            eventType: "inter-store-transfer.requested",
-            idempotencyKey: `${nodeCode}:interStoreTransfer:${draft.id}:requested:${timestamp}`,
-            payload,
-            recordVersion: 1,
-          },
-          transaction,
-        );
+        for (const line of lines) {
+          const payload: StoreInterStoreTransferRequestedPayload = {
+            requestId: line.lineId,
+            requestNo: draft.request_no,
+            transferBatchNo: draft.request_no,
+            lineNo: line.lineNo,
+            storeCode,
+            terminalCode,
+            sourceStoreCode: draft.source_store_code,
+            destinationLocationCode: draft.destination_location_code,
+            productCode: line.productCode,
+            quantity: line.requestedUnitQuantity,
+            unitOfMeasure: line.requestedUnitOfMeasure,
+            externalReference: draft.external_reference,
+            operatorName,
+            note: draft.note,
+            occurredAt: timestamp,
+          };
+
+          await this.insertOutboxEvent(
+            {
+              nodeCode,
+              timestamp,
+              aggregateType: "interStoreTransfer",
+              aggregateId: line.lineId,
+              eventType: "inter-store-transfer.requested",
+              idempotencyKey: `${nodeCode}:interStoreTransfer:${line.lineId}:requested`,
+              payload,
+              recordVersion: 1,
+            },
+            transaction,
+          );
+        }
       }
       await this.setMetadata("last_local_write_at", timestamp, transaction);
     });
@@ -8031,9 +8563,9 @@ export class MssqlStoreService {
       runKind: "LOCAL_WRITE",
       result: "SUCCESS",
       summary: shouldQueueEnterprise
-        ? `${draft.request_no} was submitted from SQL Server and queued upstream as an inter-store transfer request.`
+        ? `${draft.request_no} was sent from SQL Server and queued upstream as one ${lines.length}-line inter-store transfer request.`
         : `${draft.request_no} was submitted from SQL Server for standalone transfer tracking.`,
-      upstreamProcessed: shouldQueueEnterprise ? 1 : 0,
+      upstreamProcessed: shouldQueueEnterprise ? lines.length : 0,
       downstreamApplied: 0,
       startedAt: timestamp,
       finishedAt: timestamp,
@@ -8041,7 +8573,7 @@ export class MssqlStoreService {
 
     return {
       message: shouldQueueEnterprise
-        ? `${draft.request_no} was submitted and queued for enterprise creation.`
+        ? `${draft.request_no} was sent with ${lines.length} line(s) and queued for enterprise creation.`
         : `${draft.request_no} was submitted locally for standalone transfer tracking.`,
       snapshot: await this.getSyncSnapshot(),
     };
@@ -8598,6 +9130,31 @@ export class MssqlStoreService {
       input.trackInventory === false
         ? 0
         : normalizeSetupNumber(input.quantityOnHand, 0, 3);
+    const baseUnitOfMeasure =
+      optionalSetupText(input.unitOfMeasure)?.toUpperCase() ?? "EA";
+    const sellingUnits = normalizePosSellingUnits({
+      baseUnitOfMeasure,
+      serialized: input.isSerialized === true,
+      sellingUnits: input.sellingUnits?.map((unit) => ({
+        ...unit,
+        unitOfMeasureName:
+          unit.unitOfMeasureName?.trim() || unit.unitOfMeasureCode,
+        isDefault: unit.isDefault === true,
+        allowFractionalSale: unit.allowFractionalSale === true,
+        decimalPrecision: unit.decimalPrecision ?? 0,
+      })),
+    });
+    const sellingUnitPayloads = sellingUnits.map((unit) => ({
+      productVariantCode: null,
+      uomCode: unit.unitOfMeasureCode,
+      uomName: unit.unitOfMeasureName,
+      conversionFactor: unit.conversionFactor,
+      unitPrice: unit.unitPrice,
+      barcode: unit.barcode ?? null,
+      isDefault: unit.isDefault === true,
+      allowFractionalSale: unit.allowFractionalSale === true,
+      decimalPrecision: unit.decimalPrecision ?? 0,
+    }));
 
     await this.mergeRow("product_snapshot", ["product_code"], {
       id: `standalone-product-${productCode.toLowerCase()}`,
@@ -8609,7 +9166,9 @@ export class MssqlStoreService {
       department_code: optionalSetupText(input.departmentCode)?.toUpperCase() ?? null,
       category_code: optionalSetupText(input.categoryCode)?.toUpperCase() ?? null,
       subcategory: optionalSetupText(input.subcategory),
-      unit_of_measure: optionalSetupText(input.unitOfMeasure)?.toUpperCase() ?? "EA",
+      unit_of_measure: baseUnitOfMeasure,
+      base_unit_of_measure: baseUnitOfMeasure,
+      selling_units_json: JSON.stringify(sellingUnits),
       taxable: input.taxable === false ? 0 : 1,
       tax_profile_code: optionalSetupText(input.taxProfileCode)?.toUpperCase() ?? null,
       tax_profile_name: null,
@@ -8640,6 +9199,25 @@ export class MssqlStoreService {
         barcode_code: barcode,
         product_code: productCode,
         barcode_type: "LOCAL",
+        updated_at: timestamp,
+      });
+    }
+
+    await this.query(
+      `DELETE FROM [dbo].[barcode_snapshot]
+       WHERE [product_code] = @productCode
+         AND [barcode_type] LIKE N'SELLING_UOM:%'`,
+      { productCode },
+    );
+
+    for (const sellingUnit of sellingUnitPayloads) {
+      if (!sellingUnit.barcode) continue;
+
+      await this.mergeRow("barcode_snapshot", ["barcode_code"], {
+        id: `standalone-selling-uom-${productCode.toLowerCase()}-${sellingUnit.uomCode.toLowerCase()}`,
+        barcode_code: sellingUnit.barcode,
+        product_code: productCode,
+        barcode_type: `SELLING_UOM:${sellingUnit.uomCode}`,
         updated_at: timestamp,
       });
     }
@@ -9108,7 +9686,8 @@ export class MssqlStoreService {
       this.query<{ location_code: string; location_name: string }>(
         `SELECT TOP (1) [location_code], [location_name]
          FROM [dbo].[inventory_location_snapshot]
-         WHERE [location_code] = @locationCode`,
+         WHERE UPPER([location_code]) = UPPER(@locationCode)
+           AND [status] = N'ACTIVE'`,
         { locationCode },
       ),
       this.findCatalogLookup(productCode),
@@ -9268,13 +9847,17 @@ export class MssqlStoreService {
 
     const timestamp = isoNow();
     const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
-    const sessionId = randomUUID();
-    const sessionNo = buildLocalDocumentNo(
-      "CNT",
-      storeCode,
-      await this.nextSequence("stock_count_session_sequence"),
-      timestamp,
-    );
+    const sessionId = input.sessionId?.trim() || randomUUID();
+    const requestedSheetNo = input.sheetNo?.trim().toUpperCase() || null;
+    const requestedLineNo = Math.max(1, Math.trunc(input.lineNo ?? 1));
+    const sessionNo = requestedSheetNo
+      ? `${requestedSheetNo}-L${String(requestedLineNo).padStart(3, "0")}`
+      : buildLocalDocumentNo(
+          "CNT",
+          storeCode,
+          await this.nextSequence("stock_count_session_sequence"),
+          timestamp,
+        );
     const operatorName =
       input.operatorName?.trim() || this.formatOperatorLabel(operatorSession);
     const note = input.note?.trim() || null;
@@ -9283,7 +9866,33 @@ export class MssqlStoreService {
     );
 
     await this.query(
-      `INSERT INTO [dbo].[stock_count_session] (
+      `IF EXISTS (SELECT 1 FROM [dbo].[stock_count_session] WHERE [id] = @sessionId AND [status] = N'DRAFT')
+      BEGIN
+        UPDATE [dbo].[stock_count_session]
+        SET [session_no] = @sessionNo,
+            [inventory_location_code] = @locationCode,
+            [inventory_location_name] = @locationName,
+            [product_code] = @productCode,
+            [product_name] = @productName,
+            [department_code] = @departmentCode,
+            [category_code] = @categoryCode,
+            [subcategory] = @subcategory,
+            [is_serialized] = @isSerialized,
+            [previous_quantity] = @previousQuantity,
+            [counted_quantity] = @countedQuantity,
+            [variance_quantity] = @varianceQuantity,
+            [previous_serial_numbers_json] = @previousSerialNumbersJson,
+            [counted_serial_numbers_json] = @countedSerialNumbersJson,
+            [previous_batch_quantities_json] = @previousBatchQuantitiesJson,
+            [counted_batch_quantities_json] = @countedBatchQuantitiesJson,
+            [note] = @note,
+            [operator_name] = @operatorName,
+            [updated_at] = @timestamp
+        WHERE [id] = @sessionId;
+      END
+      ELSE
+      BEGIN
+      INSERT INTO [dbo].[stock_count_session] (
         [id],
         [session_no],
         [status],
@@ -9331,7 +9940,8 @@ export class MssqlStoreService {
         NULL,
         NULL,
         @timestamp
-      )`,
+      );
+      END`,
       {
         sessionId,
         sessionNo,
@@ -9976,7 +10586,15 @@ export class MssqlStoreService {
       `SELECT TOP (@limit)
         line.[product_code_snapshot] AS [product_code],
         line.[product_name_snapshot] AS [product_name],
+        line.[selling_unit_of_measure],
+        line.[base_unit_of_measure],
+        line.[uom_conversion_factor],
         SUM(CASE WHEN line.[line_intent] = N'RETURN' THEN line.[quantity] * -1 ELSE line.[quantity] END) AS [quantity],
+        SUM(CASE
+          WHEN line.[line_intent] = N'RETURN'
+            THEN (CASE WHEN line.[base_quantity] > 0 THEN line.[base_quantity] ELSE line.[quantity] END) * -1
+          ELSE CASE WHEN line.[base_quantity] > 0 THEN line.[base_quantity] ELSE line.[quantity] END
+        END) AS [base_quantity],
         SUM(CASE WHEN line.[line_intent] = N'RETURN' THEN line.[unit_price] * line.[quantity] * -1 ELSE line.[unit_price] * line.[quantity] END) AS [gross_amount],
         SUM(CASE WHEN line.[line_intent] = N'RETURN' THEN line.[discount_amount] * -1 ELSE line.[discount_amount] END) AS [discount_amount],
         SUM(CASE WHEN line.[line_intent] = N'RETURN' THEN line.[tax_amount] * -1 ELSE line.[tax_amount] END) AS [tax_amount],
@@ -9989,7 +10607,8 @@ export class MssqlStoreService {
        LEFT JOIN [dbo].[pos_shift] AS shift
          ON shift.[id] = txn.[shift_id]
        WHERE ${salesWhere.join(" AND ")}
-       GROUP BY line.[product_code_snapshot], line.[product_name_snapshot]
+       GROUP BY line.[product_code_snapshot], line.[product_name_snapshot],
+        line.[selling_unit_of_measure], line.[base_unit_of_measure], line.[uom_conversion_factor]
        ORDER BY ABS(SUM(CASE WHEN line.[line_intent] = N'RETURN' THEN line.[line_total] * -1 ELSE line.[line_total] END)) DESC,
         line.[product_name_snapshot] ASC`,
       salesParams,
@@ -10148,6 +10767,12 @@ export class MssqlStoreService {
         productCode: row.product_code,
         productName: row.product_name,
         quantity: Number(asNumber(row.quantity).toFixed(3)),
+        sellingUnitOfMeasure: row.selling_unit_of_measure,
+        baseQuantity: Number(asNumber(row.base_quantity).toFixed(3)),
+        baseUnitOfMeasure: row.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(row.uom_conversion_factor).toFixed(6),
+        ),
         grossAmount: Number(asNumber(row.gross_amount).toFixed(2)),
         discountAmount: Number(asNumber(row.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(row.tax_amount).toFixed(2)),
@@ -10738,6 +11363,12 @@ export class MssqlStoreService {
           quantityReturned: corrected.returnedQuantity,
           quantityPending: corrected.pendingQuantity,
           quantityAvailableToReturn,
+          sellingUnitOfMeasure: line.selling_unit_of_measure,
+          baseUnitOfMeasure: line.base_unit_of_measure,
+          uomConversionFactor: Number(
+            asNumber(line.uom_conversion_factor).toFixed(6),
+          ),
+          baseQuantitySold: Number(asNumber(line.base_quantity).toFixed(3)),
           unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
           taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
           lineTotal: Number(asNumber(line.line_total).toFixed(2)),
@@ -11213,6 +11844,12 @@ export class MssqlStoreService {
         variantColor: line.variant_color,
         lineNote: line.line_note,
         quantity: Number(asNumber(line.quantity).toFixed(3)),
+        sellingUnitOfMeasure: line.selling_unit_of_measure,
+        baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
+        baseUnitOfMeasure: line.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(line.uom_conversion_factor).toFixed(6),
+        ),
         unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
         discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -11330,6 +11967,12 @@ export class MssqlStoreService {
         variantColor: line.variant_color,
         lineNote: line.line_note,
         quantity: Number(asNumber(line.quantity).toFixed(3)),
+        sellingUnitOfMeasure: line.selling_unit_of_measure,
+        baseQuantity: Number(asNumber(line.base_quantity).toFixed(3)),
+        baseUnitOfMeasure: line.base_unit_of_measure,
+        uomConversionFactor: Number(
+          asNumber(line.uom_conversion_factor).toFixed(6),
+        ),
         unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
         discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
         taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -11754,9 +12397,18 @@ export class MssqlStoreService {
     input: StoreCreateSalesOrderRequest | null = {},
   ): Promise<StoreSyncActionResult> {
     input ??= {};
+    const orderType = input.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER";
     const operatorSession = await this.requireActiveOperatorSession({
-      permissionCodes: ["pos.sale.process"],
-      purpose: "creating a sales order from the active basket",
+      permissionCodes: [
+        orderType === "LAYAWAY" ? "pos.layaway.create" : "pos.sale.process",
+        ...(orderType === "LAYAWAY" && input.policyOverrideApproved
+          ? ["pos.layaway.policy.override"]
+          : []),
+      ],
+      purpose:
+        orderType === "LAYAWAY"
+          ? "creating a layaway from the active basket"
+          : "creating a sales order from the active basket",
     });
     const openShift = await this.getOpenShiftRow();
 
@@ -11966,7 +12618,87 @@ export class MssqlStoreService {
           };
     const depositAmount = preparedDepositPayments.paidAmount;
     const primaryDepositPayment = preparedDepositPayments.payments[0] ?? null;
-    const balanceAmount = Number((totalAmount - depositAmount).toFixed(2));
+    const layawayOpening =
+      orderType === "LAYAWAY"
+        ? evaluateLayawayOpening({
+            totalAmount,
+            openingPaymentAmount: depositAmount,
+            settings: await this.getLayawaySettings(),
+            capturedAt: timestamp,
+            policyOverrideApproved: input.policyOverrideApproved === true,
+          })
+        : null;
+    const paidAmount = layawayOpening?.paidAmount ?? depositAmount;
+    const balanceAmount = Number((totalAmount - paidAmount).toFixed(2));
+    const layawayExpiresAt = input.layawayExpiresAt?.trim() || null;
+
+    if (
+      layawayExpiresAt &&
+      (!Number.isFinite(Date.parse(layawayExpiresAt)) ||
+        Date.parse(layawayExpiresAt) <= Date.parse(timestamp))
+    ) {
+      throw new Error("Choose a layaway expiry date and time in the future.");
+    }
+
+    const reservationRows: NonNullable<StoreSalesOrderRecordedPayload["reservations"]> = [];
+    const pendingReservedByKey = new Map<string, number>();
+
+    if (layawayOpening?.reservationStatus === "ACTIVE") {
+      for (const line of lines) {
+        const product = await this.requireBasketProductLookup(line.product_code_snapshot);
+
+        if (!asBooleanFlag(product.track_inventory) || isServiceProductType(product.product_type)) {
+          continue;
+        }
+
+        const variant = line.product_variant_code_snapshot
+          ? await this.getMatrixVariantByCode(line.product_code_snapshot, line.product_variant_code_snapshot)
+          : null;
+        const onHandBaseQuantity = variant
+          ? asNumber(variant.quantity_on_hand)
+          : (await this.getOptionalLocationQuantity(salesOrderLocationCode, line.product_code_snapshot)) ??
+            asNumber(product.quantity_on_hand);
+        const reservedResult = await this.query<{ value: string | number }>(
+          `SELECT COALESCE(SUM([base_quantity]), 0) AS [value]
+           FROM [dbo].[sales_order_inventory_reservation]
+           WHERE [inventory_location_code] = @locationCode
+             AND [product_code] = @productCode
+             AND ((@variantCode IS NULL AND [product_variant_code] IS NULL) OR [product_variant_code] = @variantCode)
+             AND [status] = N'ACTIVE'`,
+          {
+            locationCode: salesOrderLocationCode,
+            productCode: line.product_code_snapshot,
+            variantCode: line.product_variant_code_snapshot,
+          },
+        );
+        const availableBaseQuantity = calculateLayawayAvailableBaseQuantity({
+          onHandBaseQuantity,
+          activeReservedBaseQuantity: asNumber(reservedResult.recordset[0]?.value),
+        });
+        const key = `${salesOrderLocationCode}:${line.product_code_snapshot}:${line.product_variant_code_snapshot ?? ""}`;
+        const lineBaseQuantity = Number(asNumber(line.base_quantity || line.quantity).toFixed(3));
+        const requestedBaseQuantity = Number(((pendingReservedByKey.get(key) ?? 0) + lineBaseQuantity).toFixed(3));
+
+        if (requestedBaseQuantity > availableBaseQuantity) {
+          throw new Error(`${line.product_name_snapshot} needs ${requestedBaseQuantity.toFixed(3)} available unit(s) for this layaway, but only ${availableBaseQuantity.toFixed(3)} unit(s) remain after active reservations.`);
+        }
+
+        pendingReservedByKey.set(key, requestedBaseQuantity);
+        reservationRows.push({
+          reservationId: randomUUID(),
+          salesOrderLineId: line.id,
+          inventoryLocationCode: salesOrderLocationCode,
+          productCode: line.product_code_snapshot,
+          productVariantCode: line.product_variant_code_snapshot,
+          baseUnitOfMeasure: line.base_unit_of_measure,
+          baseQuantity: lineBaseQuantity,
+          status: "ACTIVE",
+          releaseReason: null,
+          createdAt: timestamp,
+          releasedAt: null,
+        });
+      }
+    }
 
     const payload: StoreSalesOrderRecordedPayload = {
       orderId,
@@ -11978,6 +12710,7 @@ export class MssqlStoreService {
       customerId: refreshedBasket.customer_id,
       customerNo: refreshedBasket.customer_no,
       customerName: refreshedBasket.customer_name,
+      orderType,
       subtotalAmount: Number(
         asNumber(refreshedBasket.subtotal_amount).toFixed(2),
       ),
@@ -11987,12 +12720,22 @@ export class MssqlStoreService {
       taxAmount: Number(asNumber(refreshedBasket.tax_amount).toFixed(2)),
       totalAmount,
       depositAmount,
+      paidAmount,
       balanceAmount,
       depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
       depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
       depositPaymentMethod: primaryDepositPayment?.method ?? null,
       depositReference: primaryDepositPayment?.reference ?? null,
       depositPaidAt: depositAmount > 0 ? timestamp : null,
+      layawayPolicySnapshotJson: layawayOpening ? JSON.stringify(layawayOpening.policySnapshot) : null,
+      minimumDepositAmount: layawayOpening?.minimumDepositAmount ?? 0,
+      reservationStatus: layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
+      reservationCreatedAt: reservationRows.length > 0 ? timestamp : null,
+      reservationReleasedAt: null,
+      layawayExpiresAt,
+      expiredAt: null,
+      cancellationFeeAmount: 0,
+      refundedAmount: 0,
       status: "OPEN",
       operatorName,
       note,
@@ -12016,13 +12759,14 @@ export class MssqlStoreService {
         bankAccountName: payment.bankAccountName,
         amount: payment.amount,
         reference: payment.reference,
-        paymentPurpose: "SALES_ORDER_DEPOSIT",
+        paymentPurpose: orderType === "LAYAWAY" ? "LAYAWAY_DEPOSIT" : "SALES_ORDER_DEPOSIT",
         receivedShiftId: openShift.id,
         receivedShiftNo: openShift.shift_no,
         receivedTerminalCode: terminalCode,
         receivedCashierCode: operatorSession.loginId,
         receivedAt: payment.receivedAt,
       })),
+      reservations: reservationRows,
     };
 
     await this.withTransaction(async (transaction) => {
@@ -12035,15 +12779,26 @@ export class MssqlStoreService {
           [customer_id],
           [customer_no],
           [customer_name],
+          [order_type],
           [status],
           [total_amount],
           [deposit_amount],
+          [paid_amount],
           [balance_amount],
           [deposit_tender_method_code],
           [deposit_tender_method_name],
           [deposit_payment_method],
           [deposit_reference],
           [deposit_paid_at],
+          [layaway_policy_snapshot_json],
+          [minimum_deposit_amount],
+          [reservation_status],
+          [reservation_created_at],
+          [reservation_released_at],
+          [layaway_expires_at],
+          [expired_at],
+          [cancellation_fee_amount],
+          [refunded_amount],
           [operator_name],
           [note],
           [fulfilled_transaction_id],
@@ -12061,15 +12816,26 @@ export class MssqlStoreService {
           @customerId,
           @customerNo,
           @customerName,
+          @orderType,
           N'OPEN',
           @totalAmount,
           @depositAmount,
+          @paidAmount,
           @balanceAmount,
           @depositTenderMethodCode,
           @depositTenderMethodName,
           @depositPaymentMethod,
           @depositReference,
           @depositPaidAt,
+          @layawayPolicySnapshotJson,
+          @minimumDepositAmount,
+          @reservationStatus,
+          @reservationCreatedAt,
+          NULL,
+          @layawayExpiresAt,
+          NULL,
+          0,
+          0,
           @operatorName,
           @note,
           NULL,
@@ -12088,20 +12854,53 @@ export class MssqlStoreService {
           customerId: refreshedBasket.customer_id,
           customerNo: refreshedBasket.customer_no,
           customerName: refreshedBasket.customer_name,
+          orderType,
           totalAmount,
           depositAmount,
+          paidAmount,
           balanceAmount,
           depositTenderMethodCode: primaryDepositPayment?.tenderMethodCode ?? null,
           depositTenderMethodName: primaryDepositPayment?.tenderMethodName ?? null,
           depositPaymentMethod: primaryDepositPayment?.method ?? null,
           depositReference: primaryDepositPayment?.reference ?? null,
           depositPaidAt: depositAmount > 0 ? timestamp : null,
+          layawayPolicySnapshotJson: layawayOpening ? JSON.stringify(layawayOpening.policySnapshot) : null,
+          minimumDepositAmount: layawayOpening?.minimumDepositAmount ?? 0,
+          reservationStatus: layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
+          reservationCreatedAt: reservationRows.length > 0 ? timestamp : null,
+          layawayExpiresAt,
           operatorName,
           note,
           timestamp,
         },
         transaction,
       );
+
+      for (const reservation of reservationRows) {
+        await this.query(
+          `INSERT INTO [dbo].[sales_order_inventory_reservation] (
+            [id], [sales_order_id], [sales_order_line_id], [inventory_location_code],
+            [product_code], [product_variant_code], [base_unit_of_measure], [base_quantity],
+            [status], [release_reason], [created_at], [released_at], [updated_at]
+          ) VALUES (
+            @reservationId, @orderId, @salesOrderLineId, @inventoryLocationCode,
+            @productCode, @productVariantCode, @baseUnitOfMeasure, @baseQuantity,
+            N'ACTIVE', NULL, @timestamp, NULL, @timestamp
+          )`,
+          {
+            reservationId: reservation.reservationId,
+            orderId,
+            salesOrderLineId: reservation.salesOrderLineId,
+            inventoryLocationCode: reservation.inventoryLocationCode,
+            productCode: reservation.productCode,
+            productVariantCode: reservation.productVariantCode,
+            baseUnitOfMeasure: reservation.baseUnitOfMeasure,
+            baseQuantity: reservation.baseQuantity,
+            timestamp,
+          },
+          transaction,
+        );
+      }
 
       for (const payment of preparedDepositPayments.payments) {
         await this.query(
@@ -12139,7 +12938,7 @@ export class MssqlStoreService {
             @bankAccountNumber,
             @bankAccountName,
             @method,
-            N'SALES_ORDER_DEPOSIT',
+            @paymentPurpose,
             @amount,
             @reference,
             @receivedShiftId,
@@ -12161,6 +12960,7 @@ export class MssqlStoreService {
             bankAccountNumber: payment.bankAccountNumber,
             bankAccountName: payment.bankAccountName,
             method: payment.method,
+            paymentPurpose: orderType === "LAYAWAY" ? "LAYAWAY_DEPOSIT" : "SALES_ORDER_DEPOSIT",
             amount: payment.amount,
             reference: payment.reference,
             receivedShiftId: openShift.id,
@@ -12256,9 +13056,23 @@ export class MssqlStoreService {
     }
 
     await this.requireActiveOperatorSession({
-      permissionCodes: ["pos.sale.process"],
-      purpose: "fulfilling a sales order",
+      permissionCodes: [
+        order.order_type === "LAYAWAY" ? "pos.layaway.fulfil" : "pos.sale.process",
+      ],
+      purpose:
+        order.order_type === "LAYAWAY"
+          ? "fulfilling a layaway"
+          : "fulfilling a sales order",
     });
+
+    if (order.order_type === "LAYAWAY") {
+      assertLayawayFulfilmentEligible({
+        balanceAmount: asNumber(order.balance_amount),
+        policySnapshot: order.layaway_policy_snapshot_json
+          ? JSON.parse(order.layaway_policy_snapshot_json)
+          : await this.getLayawaySettings(),
+      });
+    }
 
     const basket = await this.getBasketHeader(order.source_transaction_id);
 
@@ -12295,6 +13109,269 @@ export class MssqlStoreService {
     };
   }
 
+  async receiveLayawayPayment(
+    input: StoreReceiveLayawayPaymentRequest,
+  ): Promise<StoreSyncActionResult> {
+    const order = await this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN" || order.order_type !== "LAYAWAY") {
+      throw new Error("Flash ERP could not find that open layaway in SQL Server.");
+    }
+
+    const operatorSession = await this.requireActiveOperatorSession({
+      permissionCodes: ["pos.layaway.payment.receive"],
+      purpose: "receiving a layaway installment",
+    });
+    const shift = await this.getOpenShiftRow();
+
+    if (!shift) {
+      throw new Error("Open a cashier shift before receiving a layaway payment.");
+    }
+
+    const timestamp = isoNow();
+    const requestedAmount = Number(input.payments.reduce((sum, payment) => sum + Number(payment.amount ?? 0), 0).toFixed(2));
+    const currentBalance = Number(asNumber(order.balance_amount).toFixed(2));
+
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new Error("Enter a layaway installment greater than zero.");
+    }
+    if (requestedAmount > currentBalance + 0.005) {
+      throw new Error(`The installment cannot exceed the ${currentBalance.toFixed(2)} layaway balance.`);
+    }
+
+    const preparedPayments = await this.normalizeCheckoutPayments(
+      { payments: input.payments }, requestedAmount, order.order_no, timestamp, "SALE",
+    );
+    const nextPaidAmount = Number((asNumber(order.paid_amount) + preparedPayments.paidAmount).toFixed(2));
+    const nextBalanceAmount = Number(Math.max(0, asNumber(order.total_amount) - nextPaidAmount).toFixed(2));
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const metadata = await this.metadata();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const operatorName = input.operatorName?.trim() || order.operator_name;
+    const note = input.note?.trim() || order.note;
+    const eventId = randomUUID();
+    const paymentPayloads: NonNullable<StoreSalesOrderRecordedPayload["payments"]> = preparedPayments.payments.map((payment) => ({
+      paymentId: payment.paymentId,
+      method: payment.method,
+      tenderMethodCode: payment.tenderMethodCode,
+      tenderMethodName: payment.tenderMethodName,
+      bankAccountId: payment.bankAccountId,
+      bankCode: payment.bankCode,
+      bankName: payment.bankName,
+      bankBranchCode: payment.bankBranchCode,
+      bankBranchName: payment.bankBranchName,
+      bankAccountNumber: payment.bankAccountNumber,
+      bankAccountName: payment.bankAccountName,
+      amount: payment.amount,
+      reference: payment.reference,
+      paymentPurpose: "LAYAWAY_INSTALLMENT",
+      receivedShiftId: shift.id,
+      receivedShiftNo: shift.shift_no,
+      receivedTerminalCode: this.getTerminalCode(),
+      receivedCashierCode: operatorSession.loginId,
+      receivedAt: payment.receivedAt,
+    }));
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
+      paid_amount: nextPaidAmount,
+      balance_amount: nextBalanceAmount,
+      operator_name: operatorName,
+      note,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, { payments: paymentPayloads });
+
+    await this.withTransaction(async (transaction) => {
+      for (const payment of preparedPayments.payments) {
+        await this.query(
+          `INSERT INTO [dbo].[pos_payment] (
+            [id],[pos_transaction_id],[tender_method_code],[tender_method_name],[bank_account_id],
+            [bank_code],[bank_name],[bank_branch_code],[bank_branch_name],[bank_account_number],
+            [bank_account_name],[method],[payment_purpose],[amount],[reference],[received_shift_id],
+            [received_shift_no],[received_terminal_code],[received_cashier_code],[received_at]
+          ) VALUES (
+            @paymentId,@transactionId,@tenderMethodCode,@tenderMethodName,@bankAccountId,
+            @bankCode,@bankName,@bankBranchCode,@bankBranchName,@bankAccountNumber,
+            @bankAccountName,@method,N'LAYAWAY_INSTALLMENT',@amount,@reference,@receivedShiftId,
+            @receivedShiftNo,@receivedTerminalCode,@receivedCashierCode,@receivedAt
+          )`,
+          {
+            paymentId: payment.paymentId,
+            transactionId: order.source_transaction_id,
+            tenderMethodCode: payment.tenderMethodCode,
+            tenderMethodName: payment.tenderMethodName,
+            bankAccountId: payment.bankAccountId,
+            bankCode: payment.bankCode,
+            bankName: payment.bankName,
+            bankBranchCode: payment.bankBranchCode,
+            bankBranchName: payment.bankBranchName,
+            bankAccountNumber: payment.bankAccountNumber,
+            bankAccountName: payment.bankAccountName,
+            method: payment.method,
+            amount: payment.amount,
+            reference: payment.reference,
+            receivedShiftId: shift.id,
+            receivedShiftNo: shift.shift_no,
+            receivedTerminalCode: this.getTerminalCode(),
+            receivedCashierCode: operatorSession.loginId,
+            receivedAt: payment.receivedAt,
+          },
+          transaction,
+        );
+      }
+      await this.query(
+        `UPDATE [dbo].[pos_transaction] SET [paid_amount] = @paidAmount, [updated_at] = @timestamp WHERE [id] = @transactionId`,
+        { paidAmount: nextPaidAmount, timestamp, transactionId: order.source_transaction_id },
+        transaction,
+      );
+      await this.query(
+        `UPDATE [dbo].[sales_order]
+         SET [paid_amount] = @paidAmount, [balance_amount] = @balanceAmount,
+             [operator_name] = @operatorName, [note] = @note,
+             [record_version] = @recordVersion, [updated_at] = @timestamp
+         WHERE [id] = @orderId AND [status] = N'OPEN'`,
+        { paidAmount: nextPaidAmount, balanceAmount: nextBalanceAmount, operatorName, note, recordVersion: nextRecordVersion, timestamp, orderId: order.id },
+        transaction,
+      );
+      if (!this.isStandaloneDeployment()) {
+        await this.insertOutboxEvent({
+          nodeCode,
+          timestamp,
+          aggregateType: "salesOrder",
+          aggregateId: order.id,
+          eventType: "sales-order.payment-received",
+          idempotencyKey: `${nodeCode}:salesOrder:${order.order_no}:payment:${eventId}`,
+          payload,
+          recordVersion: nextRecordVersion,
+        }, transaction);
+      }
+      await this.setMetadata("last_local_write_at", timestamp, transaction);
+    });
+
+    return {
+      message: `${preparedPayments.paidAmount.toFixed(2)} was received for ${order.order_no}; balance ${nextBalanceAmount.toFixed(2)}.`,
+      snapshot: await this.getSyncSnapshot(),
+      salesOrderNo: order.order_no,
+    };
+  }
+
+  async releaseLayawayReservation(
+    input: StoreReleaseLayawayReservationRequest,
+  ): Promise<StoreSyncActionResult> {
+    const order = await this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN" || order.order_type !== "LAYAWAY") {
+      throw new Error("Flash ERP could not find that open layaway in SQL Server.");
+    }
+    await this.requireActiveOperatorSession({ permissionCodes: ["pos.layaway.reservation.release"], purpose: "releasing a layaway stock reservation" });
+    const reason = input.reason.trim();
+
+    if (!reason) {
+      throw new Error("Enter why the layaway reservation is being released.");
+    }
+
+    const timestamp = isoNow();
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const metadata = await this.metadata();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
+      reservation_status: "RELEASED",
+      reservation_released_at: timestamp,
+      operator_name: input.operatorName?.trim() || order.operator_name,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, {
+      reservations: (await this.getSalesOrderReservationPayloads(order.id)).map((reservation) =>
+        reservation.status === "ACTIVE" ? { ...reservation, status: "RELEASED", releaseReason: reason, releasedAt: timestamp } : reservation,
+      ),
+    });
+
+    await this.withTransaction(async (transaction) => {
+      await this.query(
+        `UPDATE [dbo].[sales_order_inventory_reservation]
+         SET [status] = N'RELEASED', [release_reason] = @reason, [released_at] = @timestamp, [updated_at] = @timestamp
+         WHERE [sales_order_id] = @orderId AND [status] = N'ACTIVE'`,
+        { reason, timestamp, orderId: order.id }, transaction,
+      );
+      await this.query(
+        `UPDATE [dbo].[sales_order]
+         SET [reservation_status] = N'RELEASED', [reservation_released_at] = @timestamp,
+             [operator_name] = @operatorName, [record_version] = @recordVersion, [updated_at] = @timestamp
+         WHERE [id] = @orderId AND [status] = N'OPEN'`,
+        { timestamp, operatorName: input.operatorName?.trim() || order.operator_name, recordVersion: nextRecordVersion, orderId: order.id }, transaction,
+      );
+      if (!this.isStandaloneDeployment()) {
+        await this.insertOutboxEvent({ nodeCode, timestamp, aggregateType: "salesOrder", aggregateId: order.id, eventType: "sales-order.reservation-released", idempotencyKey: `${nodeCode}:salesOrder:${order.order_no}:reservation-released:${nextRecordVersion}`, payload, recordVersion: nextRecordVersion }, transaction);
+      }
+      await this.setMetadata("last_local_write_at", timestamp, transaction);
+    });
+
+    return { message: `${order.order_no} stock reservation was released.`, snapshot: await this.getSyncSnapshot(), salesOrderNo: order.order_no };
+  }
+
+  async expireLayaway(input: StoreExpireLayawayRequest): Promise<StoreSyncActionResult> {
+    const order = await this.getSalesOrderRow(input.orderId);
+
+    if (!order || order.status !== "OPEN" || order.order_type !== "LAYAWAY") {
+      throw new Error("Flash ERP could not find that open layaway in SQL Server.");
+    }
+    await this.requireActiveOperatorSession({ permissionCodes: ["pos.layaway.reservation.release"], purpose: "expiring a layaway" });
+    const timestamp = isoNow();
+
+    if (!order.layaway_expires_at) {
+      throw new Error(`${order.order_no} does not have an expiry date.`);
+    }
+    if (Date.parse(order.layaway_expires_at) > Date.parse(timestamp)) {
+      throw new Error(`${order.order_no} is not due to expire yet.`);
+    }
+
+    const reason = input.reason?.trim() || "Layaway expired before fulfilment.";
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const metadata = await this.metadata();
+    const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
+      status: "EXPIRED",
+      reservation_status: "EXPIRED",
+      reservation_released_at: timestamp,
+      expired_at: timestamp,
+      operator_name: input.operatorName?.trim() || order.operator_name,
+      note: reason,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, {
+      reservations: (await this.getSalesOrderReservationPayloads(order.id)).map((reservation) =>
+        reservation.status === "ACTIVE" ? { ...reservation, status: "EXPIRED", releaseReason: reason, releasedAt: timestamp } : reservation,
+      ),
+    });
+
+    await this.withTransaction(async (transaction) => {
+      await this.query(
+        `UPDATE [dbo].[sales_order_inventory_reservation]
+         SET [status] = N'EXPIRED', [release_reason] = @reason, [released_at] = @timestamp, [updated_at] = @timestamp
+         WHERE [sales_order_id] = @orderId AND [status] = N'ACTIVE'`,
+        { reason, timestamp, orderId: order.id }, transaction,
+      );
+      await this.query(
+        `UPDATE [dbo].[sales_order]
+         SET [status] = N'EXPIRED', [reservation_status] = N'EXPIRED',
+             [reservation_released_at] = @timestamp, [expired_at] = @timestamp,
+             [operator_name] = @operatorName, [note] = @reason,
+             [record_version] = @recordVersion, [updated_at] = @timestamp
+         WHERE [id] = @orderId AND [status] = N'OPEN'`,
+        { timestamp, operatorName: input.operatorName?.trim() || order.operator_name, reason, recordVersion: nextRecordVersion, orderId: order.id }, transaction,
+      );
+      await this.query(`UPDATE [dbo].[pos_transaction] SET [status] = N'CANCELLED', [updated_at] = @timestamp WHERE [id] = @transactionId`, { timestamp, transactionId: order.source_transaction_id }, transaction);
+      if (!this.isStandaloneDeployment()) {
+        await this.insertOutboxEvent({ nodeCode, timestamp, aggregateType: "salesOrder", aggregateId: order.id, eventType: "sales-order.expired", idempotencyKey: `${nodeCode}:salesOrder:${order.order_no}:expired`, payload, recordVersion: nextRecordVersion }, transaction);
+      }
+      await this.setMetadata("last_local_write_at", timestamp, transaction);
+    });
+
+    return { message: `${order.order_no} expired and its stock reservation was released.`, snapshot: await this.getSyncSnapshot(), salesOrderNo: order.order_no };
+  }
+
   async cancelSalesOrder(
     input: StoreCancelSalesOrderRequest,
   ): Promise<StoreSyncActionResult> {
@@ -12306,62 +13383,149 @@ export class MssqlStoreService {
       );
     }
 
-    await this.requireActiveOperatorSession({
-      permissionCodes: ["pos.sale.process"],
-      purpose: "cancelling a sales order",
+    const isLayaway = order.order_type === "LAYAWAY";
+    const operatorSession = await this.requireActiveOperatorSession({
+      permissionCodes: [
+        isLayaway ? "pos.layaway.cancel-refund" : "pos.sale.process",
+        ...(isLayaway && input.policyOverrideApproved ? ["pos.layaway.policy.override"] : []),
+      ],
+      purpose: isLayaway ? "cancelling and refunding a layaway" : "cancelling a sales order",
     });
-
     const activeBasketId = await this.getActiveBasketId();
     const timestamp = isoNow();
+    const cancellationAmounts = isLayaway
+      ? calculateLayawayCancellationAmounts({
+          paidAmount: asNumber(order.paid_amount),
+          policySnapshot: order.layaway_policy_snapshot_json
+            ? JSON.parse(order.layaway_policy_snapshot_json)
+            : await this.getLayawaySettings(),
+        })
+      : { cancellationFeeAmount: 0, refundAmount: 0 };
+    const refundShift = cancellationAmounts.refundAmount > 0 ? await this.getOpenShiftRow() : null;
+
+    if (cancellationAmounts.refundAmount > 0 && !refundShift) {
+      throw new Error("Open a cashier shift before refunding the layaway.");
+    }
+    if (cancellationAmounts.refundAmount > 0 && (!input.refundPayments || input.refundPayments.length === 0)) {
+      throw new Error(`Choose refund tenders totalling ${cancellationAmounts.refundAmount.toFixed(2)} before cancelling this layaway.`);
+    }
+
+    const preparedRefundPayments = cancellationAmounts.refundAmount > 0
+      ? await this.normalizeCheckoutPayments({ payments: input.refundPayments ?? [] }, cancellationAmounts.refundAmount, order.order_no, timestamp, "RETURN")
+      : { payments: [] as NormalizedCheckoutPayment[], paidAmount: 0, changeAmount: 0 };
     const metadata = await this.metadata();
-    const storeCode = metadata.store_code ?? defaultStoreConfig.storeCode;
-    const terminalCode = this.getTerminalCode();
     const nodeCode = metadata.node_code ?? defaultStoreConfig.nodeCode;
     const shouldQueueEnterprise = !this.isStandaloneDeployment();
     const operatorName = input.operatorName?.trim() || order.operator_name;
     const note = input.note?.trim() || order.note;
-    const lines = await this.getBasketLines(order.source_transaction_id);
-    const payload: StoreSalesOrderRecordedPayload = {
-      orderId: order.id,
-      orderNo: order.order_no,
-      storeCode,
-      terminalCode,
-      sourceTransactionId: order.source_transaction_id,
-      sourceTransactionNo: order.source_transaction_no,
-      customerId: order.customer_id,
-      customerNo: order.customer_no,
-      customerName: order.customer_name,
-      totalAmount: Number(asNumber(order.total_amount).toFixed(2)),
-      depositAmount: Number(asNumber(order.deposit_amount).toFixed(2)),
-      balanceAmount: Number(asNumber(order.balance_amount).toFixed(2)),
-      depositTenderMethodCode: order.deposit_tender_method_code,
-      depositTenderMethodName: order.deposit_tender_method_name,
-      depositPaymentMethod: order.deposit_payment_method,
-      depositReference: order.deposit_reference,
-      depositPaidAt: order.deposit_paid_at,
+    const nextRecordVersion = Math.max(1, asNumber(order.record_version) + 1);
+    const refundPayloads: NonNullable<StoreSalesOrderRecordedPayload["payments"]> = preparedRefundPayments.payments.map((payment) => ({
+      paymentId: payment.paymentId,
+      method: payment.method,
+      tenderMethodCode: payment.tenderMethodCode,
+      tenderMethodName: payment.tenderMethodName,
+      bankAccountId: payment.bankAccountId,
+      bankCode: payment.bankCode,
+      bankName: payment.bankName,
+      bankBranchCode: payment.bankBranchCode,
+      bankBranchName: payment.bankBranchName,
+      bankAccountNumber: payment.bankAccountNumber,
+      bankAccountName: payment.bankAccountName,
+      amount: Number((payment.amount * -1).toFixed(2)),
+      reference: payment.reference,
+      paymentPurpose: "LAYAWAY_REFUND",
+      receivedShiftId: refundShift?.id ?? null,
+      receivedShiftNo: refundShift?.shift_no ?? null,
+      receivedTerminalCode: this.getTerminalCode(),
+      receivedCashierCode: operatorSession.loginId,
+      receivedAt: payment.receivedAt,
+    }));
+    const payload = await this.buildSalesOrderLifecyclePayload({
+      ...order,
       status: "CANCELLED",
-      operatorName,
+      reservation_status: isLayaway && order.reservation_status === "ACTIVE" ? "RELEASED" : order.reservation_status,
+      reservation_released_at: isLayaway && order.reservation_status === "ACTIVE" ? timestamp : order.reservation_released_at,
+      cancellation_fee_amount: cancellationAmounts.cancellationFeeAmount,
+      refunded_amount: cancellationAmounts.refundAmount,
+      operator_name: operatorName,
       note,
-      createdAt: order.created_at,
-      fulfilledTransactionId: null,
-      fulfilledTransactionNo: null,
-      fulfilledAt: null,
-      cancelledAt: timestamp,
-      lines: this.toSalesOrderPayloadLines(lines),
-    };
+      cancelled_at: timestamp,
+      record_version: nextRecordVersion,
+      updated_at: timestamp,
+    }, {
+      payments: refundPayloads,
+      reservations: (await this.getSalesOrderReservationPayloads(order.id)).map((reservation) =>
+        isLayaway && reservation.status === "ACTIVE"
+          ? { ...reservation, status: "RELEASED", releaseReason: `Released when ${order.order_no} was cancelled.`, releasedAt: timestamp }
+          : reservation,
+      ),
+    });
 
     await this.withTransaction(async (transaction) => {
+      for (const payment of preparedRefundPayments.payments) {
+        await this.query(
+          `INSERT INTO [dbo].[pos_payment] (
+            [id],[pos_transaction_id],[tender_method_code],[tender_method_name],[bank_account_id],
+            [bank_code],[bank_name],[bank_branch_code],[bank_branch_name],[bank_account_number],
+            [bank_account_name],[method],[payment_purpose],[amount],[reference],[received_shift_id],
+            [received_shift_no],[received_terminal_code],[received_cashier_code],[received_at]
+          ) VALUES (
+            @paymentId,@transactionId,@tenderMethodCode,@tenderMethodName,@bankAccountId,
+            @bankCode,@bankName,@bankBranchCode,@bankBranchName,@bankAccountNumber,
+            @bankAccountName,@method,N'LAYAWAY_REFUND',@amount,@reference,@receivedShiftId,
+            @receivedShiftNo,@receivedTerminalCode,@receivedCashierCode,@receivedAt
+          )`,
+          {
+            paymentId: payment.paymentId,
+            transactionId: order.source_transaction_id,
+            tenderMethodCode: payment.tenderMethodCode,
+            tenderMethodName: payment.tenderMethodName,
+            bankAccountId: payment.bankAccountId,
+            bankCode: payment.bankCode,
+            bankName: payment.bankName,
+            bankBranchCode: payment.bankBranchCode,
+            bankBranchName: payment.bankBranchName,
+            bankAccountNumber: payment.bankAccountNumber,
+            bankAccountName: payment.bankAccountName,
+            method: payment.method,
+            amount: Number((payment.amount * -1).toFixed(2)),
+            reference: payment.reference,
+            receivedShiftId: refundShift?.id ?? null,
+            receivedShiftNo: refundShift?.shift_no ?? null,
+            receivedTerminalCode: this.getTerminalCode(),
+            receivedCashierCode: operatorSession.loginId,
+            receivedAt: payment.receivedAt,
+          },
+          transaction,
+        );
+      }
+      if (isLayaway) {
+        await this.query(
+          `UPDATE [dbo].[sales_order_inventory_reservation]
+           SET [status] = N'RELEASED', [release_reason] = @reason, [released_at] = @timestamp, [updated_at] = @timestamp
+           WHERE [sales_order_id] = @orderId AND [status] = N'ACTIVE'`,
+          { reason: `Released when ${order.order_no} was cancelled.`, timestamp, orderId: order.id }, transaction,
+        );
+      }
       await this.query(
         `UPDATE [dbo].[sales_order]
          SET [status] = N'CANCELLED',
+             [reservation_status] = CASE WHEN [order_type] = N'LAYAWAY' AND [reservation_status] = N'ACTIVE' THEN N'RELEASED' ELSE [reservation_status] END,
+             [reservation_released_at] = CASE WHEN [order_type] = N'LAYAWAY' AND [reservation_status] = N'ACTIVE' THEN @timestamp ELSE [reservation_released_at] END,
+             [cancellation_fee_amount] = @cancellationFeeAmount,
+             [refunded_amount] = @refundedAmount,
              [operator_name] = @operatorName,
              [note] = @note,
              [cancelled_at] = @timestamp,
+             [record_version] = @recordVersion,
              [updated_at] = @timestamp
          WHERE [id] = @orderId`,
         {
           operatorName,
           note,
+          cancellationFeeAmount: cancellationAmounts.cancellationFeeAmount,
+          refundedAmount: cancellationAmounts.refundAmount,
+          recordVersion: nextRecordVersion,
           timestamp,
           orderId: order.id,
         },
@@ -12370,9 +13534,10 @@ export class MssqlStoreService {
       await this.query(
         `UPDATE [dbo].[pos_transaction]
          SET [status] = N'CANCELLED',
+             [paid_amount] = @paidAmount,
              [updated_at] = @timestamp
          WHERE [id] = @transactionId`,
-        { timestamp, transactionId: order.source_transaction_id },
+        { paidAmount: Math.max(0, asNumber(order.paid_amount) - cancellationAmounts.refundAmount), timestamp, transactionId: order.source_transaction_id },
         transaction,
       );
 
@@ -12390,7 +13555,7 @@ export class MssqlStoreService {
             eventType: "sales-order.cancelled",
             idempotencyKey: `${nodeCode}:salesOrder:${order.order_no}:cancelled`,
             payload,
-            recordVersion: 2,
+            recordVersion: nextRecordVersion,
           },
           transaction,
         );
@@ -12412,8 +13577,11 @@ export class MssqlStoreService {
     });
 
     return {
-      message: `${order.order_no} was cancelled locally.`,
+      message: isLayaway
+        ? `${order.order_no} was cancelled; fee ${cancellationAmounts.cancellationFeeAmount.toFixed(2)}, refund ${cancellationAmounts.refundAmount.toFixed(2)}.`
+        : `${order.order_no} was cancelled locally.`,
       snapshot: await this.getSyncSnapshot(),
+      salesOrderNo: order.order_no,
     };
   }
 
@@ -13536,6 +14704,11 @@ export class MssqlStoreService {
     const requestedQuantity = Number(
       (currentQuantity + normalizedQuantity).toFixed(3),
     );
+    const uomConversionFactor = asNumber(sourceLine.uom_conversion_factor) || 1;
+    const requestedBaseQuantity = calculatePosBaseQuantity(
+      requestedQuantity,
+      uomConversionFactor,
+    );
 
     if (requestedQuantity > maxReturnQuantity) {
       throw new Error(
@@ -13546,7 +14719,7 @@ export class MssqlStoreService {
     const nextSerialNumbers = validateSerializedLineInput({
       isSerialized,
       productName: sourceLine.product_name_snapshot,
-      quantity: requestedQuantity,
+      quantity: requestedBaseQuantity,
       serialNumbers: [
         ...readSerializedLineNumbers(existingLine?.serial_numbers_json),
         ...(input.serialNumbers ?? []),
@@ -13572,6 +14745,7 @@ export class MssqlStoreService {
         `UPDATE [dbo].[pos_transaction_line]
          SET [serial_numbers_json] = @serialNumbersJson,
              [quantity] = @quantity,
+             [base_quantity] = @baseQuantity,
              [unit_price] = @unitPrice,
              [applied_promotion_code] = @appliedPromotionCode,
              [applied_promotion_name] = @appliedPromotionName,
@@ -13582,6 +14756,7 @@ export class MssqlStoreService {
         {
           serialNumbersJson: writeSerializedLineNumbers(nextSerialNumbers),
           quantity: nextAmounts.quantity,
+          baseQuantity: requestedBaseQuantity,
           unitPrice: nextAmounts.unitPrice,
           appliedPromotionCode: sourceLine.applied_promotion_code,
           appliedPromotionName: sourceLine.applied_promotion_name,
@@ -13608,9 +14783,14 @@ export class MssqlStoreService {
           [applied_promotion_code],
           [applied_promotion_name],
           [product_code_snapshot],
+          [product_variant_code_snapshot],
           [product_name_snapshot],
           [serial_numbers_json],
           [quantity],
+          [selling_unit_of_measure],
+          [base_unit_of_measure],
+          [uom_conversion_factor],
+          [base_quantity],
           [unit_price],
           [discount_amount],
           [tax_amount],
@@ -13627,9 +14807,14 @@ export class MssqlStoreService {
           @appliedPromotionCode,
           @appliedPromotionName,
           @productCode,
+          @productVariantCode,
           @productName,
           @serialNumbersJson,
           @quantity,
+          @sellingUnitOfMeasure,
+          @baseUnitOfMeasure,
+          @uomConversionFactor,
+          @baseQuantity,
           @unitPrice,
           @discountAmount,
           @taxAmount,
@@ -13646,9 +14831,17 @@ export class MssqlStoreService {
           appliedPromotionCode: sourceLine.applied_promotion_code,
           appliedPromotionName: sourceLine.applied_promotion_name,
           productCode: sourceLine.product_code_snapshot,
+          productVariantCode: sourceLine.product_variant_code_snapshot,
           productName: sourceLine.product_name_snapshot,
           serialNumbersJson: writeSerializedLineNumbers(nextSerialNumbers),
           quantity: insertedAmounts.quantity,
+          sellingUnitOfMeasure: sourceLine.selling_unit_of_measure,
+          baseUnitOfMeasure: sourceLine.base_unit_of_measure,
+          uomConversionFactor,
+          baseQuantity: calculatePosBaseQuantity(
+            normalizedQuantity,
+            uomConversionFactor,
+          ),
           unitPrice: insertedAmounts.unitPrice,
           discountAmount: insertedAmounts.discountAmount,
           taxAmount: insertedAmounts.taxAmount,
@@ -13913,6 +15106,28 @@ export class MssqlStoreService {
       );
     }
 
+    const configuredSellingUnits = parseProductSellingUnits(
+      match.selling_units_json,
+    );
+    const selectedVariantCode = selectedVariant?.variant_code ?? null;
+    const scopedSellingUnits = configuredSellingUnits.filter(
+      (unit) =>
+        (unit.productVariantCode?.trim().toUpperCase() ?? null) ===
+        (selectedVariantCode?.trim().toUpperCase() ?? null),
+    );
+    const barcodeSellingUnit = match.barcode_type?.startsWith("SELLING_UOM:")
+      ? match.barcode_type.slice("SELLING_UOM:".length)
+      : null;
+    const sellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: match.base_unit_of_measure,
+      baseUnitPrice: asNumber(selectedVariant?.unit_price ?? match.unit_price),
+      quantity: normalizedQuantity,
+      selectedUnitOfMeasure: input.sellingUnitOfMeasure ?? barcodeSellingUnit,
+      scannedBarcode: match.matched_on === "barcode" ? match.barcode_code : null,
+      sellingUnits: scopedSellingUnits,
+      serialized: asBooleanFlag(match.is_serialized),
+    });
+
     const requestedUnitPrice =
       typeof input.unitPrice === "number"
         ? Number(input.unitPrice.toFixed(2))
@@ -13931,7 +15146,7 @@ export class MssqlStoreService {
 
     const unitPrice = Number(
       asNumber(
-        requestedUnitPrice ?? selectedVariant?.unit_price ?? match.unit_price,
+        requestedUnitPrice ?? sellingUom.unitPrice,
       ).toFixed(2),
     );
     const activeBasketLines = await this.getBasketLines(basket.id);
@@ -13944,7 +15159,7 @@ export class MssqlStoreService {
           line.line_intent === lineIntent &&
           line.source_line_id === null,
       )
-      .reduce((sum, line) => sum + asNumber(line.quantity), 0);
+      .reduce((sum, line) => sum + asNumber(line.base_quantity), 0);
     const isSerialized = asBooleanFlag(match.is_serialized);
     const requestedSerialNumbers = input.serialNumbers ?? [];
     const validateSerialSelection =
@@ -13953,11 +15168,11 @@ export class MssqlStoreService {
     const nextSerialNumbers = validateSerializedLineInput({
       isSerialized: validateSerialSelection,
       productName: match.product_name,
-      quantity: normalizedQuantity,
+      quantity: sellingUom.baseQuantity,
       serialNumbers: requestedSerialNumbers,
     });
     const requestedQuantity = Number(
-      (currentBasketProductQuantity + normalizedQuantity).toFixed(3),
+      (currentBasketProductQuantity + sellingUom.baseQuantity).toFixed(3),
     );
     const availableQuantity =
       selectedVariant
@@ -14031,7 +15246,7 @@ export class MssqlStoreService {
       match.sales_location_code
         ? allocateInventoryBatchesFefo({
             productName: match.product_name,
-            quantity: normalizedQuantity,
+            quantity: sellingUom.baseQuantity,
             preferredBatchId: optionalSetupText(input.preferredBatchId),
             batches: (
               await this.query<{
@@ -14082,6 +15297,10 @@ export class MssqlStoreService {
         [serial_numbers_json],
         [batch_allocations_json],
         [quantity],
+        [selling_unit_of_measure],
+        [base_unit_of_measure],
+        [uom_conversion_factor],
+        [base_quantity],
         [unit_price],
         [discount_amount],
         [tax_amount],
@@ -14105,6 +15324,10 @@ export class MssqlStoreService {
         @serialNumbersJson,
         @batchAllocationsJson,
         @quantity,
+        @sellingUnitOfMeasure,
+        @baseUnitOfMeasure,
+        @uomConversionFactor,
+        @baseQuantity,
         @unitPrice,
         @discountAmount,
         @taxAmount,
@@ -14130,6 +15353,10 @@ export class MssqlStoreService {
           preferredBatchAllocations,
         ),
         quantity: normalizedQuantity,
+        sellingUnitOfMeasure: sellingUom.sellingUnitOfMeasure,
+        baseUnitOfMeasure: sellingUom.baseUnitOfMeasure,
+        uomConversionFactor: sellingUom.uomConversionFactor,
+        baseQuantity: sellingUom.baseQuantity,
         unitPrice,
         discountAmount: lineAmounts.discountAmount,
         taxAmount: lineAmounts.taxAmount,
@@ -14332,6 +15559,28 @@ export class MssqlStoreService {
     const product = await this.requireBasketProductLookup(
       line.product_code_snapshot,
     );
+    const selectedVariant = line.product_variant_code_snapshot
+      ? await this.getMatrixVariantByCode(
+          line.product_code_snapshot,
+          line.product_variant_code_snapshot,
+        )
+      : null;
+    const scopedSellingUnits = parseProductSellingUnits(
+      product.selling_units_json,
+    ).filter(
+      (unit) =>
+        (unit.productVariantCode?.trim().toUpperCase() ?? null) ===
+        (line.product_variant_code_snapshot?.trim().toUpperCase() ?? null),
+    );
+    const standardSellingUom = resolvePosSellingUom({
+      baseUnitOfMeasure: product.base_unit_of_measure,
+      baseUnitPrice: asNumber(selectedVariant?.unit_price ?? product.unit_price),
+      quantity: normalizedQuantity,
+      selectedUnitOfMeasure: line.selling_unit_of_measure,
+      sellingUnits: scopedSellingUnits,
+      serialized: asBooleanFlag(product.is_serialized),
+    });
+    const normalizedBaseQuantity = standardSellingUom.baseQuantity;
     const requestedUnitPrice =
       typeof input.overrideUnitPrice === "number" &&
       Number.isFinite(input.overrideUnitPrice)
@@ -14348,7 +15597,9 @@ export class MssqlStoreService {
       input.configuredDiscountRate > 0
         ? Number(input.configuredDiscountRate.toFixed(2))
         : null;
-    const standardUnitPrice = Number(asNumber(product.unit_price).toFixed(2));
+    const standardUnitPrice = Number(
+      asNumber(standardSellingUom.unitPrice).toFixed(2),
+    );
     const currentUnitPrice = Number(asNumber(line.unit_price).toFixed(2));
     const currentDiscountAmount = Number(asNumber(line.discount_amount).toFixed(2));
     const unitPrice =
@@ -14377,7 +15628,7 @@ export class MssqlStoreService {
     const nextSerialNumbers = validateSerializedLineInput({
       isSerialized: validateSerialSelection,
       productName: product.product_name,
-      quantity: normalizedQuantity,
+      quantity: normalizedBaseQuantity,
       serialNumbers: requestedSerialNumbers,
     });
 
@@ -14390,6 +15641,38 @@ export class MssqlStoreService {
           product.sales_location_code,
         ),
       });
+    }
+
+    if (
+      asBooleanFlag(product.track_inventory) &&
+      !isServiceProductType(product.product_type) &&
+      !deferInventoryValidation
+    ) {
+      const availableQuantity = asNumber(
+        selectedVariant?.quantity_on_hand ??
+          product.sales_location_quantity ??
+          product.quantity_on_hand,
+      );
+      const basketBaseQuantity = (await this.getBasketLines(basket.id))
+        .filter(
+          (candidate) =>
+            candidate.id !== line.id &&
+            candidate.product_code_snapshot === line.product_code_snapshot &&
+            (candidate.product_variant_code_snapshot ?? null) ===
+              (line.product_variant_code_snapshot ?? null) &&
+            candidate.line_intent === "SALE" &&
+            candidate.source_line_id === null,
+        )
+        .reduce(
+          (sum, candidate) => sum + asNumber(candidate.base_quantity),
+          normalizedBaseQuantity,
+        );
+
+      if (availableQuantity < basketBaseQuantity) {
+        throw new Error(
+          `Only ${Number(availableQuantity.toFixed(3))} unit(s) of ${product.product_name} are available in the local sales position.`,
+        );
+      }
     }
 
     const lineAmounts = calculateSaleLineAmounts({
@@ -14440,6 +15723,7 @@ export class MssqlStoreService {
       `UPDATE [dbo].[pos_transaction_line]
        SET [serial_numbers_json] = @serialNumbersJson,
            [quantity] = @quantity,
+           [base_quantity] = @baseQuantity,
            [unit_price] = @unitPrice,
            [applied_promotion_code] = @appliedPromotionCode,
            [applied_promotion_name] = @appliedPromotionName,
@@ -14452,6 +15736,7 @@ export class MssqlStoreService {
       {
         serialNumbersJson: writeSerializedLineNumbers(nextSerialNumbers),
         quantity: normalizedQuantity,
+        baseQuantity: normalizedBaseQuantity,
         unitPrice,
         appliedPromotionCode: nextAppliedPromotionCode,
         appliedPromotionName: nextAppliedPromotionName,
@@ -14848,7 +16133,9 @@ export class MssqlStoreService {
       const lineLocationCode = isSalesOrderFulfillment
         ? salesLocationCode
         : line.inventory_location_code ?? salesLocationCode;
-      const quantity = Number(asNumber(line.quantity).toFixed(3));
+      const quantity = Number(
+        asNumber(line.base_quantity || line.quantity).toFixed(3),
+      );
       const serialNumbers = validateSerializedLineInput({
         isSerialized: asBooleanFlag(product.is_serialized),
         productName: line.product_name_snapshot,
@@ -14995,7 +16282,13 @@ export class MssqlStoreService {
           variantAttributesSnapshot: line.variant_attributes_snapshot,
           lineNote: line.line_note,
           serialNumbers,
-          quantity,
+          quantity: Number(asNumber(line.quantity).toFixed(3)),
+          sellingUnitOfMeasure: line.selling_unit_of_measure,
+          baseUnitOfMeasure: line.base_unit_of_measure,
+          uomConversionFactor: Number(
+            asNumber(line.uom_conversion_factor).toFixed(6),
+          ),
+          baseQuantity: quantity,
           unitPrice: Number(asNumber(line.unit_price).toFixed(2)),
           discountAmount: Number(asNumber(line.discount_amount).toFixed(2)),
           taxAmount: Number(asNumber(line.tax_amount).toFixed(2)),
@@ -15468,6 +16761,11 @@ export class MssqlStoreService {
       const salesOrder = openSalesOrder;
 
       if (salesOrder) {
+        const fulfilledReservations = (await this.getSalesOrderReservationPayloads(salesOrder.id)).map((reservation) =>
+          reservation.status === "ACTIVE"
+            ? { ...reservation, status: "CONSUMED" as const, releaseReason: `Consumed by ${refreshedBasket.transaction_no}.`, releasedAt: timestamp }
+            : reservation,
+        );
         const salesOrderPayload: StoreSalesOrderRecordedPayload = {
           orderId: salesOrder.id,
           orderNo: salesOrder.order_no,
@@ -15478,14 +16776,31 @@ export class MssqlStoreService {
           customerId: salesOrder.customer_id,
           customerNo: salesOrder.customer_no,
           customerName: salesOrder.customer_name,
+          orderType: salesOrder.order_type,
           totalAmount: Number(asNumber(salesOrder.total_amount).toFixed(2)),
           depositAmount: Number(asNumber(salesOrder.deposit_amount).toFixed(2)),
+          paidAmount: Number(asNumber(salesOrder.total_amount).toFixed(2)),
           balanceAmount: 0,
           depositTenderMethodCode: salesOrder.deposit_tender_method_code,
           depositTenderMethodName: salesOrder.deposit_tender_method_name,
           depositPaymentMethod: salesOrder.deposit_payment_method,
           depositReference: salesOrder.deposit_reference,
           depositPaidAt: salesOrder.deposit_paid_at,
+          layawayPolicySnapshotJson: salesOrder.layaway_policy_snapshot_json,
+          minimumDepositAmount: Number(asNumber(salesOrder.minimum_deposit_amount).toFixed(2)),
+          reservationStatus:
+            salesOrder.order_type === "LAYAWAY" && salesOrder.reservation_status === "ACTIVE"
+              ? "CONSUMED"
+              : salesOrder.reservation_status,
+          reservationCreatedAt: salesOrder.reservation_created_at,
+          reservationReleasedAt:
+            salesOrder.order_type === "LAYAWAY" && salesOrder.reservation_status === "ACTIVE"
+              ? timestamp
+              : salesOrder.reservation_released_at,
+          layawayExpiresAt: salesOrder.layaway_expires_at,
+          expiredAt: salesOrder.expired_at,
+          cancellationFeeAmount: Number(asNumber(salesOrder.cancellation_fee_amount).toFixed(2)),
+          refundedAmount: Number(asNumber(salesOrder.refunded_amount).toFixed(2)),
           status: "FULFILLED",
           operatorName: salesOrder.operator_name,
           note: salesOrder.note,
@@ -15495,15 +16810,29 @@ export class MssqlStoreService {
           fulfilledAt: timestamp,
           cancelledAt: null,
           lines: this.toSalesOrderPayloadLines(lines),
+          reservations: fulfilledReservations,
         };
+
+        await this.query(
+          `UPDATE [dbo].[sales_order_inventory_reservation]
+           SET [status] = N'CONSUMED', [release_reason] = @reason,
+               [released_at] = @timestamp, [updated_at] = @timestamp
+           WHERE [sales_order_id] = @orderId AND [status] = N'ACTIVE'`,
+          { reason: `Consumed by ${refreshedBasket.transaction_no}.`, timestamp, orderId: salesOrder.id },
+          transaction,
+        );
 
         await this.query(
           `UPDATE [dbo].[sales_order]
            SET [status] = N'FULFILLED',
+               [paid_amount] = [total_amount],
                [balance_amount] = 0,
+               [reservation_status] = CASE WHEN [reservation_status] = N'ACTIVE' THEN N'CONSUMED' ELSE [reservation_status] END,
+               [reservation_released_at] = CASE WHEN [reservation_status] = N'ACTIVE' THEN @timestamp ELSE [reservation_released_at] END,
                [fulfilled_transaction_id] = @transactionId,
                [fulfilled_transaction_no] = @transactionNo,
                [fulfilled_at] = @timestamp,
+               [record_version] = [record_version] + 1,
                [updated_at] = @timestamp
            WHERE [id] = @orderId`,
           {
@@ -15525,7 +16854,7 @@ export class MssqlStoreService {
               eventType: "sales-order.fulfilled",
               idempotencyKey: `${nodeCode}:salesOrder:${salesOrder.order_no}:fulfilled`,
               payload: salesOrderPayload,
-              recordVersion: 2,
+              recordVersion: Math.max(1, asNumber(salesOrder.record_version) + 1),
             },
             transaction,
           );
@@ -15633,6 +16962,7 @@ export class MssqlStoreService {
       purpose: "issuing an inter-store transfer",
     });
     const transferId = input.transferId.trim();
+    const sourceLocationCode = input.sourceLocationCode.trim();
     const quantity = Number(Number(input.quantity).toFixed(3));
     const serialNumbers = normalizeSerialNumbers(input.serialNumbers);
 
@@ -15645,6 +16975,12 @@ export class MssqlStoreService {
     if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new Error(
         "Enter an issued quantity greater than zero before syncing the transfer.",
+      );
+    }
+
+    if (!sourceLocationCode) {
+      throw new Error(
+        "Select the source shop dispatch location before issuing stock.",
       );
     }
 
@@ -15678,6 +17014,35 @@ export class MssqlStoreService {
         );
       }
 
+      const sourceLocationResult = await this.query<{
+        location_code: string;
+        location_name: string;
+      }>(
+        `SELECT TOP (1) [location_code], [location_name]
+         FROM [dbo].[inventory_location_snapshot]
+         WHERE UPPER([location_code]) = UPPER(@sourceLocationCode)
+           AND [status] = N'ACTIVE'`,
+        { sourceLocationCode },
+        transaction,
+      );
+      const sourceLocation = sourceLocationResult.recordset[0] ?? null;
+
+      if (!sourceLocation) {
+        throw new Error(
+          `Flash ERP could not find active dispatch location "${sourceLocationCode}" in this shop.`,
+        );
+      }
+
+      if (
+        asNumber(transfer.issued_quantity) > 0 &&
+        transfer.source_location_code.toUpperCase() !==
+          sourceLocation.location_code.toUpperCase()
+      ) {
+        throw new Error(
+          `${transfer.transfer_no} has already been partly issued from ${transfer.source_location_name}. Continue issuing from the same location.`,
+        );
+      }
+
       const outstandingIssueQuantity = Number(
         asNumber(transfer.outstanding_issue_quantity).toFixed(3),
       );
@@ -15697,14 +17062,14 @@ export class MssqlStoreService {
       }
 
       const sourceLocationQuantity = await this.getLocationQuantity(
-        transfer.source_location_code,
+        sourceLocation.location_code,
         transfer.product_code,
         transaction,
       );
 
       if (quantity - sourceLocationQuantity > 0.0001) {
         throw new Error(
-          `Only ${sourceLocationQuantity.toFixed(3)} unit(s) of ${transfer.product_name} are available in ${transfer.source_location_code}.`,
+          `Only ${sourceLocationQuantity.toFixed(3)} unit(s) of ${transfer.product_name} are available in ${sourceLocation.location_name}.`,
         );
       }
 
@@ -15726,7 +17091,7 @@ export class MssqlStoreService {
           selectedSerialNumbers: serialNumbers,
           allowedSerialNumbers: await this.listAvailableRegistrySerialNumbers(
             transfer.product_code,
-            transfer.source_location_code,
+            sourceLocation.location_code,
             transaction,
           ),
         });
@@ -15757,7 +17122,7 @@ export class MssqlStoreService {
                    AND [quantity_on_hand] > 0
                  ORDER BY [expiry_date] ASC, [manufactured_at] ASC, [batch_no] ASC`,
                 {
-                  locationCode: transfer.source_location_code,
+                  locationCode: sourceLocation.location_code,
                   productCode: transfer.product_code,
                 },
                 transaction,
@@ -15841,7 +17206,7 @@ export class MssqlStoreService {
       ];
       const issueNote =
         input.note?.trim() ||
-        `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${transfer.source_location_code}.`;
+        `Issued ${quantity.toFixed(3)} unit(s) of ${transfer.product_name} from ${sourceLocation.location_name}.`;
       const operatorName =
         input.operatorName?.trim() || this.formatOperatorLabel(operatorSession);
 
@@ -15854,7 +17219,7 @@ export class MssqlStoreService {
         transaction,
       );
       await this.applyLocationBalanceDelta({
-        locationCode: transfer.source_location_code,
+        locationCode: sourceLocation.location_code,
         productCode: transfer.product_code,
         delta: quantity * -1,
         updatedAt: timestamp,
@@ -15881,6 +17246,8 @@ export class MssqlStoreService {
              [issue_note] = @issueNote,
              [issue_operator_name] = @operatorName,
              [source_node_code] = @nodeCode,
+             [source_location_code] = @sourceLocationCode,
+             [source_location_name] = @sourceLocationName,
              [issued_at] = @timestamp,
              [updated_at] = @timestamp
          WHERE [id] = @transferId`,
@@ -15904,6 +17271,8 @@ export class MssqlStoreService {
           issueNote,
           operatorName,
           nodeCode,
+          sourceLocationCode: sourceLocation.location_code,
+          sourceLocationName: sourceLocation.location_name,
           timestamp,
           transferId: transfer.id,
         },
@@ -15915,7 +17284,7 @@ export class MssqlStoreService {
         transferNo: transfer.transfer_no,
         storeCode,
         terminalCode,
-        sourceLocationCode: transfer.source_location_code,
+        sourceLocationCode: sourceLocation.location_code,
         destinationLocationCode: transfer.destination_location_code,
         productCode: transfer.product_code,
         quantity,
@@ -18538,6 +19907,22 @@ export class MssqlStoreService {
     const acknowledgedDownstreamIdsForPush = [
       ...new Set([...acknowledgedDownstreamIds, ...appliedDownstreamIds]),
     ];
+    const failedDownstreamResult = await this.query<{
+      eventId: string;
+      status: "FAILED" | "DEAD_LETTER";
+      errorMessage: string;
+      failedAt: string;
+    }>(
+      `SELECT TOP (100)
+         [id] AS [eventId],
+         [status],
+         [error_message] AS [errorMessage],
+         COALESCE([applied_at], [received_at]) AS [failedAt]
+       FROM [dbo].[sync_inbox]
+       WHERE [status] IN (N'FAILED', N'DEAD_LETTER')
+         AND [error_message] IS NOT NULL
+       ORDER BY [received_at] ASC`,
+    );
     const pushPayload: StoreNodePushRequest = {
       sourceNodeCode: nodeCode,
       sentAt: pushStartedAt,
@@ -18547,6 +19932,12 @@ export class MssqlStoreService {
       clientStartedAt: startedAt,
       upstreamEvents: upstreamRows.map((row) => this.toSyncEnvelope(row, nodeCode)),
       acknowledgedDownstreamEventIds: acknowledgedDownstreamIdsForPush,
+      failedDownstreamEvents: failedDownstreamResult.recordset.map((event) => ({
+        eventId: event.eventId,
+        status: event.status,
+        errorMessage: event.errorMessage,
+        failedAt: event.failedAt,
+      })),
       telemetry: await this.buildStoreNodeTelemetry(),
     };
 
@@ -18635,7 +20026,20 @@ export class MssqlStoreService {
        WHERE [status] IN (N'PENDING', N'IN_FLIGHT', N'FAILED')
          AND [attempt_count] < @maxAttempts
          AND ([next_retry_at] IS NULL OR [next_retry_at] <= @now)
-       ORDER BY [created_at] ASC, [record_version] ASC, [id] ASC`,
+       ORDER BY CASE [aggregate_type]
+         WHEN N'interStoreTransfer' THEN 0
+         WHEN N'posTransaction' THEN 1
+         WHEN N'salesOrder' THEN 1
+         WHEN N'inventoryLedgerEntry' THEN 2
+         WHEN N'goodsReceipt' THEN 2
+         WHEN N'supplierReturn' THEN 2
+         WHEN N'stockCountSession' THEN 2
+         WHEN N'customerAccountEntry' THEN 3
+         WHEN N'eodReconciliation' THEN 3
+         WHEN N'bankingDeposit' THEN 3
+         WHEN N'storeExpense' THEN 3
+         ELSE 4
+       END, [created_at] ASC, [record_version] ASC, [id] ASC`,
       { limit, maxAttempts: MAX_SYNC_RETRY_ATTEMPTS, now: isoNow() },
     );
 
@@ -19881,6 +21285,9 @@ export class MssqlStoreService {
               typeof variant.unitPrice === "number",
           )
         : [];
+      const sellingUnits = normalizePublishedSellingUnits(
+        productPayload.sellingUnits,
+      );
       const nextQuantity =
         matrixVariants.length > 0
           ? matrixVariants.reduce(
@@ -19912,6 +21319,7 @@ export class MssqlStoreService {
              @unitOfMeasure AS [unit_of_measure],
              @baseUnitOfMeasure AS [base_unit_of_measure],
              @uomConversionsJson AS [uom_conversions_json],
+             @sellingUnitsJson AS [selling_units_json],
              @taxable AS [taxable],
              @taxProfileCode AS [tax_profile_code],
              @taxProfileName AS [tax_profile_name],
@@ -19945,6 +21353,7 @@ export class MssqlStoreService {
            [unit_of_measure] = source.[unit_of_measure],
            [base_unit_of_measure] = source.[base_unit_of_measure],
            [uom_conversions_json] = source.[uom_conversions_json],
+           [selling_units_json] = source.[selling_units_json],
            [taxable] = source.[taxable],
            [tax_profile_code] = source.[tax_profile_code],
            [tax_profile_name] = source.[tax_profile_name],
@@ -19968,7 +21377,7 @@ export class MssqlStoreService {
          WHEN NOT MATCHED THEN INSERT (
            [id], [product_code], [product_name], [product_type], [short_name], [description],
            [primary_image_url], [department_code], [category_code], [subcategory],
-           [unit_of_measure], [base_unit_of_measure], [uom_conversions_json], [taxable], [tax_profile_code], [tax_profile_name],
+           [unit_of_measure], [base_unit_of_measure], [uom_conversions_json], [selling_units_json], [taxable], [tax_profile_code], [tax_profile_name],
            [tax_rate_percent], [tax_inclusive], [track_inventory], [track_expiry], [shelf_life_days], [is_serialized],
            [track_size], [track_color], [must_enter_price_at_pos], [min_stock_level], [reorder_point],
            [safety_stock_level], [catalog_membership_active], [catalog_sort_order],
@@ -19977,7 +21386,7 @@ export class MssqlStoreService {
            source.[id], source.[product_code], source.[product_name],
            source.[product_type], source.[short_name], source.[description], source.[primary_image_url],
            source.[department_code], source.[category_code], source.[subcategory],
-           source.[unit_of_measure], source.[base_unit_of_measure], source.[uom_conversions_json], source.[taxable], source.[tax_profile_code],
+           source.[unit_of_measure], source.[base_unit_of_measure], source.[uom_conversions_json], source.[selling_units_json], source.[taxable], source.[tax_profile_code],
            source.[tax_profile_name], source.[tax_rate_percent],
            source.[tax_inclusive], source.[track_inventory], source.[track_expiry], source.[shelf_life_days], source.[is_serialized],
            source.[track_size], source.[track_color],
@@ -20001,6 +21410,7 @@ export class MssqlStoreService {
           baseUnitOfMeasure:
             productPayload.baseUnitOfMeasure ?? productPayload.unitOfMeasure ?? "EA",
           uomConversionsJson: JSON.stringify(productPayload.uomConversions ?? []),
+          sellingUnitsJson: JSON.stringify(sellingUnits),
           taxable: productPayload.taxable === false ? 0 : 1,
           taxProfileCode: productPayload.taxProfileCode ?? null,
           taxProfileName: productPayload.taxProfileName ?? null,
@@ -20086,6 +21496,40 @@ export class MssqlStoreService {
             attributesJson: writeMatrixVariantAttributes(
               Array.isArray(variant.attributes) ? variant.attributes : [],
             ),
+            updatedAt: appliedAt,
+          },
+          runner,
+        );
+      }
+
+      await this.query(
+        `DELETE FROM [dbo].[barcode_snapshot]
+         WHERE [product_code] = @productCode
+           AND [barcode_type] LIKE N'SELLING_UOM:%'`,
+        { productCode: productPayload.productCode },
+        runner,
+      );
+
+      for (const sellingUnit of sellingUnits) {
+        if (!sellingUnit.barcode?.trim()) continue;
+
+        await this.query(
+          `MERGE [dbo].[barcode_snapshot] AS target
+           USING (SELECT @barcodeCode AS [barcode_code]) AS source
+           ON target.[barcode_code] = source.[barcode_code]
+           WHEN MATCHED THEN UPDATE SET
+             [product_code] = @productCode,
+             [barcode_type] = @barcodeType,
+             [updated_at] = @updatedAt
+           WHEN NOT MATCHED THEN INSERT
+             ([id], [barcode_code], [product_code], [barcode_type], [updated_at])
+           VALUES
+             (@id, @barcodeCode, @productCode, @barcodeType, @updatedAt);`,
+          {
+            id: randomUUID(),
+            barcodeCode: sellingUnit.barcode.trim(),
+            productCode: productPayload.productCode,
+            barcodeType: `SELLING_UOM:${sellingUnit.unitOfMeasureCode}`,
             updatedAt: appliedAt,
           },
           runner,

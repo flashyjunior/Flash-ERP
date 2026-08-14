@@ -34,6 +34,8 @@ type InventoryRiskRow = EnterpriseReportingDashboardData["inventoryRiskRows"][nu
 type PromotionRow = EnterpriseReportingDashboardData["promotionRows"][number];
 type ExceptionRow = EnterpriseReportingDashboardData["exceptionRows"][number];
 type SalesOrderRow = EnterpriseReportingDashboardData["salesOrderRows"][number];
+type LayawayRow = EnterpriseReportingDashboardData["layawayRows"][number];
+type LayawayPaymentRow = EnterpriseReportingDashboardData["layawayPaymentRows"][number];
 type CloseoutRow = EnterpriseReportingDashboardData["closeoutRows"][number];
 type TenderReportRow = EnterpriseReportingDashboardData["tenderReportRows"][number];
 type ReceiptReportRow = EnterpriseReportingDashboardData["receiptReportRows"][number];
@@ -78,6 +80,8 @@ type ReportId =
   | "expenseTracking"
   | "storePerformance"
   | "salesOrders"
+  | "layawayAgeing"
+  | "layawayPayments"
   | "closeouts"
   | "cashierVariance"
   | "purchaseOrders"
@@ -142,6 +146,8 @@ const reportIds: ReportId[] = [
   "expenseTracking",
   "storePerformance",
   "salesOrders",
+  "layawayAgeing",
+  "layawayPayments",
   "closeouts",
   "cashierVariance",
   "purchaseOrders",
@@ -189,6 +195,8 @@ const reportsWithStoreScope = new Set<ReportId>([
   "expenseTracking",
   "storePerformance",
   "salesOrders",
+  "layawayAgeing",
+  "layawayPayments",
   "closeouts",
   "cashierVariance",
   "purchaseOrders",
@@ -715,6 +723,53 @@ const salesOrderFilter: FilterFn<SalesOrderRow> = (row, _columnId, filterValue) 
     row.original.sourceTransactionNo,
     row.original.status,
     row.original.fulfilledTransactionNo ?? ""
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
+};
+
+const layawayFilter: FilterFn<LayawayRow> = (row, _columnId, filterValue) => {
+  const query = String(filterValue ?? "").trim().toLowerCase();
+
+  if (!query) {
+    return true;
+  }
+
+  return [
+    row.original.orderNo,
+    row.original.store,
+    row.original.storeCode,
+    row.original.customerNo ?? "",
+    row.original.customerName ?? "",
+    row.original.status,
+    row.original.reservationStatus,
+    row.original.ageingBucket,
+    row.original.operatorName ?? ""
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
+};
+
+const layawayPaymentFilter: FilterFn<LayawayPaymentRow> = (row, _columnId, filterValue) => {
+  const query = String(filterValue ?? "").trim().toLowerCase();
+
+  if (!query) {
+    return true;
+  }
+
+  return [
+    row.original.orderNo,
+    row.original.store,
+    row.original.storeCode,
+    row.original.customerName ?? "",
+    row.original.paymentPurpose,
+    row.original.tenderName,
+    row.original.reference ?? "",
+    row.original.shiftNo ?? "",
+    row.original.terminalCode ?? "",
+    row.original.cashierCode ?? ""
   ]
     .join(" ")
     .toLowerCase()
@@ -1742,6 +1797,140 @@ export function EnterpriseReportingDashboard({
         meta: {
           disableTruncate: true
         }
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const layawayColumns = useMemo<ColumnDef<LayawayRow>[]>(
+    () => [
+      {
+        accessorKey: "orderNo",
+        header: "Layaway",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.orderNo}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.customerName ?? row.original.customerNo ?? "Customer"}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "store",
+        header: "Store"
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <StatusBadge
+            label={row.original.status}
+            tone={
+              row.original.status === "OPEN"
+                ? "warning"
+                : row.original.status === "FULFILLED"
+                  ? "success"
+                  : "default"
+            }
+          />
+        )
+      },
+      {
+        accessorKey: "balanceAmount",
+        header: "Outstanding",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-medium text-stone-900">
+              {currencyFormatter.format(row.original.balanceAmount)}
+            </p>
+            <p className="text-xs text-stone-500">
+              Paid {currencyFormatter.format(row.original.paidAmount)} of {currencyFormatter.format(row.original.totalAmount)}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "ageDays",
+        header: "Ageing",
+        cell: ({ row }) => `${row.original.ageingBucket} (${row.original.ageDays}d)`
+      },
+      {
+        accessorKey: "reservationStatus",
+        header: "Reservation",
+        cell: ({ row }) => (
+          <div>
+            <p>{row.original.reservationStatus}</p>
+            <p className="text-xs text-stone-500">{row.original.reservedBaseQuantity} base unit(s)</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "refundedAmount",
+        header: "Cancel / Refund",
+        cell: ({ row }) => (
+          <div>
+            <p>{currencyFormatter.format(row.original.refundedAmount)} refunded</p>
+            <p className="text-xs text-stone-500">
+              {currencyFormatter.format(row.original.cancellationFeeAmount)} fee
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "createdAtLabel",
+        header: "Created",
+        cell: ({ row }) => renderTimestamp(row.original.createdAt, row.original.createdAtLabel),
+        meta: { disableTruncate: true }
+      }
+    ],
+    [currencyFormatter]
+  );
+
+  const layawayPaymentColumns = useMemo<ColumnDef<LayawayPaymentRow>[]>(
+    () => [
+      {
+        accessorKey: "orderNo",
+        header: "Layaway",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.orderNo}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.customerName ?? "Customer"}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      { accessorKey: "store", header: "Store" },
+      { accessorKey: "paymentPurpose", header: "Purpose" },
+      { accessorKey: "tenderName", header: "Tender" },
+      {
+        accessorKey: "amount",
+        header: "Amount",
+        cell: ({ row }) => currencyFormatter.format(row.original.amount)
+      },
+      {
+        accessorKey: "cashierCode",
+        header: "Received by",
+        cell: ({ row }) => (
+          <div>
+            <p>{row.original.cashierCode ?? "Unassigned"}</p>
+            <p className="text-xs text-stone-500">
+              {[row.original.shiftNo, row.original.terminalCode].filter(Boolean).join(" / ") || "No shift"}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      { accessorKey: "reference", header: "Reference" },
+      {
+        accessorKey: "receivedAtLabel",
+        header: "Received",
+        cell: ({ row }) => renderTimestamp(row.original.receivedAt, row.original.receivedAtLabel),
+        meta: { disableTruncate: true }
       }
     ],
     [currencyFormatter]
@@ -2861,6 +3050,18 @@ export function EnterpriseReportingDashboard({
             rowCount: dashboard.salesOrderRows.length,
           },
           {
+            id: "layawayAgeing",
+            label: "Layaway ageing",
+            description: "Outstanding balances, stock reservations, ageing, cancellations, and refunds.",
+            rowCount: dashboard.layawayRows.length,
+          },
+          {
+            id: "layawayPayments",
+            label: "Layaway payments",
+            description: "Deposits, installments, and refunds by tender, cashier, terminal, and shift.",
+            rowCount: dashboard.layawayPaymentRows.length,
+          },
+          {
             id: "closeouts",
             label: "Cash closeouts",
             description: "Declared, banked, and remaining store cash.",
@@ -3003,6 +3204,10 @@ export function EnterpriseReportingDashboard({
         return buildChoiceOptions(dashboard.slowMovingItemRows.map((row) => row.riskBand));
       case "salesOrders":
         return buildChoiceOptions(dashboard.salesOrderRows.map((row) => row.status));
+      case "layawayAgeing":
+        return buildChoiceOptions(
+          dashboard.layawayRows.flatMap((row) => [row.status, row.reservationStatus, row.ageingBucket])
+        );
       case "purchaseOrders":
         return buildChoiceOptions(dashboard.purchaseOrderReportRows.map((row) => row.status));
       case "suppliers":
@@ -3055,6 +3260,12 @@ export function EnterpriseReportingDashboard({
         );
       case "itemSales":
         return buildChoiceOptions(dashboard.itemSalesRows.map((row) => row.customerName));
+      case "layawayAgeing":
+        return buildChoiceOptions(
+          dashboard.layawayRows.flatMap((row) => [row.customerNo, row.customerName])
+        );
+      case "layawayPayments":
+        return buildChoiceOptions(dashboard.layawayPaymentRows.map((row) => row.customerName));
       default:
         return [];
     }
@@ -3162,6 +3373,10 @@ export function EnterpriseReportingDashboard({
       return buildChoiceOptions(dashboard.receiptReportRows.map((row) => row.tenderSummary));
     }
 
+    if (reportId === "layawayPayments") {
+      return buildChoiceOptions(dashboard.layawayPaymentRows.map((row) => row.tenderName));
+    }
+
     return [];
   }
 
@@ -3187,6 +3402,8 @@ export function EnterpriseReportingDashboard({
             ...dashboard.closeoutRows.map((row) => row.cashierCode)
           ]
         );
+      case "layawayPayments":
+        return buildChoiceOptions(dashboard.layawayPaymentRows.map((row) => row.cashierCode));
       default:
         return [];
     }
@@ -3886,6 +4103,45 @@ export function EnterpriseReportingDashboard({
             globalFilterFn={salesOrderFilter}
             initialPageSize={12}
             searchPlaceholder="Search orders, stores, customers, or basket references"
+          />
+        );
+      case "layawayAgeing":
+        return (
+          <SharedDataGrid
+            columns={layawayColumns}
+            data={dashboard.layawayRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeCode, row.store]) &&
+                matchesDate(row.createdAt) &&
+                matchesChoice(filters.status, [row.status, row.reservationStatus, row.ageingBucket]) &&
+                matchesChoice(filters.customer, [row.customerNo, row.customerName])
+            )}
+            emptyLabel="No layaway rows are available for this report."
+            exportFileName="flash-erp-layaway-ageing"
+            globalFilterFn={layawayFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "ageDays", desc: true }]}
+            searchPlaceholder="Search layaways, customers, stores, status, or ageing"
+          />
+        );
+      case "layawayPayments":
+        return (
+          <SharedDataGrid
+            columns={layawayPaymentColumns}
+            data={dashboard.layawayPaymentRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeCode, row.store]) &&
+                matchesDate(row.receivedAt) &&
+                matchesChoice(filters.customer, [row.customerName]) &&
+                matchesChoice(filters.tender, [row.tenderName, row.paymentPurpose]) &&
+                matchesChoice(filters.cashier, [row.cashierCode, row.shiftNo, row.terminalCode])
+            )}
+            emptyLabel="No layaway payment rows are available for this report."
+            exportFileName="flash-erp-layaway-payments"
+            globalFilterFn={layawayPaymentFilter}
+            initialPageSize={12}
+            initialSorting={[{ id: "receivedAt", desc: true }]}
+            searchPlaceholder="Search layaways, tenders, references, cashiers, shifts, or terminals"
           />
         );
       case "closeouts":
