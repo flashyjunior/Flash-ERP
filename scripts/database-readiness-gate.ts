@@ -10,9 +10,23 @@ const readinessErrorCode = "ENTERPRISE_DATABASE_SCHEMA_NOT_READY";
 const requiredMigrationNames = [
   "20260522000000_init_sqlserver",
   "20260522021500_add_relation_indexes",
-  "20260522043000_widen_receipt_template_html"
+  "20260522043000_widen_receipt_template_html",
+  "20260712000000_stock_update_confirmation_policy",
+  "20260813010000_enterprise_capacity_idempotency",
+  "20260814010000_alternate_uom_selling",
+  "20260814020000_layaway_lifecycle",
+  "20260814030000_ecommerce_layaway",
+  "20260814040000_sync_downstream_failure_details",
+  "20260814050000_sqlserver_schema_reconciliation"
 ];
-const requiredTables = ["GlAccount", "GlJournalEntry", "GlJournalLine", "OperatingExpense"];
+const requiredTables = [
+  "GlAccount",
+  "GlJournalEntry",
+  "GlJournalLine",
+  "OperatingExpense",
+  "StoreProductSellingUnit",
+  "SalesOrderInventoryReservation"
+];
 const requiredColumns = [
   { tableName: "TenderMethod", columnName: "gatewayProvider" },
   { tableName: "TenderMethod", columnName: "gatewayMode" },
@@ -29,7 +43,47 @@ const requiredColumns = [
   { tableName: "Store", columnName: "accountPaymentReceiptTemplateHtml" },
   { tableName: "OperatingExpense", columnName: "expenseNo" },
   { tableName: "OperatingExpense", columnName: "expenseDate" },
-  { tableName: "OperatingExpense", columnName: "status" }
+  { tableName: "OperatingExpense", columnName: "status" },
+  { tableName: "EcommerceOrder", columnName: "checkoutRequestKey" },
+  { tableName: "EcommerceOrder", columnName: "checkoutRequestHash" },
+  { tableName: "EcommerceOrder", columnName: "layawayDepositAmount" },
+  { tableName: "EcommercePayment", columnName: "initializationRequestKey" },
+  { tableName: "EcommercePayment", columnName: "initializationRequestHash" },
+  { tableName: "RetailOrg", columnName: "stockUpdateMode" },
+  { tableName: "Store", columnName: "stockUpdateMode" },
+  { tableName: "Store", columnName: "ecommerceLayawayEnabled" },
+  { tableName: "GoodsReceipt", columnName: "stockUpdateStatus" },
+  { tableName: "GoodsReceipt", columnName: "stockConfirmedAt" },
+  { tableName: "GoodsReceipt", columnName: "stockConfirmedBy" },
+  { tableName: "InterStoreTransfer", columnName: "issueStockUpdateStatus" },
+  { tableName: "InterStoreTransfer", columnName: "issueStockConfirmedAt" },
+  { tableName: "InterStoreTransfer", columnName: "issueStockConfirmedBy" },
+  { tableName: "InterStoreTransfer", columnName: "receiptStockUpdateStatus" },
+  { tableName: "InterStoreTransfer", columnName: "receiptStockConfirmedAt" },
+  { tableName: "InterStoreTransfer", columnName: "receiptStockConfirmedBy" },
+  { tableName: "PosTransactionLine", columnName: "sellingUnitOfMeasure" },
+  { tableName: "PosTransactionLine", columnName: "baseUnitOfMeasure" },
+  { tableName: "PosTransactionLine", columnName: "uomConversionFactor" },
+  { tableName: "PosTransactionLine", columnName: "baseQuantity" },
+  { tableName: "SalesOrderLine", columnName: "sellingUnitOfMeasure" },
+  { tableName: "SalesOrderLine", columnName: "baseUnitOfMeasure" },
+  { tableName: "SalesOrderLine", columnName: "uomConversionFactor" },
+  { tableName: "SalesOrderLine", columnName: "baseQuantity" },
+  { tableName: "SalesOrder", columnName: "orderType" },
+  { tableName: "SalesOrder", columnName: "paidAmount" },
+  { tableName: "SalesOrder", columnName: "layawayPolicySnapshotJson" },
+  { tableName: "SalesOrder", columnName: "minimumDepositAmount" },
+  { tableName: "SalesOrder", columnName: "reservationStatus" },
+  { tableName: "SalesOrder", columnName: "reservationCreatedAt" },
+  { tableName: "SalesOrder", columnName: "reservationReleasedAt" },
+  { tableName: "SalesOrder", columnName: "layawayExpiresAt" },
+  { tableName: "SalesOrder", columnName: "expiredAt" },
+  { tableName: "SalesOrder", columnName: "cancellationFeeAmount" },
+  { tableName: "SalesOrder", columnName: "refundedAmount" },
+  { tableName: "ErpFuelOperationsSettings", columnName: "saleReceiptPaperKind" },
+  { tableName: "ErpFuelOperationsSettings", columnName: "deliveryReceiptPaperKind" },
+  { tableName: "ErpFuelOperationsSettings", columnName: "salesOrderReceiptPaperKind" },
+  { tableName: "SyncOutboxEvent", columnName: "errorMessage" }
 ];
 
 function requireFile(relativePath: string) {
@@ -166,6 +220,7 @@ requireIncludes(readinessModule, "assertEnterpriseDatabaseReady", "readiness ass
 requireIncludes(readinessModule, "isPrismaSchemaDriftError", "Prisma schema drift detection must exist.");
 requireIncludes(readinessModule, "gatewayProvider", "tender gateway provider column must be checked.");
 requireIncludes(readinessModule, "OperatingExpense", "operating expense table must be checked.");
+requireIncludes(readinessModule, "SyncOutboxEvent", "sync outbox failure details must be checked.");
 requireIncludes(readinessRoute, "getEnterpriseDatabaseReadiness", "readiness API route must exist.");
 requireIncludes(pushRoute, "assertEnterpriseDatabaseReady", "sync push must guard schema readiness.");
 requireIncludes(pullRoute, "assertEnterpriseDatabaseReady", "sync pull must guard schema readiness.");
