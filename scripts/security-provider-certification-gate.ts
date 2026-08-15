@@ -54,6 +54,9 @@ if (!rootPackage.scripts?.["cert:security-providers"]) {
 
 requireIncludes(settingsRepository, "validateEnterpriseLdapSettings", "LDAP validation must exist.");
 requireIncludes(settingsRepository, "validateEnterpriseSmtpSettings", "SMTP validation must exist.");
+requireIncludes(settingsRepository, "probeSmtpTransport", "SMTP validation must verify provider authentication.");
+requireIncludes(settingsRepository, "transporter.verify", "SMTP validation must test configured credentials.");
+requireIncludes(settingsRepository, "response.status === 405", "POST-only SMS providers must pass the non-delivery reachability probe.");
 requireIncludes(settingsRepository, "validateEnterpriseSmsSettings", "SMS validation must exist.");
 requireIncludes(ldapRoute, "validateEnterpriseLdapSettings", "LDAP route must call repository validation.");
 requireIncludes(smtpRoute, "validateEnterpriseSmtpSettings", "SMTP route must call repository validation.");
@@ -73,6 +76,8 @@ requireIncludes(stepUpRoute, "createEnterpriseStepUpVerification", "step-up rout
 requireIncludes(securityRepository, "alertOnAccountLockout", "security policy must support lockout alerting.");
 requireIncludes(securityRepository, "criticalAlertEscalationMinutes", "security policy must support escalation timing.");
 requireIncludes(securityRepository, "securityAlertEmail", "security policy must capture escalation owner.");
+requireIncludes(securityRepository, "assertMfaPolicyDeliveryReadiness", "MFA policy must validate delivery readiness before activation.");
+requireIncludes(securityRepository, "Every user covered by MFA needs a valid email address", "MFA policy must protect users from unreachable MFA delivery.");
 requireIncludes(securityRepository, "unlockEnterpriseRetailUser", "admin unlock workflow must exist.");
 requireIncludes(alertsRepository, "critical-security-events", "HQ alert snapshot must include critical security events.");
 requireIncludes(alertsRepository, "locked-enterprise-accounts", "HQ alert snapshot must include locked accounts.");

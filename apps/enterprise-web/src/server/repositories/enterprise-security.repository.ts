@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import {
   deriveRetailUserCapabilities,
+  expandGrantedPermissionCodes,
   getSecurityPermissionDefinition as getDomainSecurityPermissionDefinition,
   RecordStatus,
   SecurityLogKind,
@@ -181,6 +182,122 @@ const defaultPasswordPolicy: PasswordPolicySettings = {
   criticalAlertEscalationMinutes: 15,
   alertOnAccountLockout: true
 };
+
+type MfaSmtpDeliveryConfiguration = {
+  enabled: boolean;
+  host: string;
+  username: string;
+  password: string;
+  fromAddress: string;
+};
+
+function readMfaSmtpDeliveryConfiguration(value: unknown): MfaSmtpDeliveryConfiguration {
+  const payload = readJsonObject(value);
+  const readText = (key: string) =>
+    typeof payload[key] === "string" ? String(payload[key]).trim() : "";
+
+  return {
+    enabled: payload.enabled === true,
+    host: readText("host"),
+    username: readText("username"),
+    password: readText("passwordMask"),
+    fromAddress: readText("fromAddress")
+  };
+}
+
+function hasValidMfaEmail(value: string | null | undefined) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value?.trim() ?? "");
+}
+
+function requiresAdministratorMfa(permissionCodes: string[]) {
+  return expandGrantedPermissionCodes(permissionCodes).some(
+    (permissionCode) =>
+      permissionCode.startsWith("security.") ||
+      permissionCode.startsWith("settings.") ||
+      permissionCode.startsWith("sync.")
+  );
+}
+
+async function assertMfaPolicyDeliveryReadiness(
+  tx: Prisma.TransactionClient,
+  retailOrgId: string,
+  mode: MfaPolicyMode
+) {
+  if (mode === "DISABLED") {
+    return;
+  }
+
+  const retailOrg = await tx.retailOrg.findUnique({
+    where: { id: retailOrgId },
+    select: { smtpSettingsJson: true }
+  });
+  const smtp = readMfaSmtpDeliveryConfiguration(retailOrg?.smtpSettingsJson);
+
+  if (!smtp.enabled || !smtp.host || !smtp.username || !smtp.password || !smtp.fromAddress) {
+    throw new Error(
+      "Configure and validate SMTP before enabling MFA. Enterprise MFA requires an enabled SMTP host, sender address, username, and password."
+    );
+  }
+
+  const activeUsers = await tx.retailUser.findMany({
+    where: {
+      retailOrgId,
+      accountStatus: UserAccountStatus.ACTIVE,
+      deletedAt: null
+    },
+    select: {
+      loginId: true,
+      email: true,
+      userRoles: {
+        select: {
+          role: {
+            select: {
+              status: true,
+              rolePermissions: {
+                select: {
+                  permission: {
+                    select: { code: true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+  const mfaUsers = activeUsers.filter((user) => {
+    if (mode === "ALL_USERS") {
+      return true;
+    }
+
+    const permissionCodes = user.userRoles
+      .filter((entry) => entry.role.status === RecordStatus.ACTIVE)
+      .flatMap((entry) => entry.role.rolePermissions.map((permission) => permission.permission.code));
+
+    return requiresAdministratorMfa(permissionCodes);
+  });
+
+  if (mfaUsers.length === 0) {
+    throw new Error(
+      mode === "ADMIN_ONLY"
+        ? "MFA could not be enabled because no active administrator has security, settings, or sync access."
+        : "MFA could not be enabled because there are no active users."
+    );
+  }
+
+  const missingEmailLogins = mfaUsers
+    .filter((user) => !hasValidMfaEmail(user.email))
+    .map((user) => user.loginId);
+
+  if (missingEmailLogins.length > 0) {
+    const sample = missingEmailLogins.slice(0, 5).join(", ");
+    const remainder = missingEmailLogins.length - Math.min(missingEmailLogins.length, 5);
+    throw new Error(
+      `Every user covered by MFA needs a valid email address before MFA can be enabled. Add an email for: ${sample}${remainder > 0 ? ` and ${remainder} more` : ""}.`
+    );
+  }
+}
 
 const explicitSecurityPermissionFallbacks: SecurityPermissionDefinition[] = [
   {
@@ -2056,6 +2173,11 @@ export async function updateEnterprisePasswordPolicy(
   try {
     return await prisma.$transaction(async (tx) => {
       const enterpriseNode = await getWritableEnterpriseNode(tx);
+      await assertMfaPolicyDeliveryReadiness(
+        tx,
+        enterpriseNode.retailOrgId,
+        nextPolicy.mfaMode
+      );
       const currentOrg = await tx.retailOrg.findUnique({
         where: {
           id: enterpriseNode.retailOrgId
