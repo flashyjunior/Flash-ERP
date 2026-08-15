@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import net from "node:net";
 import tls from "node:tls";
+import nodemailer from "nodemailer";
 import { readJsonObject, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
@@ -258,7 +259,7 @@ const defaultSmtpSettings: SmtpSettings = {
   enabled: false,
   host: "",
   port: 587,
-  secureConnection: true,
+  secureConnection: false,
   username: "",
   passwordMask: "",
   fromName: "",
@@ -737,6 +738,38 @@ async function probeTcpEndpoint(input: {
   });
 }
 
+async function probeSmtpTransport(settings: SmtpSettings) {
+  try {
+    const transporter = nodemailer.createTransport({
+      host: settings.host,
+      port: settings.port,
+      secure: settings.secureConnection,
+      auth: {
+        user: settings.username,
+        pass: settings.passwordMask
+      },
+      connectionTimeout: 5_000,
+      greetingTimeout: 5_000,
+      socketTimeout: 5_000
+    });
+
+    await transporter.verify();
+    transporter.close();
+    return {
+      ok: true,
+      message: "SMTP accepted the configured connection and credentials."
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message:
+        error instanceof Error
+          ? `SMTP authentication failed: ${error.message}`
+          : "SMTP authentication failed."
+    };
+  }
+}
+
 async function probeHttpEndpoint(url: string, timeoutMs = 3_000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -746,6 +779,13 @@ async function probeHttpEndpoint(url: string, timeoutMs = 3_000) {
       method: "HEAD",
       signal: controller.signal
     });
+
+    if (response.status === 405) {
+      return {
+        ok: true,
+        message: "Reached the HTTP endpoint; it correctly rejected the non-delivery HEAD probe because this SMS endpoint accepts POST requests."
+      };
+    }
 
     return {
       ok: response.ok,
@@ -1628,24 +1668,26 @@ export async function validateEnterpriseSmtpSettings(
       : "Enter SMTP username and password before testing."
   );
 
-  if (input.attemptNetwork && settings.host) {
-    const result = await probeTcpEndpoint({
-      host: settings.host,
-      port: settings.port,
-      secure: settings.secureConnection
-    });
+  if (
+    input.attemptNetwork &&
+    settings.host &&
+    settings.username &&
+    settings.passwordMask &&
+    settings.fromAddress
+  ) {
+    const result = await probeSmtpTransport(settings);
     pushValidationCheck(
       checks,
-      "Network reachability",
+      "SMTP authentication",
       result.ok ? "PASS" : "FAIL",
       result.message
     );
   } else {
     pushValidationCheck(
       checks,
-      "Network reachability",
+      "SMTP authentication",
       "FAIL",
-      "Network probe was not run, so Flash ERP cannot mark SMTP as tested."
+      "Enter the SMTP host, sender address, username, and password before testing."
     );
   }
 

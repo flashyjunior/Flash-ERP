@@ -55,7 +55,7 @@ const defaultSmtpSettings: SmtpSettings = {
   enabled: false,
   host: "",
   port: 587,
-  secureConnection: true,
+  secureConnection: false,
   username: "",
   passwordMask: "",
   fromName: "",
