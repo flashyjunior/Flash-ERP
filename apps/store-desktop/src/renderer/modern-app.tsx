@@ -5805,6 +5805,18 @@ export function ModernDesktopApp() {
       return;
     }
 
+    if (isVoidReviewBasket) {
+      const sourceTransactionNo =
+        activeBasket.sourceTransactionNo ?? voidModeTransactionNo ?? activeBasket.transactionNo;
+      const confirmed = window.confirm(
+        `Void receipt ${sourceTransactionNo}? This will post the reviewed return, reverse the sale, and cannot be undone.`,
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     const transactionNoToPrint = activeBasket.transactionNo;
     setIsBusy(true);
     setError(null);
@@ -5910,6 +5922,14 @@ export function ModernDesktopApp() {
   }
 
   async function cancelSalesOrder(order: StoreSalesOrderSummary) {
+    const confirmed = window.confirm(
+      `Cancel sales order ${order.orderNo}? The order will be closed and can no longer be fulfilled.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
     await runAction((desktopRuntime) =>
       desktopRuntime.cancelSalesOrder({
         orderId: order.orderId,
@@ -16021,6 +16041,33 @@ function POSWorkspace(props: {
     }
 
     const { kind, order } = layawayActionDraft;
+
+    if (kind === "RELEASE") {
+      const confirmed = window.confirm(
+        `Release the reserved stock for layaway ${order.orderNo}? The stock will become available for other sales while the layaway remains open.`,
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    } else if (kind === "CANCEL") {
+      const confirmed = window.confirm(
+        `Cancel layaway ${order.orderNo}? This will close the layaway, release its stock, and process the configured refund and cancellation fee. This cannot be undone.`,
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    } else if (kind === "EXPIRE") {
+      const confirmed = window.confirm(
+        `Expire layaway ${order.orderNo}? This will mark the layaway as expired and release its reserved stock.`,
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     const payments = paymentDraftsToRequests(
       layawayActionPayments,
       props.snapshot?.availableTenderMethods ?? [],
@@ -18107,7 +18154,15 @@ function POSWorkspace(props: {
                 onClick={() => void submitLayawayAction()}
                 type="button"
               >
-                Confirm
+                {props.isBusy
+                  ? "Working..."
+                  : layawayActionDraft.kind === "CANCEL"
+                    ? "Cancel layaway"
+                    : layawayActionDraft.kind === "RELEASE"
+                      ? "Release reserved stock"
+                      : layawayActionDraft.kind === "EXPIRE"
+                        ? "Expire layaway"
+                        : "Receive payment"}
               </button>
             </div>
           </section>

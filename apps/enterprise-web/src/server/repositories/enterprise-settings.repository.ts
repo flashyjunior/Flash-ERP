@@ -4,6 +4,7 @@ import tls from "node:tls";
 import { readJsonObject, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
+import { normalizeCompanyMediaUrl } from "@/server/files/company-media-storage";
 import {
   STOCK_UPDATE_MODE_AUTO,
   STOCK_UPDATE_MODE_HQ_CONFIRM,
@@ -439,8 +440,10 @@ function readCompanyProfileSettings(
     companyCode: retailOrg.code,
     legalName: readString(payload, "legalName", retailOrg.name),
     tradingName: readString(payload, "tradingName", retailOrg.name),
-    companyLogoUrl: readString(payload, "companyLogoUrl"),
-    loginBackgroundImageUrl: readString(payload, "loginBackgroundImageUrl"),
+    companyLogoUrl: normalizeCompanyMediaUrl(readString(payload, "companyLogoUrl")),
+    loginBackgroundImageUrl: normalizeCompanyMediaUrl(
+      readString(payload, "loginBackgroundImageUrl")
+    ),
     documentNumberFormats: readDocumentNumberFormats(value),
     productSizes: normalizeProductSizes(payload.productSizes),
     posDiscountRates: normalizePosDiscountRates(payload.posDiscountRates),

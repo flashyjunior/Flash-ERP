@@ -4638,6 +4638,14 @@ export function OnlineStoreWorkspace({
   }
 
   async function cancelSalesOrder(order: SalesOrder) {
+    const confirmed = window.confirm(
+      `Cancel sales order ${order.orderNo}? The order will be closed and can no longer be fulfilled.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
     setIsPostingPosAction(true);
     setCheckoutMessage(`Cancelling ${order.orderNo}...`);
 
@@ -5813,6 +5821,16 @@ export function OnlineStoreWorkspace({
       return;
     }
 
+    if (correctionRequiresManagerOverride) {
+      const confirmed = window.confirm(
+        `Void receipt ${correctionSelection.transactionNo}? This will post the reviewed return, reverse the sale, and cannot be undone.`
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     setIsPostingCorrection(true);
     setCorrectionMessage("Posting correction...");
 
@@ -6900,6 +6918,33 @@ export function OnlineStoreWorkspace({
     }
 
     const { kind, order } = layawayActionDraft;
+
+    if (kind === "RELEASE") {
+      const confirmed = window.confirm(
+        `Release the reserved stock for layaway ${order.orderNo}? The stock will become available for other sales while the layaway remains open.`
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    } else if (kind === "CANCEL") {
+      const confirmed = window.confirm(
+        `Cancel layaway ${order.orderNo}? This will close the layaway, release its stock, and process the configured refund and cancellation fee. This cannot be undone.`
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    } else if (kind === "EXPIRE") {
+      const confirmed = window.confirm(
+        `Expire layaway ${order.orderNo}? This will mark the layaway as expired and release its reserved stock.`
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     const payments = paymentPayload(layawayActionPayments);
     const endpointAction =
       kind === "PAYMENT"
@@ -9457,7 +9502,17 @@ export function OnlineStoreWorkspace({
                   {layawayActionReasonMissing ? <p className="rms-inline-message">Enter a reason before releasing reserved stock.</p> : null}
                   <div className="rms-dialog-actions">
                     <button className="rms-button" disabled={isPostingPosAction} onClick={() => setLayawayActionDraft(null)} type="button">Cancel</button>
-                    <button className={`rms-button is-primary${layawayActionDraft.kind === "CANCEL" ? " is-danger" : ""}`} disabled={isPostingPosAction || layawayActionPaymentInvalid || layawayActionMissingBankAccount || layawayActionMissingReference || layawayActionReasonMissing} onClick={() => void submitLayawayAction()} type="button">{isPostingPosAction ? "Working..." : "Confirm"}</button>
+                    <button className={`rms-button is-primary${layawayActionDraft.kind === "CANCEL" ? " is-danger" : ""}`} disabled={isPostingPosAction || layawayActionPaymentInvalid || layawayActionMissingBankAccount || layawayActionMissingReference || layawayActionReasonMissing} onClick={() => void submitLayawayAction()} type="button">
+                      {isPostingPosAction
+                        ? "Working..."
+                        : layawayActionDraft.kind === "CANCEL"
+                          ? "Cancel layaway"
+                          : layawayActionDraft.kind === "RELEASE"
+                            ? "Release reserved stock"
+                            : layawayActionDraft.kind === "EXPIRE"
+                              ? "Expire layaway"
+                              : "Receive payment"}
+                    </button>
                   </div>
                 </section>
               </div>
@@ -10726,7 +10781,13 @@ export function OnlineStoreWorkspace({
                       );
                     })}
                   </div>
-                  <button className="rms-button is-primary rms-pay-button" disabled={isPostingCorrection} onClick={() => void submitCorrection()} type="button">{isPostingCorrection ? "Posting..." : "Complete Correction"}</button>
+                  <button className="rms-button is-primary rms-pay-button" disabled={isPostingCorrection} onClick={() => void submitCorrection()} type="button">
+                    {isPostingCorrection
+                      ? "Posting..."
+                      : correctionRequiresManagerOverride
+                        ? "Void transaction"
+                        : "Complete correction"}
+                  </button>
                 </div>
               ) : (
                 <div className="rms-empty-catalog">Select a completed sale receipt to start a linked return or exchange.</div>

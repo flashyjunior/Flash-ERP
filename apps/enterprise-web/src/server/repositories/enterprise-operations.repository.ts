@@ -60,6 +60,28 @@ function formatRelativeTime(value: Date | null) {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
+function formatDashboardDateTime(value: Date) {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(value);
+}
+
+function formatDashboardPeriod(dateFromKey: string, dateToKey: string) {
+  if (!dateFromKey && !dateToKey) {
+    return "All available dates";
+  }
+
+  if (dateFromKey && dateToKey) {
+    return `${dateFromKey} to ${dateToKey}`;
+  }
+
+  return dateFromKey ? `From ${dateFromKey}` : `Up to ${dateToKey}`;
+}
+
 function toIsoString(value: Date | null) {
   return value?.toISOString() ?? null;
 }
@@ -327,6 +349,85 @@ export type EnterpriseOperationsDashboardFilters = {
   dateTo?: string | null;
 };
 
+export const enterpriseSalesDashboardDetailViews = [
+  "net-sales",
+  "transactions",
+  "collections",
+  "discounts",
+  "tax"
+] as const;
+
+export type EnterpriseSalesDashboardDetailView =
+  (typeof enterpriseSalesDashboardDetailViews)[number];
+
+export function isEnterpriseSalesDashboardDetailView(
+  value: string | null | undefined
+): value is EnterpriseSalesDashboardDetailView {
+  return enterpriseSalesDashboardDetailViews.includes(
+    value as EnterpriseSalesDashboardDetailView
+  );
+}
+
+type EnterpriseSalesDashboardReceiptDetail = {
+  view: Exclude<EnterpriseSalesDashboardDetailView, "collections">;
+  title: string;
+  description: string;
+  scopeLabel: string;
+  page: number;
+  pageSize: number;
+  totalRows: number;
+  totalPages: number;
+  totals: {
+    netSales: number;
+    paidAmount: number;
+    taxAmount: number;
+    discountAmount: number;
+  };
+  rows: Array<{
+    transactionNo: string;
+    customerName: string;
+    storeName: string;
+    storeCode: string;
+    cashierCode: string;
+    completedAt: string;
+    completedAtLabel: string;
+    netSale: number;
+    paidAmount: number;
+    taxAmount: number;
+    discountAmount: number;
+  }>;
+};
+
+type EnterpriseSalesDashboardCollectionDetail = {
+  view: "collections";
+  title: string;
+  description: string;
+  scopeLabel: string;
+  page: number;
+  pageSize: number;
+  totalRows: number;
+  totalPages: number;
+  totals: {
+    tenderedAmount: number;
+    collectedAmount: number;
+    creditSalesAmount: number;
+  };
+  rows: Array<{
+    tenderKey: string;
+    tenderName: string;
+    paymentMethod: string;
+    classification: "COLLECTED" | "CREDIT SALE";
+    shopCount: number;
+    transactionCount: number;
+    paymentEntries: number;
+    amount: number;
+  }>;
+};
+
+export type EnterpriseSalesDashboardDetailData =
+  | EnterpriseSalesDashboardReceiptDetail
+  | EnterpriseSalesDashboardCollectionDetail;
+
 export type EnterpriseOperationsDashboardData = {
   currencyCode: string;
   filters: {
@@ -343,6 +444,8 @@ export type EnterpriseOperationsDashboardData = {
   metrics: {
     postedTransactions: number;
     postedRevenue: number;
+    paidAmount: number;
+    taxAmount: number;
     discountAmount: number;
     stockMovements: number;
     projectionIssues: number;
@@ -450,6 +553,9 @@ export type EnterpriseOperationsDashboardData = {
     postedTransactions: number;
     salesOrders: number;
     salesValue: number;
+    paidAmount: number;
+    taxAmount: number;
+    discountAmount: number;
     stockMovements: number;
     lastPostedAt: string | null;
     lastPostedAtLabel: string;
@@ -487,6 +593,8 @@ export function buildUnavailableEnterpriseOperationsDashboard(
     metrics: {
       postedTransactions: 0,
       postedRevenue: 0,
+      paidAmount: 0,
+      taxAmount: 0,
       discountAmount: 0,
       stockMovements: 0,
       projectionIssues: 0,
@@ -667,6 +775,7 @@ export async function getEnterpriseOperationsDashboard(
   const transactionWhere: Prisma.PosTransactionWhereInput = {
     retailOrgId: enterpriseNode.retailOrgId,
     status: PosTransactionStatus.COMPLETED,
+    deletedAt: null,
     storeId: {
       in: salesScopedStoreIds
     },
@@ -675,16 +784,18 @@ export async function getEnterpriseOperationsDashboard(
   const paymentWhere: Prisma.PosPaymentWhereInput = {
     posTransaction: {
       retailOrgId: enterpriseNode.retailOrgId,
+      status: PosTransactionStatus.COMPLETED,
       deletedAt: null,
       storeId: {
         in: salesScopedStoreIds
-      }
-    },
-    ...(transactionDateFilter ? { receivedAt: transactionDateFilter } : {})
+      },
+      ...transactionDateWhere
+    }
   };
   const allShopTransactionWhere: Prisma.PosTransactionWhereInput = {
     retailOrgId: enterpriseNode.retailOrgId,
     status: PosTransactionStatus.COMPLETED,
+    deletedAt: null,
     storeId: {
       in: allSalesStoreIds
     },
@@ -759,6 +870,8 @@ export async function getEnterpriseOperationsDashboard(
       },
       _sum: {
         totalAmount: true,
+        paidAmount: true,
+        taxAmount: true,
         discountAmount: true
       }
     }),
@@ -999,7 +1112,10 @@ export async function getEnterpriseOperationsDashboard(
         _all: true
       },
       _sum: {
-        totalAmount: true
+        totalAmount: true,
+        paidAmount: true,
+        taxAmount: true,
+        discountAmount: true
       },
       _max: {
         completedAt: true,
@@ -1080,6 +1196,8 @@ export async function getEnterpriseOperationsDashboard(
 
   const postedTransactions = transactionAggregate._count._all;
   const postedRevenue = Number(transactionAggregate._sum.totalAmount ?? 0);
+  const paidAmount = Number(transactionAggregate._sum.paidAmount ?? 0);
+  const taxAmount = Number(transactionAggregate._sum.taxAmount ?? 0);
   const discountAmount = Number(transactionAggregate._sum.discountAmount ?? 0);
   const bankedAmount = Number(bankedAggregate._sum.amount ?? 0);
 
@@ -1103,17 +1221,20 @@ export async function getEnterpriseOperationsDashboard(
         postedTransactions: salesGroup?._count._all ?? 0,
         salesOrders: salesOrderGroup?._count._all ?? 0,
         salesValue: Number(salesGroup?._sum.totalAmount ?? 0),
+        paidAmount: Number(salesGroup?._sum.paidAmount ?? 0),
+        taxAmount: Number(salesGroup?._sum.taxAmount ?? 0),
+        discountAmount: Number(salesGroup?._sum.discountAmount ?? 0),
         stockMovements: inventoryGroup?._count._all ?? 0,
         lastPostedAt: toIsoString(lastPostedAt),
         lastPostedAtLabel: formatRelativeTime(lastPostedAt)
       };
     })
     .sort((left, right) => {
-      if (right.postedTransactions !== left.postedTransactions) {
-        return right.postedTransactions - left.postedTransactions;
+      if (right.salesValue !== left.salesValue) {
+        return right.salesValue - left.salesValue;
       }
 
-      return right.salesValue - left.salesValue;
+      return right.postedTransactions - left.postedTransactions;
     });
 
   const salesEnabledStoreCount = storeSummaries.length;
@@ -1430,6 +1551,8 @@ export async function getEnterpriseOperationsDashboard(
     metrics: {
       postedTransactions,
       postedRevenue,
+      paidAmount,
+      taxAmount,
       discountAmount,
       stockMovements,
       projectionIssues,
@@ -1555,6 +1678,276 @@ export async function getEnterpriseOperationsDashboard(
     priorities,
     statusMessage: `Live Flash ERP operations ledger from ${enterpriseNode.name} in ${enterpriseNode.retailOrg.name}. ${projectedInboundCount} upstream retail packet(s) have been acknowledged by enterprise so far.`,
     refreshedAt: new Date().toISOString()
+  };
+}
+
+type EnterpriseSalesDashboardDetailInput = EnterpriseOperationsDashboardFilters & {
+  view: EnterpriseSalesDashboardDetailView;
+  page?: number | null;
+  pageSize?: number | null;
+};
+
+type TenderDashboardSqlRow = {
+  tenderCode: string | null;
+  tenderName: string;
+  paymentMethod: string;
+  shopCount: bigint | number;
+  transactionCount: bigint | number;
+  paymentEntries: bigint | number;
+  amount: Prisma.Decimal | number | string;
+};
+
+export async function getEnterpriseSalesDashboardDetail(
+  input: EnterpriseSalesDashboardDetailInput
+): Promise<EnterpriseSalesDashboardDetailData | null> {
+  const requestedDateFrom = parseDateBoundary(input.dateFrom, "start");
+  const requestedDateTo = parseDateBoundary(input.dateTo, "end");
+  const dateFrom = requestedDateFrom?.date ?? null;
+  const dateTo = requestedDateTo?.date ?? null;
+  const dateFromKey = requestedDateFrom?.key ?? "";
+  const dateToKey = requestedDateTo?.key ?? "";
+  const requestedPage = Number.isFinite(input.page) ? Math.max(1, Math.trunc(input.page ?? 1)) : 1;
+  const requestedPageSize = Number.isFinite(input.pageSize)
+    ? Math.max(10, Math.min(50, Math.trunc(input.pageSize ?? 20)))
+    : 20;
+  const pageSize = [10, 20, 50].includes(requestedPageSize) ? requestedPageSize : 20;
+  const enterpriseNode = await prisma.syncNode.findFirst({
+    where: {
+      nodeType: SyncNodeType.ENTERPRISE,
+      isPrimary: true,
+      status: RecordStatus.ACTIVE
+    },
+    select: {
+      retailOrgId: true
+    }
+  });
+
+  if (!enterpriseNode) {
+    return null;
+  }
+
+  const activeStores = await prisma.store.findMany({
+    where: {
+      retailOrgId: enterpriseNode.retailOrgId,
+      status: RecordStatus.ACTIVE,
+      salesEnabled: true
+    },
+    orderBy: {
+      name: "asc"
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true
+    }
+  });
+  const requestedStoreCode = input.storeCode?.trim() ?? "";
+  const selectedStore = requestedStoreCode
+    ? activeStores.find(
+        (store) => store.code.toLowerCase() === requestedStoreCode.toLowerCase()
+      ) ?? null
+    : null;
+  const scopedStores = selectedStore ? [selectedStore] : activeStores;
+  const scopedStoreIds = scopedStores.map((store) => store.id);
+  const scopeLabel = selectedStore?.name ?? "All active shops";
+  const periodLabel = formatDashboardPeriod(dateFromKey, dateToKey);
+  const transactionDateFilter = buildDateRangeFilter(dateFrom, dateTo);
+  const transactionDateWhere: Prisma.PosTransactionWhereInput = transactionDateFilter
+    ? {
+        OR: [
+          { completedAt: transactionDateFilter },
+          { completedAt: null, createdAt: transactionDateFilter }
+        ]
+      }
+    : {};
+  const baseTransactionWhere: Prisma.PosTransactionWhereInput = {
+    retailOrgId: enterpriseNode.retailOrgId,
+    status: PosTransactionStatus.COMPLETED,
+    deletedAt: null,
+    storeId: {
+      in: scopedStoreIds
+    },
+    ...transactionDateWhere
+  };
+
+  if (input.view === "collections") {
+    const whereClauses: Prisma.Sql[] = [
+      Prisma.sql`t.[retailOrgId] = ${enterpriseNode.retailOrgId}`,
+      Prisma.sql`t.[status] = ${PosTransactionStatus.COMPLETED}`,
+      Prisma.sql`t.[deletedAt] IS NULL`
+    ];
+
+    if (scopedStoreIds.length > 0) {
+      whereClauses.push(Prisma.sql`t.[storeId] IN (${Prisma.join(scopedStoreIds)})`);
+    } else {
+      whereClauses.push(Prisma.sql`1 = 0`);
+    }
+
+    if (dateFrom) {
+      whereClauses.push(Prisma.sql`COALESCE(t.[completedAt], t.[createdAt]) >= ${dateFrom}`);
+    }
+
+    if (dateTo) {
+      whereClauses.push(Prisma.sql`COALESCE(t.[completedAt], t.[createdAt]) <= ${dateTo}`);
+    }
+
+    const groupedRows = await prisma.$queryRaw<TenderDashboardSqlRow[]>(Prisma.sql`
+      SELECT
+        NULLIF(LTRIM(RTRIM(p.[tenderMethodCodeSnapshot])), N'') AS [tenderCode],
+        COALESCE(
+          NULLIF(LTRIM(RTRIM(p.[tenderMethodNameSnapshot])), N''),
+          NULLIF(LTRIM(RTRIM(p.[tenderMethodCodeSnapshot])), N''),
+          p.[method]
+        ) AS [tenderName],
+        p.[method] AS [paymentMethod],
+        COUNT_BIG(DISTINCT t.[storeId]) AS [shopCount],
+        COUNT_BIG(DISTINCT p.[posTransactionId]) AS [transactionCount],
+        COUNT_BIG(*) AS [paymentEntries],
+        COALESCE(SUM(p.[amount]), 0) AS [amount]
+      FROM [dbo].[PosPayment] p
+      INNER JOIN [dbo].[PosTransaction] t ON t.[id] = p.[posTransactionId]
+      WHERE ${Prisma.join(whereClauses, " AND ")}
+      GROUP BY
+        p.[tenderMethodCodeSnapshot],
+        p.[tenderMethodNameSnapshot],
+        p.[method]
+      ORDER BY COALESCE(SUM(p.[amount]), 0) DESC
+    `);
+    const rows = groupedRows.map((row) => {
+      const paymentMethod = row.paymentMethod.trim().toUpperCase();
+      const tenderCode = row.tenderCode?.trim() || null;
+      const classification = paymentMethod === "STORE_CREDIT" ? "CREDIT SALE" : "COLLECTED";
+
+      return {
+        tenderKey: tenderCode ?? paymentMethod,
+        tenderName: row.tenderName.trim() || formatEnumLabel(paymentMethod),
+        paymentMethod: formatEnumLabel(paymentMethod),
+        classification,
+        shopCount: Number(row.shopCount),
+        transactionCount: Number(row.transactionCount),
+        paymentEntries: Number(row.paymentEntries),
+        amount: Number(row.amount)
+      } satisfies EnterpriseSalesDashboardCollectionDetail["rows"][number];
+    });
+    const totalRows = rows.length;
+    const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const tenderedAmount = rows.reduce((sum, row) => sum + row.amount, 0);
+    const creditSalesAmount = rows
+      .filter((row) => row.classification === "CREDIT SALE")
+      .reduce((sum, row) => sum + row.amount, 0);
+
+    return {
+      view: "collections",
+      title: "Collections by tender",
+      description: `${periodLabel} · ${scopeLabel}`,
+      scopeLabel,
+      page,
+      pageSize,
+      totalRows,
+      totalPages,
+      totals: {
+        tenderedAmount: Number(tenderedAmount.toFixed(2)),
+        collectedAmount: Number((tenderedAmount - creditSalesAmount).toFixed(2)),
+        creditSalesAmount: Number(creditSalesAmount.toFixed(2))
+      },
+      rows: rows.slice((page - 1) * pageSize, page * pageSize)
+    };
+  }
+
+  const viewWhere: Prisma.PosTransactionWhereInput =
+    input.view === "discounts"
+      ? { discountAmount: { not: 0 } }
+      : input.view === "tax"
+        ? { taxAmount: { not: 0 } }
+        : {};
+  const where: Prisma.PosTransactionWhereInput = {
+    AND: [baseTransactionWhere, viewWhere]
+  };
+  const totalRows = await prisma.posTransaction.count({ where });
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const [totals, transactions] = await Promise.all([
+    prisma.posTransaction.aggregate({
+      where,
+      _sum: {
+        totalAmount: true,
+        paidAmount: true,
+        taxAmount: true,
+        discountAmount: true
+      }
+    }),
+    prisma.posTransaction.findMany({
+      where,
+      orderBy: [{ completedAt: "desc" }, { createdAt: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      select: {
+        transactionNo: true,
+        customerNameSnapshot: true,
+        cashierCodeSnapshot: true,
+        totalAmount: true,
+        paidAmount: true,
+        taxAmount: true,
+        discountAmount: true,
+        completedAt: true,
+        createdAt: true,
+        customer: {
+          select: {
+            fullName: true
+          }
+        },
+        store: {
+          select: {
+            name: true,
+            code: true
+          }
+        }
+      }
+    })
+  ]);
+  const titleByView: Record<EnterpriseSalesDashboardReceiptDetail["view"], string> = {
+    "net-sales": "Net sales detail",
+    transactions: "Completed transactions",
+    discounts: "Discounted sales",
+    tax: "Taxed sales"
+  };
+
+  return {
+    view: input.view,
+    title: titleByView[input.view],
+    description: `${periodLabel} · ${scopeLabel}`,
+    scopeLabel,
+    page,
+    pageSize,
+    totalRows,
+    totalPages,
+    totals: {
+      netSales: Number(totals._sum.totalAmount ?? 0),
+      paidAmount: Number(totals._sum.paidAmount ?? 0),
+      taxAmount: Number(totals._sum.taxAmount ?? 0),
+      discountAmount: Number(totals._sum.discountAmount ?? 0)
+    },
+    rows: transactions.map((transaction) => {
+      const completedAt = transaction.completedAt ?? transaction.createdAt;
+
+      return {
+        transactionNo: transaction.transactionNo,
+        customerName:
+          transaction.customer?.fullName ??
+          transaction.customerNameSnapshot?.trim() ??
+          "Walk-in customer",
+        storeName: transaction.store.name,
+        storeCode: transaction.store.code,
+        cashierCode: transaction.cashierCodeSnapshot?.trim() || "Not captured",
+        completedAt: completedAt.toISOString(),
+        completedAtLabel: formatDashboardDateTime(completedAt),
+        netSale: Number(transaction.totalAmount),
+        paidAmount: Number(transaction.paidAmount),
+        taxAmount: Number(transaction.taxAmount),
+        discountAmount: Number(transaction.discountAmount)
+      };
+    })
   };
 }
 
