@@ -1265,6 +1265,7 @@ export type EnterpriseSalesOrderDetailData = {
   order: {
     id: string;
     orderNo: string;
+    orderType: string;
     status: string;
     storeName: string;
     storeCode: string;
@@ -1276,7 +1277,13 @@ export type EnterpriseSalesOrderDetailData = {
     note: string | null;
     totalAmount: number;
     depositAmount: number;
+    paidAmount: number;
     balanceAmount: number;
+    minimumDepositAmount: number;
+    reservationStatus: string;
+    layawayExpiresAt: string | null;
+    cancellationFeeAmount: number;
+    refundedAmount: number;
     depositTenderName: string | null;
     depositReference: string | null;
     fulfilledTransactionNo: string | null;
@@ -1297,6 +1304,18 @@ export type EnterpriseSalesOrderDetailData = {
     taxAmount: number;
     lineTotal: number;
     promotionName: string | null;
+  }>;
+  payments: Array<{
+    id: string;
+    paymentPurpose: string;
+    tenderName: string;
+    amount: number;
+    reference: string | null;
+    shiftNo: string | null;
+    terminalCode: string | null;
+    cashierCode: string | null;
+    receivedAt: string;
+    receivedAtLabel: string;
   }>;
   syncTrail: Array<{
     eventId: string;
@@ -1327,6 +1346,7 @@ export async function getEnterpriseSalesOrderDetail(
     select: {
       id: true,
       orderNo: true,
+      orderType: true,
       status: true,
       sourceTransactionId: true,
       sourceTransactionNo: true,
@@ -1336,7 +1356,13 @@ export async function getEnterpriseSalesOrderDetail(
       note: true,
       totalAmount: true,
       depositAmount: true,
+      paidAmount: true,
       balanceAmount: true,
+      minimumDepositAmount: true,
+      reservationStatus: true,
+      layawayExpiresAt: true,
+      cancellationFeeAmount: true,
+      refundedAmount: true,
       depositTenderMethodNameSnapshot: true,
       depositReference: true,
       fulfilledTransactionNo: true,
@@ -1387,7 +1413,7 @@ export async function getEnterpriseSalesOrderDetail(
     return null;
   }
 
-  const [fallbackLines, syncTrail] = await Promise.all([
+  const [fallbackLines, payments, syncTrail] = await Promise.all([
     order.lines.length === 0
       ? prisma.posTransactionLine.findMany({
           where: {
@@ -1413,6 +1439,31 @@ export async function getEnterpriseSalesOrderDetail(
           }
         })
       : Promise.resolve([]),
+    prisma.posPayment.findMany({
+      where: {
+        posTransactionId: order.sourceTransactionId,
+        paymentPurpose: {
+          in:
+            order.orderType === "LAYAWAY"
+              ? ["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"]
+              : ["SALES_ORDER_DEPOSIT", "TRANSACTION_SETTLEMENT"]
+        }
+      },
+      orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+      select: {
+        id: true,
+        paymentPurpose: true,
+        tenderMethodNameSnapshot: true,
+        tenderMethodCodeSnapshot: true,
+        method: true,
+        amount: true,
+        reference: true,
+        receivedShiftNoSnapshot: true,
+        receivedTerminalCodeSnapshot: true,
+        receivedCashierCodeSnapshot: true,
+        receivedAt: true
+      }
+    }),
     prisma.syncInboundEvent.findMany({
       where: {
         syncNodeId: enterpriseNode.id,
@@ -1482,6 +1533,7 @@ export async function getEnterpriseSalesOrderDetail(
     order: {
       id: order.id,
       orderNo: order.orderNo,
+      orderType: order.orderType,
       status: order.status,
       storeName: order.store.name,
       storeCode: order.store.code,
@@ -1493,7 +1545,13 @@ export async function getEnterpriseSalesOrderDetail(
       note: order.note,
       totalAmount: Number(order.totalAmount),
       depositAmount: Number(order.depositAmount),
+      paidAmount: Number(order.paidAmount),
       balanceAmount: Number(order.balanceAmount),
+      minimumDepositAmount: Number(order.minimumDepositAmount),
+      reservationStatus: order.reservationStatus,
+      layawayExpiresAt: toIsoString(order.layawayExpiresAt),
+      cancellationFeeAmount: Number(order.cancellationFeeAmount),
+      refundedAmount: Number(order.refundedAmount),
       depositTenderName: order.depositTenderMethodNameSnapshot,
       depositReference: order.depositReference,
       fulfilledTransactionNo: order.fulfilledTransactionNo,
@@ -1503,6 +1561,21 @@ export async function getEnterpriseSalesOrderDetail(
       cancelledAt: toIsoString(order.cancelledAt)
     },
     lines,
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      paymentPurpose: payment.paymentPurpose,
+      tenderName:
+        payment.tenderMethodNameSnapshot ??
+        payment.tenderMethodCodeSnapshot ??
+        payment.method,
+      amount: Number(payment.amount),
+      reference: payment.reference,
+      shiftNo: payment.receivedShiftNoSnapshot,
+      terminalCode: payment.receivedTerminalCodeSnapshot,
+      cashierCode: payment.receivedCashierCodeSnapshot,
+      receivedAt: payment.receivedAt.toISOString(),
+      receivedAtLabel: formatRelativeTime(payment.receivedAt)
+    })),
     syncTrail: syncTrail.map((event) => ({
       eventId: event.id,
       eventType: event.eventType,

@@ -5,13 +5,19 @@ import {
   AlertTriangle,
   BadgePercent,
   CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  CircleDollarSign,
+  CreditCard,
   Package,
+  ReceiptText,
   ShieldCheck,
   Sparkles,
   Store,
   Truck,
   Users,
-  WalletCards
+  WalletCards,
+  X
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -32,10 +38,17 @@ import {
 } from "recharts";
 
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
-import type { EnterpriseOperationsDashboardData } from "@/server/repositories/enterprise-operations.repository";
+import type {
+  EnterpriseOperationsDashboardData,
+  EnterpriseSalesDashboardDetailData,
+  EnterpriseSalesDashboardDetailView
+} from "@/server/repositories/enterprise-operations.repository";
 
 type EnterpriseOverviewDashboardProps = {
   operationsDashboard: EnterpriseOperationsDashboardData;
+  detailStoreCode: string;
+  detailView: EnterpriseSalesDashboardDetailView | null;
+  salesDetail: EnterpriseSalesDashboardDetailData | null;
 };
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -71,13 +84,20 @@ function axisCurrency(value: number, currencyCode: string) {
   return formatCompactCurrency(value, currencyCode).replace(".0", "");
 }
 
-function buildPosDrilldownHref(input: {
+function buildDashboardHref(input: {
   storeCode: string;
   dateFrom: string;
   dateTo: string;
+  detail?: EnterpriseSalesDashboardDetailView | null;
+  detailShop?: string | null;
+  page?: number | null;
+  pageSize?: number | null;
 }) {
   const params = new URLSearchParams();
-  params.set("shop", input.storeCode);
+
+  if (input.storeCode) {
+    params.set("shop", input.storeCode);
+  }
 
   if (input.dateFrom) {
     params.set("from", input.dateFrom);
@@ -87,84 +107,143 @@ function buildPosDrilldownHref(input: {
     params.set("to", input.dateTo);
   }
 
-  return `/pos?${params.toString()}`;
+  if (input.detail) {
+    params.set("detail", input.detail);
+  }
+
+  if (input.detailShop) {
+    params.set("detailShop", input.detailShop);
+  }
+
+  if (input.page && input.page > 1) {
+    params.set("page", String(input.page));
+  }
+
+  if (input.pageSize && input.pageSize !== 20) {
+    params.set("pageSize", String(input.pageSize));
+  }
+
+  const query = params.toString();
+  return query ? `/?${query}` : "/";
 }
 
-const storeSalesCardTones = [
+const shopCardTones = [
   {
-    card: "border-blue-600 bg-[linear-gradient(135deg,#1d4ed8,#2563eb)] shadow-blue-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
+    border: "border-t-amber-500",
+    icon: "bg-amber-500 text-white"
   },
   {
-    card: "border-emerald-600 bg-[linear-gradient(135deg,#047857,#10b981)] shadow-emerald-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
+    border: "border-t-rose-600",
+    icon: "bg-rose-600 text-white"
   },
   {
-    card: "border-fuchsia-600 bg-[linear-gradient(135deg,#a21caf,#d946ef)] shadow-fuchsia-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
+    border: "border-t-red-500",
+    icon: "bg-red-500 text-white"
   },
   {
-    card: "border-amber-600 bg-[linear-gradient(135deg,#b45309,#f59e0b)] shadow-amber-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
-  },
-  {
-    card: "border-rose-600 bg-[linear-gradient(135deg,#be123c,#f43f5e)] shadow-rose-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
-  },
-  {
-    card: "border-violet-600 bg-[linear-gradient(135deg,#6d28d9,#8b5cf6)] shadow-violet-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
-  },
-  {
-    card: "border-cyan-600 bg-[linear-gradient(135deg,#0e7490,#06b6d4)] shadow-cyan-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
-  },
-  {
-    card: "border-lime-600 bg-[linear-gradient(135deg,#4d7c0f,#84cc16)] shadow-lime-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
-  },
-  {
-    card: "border-orange-600 bg-[linear-gradient(135deg,#c2410c,#f97316)] shadow-orange-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
-  },
-  {
-    card: "border-indigo-600 bg-[linear-gradient(135deg,#3730a3,#6366f1)] shadow-indigo-500/15",
-    icon: "bg-white/18 text-white ring-1 ring-white/25"
+    border: "border-t-orange-500",
+    icon: "bg-orange-500 text-white"
   }
-];
+] as const;
 
 function StoreSalesCard({
   row,
   currencyCode,
-  index,
-  href
+  href,
+  index
 }: {
   row: EnterpriseOperationsDashboardData["storeSummaries"][number];
   currencyCode: string;
-  index: number;
   href: string;
+  index: number;
 }) {
-  const tone = storeSalesCardTones[index % storeSalesCardTones.length];
+  const tone = shopCardTones[index % shopCardTones.length];
+  const isTrading = row.postedTransactions > 0;
+
   return (
     <Link
-      className={`group block min-h-[6.75rem] rounded-2xl border p-4 text-white shadow-[0_14px_28px_var(--tw-shadow-color)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_34px_var(--tw-shadow-color)] focus:outline-none focus:ring-4 focus:ring-blue-200 ${tone.card}`}
+      className={`group block min-h-[12.5rem] overflow-hidden rounded-b-lg rounded-t-[18px] border border-t-4 border-stone-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-stone-200 ${tone.border}`}
       href={href}
     >
-      <div className="flex h-full items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-[11px] font-extrabold uppercase text-white/75">{row.storeCode}</p>
-          <h2 className="mt-1 truncate text-sm font-semibold text-white">{row.store}</h2>
-          <p className="mt-2 truncate text-[1.3rem] font-semibold leading-tight text-white">
+      <div className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${tone.icon}`}>
+              <Store className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <h2 className="truncate text-sm font-semibold text-stone-950">{row.store}</h2>
+              <p className="mt-1 truncate text-xs text-stone-500">{row.storeCode}</p>
+            </div>
+          </div>
+          <span
+            className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold uppercase ${isTrading ? "bg-emerald-50 text-emerald-700" : "bg-stone-100 text-stone-500"}`}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${isTrading ? "bg-emerald-500" : "bg-stone-400"}`} />
+            {isTrading ? "Live" : "No sales"}
+          </span>
+        </div>
+        <div className="mt-5">
+          <p className="text-xs font-semibold uppercase text-stone-500">Net sales</p>
+          <p className="mt-1 truncate text-2xl font-semibold text-stone-950">
             {formatCurrency(row.salesValue, currencyCode)}
           </p>
-          <p className="mt-1 truncate text-xs font-medium text-white/78">
-            {numberFormatter.format(row.postedTransactions)} sale(s), {numberFormatter.format(row.salesOrders)} order(s) / {row.lastPostedAtLabel}
+          <p
+            className="mt-1.5 truncate text-[11px] font-medium text-stone-500"
+            title={`${numberFormatter.format(row.salesOrders)} order(s) / ${row.lastPostedAtLabel}`}
+          >
+            {numberFormatter.format(row.salesOrders)} order(s) / {row.lastPostedAtLabel}
           </p>
         </div>
-        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-sm ${tone.icon}`}>
-          <Store className="h-5 w-5" />
+      </div>
+      <div className="grid grid-cols-[0.7fr_1.35fr_1fr] border-t border-stone-200 text-center text-xs">
+        <div className="bg-stone-50 px-2 py-3">
+          <span className="block text-[10px] font-semibold uppercase text-stone-500">Sales</span>
+          <strong className="mt-1 block text-stone-900">{numberFormatter.format(row.postedTransactions)}</strong>
+        </div>
+        <div className="bg-emerald-50 px-2 py-3 text-emerald-800">
+          <span className="block text-[10px] font-semibold uppercase">Collected</span>
+          <strong className="mt-1 block truncate">{formatCurrency(row.paidAmount, currencyCode)}</strong>
+          <span className="mt-1 block text-[10px] font-semibold">View breakdown</span>
+        </div>
+        <div className="bg-amber-50 px-2 py-3 text-amber-800">
+          <span className="block text-[10px] font-semibold uppercase">Discount</span>
+          <strong className="mt-1 block truncate">{formatCurrency(row.discountAmount, currencyCode)}</strong>
+          <span className="mt-1 block text-[10px] font-semibold">View details</span>
         </div>
       </div>
+    </Link>
+  );
+}
+
+function DashboardMetricCard({
+  href,
+  icon: Icon,
+  label,
+  value,
+  detail
+}: {
+  href: string;
+  icon: typeof Store;
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <Link
+      className="group block min-h-32 rounded-lg border border-stone-200 bg-white p-4 shadow-sm transition hover:border-blue-300 hover:shadow-md focus:outline-none focus:ring-4 focus:ring-blue-100"
+      href={href}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase text-stone-500">{label}</p>
+          <p className="mt-3 truncate text-2xl font-semibold text-stone-950">{value}</p>
+        </div>
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+          <Icon className="h-5 w-5" />
+        </span>
+      </div>
+      <p className="mt-3 text-xs text-stone-500">{detail}</p>
     </Link>
   );
 }
@@ -202,6 +281,284 @@ function MasterSummaryCard({
   );
 }
 
+function SalesDashboardDetailDialog({
+  closeHref,
+  currencyCode,
+  dashboardStoreCode,
+  dateFrom,
+  dateTo,
+  detail,
+  detailStoreCode,
+  pageHref,
+  requestedView,
+  shopOptions
+}: {
+  closeHref: string;
+  currencyCode: string;
+  dashboardStoreCode: string;
+  dateFrom: string;
+  dateTo: string;
+  detail: EnterpriseSalesDashboardDetailData | null;
+  detailStoreCode: string;
+  pageHref: (page: number, pageSize?: number) => string;
+  requestedView: EnterpriseSalesDashboardDetailView;
+  shopOptions: EnterpriseOperationsDashboardData["shopOptions"];
+}) {
+  const fallbackTitles: Record<EnterpriseSalesDashboardDetailView, string> = {
+    "net-sales": "Net sales detail",
+    transactions: "Completed transactions",
+    collections: "Collections by tender",
+    discounts: "Discounted sales",
+    tax: "Taxed sales"
+  };
+  const receiptSummary =
+    detail && detail.view !== "collections"
+      ? detail.view === "discounts"
+        ? { label: "Discounts", value: detail.totals.discountAmount }
+        : detail.view === "tax"
+          ? { label: "Tax", value: detail.totals.taxAmount }
+          : { label: "Net sales", value: detail.totals.netSales }
+      : null;
+
+  return (
+    <div
+      aria-labelledby="sales-dashboard-dialog-title"
+      aria-modal="true"
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-2 sm:p-4"
+      role="dialog"
+    >
+      <section className="flex h-[min(90vh,54rem)] w-full max-w-[65rem] flex-col overflow-hidden rounded-lg bg-white shadow-2xl">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-stone-200 px-5 py-4">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-blue-700">Sales dashboard detail</p>
+            <h2 className="mt-1 truncate text-xl font-semibold text-stone-950" id="sales-dashboard-dialog-title">
+              {detail?.title ?? fallbackTitles[requestedView]}
+            </h2>
+            {detail ? <p className="mt-1 text-sm text-stone-500">{detail.description}</p> : null}
+          </div>
+          <Link
+            aria-label="Close sales detail"
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-600 transition hover:bg-stone-50 hover:text-stone-950"
+            href={closeHref}
+            title="Close"
+          >
+            <X className="h-5 w-5" />
+          </Link>
+        </header>
+
+        <form
+          action="/"
+          className="flex shrink-0 flex-wrap items-end gap-2 border-b border-stone-200 bg-stone-50 px-5 py-2.5"
+          method="get"
+        >
+          {dashboardStoreCode ? <input name="shop" type="hidden" value={dashboardStoreCode} /> : null}
+          {dateFrom ? <input name="from" type="hidden" value={dateFrom} /> : null}
+          {dateTo ? <input name="to" type="hidden" value={dateTo} /> : null}
+          <input name="detail" type="hidden" value={requestedView} />
+          {detail?.pageSize && detail.pageSize !== 20 ? (
+            <input name="pageSize" type="hidden" value={detail.pageSize} />
+          ) : null}
+          <label className="grid min-w-56 gap-1 text-[11px] font-semibold text-stone-600">
+            Shop
+            <select
+              className="h-9 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-800 outline-none"
+              defaultValue={
+                detailStoreCode === "__all__"
+                  ? "__all__"
+                  : detailStoreCode || dashboardStoreCode || "__all__"
+              }
+              name="detailShop"
+            >
+              <option value="__all__">All active shops</option>
+              {shopOptions.map((shop) => (
+                <option key={shop.storeCode} value={shop.storeCode}>
+                  {shop.storeName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="inline-flex h-9 items-center justify-center rounded-lg border border-stone-300 bg-white px-4 text-xs font-semibold text-stone-800 transition hover:bg-stone-100"
+            type="submit"
+          >
+            Apply
+          </button>
+        </form>
+
+        {!detail ? (
+          <div className="flex flex-1 items-center justify-center p-8 text-center text-sm font-medium text-rose-700">
+            Flash ERP could not load this dashboard detail. Close the dialog and try again.
+          </div>
+        ) : detail.view === "collections" ? (
+          <>
+            <div className="shrink-0 px-5 pb-2 pt-4">
+              <div className="grid gap-2.5 sm:grid-cols-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3.5">
+                  <p className="text-[10px] font-semibold uppercase text-slate-500">Total tendered</p>
+                  <p className="mt-2 text-xl font-semibold text-slate-900">
+                    {formatCurrency(detail.totals.tenderedAmount, currencyCode)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3.5">
+                  <p className="text-[10px] font-semibold uppercase text-emerald-700">Cash and electronic collections</p>
+                  <p className="mt-2 text-xl font-semibold text-emerald-800">
+                    {formatCurrency(detail.totals.collectedAmount, currencyCode)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3.5">
+                  <p className="text-[10px] font-semibold uppercase text-amber-700">Credit sales</p>
+                  <p className="mt-2 text-xl font-semibold text-amber-800">
+                    {formatCurrency(detail.totals.creditSalesAmount, currencyCode)}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-2.5 text-[11px] text-stone-500">
+                Credit is included in the tendered total but separated from cash and electronic collections.
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden px-5 pb-4 pt-3">
+              <div className="h-full w-full overflow-auto rounded-lg border border-stone-200 [scrollbar-gutter:stable]">
+                <table className="w-full min-w-[52rem] border-collapse whitespace-nowrap text-[12px]">
+                  <thead className="sticky top-0 bg-stone-50 text-left text-[10px] font-semibold uppercase text-stone-500">
+                    <tr>
+                      <th className="px-4 py-3">Tender</th>
+                      <th className="px-4 py-3">Classification</th>
+                      <th className="px-4 py-3 text-right">Shops</th>
+                      <th className="px-4 py-3 text-right">Transactions</th>
+                      <th className="px-4 py-3 text-right">Payment entries</th>
+                      <th className="px-4 py-3 text-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100 bg-white">
+                    {detail.rows.map((row) => (
+                      <tr className="even:bg-stone-50/70" key={row.tenderKey}>
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-stone-900">{row.tenderName}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${row.classification === "COLLECTED" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                            {row.classification}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right text-stone-700">{numberFormatter.format(row.shopCount)}</td>
+                        <td className="px-4 py-3 text-right text-stone-700">{numberFormatter.format(row.transactionCount)}</td>
+                        <td className="px-4 py-3 text-right text-stone-700">{numberFormatter.format(row.paymentEntries)}</td>
+                        <td className="px-4 py-3 text-right font-semibold text-stone-950">{formatCurrency(row.amount, currencyCode)}</td>
+                      </tr>
+                    ))}
+                    {detail.rows.length === 0 ? (
+                      <tr>
+                        <td className="px-4 py-10 text-center text-stone-500" colSpan={6}>No tender collections match this scope.</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                  <tfoot className="border-t border-stone-200 bg-stone-50 text-[11px] font-semibold text-stone-900">
+                    <tr>
+                      <td className="px-4 py-3" colSpan={5}>Total tendered for the selected period</td>
+                      <td className="px-4 py-3 text-right">
+                        {formatCurrency(detail.totals.tenderedAmount, currencyCode)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex shrink-0 items-center justify-between gap-4 border-b border-stone-200 px-5 py-3 text-xs text-stone-500">
+              <span>{numberFormatter.format(detail.totalRows)} completed transaction(s) for the selected period</span>
+              {receiptSummary ? (
+                <strong className="shrink-0 text-sm text-stone-900">
+                  {receiptSummary.label}: {formatCurrency(receiptSummary.value, currencyCode)}
+                </strong>
+              ) : null}
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden px-5 pb-4 pt-3">
+              <div className="h-full w-full overflow-auto rounded-lg border border-stone-200 [scrollbar-gutter:stable]">
+                <table className="w-full min-w-[68rem] border-collapse whitespace-nowrap text-[12px]">
+                  <thead className="sticky top-0 bg-stone-50 text-left text-[10px] font-semibold uppercase text-stone-500">
+                    <tr>
+                      <th className="px-4 py-3">Sale</th>
+                      <th className="px-4 py-3">Customer</th>
+                      <th className="px-4 py-3">Shop</th>
+                      <th className="px-4 py-3">Cashier</th>
+                      <th className="px-4 py-3">Completed</th>
+                      <th className="px-4 py-3 text-right">Net sale</th>
+                      <th className="px-4 py-3 text-right">Paid</th>
+                      <th className="px-4 py-3 text-right">Tax</th>
+                      <th className="px-4 py-3 text-right">Discount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100 bg-white">
+                    {detail.rows.map((row) => (
+                      <tr className="even:bg-stone-50/70" key={row.transactionNo}>
+                        <td className="px-4 py-3">
+                          <Link className="font-semibold text-blue-700 hover:underline" href={`/pos/transactions/${encodeURIComponent(row.transactionNo)}`}>
+                            {row.transactionNo}
+                          </Link>
+                        </td>
+                        <td className="px-4 py-3 text-stone-700">{row.customerName}</td>
+                        <td className="px-4 py-3 text-stone-700">{row.storeName}</td>
+                        <td className="px-4 py-3 text-stone-700">{row.cashierCode}</td>
+                        <td className="px-4 py-3 text-stone-600">{row.completedAtLabel}</td>
+                        <td className="px-4 py-3 text-right font-semibold text-stone-950">{formatCurrency(row.netSale, currencyCode)}</td>
+                        <td className="px-4 py-3 text-right text-stone-700">{formatCurrency(row.paidAmount, currencyCode)}</td>
+                        <td className="px-4 py-3 text-right text-stone-700">{formatCurrency(row.taxAmount, currencyCode)}</td>
+                        <td className="px-4 py-3 text-right text-stone-700">{formatCurrency(row.discountAmount, currencyCode)}</td>
+                      </tr>
+                    ))}
+                    {detail.rows.length === 0 ? (
+                      <tr>
+                        <td className="px-4 py-10 text-center text-stone-500" colSpan={9}>No completed sales match this scope.</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+
+        {detail ? (
+          <footer className="flex shrink-0 flex-col gap-3 border-t border-stone-200 bg-stone-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+            <p className="text-sm text-stone-600">
+              Page {detail.page} of {detail.totalPages} · {numberFormatter.format(detail.totalRows)} row(s)
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {[10, 20, 50].map((size) => (
+                <Link
+                  className={`inline-flex h-9 items-center rounded-lg border px-3 text-xs font-semibold ${detail.pageSize === size ? "border-blue-600 bg-blue-600 text-white" : "border-stone-200 bg-white text-stone-700"}`}
+                  href={pageHref(1, size)}
+                  key={size}
+                >
+                  {size} rows
+                </Link>
+              ))}
+              <Link
+                aria-disabled={detail.page <= 1}
+                className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border ${detail.page <= 1 ? "pointer-events-none border-stone-200 text-stone-300" : "border-stone-200 bg-white text-stone-700 hover:bg-stone-100"}`}
+                href={pageHref(Math.max(1, detail.page - 1))}
+                title="Previous page"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Link>
+              <Link
+                aria-disabled={detail.page >= detail.totalPages}
+                className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border ${detail.page >= detail.totalPages ? "pointer-events-none border-stone-200 text-stone-300" : "border-stone-200 bg-white text-stone-700 hover:bg-stone-100"}`}
+                href={pageHref(Math.min(detail.totalPages, detail.page + 1))}
+                title="Next page"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Link>
+            </div>
+          </footer>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 function EmptyChart({ label }: { label: string }) {
   return (
     <div className="flex h-full min-h-56 items-center justify-center rounded-lg border border-dashed border-stone-300 bg-stone-50 text-sm font-medium text-stone-500">
@@ -215,7 +572,10 @@ function ChartPlaceholder() {
 }
 
 export function EnterpriseOverviewDashboard({
-  operationsDashboard
+  detailStoreCode,
+  detailView,
+  operationsDashboard,
+  salesDetail
 }: EnterpriseOverviewDashboardProps) {
   const currencyCode = operationsDashboard.currencyCode;
   const [salesTrendPeriod, setSalesTrendPeriod] = useState<TrendPeriod>("daily");
@@ -234,6 +594,26 @@ export function EnterpriseOverviewDashboard({
     operationsDashboard.storeSummaries.reduce((sum, row) => sum + row.salesValue, 0),
     1
   );
+  const dashboardHref = (
+    view: EnterpriseSalesDashboardDetailView,
+    detailShop = "",
+    page = 1,
+    pageSize = 20
+  ) =>
+    buildDashboardHref({
+      storeCode: operationsDashboard.filters.storeCode,
+      dateFrom: operationsDashboard.filters.dateFrom,
+      dateTo: operationsDashboard.filters.dateTo,
+      detail: view,
+      detailShop,
+      page,
+      pageSize
+    });
+  const closeDetailHref = buildDashboardHref({
+    storeCode: operationsDashboard.filters.storeCode,
+    dateFrom: operationsDashboard.filters.dateFrom,
+    dateTo: operationsDashboard.filters.dateTo
+  });
   const masterSummaryCards = [
     {
       label: "Total customers",
@@ -335,25 +715,81 @@ export function EnterpriseOverviewDashboard({
         </form>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-        {operationsDashboard.storeSummaries.map((row, index) => (
-          <StoreSalesCard
-            currencyCode={currencyCode}
-            href={buildPosDrilldownHref({
-              storeCode: row.storeCode,
-              dateFrom: operationsDashboard.filters.dateFrom,
-              dateTo: operationsDashboard.filters.dateTo
-            })}
-            index={index}
-            key={row.storeCode}
-            row={row}
-          />
-        ))}
-        {operationsDashboard.storeSummaries.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-sm font-medium text-stone-500 sm:col-span-2 lg:col-span-3 xl:col-span-5">
-            No shop sales have posted yet for this dashboard scope.
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <DashboardMetricCard
+          detail="Open the completed receipt breakdown"
+          href={dashboardHref("net-sales")}
+          icon={CircleDollarSign}
+          label="Net sales"
+          value={formatCurrency(operationsDashboard.metrics.postedRevenue, currencyCode)}
+        />
+        <DashboardMetricCard
+          detail="Completed, non-void sales in this scope"
+          href={dashboardHref("transactions")}
+          icon={ReceiptText}
+          label="Transactions"
+          value={numberFormatter.format(operationsDashboard.metrics.postedTransactions)}
+        />
+        <DashboardMetricCard
+          detail="Average net value per completed transaction"
+          href={dashboardHref("transactions")}
+          icon={Activity}
+          label="Average sale"
+          value={formatCurrency(operationsDashboard.analytics.averageBasket, currencyCode)}
+        />
+        <DashboardMetricCard
+          detail="Separate cash, electronic and credit tenders"
+          href={dashboardHref("collections")}
+          icon={CreditCard}
+          label="Amount collected"
+          value={formatCurrency(operationsDashboard.metrics.paidAmount, currencyCode)}
+        />
+      </section>
+
+      <section className="grid overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm sm:grid-cols-3">
+        <Link className="border-b border-stone-200 px-5 py-4 transition hover:bg-stone-50 sm:border-b-0 sm:border-r" href={dashboardHref("tax")}>
+          <span className="block text-xs font-semibold text-stone-500">Tax collected</span>
+          <strong className="mt-2 block text-lg text-stone-950">{formatCurrency(operationsDashboard.metrics.taxAmount, currencyCode)}</strong>
+          <span className="mt-2 block text-xs font-semibold text-blue-700">View transaction details</span>
+        </Link>
+        <Link className="border-b border-stone-200 px-5 py-4 transition hover:bg-stone-50 sm:border-b-0 sm:border-r" href={dashboardHref("discounts")}>
+          <span className="block text-xs font-semibold text-stone-500">Discounts</span>
+          <strong className="mt-2 block text-lg text-stone-950">{formatCurrency(operationsDashboard.metrics.discountAmount, currencyCode)}</strong>
+          <span className="mt-2 block text-xs font-semibold text-blue-700">View discount details</span>
+        </Link>
+        <a className="px-5 py-4 transition hover:bg-stone-50" href="#shop-performance">
+          <span className="block text-xs font-semibold text-stone-500">Shops trading</span>
+          <strong className="mt-2 block text-lg text-stone-950">
+            {numberFormatter.format(operationsDashboard.analytics.storesPosting)} of {numberFormatter.format(operationsDashboard.storeSummaries.length)}
+          </strong>
+          <span className="mt-2 block text-xs font-semibold text-blue-700">View ranked shops</span>
+        </a>
+      </section>
+
+      <section id="shop-performance">
+        <div className="mb-3 flex items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase text-stone-500">Shop performance</p>
+            <h2 className="mt-1 text-lg font-semibold text-stone-950">Active shops ranked by net sales</h2>
           </div>
-        ) : null}
+          <span className="text-xs font-medium text-stone-500">Select a shop for its sales detail</span>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {operationsDashboard.storeSummaries.map((row, index) => (
+            <StoreSalesCard
+              currencyCode={currencyCode}
+              href={dashboardHref("net-sales", row.storeCode)}
+              index={index}
+              key={row.storeCode}
+              row={row}
+            />
+          ))}
+          {operationsDashboard.storeSummaries.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-sm font-medium text-stone-500 md:col-span-2 xl:col-span-4">
+              No active shop sales are available for this dashboard scope.
+            </div>
+          ) : null}
+        </div>
       </section>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
@@ -804,6 +1240,27 @@ export function EnterpriseOverviewDashboard({
           </div>
         </article>
       </section>
+      {detailView ? (
+        <SalesDashboardDetailDialog
+          closeHref={closeDetailHref}
+          currencyCode={currencyCode}
+          dashboardStoreCode={operationsDashboard.filters.storeCode}
+          dateFrom={operationsDashboard.filters.dateFrom}
+          dateTo={operationsDashboard.filters.dateTo}
+          detail={salesDetail}
+          detailStoreCode={detailStoreCode}
+          pageHref={(page, pageSize) =>
+            dashboardHref(
+              detailView,
+              detailStoreCode,
+              page,
+              pageSize ?? salesDetail?.pageSize ?? 20
+            )
+          }
+          requestedView={detailView}
+          shopOptions={operationsDashboard.shopOptions}
+        />
+      ) : null}
     </EnterpriseShell>
   );
 }

@@ -52,6 +52,12 @@ const companyLogoUploadSource = requireFile(
 const loginBackgroundUploadSource = requireFile(
   "apps/enterprise-web/src/app/api/settings/login-background/route.ts",
 );
+const companyMediaStorageSource = requireFile(
+  "apps/enterprise-web/src/server/files/company-media-storage.ts",
+);
+const companyMediaRouteSource = requireFile(
+  "apps/enterprise-web/src/app/api/media/company/[fileName]/route.ts",
+);
 
 for (const dependency of ["electron-updater", "pg", "@flash-erp/sync-core"]) {
   if (!desktopPackage.dependencies?.[dependency]) {
@@ -83,13 +89,33 @@ requireIncludes(
 );
 requireIncludes(
   companyLogoUploadSource,
-  "/uploads/company/",
-  "HQ stores company logos as durable media URLs instead of inline sync payloads",
+  "buildCompanyMediaUrl",
+  "HQ stores company logos behind the durable company-media route",
 );
 requireIncludes(
   loginBackgroundUploadSource,
-  "/uploads/company/",
-  "HQ stores login backgrounds as durable media URLs instead of inline sync payloads",
+  "buildCompanyMediaUrl",
+  "HQ stores login backgrounds behind the durable company-media route",
+);
+requireIncludes(
+  companyMediaStorageSource,
+  "FLASH_ERP_PUBLIC_MEDIA_ROOT",
+  "company media supports an explicit deployment-stable storage root",
+);
+requireIncludes(
+  companyMediaStorageSource,
+  '"shared", "public-media"',
+  "versioned VPS releases default company media into shared storage",
+);
+requireIncludes(
+  companyMediaStorageSource,
+  '"login-backgrounds"',
+  "company media reads legacy login-background folders during upgrade",
+);
+requireIncludes(
+  companyMediaRouteSource,
+  "readCompanyMediaFile",
+  "the public sign-in page can stream saved company media without authentication",
 );
 requireIncludes(mainSource, "FLASH_ERP_DESKTOP_UPDATE_URL", "runtime config stores update feed URL");
 requireIncludes(builderConfig, "updates.flashcodesolutions.com", "packager keeps first-run update metadata");

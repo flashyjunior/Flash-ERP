@@ -716,6 +716,8 @@ const salesOrderFilter: FilterFn<SalesOrderRow> = (row, _columnId, filterValue) 
 
   return [
     row.original.orderNo,
+    row.original.sourceTransactionNo,
+    row.original.fulfilledTransactionNo ?? "",
     row.original.store,
     row.original.storeCode,
     row.original.customerNo ?? "",
@@ -738,6 +740,8 @@ const layawayFilter: FilterFn<LayawayRow> = (row, _columnId, filterValue) => {
 
   return [
     row.original.orderNo,
+    row.original.sourceTransactionNo,
+    row.original.fulfilledTransactionNo ?? "",
     row.original.store,
     row.original.storeCode,
     row.original.customerNo ?? "",
@@ -1847,6 +1851,23 @@ export function EnterpriseReportingDashboard({
             </p>
             <p className="text-xs text-stone-500">
               Paid {currencyFormatter.format(row.original.paidAmount)} of {currencyFormatter.format(row.original.totalAmount)}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "paymentCount",
+        header: "Payments",
+        cell: ({ row }) => (
+          <div>
+            <p className="font-medium text-stone-900">
+              {numberFormatter.format(row.original.paymentCount)} payment(s)
+            </p>
+            <p className="text-xs text-stone-500">
+              {row.original.lastPaymentAt
+                ? `Latest ${row.original.lastPaymentAtLabel.toLowerCase()}`
+                : "No payment received"}
             </p>
           </div>
         ),
@@ -3051,8 +3072,8 @@ export function EnterpriseReportingDashboard({
           },
           {
             id: "layawayAgeing",
-            label: "Layaway ageing",
-            description: "Outstanding balances, stock reservations, ageing, cancellations, and refunds.",
+            label: "Layaway accounts",
+            description: "Balances, payment counts, stock reservations, ageing, cancellations, and refunds.",
             rowCount: dashboard.layawayRows.length,
           },
           {
@@ -4003,6 +4024,7 @@ export function EnterpriseReportingDashboard({
             )}
             emptyLabel="No receipt reporting rows are available for this report."
             exportFileName="flash-erp-hq-receipt-report"
+            getRowHref={(row) => `/pos/transactions/${encodeURIComponent(row.transactionNo)}`}
             globalFilterFn={receiptReportFilter}
             initialPageSize={12}
             initialSorting={[{ id: "completedAtLabel", desc: true }]}
@@ -4046,6 +4068,7 @@ export function EnterpriseReportingDashboard({
             )}
             emptyLabel="No item sales rows are available for this report."
             exportFileName="flash-erp-item-sales"
+            getRowHref={(row) => `/pos/transactions/${encodeURIComponent(row.transactionNo)}`}
             globalFilterFn={itemSalesFilter}
             initialPageSize={12}
             initialSorting={[{ id: "transactionNo", desc: true }]}
@@ -4100,6 +4123,7 @@ export function EnterpriseReportingDashboard({
             )}
             emptyLabel="No sales-order rows are available for this report."
             exportFileName="flash-erp-sales-order-watchlist"
+            getRowHref={(row) => `/pos/sales-orders/${encodeURIComponent(row.orderNo)}`}
             globalFilterFn={salesOrderFilter}
             initialPageSize={12}
             searchPlaceholder="Search orders, stores, customers, or basket references"
@@ -4117,7 +4141,8 @@ export function EnterpriseReportingDashboard({
                 matchesChoice(filters.customer, [row.customerNo, row.customerName])
             )}
             emptyLabel="No layaway rows are available for this report."
-            exportFileName="flash-erp-layaway-ageing"
+            exportFileName="flash-erp-layaway-accounts"
+            getRowHref={(row) => `/pos/sales-orders/${encodeURIComponent(row.orderNo)}`}
             globalFilterFn={layawayFilter}
             initialPageSize={12}
             initialSorting={[{ id: "ageDays", desc: true }]}
@@ -4138,6 +4163,7 @@ export function EnterpriseReportingDashboard({
             )}
             emptyLabel="No layaway payment rows are available for this report."
             exportFileName="flash-erp-layaway-payments"
+            getRowHref={(row) => `/pos/sales-orders/${encodeURIComponent(row.orderNo)}`}
             globalFilterFn={layawayPaymentFilter}
             initialPageSize={12}
             initialSorting={[{ id: "receivedAt", desc: true }]}
@@ -4835,7 +4861,7 @@ export function EnterpriseReportingDashboard({
               data={dashboard.receiptReportRows}
               emptyLabel="No receipt reporting rows are available yet."
               exportFileName="flash-erp-hq-receipt-report"
-              getRowHref={(row) => `/pos/transactions/${row.transactionNo}`}
+              getRowHref={(row) => `/pos/transactions/${encodeURIComponent(row.transactionNo)}`}
               globalFilterFn={receiptReportFilter}
               initialPageSize={10}
               initialSorting={[{ id: "completedAtLabel", desc: true }]}
@@ -5044,6 +5070,7 @@ export function EnterpriseReportingDashboard({
               data={dashboard.salesOrderRows}
               emptyLabel="No sales-order watch rows are available yet."
               exportFileName="flash-erp-sales-order-watchlist"
+              getRowHref={(row) => `/pos/sales-orders/${encodeURIComponent(row.orderNo)}`}
               globalFilterFn={salesOrderFilter}
               initialPageSize={6}
               searchPlaceholder="Search orders, stores, customers, or basket references"

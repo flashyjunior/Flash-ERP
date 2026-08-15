@@ -709,6 +709,8 @@ export type EnterpriseReportingDashboardData = {
   }>;
   layawayRows: Array<{
     orderNo: string;
+    sourceTransactionNo: string;
+    fulfilledTransactionNo: string | null;
     store: string;
     storeCode: string;
     customerNo: string | null;
@@ -724,6 +726,9 @@ export type EnterpriseReportingDashboardData = {
     refundedAmount: number;
     ageDays: number;
     ageingBucket: string;
+    paymentCount: number;
+    lastPaymentAt: string | null;
+    lastPaymentAtLabel: string;
     operatorName: string | null;
     createdAt: string;
     createdAtLabel: string;
@@ -919,6 +924,8 @@ async function getLayawayReportRows(
     select: {
       orderNo: true,
       sourceTransactionId: true,
+      sourceTransactionNo: true,
+      fulfilledTransactionNo: true,
       customerNoSnapshot: true,
       customerNameSnapshot: true,
       status: true,
@@ -943,12 +950,18 @@ async function getLayawayReportRows(
     }
   });
   const sourceTransactionIds = orders.map((order) => order.sourceTransactionId);
-  const payments = sourceTransactionIds.length
-    ? await prisma.posPayment.findMany({
+  const layawayPaymentPurposes = [
+    "LAYAWAY_DEPOSIT",
+    "LAYAWAY_INSTALLMENT",
+    "LAYAWAY_REFUND"
+  ];
+  const [payments, paymentAggregates] = sourceTransactionIds.length
+    ? await Promise.all([
+        prisma.posPayment.findMany({
         where: {
           posTransactionId: { in: sourceTransactionIds },
           paymentPurpose: {
-            in: ["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"]
+            in: layawayPaymentPurposes
           },
           ...(dateFrom || dateTo
             ? {
@@ -975,10 +988,23 @@ async function getLayawayReportRows(
           receivedCashierCodeSnapshot: true,
           receivedAt: true
         }
-      })
-    : [];
+        }),
+        prisma.posPayment.groupBy({
+          by: ["posTransactionId"],
+          where: {
+            posTransactionId: { in: sourceTransactionIds },
+            paymentPurpose: { in: layawayPaymentPurposes }
+          },
+          _count: { _all: true },
+          _max: { receivedAt: true }
+        })
+      ])
+    : [[], []];
   const orderBySourceTransactionId = new Map(
     orders.map((order) => [order.sourceTransactionId, order] as const)
+  );
+  const paymentAggregateBySourceTransactionId = new Map(
+    paymentAggregates.map((aggregate) => [aggregate.posTransactionId, aggregate] as const)
   );
   const now = new Date();
   const scopedOrders = orders.filter(
@@ -1003,9 +1029,15 @@ async function getLayawayReportRows(
             : ageDays <= 90
               ? "61-90 days"
               : "91+ days";
+      const paymentAggregate = paymentAggregateBySourceTransactionId.get(
+        order.sourceTransactionId
+      );
+      const lastPaymentAt = paymentAggregate?._max.receivedAt ?? null;
 
       return {
         orderNo: order.orderNo,
+        sourceTransactionNo: order.sourceTransactionNo,
+        fulfilledTransactionNo: order.fulfilledTransactionNo,
         store: order.store.name,
         storeCode: order.store.code,
         customerNo: order.customer?.customerNo ?? order.customerNoSnapshot,
@@ -1023,6 +1055,11 @@ async function getLayawayReportRows(
         refundedAmount: Number(order.refundedAmount),
         ageDays,
         ageingBucket,
+        paymentCount: paymentAggregate?._count._all ?? 0,
+        lastPaymentAt: lastPaymentAt?.toISOString() ?? null,
+        lastPaymentAtLabel: lastPaymentAt
+          ? formatRelativeTime(lastPaymentAt)
+          : "No payments",
         operatorName: order.operatorName,
         createdAt: order.createdAt.toISOString(),
         createdAtLabel: formatRelativeTime(order.createdAt),

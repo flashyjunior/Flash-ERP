@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { NextResponse } from "next/server";
 
 import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import {
+  buildCompanyMediaUrl,
+  resolveCompanyMediaUploadDirectory
+} from "@/server/files/company-media-storage";
 
 export const runtime = "nodejs";
 
@@ -18,15 +21,6 @@ const supportedMimeTypes = new Map<string, string>([
   ["image/avif", ".avif"]
 ]);
 const supportedExtensions = new Set<string>([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]);
-
-function resolveEnterpriseWebRoot() {
-  const candidates = [process.cwd(), path.join(process.cwd(), "apps", "enterprise-web")];
-
-  return (
-    candidates.find((candidate) => existsSync(path.join(candidate, "next.config.ts"))) ??
-    candidates[0]
-  );
-}
 
 function resolveExtension(file: File) {
   const supportedExtension = supportedMimeTypes.get(file.type);
@@ -63,17 +57,16 @@ export async function POST(request: Request) {
       throw new Error("Flash ERP supports PNG, JPG, WEBP, GIF, and AVIF logo uploads only.");
     }
 
-    const enterpriseWebRoot = resolveEnterpriseWebRoot();
-    const uploadDir = path.join(enterpriseWebRoot, "public", "uploads", "company");
+    const uploadDir = resolveCompanyMediaUploadDirectory();
     const fileName = `${Date.now()}-${randomUUID()}-company-logo${extension}`;
     const outputPath = path.join(uploadDir, fileName);
     const fileBuffer = Buffer.from(await file.arrayBuffer());
 
-    mkdirSync(uploadDir, { recursive: true });
+    await mkdir(uploadDir, { recursive: true });
     await writeFile(outputPath, fileBuffer);
 
     return NextResponse.json({
-      url: `/uploads/company/${fileName}`,
+      url: buildCompanyMediaUrl(fileName),
       message: `${file.name} uploaded successfully. Flash ERP attached it to the company profile.`
     });
   } catch (error) {
