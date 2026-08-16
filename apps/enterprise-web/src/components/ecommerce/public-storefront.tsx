@@ -152,6 +152,20 @@ function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
 
+function createBrowserRequestKey(scope: string) {
+  const bytes = new Uint8Array(16);
+  try {
+    if (typeof globalThis.crypto?.getRandomValues === "function") {
+      globalThis.crypto.getRandomValues(bytes);
+      return `${scope}-${Date.now().toString(36)}-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+    }
+  } catch {
+    // HTTP storefronts can expose a partial Web Crypto implementation.
+  }
+
+  return `${scope}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
 const friendlyDateTime = new Intl.DateTimeFormat("en-GH", {
   day: "numeric",
   month: "short",
@@ -1040,6 +1054,10 @@ export function PublicStorefront({
       setToast("Layaway is not currently available from this shop.");
       return;
     }
+    if (checkoutOrderType === "LAYAWAY" && !storefront.store.layawayOffer.paymentReady) {
+      setToast("Layaway needs an available online payment option for the opening deposit.");
+      return;
+    }
     if (checkoutOrderType === "LAYAWAY" && layawayDepositAmount <= 0) {
       setLayawayDepositAmount(minimumLayawayDeposit);
     }
@@ -1058,7 +1076,7 @@ export function PublicStorefront({
     setCheckoutBusy(true);
     setCheckoutError(null);
     try {
-      checkoutRequestKeyRef.current ??= crypto.randomUUID();
+      checkoutRequestKeyRef.current ??= createBrowserRequestKey("checkout");
       const result = await readJson<{
         orderNo: string;
         totalAmount: number;
@@ -1125,7 +1143,7 @@ export function PublicStorefront({
     setPaymentBusy(true);
     setCheckoutError(null);
     try {
-      paymentRequestKeyRef.current ??= crypto.randomUUID();
+      paymentRequestKeyRef.current ??= createBrowserRequestKey("payment");
       const result = await readJson<{ checkoutUrl: string }>(
         await fetch(
           `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/orders/${encodeURIComponent(orderNo)}/payments`,
@@ -1914,10 +1932,13 @@ function CheckoutPanel(props: {
       <DrawerHeader onBack={props.onBack} onClose={props.onClose} title="Checkout" />
       <div className={styles.checkoutScroll}>
         {props.store.layawayOffer.enabled ? (
-          <div className={styles.segmented}>
-            <button className={props.orderType === "SALES_ORDER" ? styles.segmentedActive : undefined} onClick={() => props.onOrderType("SALES_ORDER")} type="button"><ShoppingBag size={18} />Buy now</button>
-            <button className={props.orderType === "LAYAWAY" ? styles.segmentedActive : undefined} onClick={() => props.onOrderType("LAYAWAY")} type="button"><WalletCards size={18} />Layaway</button>
-          </div>
+          <>
+            <div className={styles.segmented}>
+              <button className={props.orderType === "SALES_ORDER" ? styles.segmentedActive : undefined} onClick={() => props.onOrderType("SALES_ORDER")} type="button"><ShoppingBag size={18} />Buy now</button>
+              <button aria-describedby={props.store.layawayOffer.paymentReady ? undefined : "layaway-payment-note"} className={props.orderType === "LAYAWAY" ? styles.segmentedActive : undefined} disabled={!props.store.layawayOffer.paymentReady} onClick={() => props.onOrderType("LAYAWAY")} title={props.store.layawayOffer.paymentReady ? "Start a layaway" : "Layaway needs an online payment option"} type="button"><WalletCards size={18} />Layaway</button>
+            </div>
+            {!props.store.layawayOffer.paymentReady ? <div className={styles.layawayUnavailable} id="layaway-payment-note"><CreditCard size={18} /><span>Layaway is offered by this shop, but online deposit payment is temporarily unavailable. Contact the shop for help.</span></div> : null}
+          </>
         ) : null}
         <div className={styles.segmented}>
           {props.store.allowDelivery ? <button className={props.deliveryMethod === "DELIVERY" ? styles.segmentedActive : undefined} onClick={() => props.onDeliveryMethod("DELIVERY")} type="button"><Truck size={18} />Delivery</button> : null}

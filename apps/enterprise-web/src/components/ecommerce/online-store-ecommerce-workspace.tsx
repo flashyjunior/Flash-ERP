@@ -424,7 +424,7 @@ export function OnlineStoreEcommerceWorkspace({
                   <strong>Offer Layaway online</strong>
                   <small>
                     {workspace.layawayPolicy.enabled
-                      ? `${workspace.layawayPolicy.minimumDepositPercent}% minimum deposit; the HQ Layaway policy remains authoritative.`
+                      ? `${workspace.layawayPolicy.minimumDepositPercent}% minimum deposit; customers also need an enabled, gateway-ready online payment option for the deposit.`
                       : "Enable Layaway in HQ Company Settings before offering it online."}
                   </small>
                 </span>
