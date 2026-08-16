@@ -21,6 +21,7 @@ import {
   EcommerceAuthError,
   getEcommerceCustomerSession
 } from "@/server/ecommerce/ecommerce-customer-auth";
+import { createEcommerceUuid } from "@/server/ecommerce/ecommerce-identifiers";
 import {
   hashEcommerceIdempotencyPayload,
   isUniqueConstraintError,
@@ -731,8 +732,8 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
   );
   const layawayOfferEnabled =
     store.ecommerceLayawayEnabled &&
-    layawaySettings.enabled &&
-    gatewayMethods.length > 0;
+    layawaySettings.enabled;
+  const layawayPaymentReady = gatewayMethods.length > 0;
 
   return {
     store: {
@@ -758,6 +759,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       payOnDeliveryEnabled: store.ecommercePayOnDeliveryEnabled,
       layawayOffer: {
         enabled: layawayOfferEnabled,
+        paymentReady: layawayPaymentReady,
         minimumDepositPercent: layawaySettings.minimumDepositPercent,
         reserveStockOnDeposit: layawaySettings.reserveStockOnDeposit,
         requireFullPaymentBeforeFulfilment:
@@ -1392,7 +1394,7 @@ export async function createEcommerceOrder(input: {
         createdAt: now,
         lines: {
           create: orderLines.map((line) => ({
-            id: crypto.randomUUID(),
+            id: createEcommerceUuid(),
             productCodeSnapshot: line.product.code,
             productVariantCodeSnapshot: line.variant?.code ?? null,
             productNameSnapshot: line.product.name,

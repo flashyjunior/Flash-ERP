@@ -5,6 +5,7 @@ import { cookies, headers } from "next/headers";
 
 import { prisma } from "@/lib/db/prisma";
 import { shouldUseSecureCookies } from "@/server/auth/enterprise-session";
+import { createEcommerceUuid } from "@/server/ecommerce/ecommerce-identifiers";
 import { deliverEnterpriseMfaCode } from "@/server/services/enterprise-mfa-delivery";
 
 const ecommerceSessionCookieName = "flash_erp_shop_session";
@@ -287,7 +288,7 @@ export async function requestEcommerceOtp(input: {
     throw new EcommerceAuthError(`Wait ${waitSeconds} second(s) before requesting another code.`, 429);
   }
 
-  const challengeId = crypto.randomUUID();
+  const challengeId = createEcommerceUuid();
   const code = String(crypto.randomInt(100000, 1_000_000));
   const expiresAt = new Date(now.getTime() + ecommerceOtpLifetimeMinutes * 60_000);
   const resendAvailableAt = new Date(now.getTime() + ecommerceOtpResendSeconds * 1000);
