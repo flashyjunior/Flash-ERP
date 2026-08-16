@@ -1267,6 +1267,7 @@ export function PublicStorefront({
       setAuthOpen(true);
       return;
     }
+    setSelectedOrder(null);
     setDrawerView("account");
     await refreshAccount();
   }
@@ -1441,6 +1442,7 @@ export function PublicStorefront({
               <PackageCheck size={20} />
             </button>
             <button
+              aria-label={session.authenticated ? "Open my account" : "Sign in"}
               className={styles.iconButton}
               onClick={() => {
                 if (session.authenticated) {
@@ -1646,7 +1648,7 @@ export function PublicStorefront({
         <button className={!drawerView ? styles.mobileNavActive : undefined} onClick={() => { setDrawerView(null); if (quickProduct) closeProduct(); }} type="button"><ShoppingBag size={20} /><span>Shop</span></button>
         <button className={drawerView === "orders" ? styles.mobileNavActive : undefined} onClick={() => void openOrders()} type="button"><PackageCheck size={20} /><span>Orders</span></button>
         <button className={drawerView === "cart" || drawerView === "checkout" ? styles.mobileNavActive : undefined} onClick={() => setDrawerView("cart")} type="button"><ShoppingCart size={20} /><span>Cart</span><b>{cartQuantity}</b></button>
-        <button className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => session.authenticated ? void openAccount() : setAuthOpen(true)} type="button"><CircleUserRound size={20} /><span>Account</span></button>
+        <button aria-label={session.authenticated ? "Open my account" : "Sign in"} className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => session.authenticated ? void openAccount() : setAuthOpen(true)} type="button"><CircleUserRound size={20} /><span>Account</span></button>
       </nav>
 
       {cartQuantity > 0 && !drawerView ? (

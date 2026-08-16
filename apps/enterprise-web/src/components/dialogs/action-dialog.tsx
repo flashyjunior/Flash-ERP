@@ -2,7 +2,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import { X } from "lucide-react";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/utils/cn";
@@ -38,6 +38,11 @@ export function ActionDialog({
   const descriptionId = useId();
   const isControlled = open !== undefined;
   const isOpen = isControlled ? open : internalOpen;
+  const onOpenChangeRef = useRef(onOpenChange);
+
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
 
   useEffect(() => {
     setMounted(true);
@@ -70,7 +75,7 @@ export function ActionDialog({
       setInternalOpen(nextValue);
     }
 
-    onOpenChange?.(nextValue);
+    onOpenChangeRef.current?.(nextValue);
   }
 
   return (
@@ -92,7 +97,7 @@ export function ActionDialog({
       {mounted && isOpen
         ? createPortal(
             <div
-              className="fixed inset-0 z-[90] bg-slate-950/45 px-4 py-6 backdrop-blur-[2px] sm:px-6"
+              className="fixed inset-0 z-[90] bg-slate-950/50 px-4 py-6 sm:px-6"
               onMouseDown={() => setOpen(false)}
             >
               <div

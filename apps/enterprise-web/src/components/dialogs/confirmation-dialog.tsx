@@ -1,7 +1,7 @@
 "use client";
 
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/utils/cn";
@@ -64,6 +64,9 @@ export function ConfirmationDialog({
 }: ConfirmationDialogProps) {
   const [mounted, setMounted] = useState(false);
   const [note, setNote] = useState(initialNote);
+  const initialNoteRef = useRef(initialNote);
+  const isSubmittingRef = useRef(isSubmitting);
+  const onCancelRef = useRef(onCancel);
   const styles = toneStyles[tone];
   const Icon = styles.icon;
   const noteMissing = Boolean(noteLabel && noteRequired && !note.trim());
@@ -71,16 +74,28 @@ export function ConfirmationDialog({
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
+    initialNoteRef.current = initialNote;
+  }, [initialNote]);
+
+  useEffect(() => {
+    isSubmittingRef.current = isSubmitting;
+  }, [isSubmitting]);
+
+  useEffect(() => {
+    onCancelRef.current = onCancel;
+  }, [onCancel]);
+
+  useEffect(() => {
     if (!open) {
       return undefined;
     }
 
-    setNote(initialNote);
+    setNote(initialNoteRef.current);
     const previousOverflow = document.body.style.overflow;
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isSubmitting) {
-        onCancel();
+      if (event.key === "Escape" && !isSubmittingRef.current) {
+        onCancelRef.current();
       }
     }
 
@@ -91,14 +106,14 @@ export function ConfirmationDialog({
       document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [initialNote, isSubmitting, onCancel, open]);
+  }, [open]);
 
   if (!mounted || !open) {
     return null;
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[95] grid place-items-center bg-slate-950/45 px-4 py-6 backdrop-blur-[2px]">
+    <div className="fixed inset-0 z-[95] grid place-items-center bg-slate-950/50 px-4 py-6">
       <section className="w-full max-w-lg overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.24)]">
         <div className="flex items-start gap-4 border-b border-slate-200 px-5 py-4">
           <div className={cn("flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl", styles.iconClassName)}>

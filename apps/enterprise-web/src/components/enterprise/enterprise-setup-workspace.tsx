@@ -220,6 +220,26 @@ function DialogCheckbox({
   );
 }
 
+function EnterpriseSetupFrame({
+  children,
+  embedded,
+  heading
+}: {
+  children: ReactNode;
+  embedded: boolean;
+  heading: string;
+}) {
+  if (embedded) {
+    return <div className="space-y-4">{children}</div>;
+  }
+
+  return (
+    <EnterpriseShell activeSection="master" eyebrow="Flash ERP enterprise" heading={heading}>
+      {children}
+    </EnterpriseShell>
+  );
+}
+
 const recordStatusOptions = [
   { value: "ACTIVE", label: "ACTIVE" },
   { value: "INACTIVE", label: "INACTIVE" },
@@ -1869,17 +1889,8 @@ export function EnterpriseSetupWorkspace({
     }
   };
 
-  const ShellFrame = ({ children }: { children: ReactNode }) =>
-    embedded ? (
-      <div className="space-y-4">{children}</div>
-    ) : (
-      <EnterpriseShell activeSection="master" eyebrow="Flash ERP enterprise" heading={pageMeta.heading}>
-        {children}
-      </EnterpriseShell>
-    );
-
   return (
-    <ShellFrame>
+    <EnterpriseSetupFrame embedded={embedded} heading={pageMeta.heading}>
       <section className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-2">
           <div className="rounded-full border border-[color:var(--brand)]/15 bg-[color:rgba(37,99,235,0.06)] px-4 py-2 text-sm font-medium text-[color:var(--brand-deep)]">
@@ -2663,6 +2674,6 @@ export function EnterpriseSetupWorkspace({
           <p className="text-sm leading-6 text-amber-900">{workspace.statusMessage}</p>
         </section>
       ) : null}
-    </ShellFrame>
+    </EnterpriseSetupFrame>
   );
 }
