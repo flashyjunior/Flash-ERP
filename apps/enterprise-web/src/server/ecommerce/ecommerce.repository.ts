@@ -43,6 +43,38 @@ function optionalText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function hasGatewaySecret(value: unknown) {
+  const secret = optionalText(value);
+  return Boolean(secret && !/^\*+$/.test(secret));
+}
+
+function isEcommerceGatewayRuntimeReady(input: {
+  gatewayActive: boolean;
+  gatewayProvider: string | null;
+  gatewaySecretMask: string | null;
+}) {
+  if (!input.gatewayActive) return false;
+
+  const provider = input.gatewayProvider?.trim().toUpperCase();
+  const environmentSecret =
+    provider === "PAYSTACK"
+      ? process.env.FLASH_ERP_PAYSTACK_SECRET_KEY
+      : provider === "FLUTTERWAVE"
+        ? process.env.FLASH_ERP_FLUTTERWAVE_SECRET_KEY
+        : null;
+
+  return hasGatewaySecret(environmentSecret) || hasGatewaySecret(input.gatewaySecretMask);
+}
+
+function resolveEcommerceGatewayStatus(input: {
+  gatewayActive: boolean;
+  gatewayProvider: string | null;
+  gatewaySecretMask: string | null;
+}) {
+  if (!input.gatewayActive) return "DISABLED";
+  return isEcommerceGatewayRuntimeReady(input) ? "READY" : "NEEDS_REVIEW";
+}
+
 function readJsonObject(value: unknown): Record<string, unknown> {
   if (!value) return {};
   if (typeof value === "object" && !Array.isArray(value)) {
@@ -564,7 +596,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       reviewCount: row._count._all
     }] as const)
   );
-  const gatewayMethods = await prisma.ecommerceStorePaymentMethod.findMany({
+  const configuredGatewayMethods = await prisma.ecommerceStorePaymentMethod.findMany({
     where: {
       retailOrgId: store.retailOrgId,
       storeId: store.id,
@@ -572,8 +604,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       tenderMethod: {
         status: "ACTIVE",
         gatewayActive: true,
-        gatewayStatus: "READY",
-        gatewayProvider: { not: null }
+        gatewayProvider: { in: ["PAYSTACK", "FLUTTERWAVE"] }
       }
     },
     orderBy: [{ sortOrder: "asc" }, { tenderMethod: { name: "asc" } }],
@@ -587,11 +618,16 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
           paymentMethod: true,
           gatewayProvider: true,
           gatewayMode: true,
-          gatewayPublicKey: true
+          gatewayPublicKey: true,
+          gatewayActive: true,
+          gatewaySecretMask: true
         }
       }
     }
   });
+  const gatewayMethods = configuredGatewayMethods.filter((configuration) =>
+    isEcommerceGatewayRuntimeReady(configuration.tenderMethod)
+  );
   const promotionPolicies = await getEcommercePromotionPolicies(store.retailOrgId);
   const publicProducts = products.map((product) => {
     const unitPrice = Number(product.storeProductPrices[0]?.unitPrice ?? product.baseUnitPrice);
@@ -1237,15 +1273,24 @@ export async function createEcommerceOrder(input: {
               code: requestedPaymentMethodCode,
               status: "ACTIVE",
               gatewayActive: true,
-              gatewayStatus: "READY",
               gatewayProvider: { in: ["PAYSTACK", "FLUTTERWAVE"] }
             }
           },
-          select: { tenderMethod: { select: { code: true, name: true } } }
+          select: {
+            tenderMethod: {
+              select: {
+                code: true,
+                name: true,
+                gatewayActive: true,
+                gatewayProvider: true,
+                gatewaySecretMask: true
+              }
+            }
+          }
         })
       : null;
 
-    if (!configuredMethod) {
+    if (!configuredMethod || !isEcommerceGatewayRuntimeReady(configuredMethod.tenderMethod)) {
       throw new EcommerceAuthError("Choose an available payment option.", 409);
     }
     paymentSelection = {
@@ -2125,6 +2170,7 @@ export async function getOnlineStoreEcommerceWorkspace() {
         gatewayProvider: true,
         gatewayStatus: true,
         gatewayActive: true,
+        gatewaySecretMask: true,
         ecommerceStoreMethods: {
           where: { storeId: store.id },
           take: 1,
@@ -2175,17 +2221,22 @@ export async function getOnlineStoreEcommerceWorkspace() {
       ecommerceSpecifications: readSpecifications(product.ecommerceSpecificationsJson),
       ecommerceGalleryImageUrls: readStringArray(product.ecommerceGalleryJson)
     })),
-    paymentMethods: tenderMethods.map((method) => ({
-      id: method.id,
-      code: method.code,
-      name: method.name,
-      paymentMethod: method.paymentMethod,
-      provider: method.gatewayProvider,
-      gatewayStatus: method.gatewayStatus,
-      gatewayActive: method.gatewayActive,
-      enabled: method.ecommerceStoreMethods[0]?.enabled ?? false,
-      sortOrder: method.ecommerceStoreMethods[0]?.sortOrder ?? 0
-    })),
+    paymentMethods: tenderMethods.map((method) => {
+      const gatewayRuntimeReady = isEcommerceGatewayRuntimeReady(method);
+
+      return {
+        id: method.id,
+        code: method.code,
+        name: method.name,
+        paymentMethod: method.paymentMethod,
+        provider: method.gatewayProvider,
+        gatewayStatus: resolveEcommerceGatewayStatus(method),
+        gatewayRuntimeReady,
+        gatewayActive: method.gatewayActive,
+        enabled: method.ecommerceStoreMethods[0]?.enabled ?? false,
+        sortOrder: method.ecommerceStoreMethods[0]?.sortOrder ?? 0
+      };
+    }),
     orders: orders.map((order) => ({
       ...mapCustomerOrder(order),
       customer: order.customerAccount.customer

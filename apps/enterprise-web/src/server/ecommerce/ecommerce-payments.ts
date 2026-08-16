@@ -409,7 +409,6 @@ export async function initializeEcommercePayment(input: {
       code: tenderMethodCode,
       status: "ACTIVE",
       gatewayActive: true,
-      gatewayStatus: "READY",
       gatewayProvider: { in: ["PAYSTACK", "FLUTTERWAVE"] },
       ecommerceStoreMethods: {
         some: { storeId: order.storeId, enabled: true }

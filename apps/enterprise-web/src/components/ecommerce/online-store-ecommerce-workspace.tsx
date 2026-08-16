@@ -441,8 +441,8 @@ export function OnlineStoreEcommerceWorkspace({
               {paymentMethods.map((method) => (
                 <div className={styles.paymentOptionRow} key={method.id}>
                   <span className={styles.paymentIcon}><CircleDollarSign size={20} /></span>
-                  <span><strong>{method.name}</strong><small>{method.provider} · Pay before delivery · {formatStatus(method.gatewayStatus)}</small></span>
-                  <label className={styles.toggle}><input checked={method.enabled} disabled={!method.gatewayActive || method.gatewayStatus !== "READY"} onChange={(event) => setPaymentMethods((current) => current.map((entry) => entry.id === method.id ? { ...entry, enabled: event.target.checked } : entry))} type="checkbox" /><span /></label>
+                  <span><strong>{method.name}</strong><small>{method.provider} · Pay before delivery · {method.gatewayRuntimeReady ? "Server key ready" : "Server key needed"}</small></span>
+                  <label className={styles.toggle}><input checked={method.enabled} disabled={!method.gatewayRuntimeReady} onChange={(event) => setPaymentMethods((current) => current.map((entry) => entry.id === method.id ? { ...entry, enabled: event.target.checked } : entry))} type="checkbox" /><span /></label>
                 </div>
               ))}
               {paymentMethods.length === 0 ? <div className={styles.empty}>Configure a Paystack or Flutterwave tender method before enabling prepayment.</div> : null}
