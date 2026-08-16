@@ -1697,6 +1697,249 @@ const customerOrderInclude = {
   statusEvents: { orderBy: { createdAt: "asc" as const } }
 } satisfies Prisma.EcommerceOrderInclude;
 
+function mapEcommerceCustomerAccount(account: {
+  customer: { customerNo: string; fullName: string; email: string | null; phone: string | null };
+  addresses: Array<{
+    id: string;
+    label: string | null;
+    recipientName: string;
+    phone: string;
+    addressLine1: string;
+    addressLine2: string | null;
+    city: string;
+    region: string | null;
+    countryCode: string;
+    postalCode: string | null;
+    deliveryNote: string | null;
+    isDefault: boolean;
+  }>;
+}) {
+  return {
+    customer: account.customer,
+    addresses: account.addresses
+  };
+}
+
+async function requireEcommerceCustomerAccount(storeCode: string) {
+  const session = await getEcommerceCustomerSession({ storeCode, required: true });
+  if (!session) {
+    throw new EcommerceAuthError("Sign in to manage your account.", 401);
+  }
+
+  const account = await prisma.ecommerceCustomerAccount.findFirst({
+    where: {
+      id: session.customerAccount.id,
+      retailOrgId: session.retailOrgId,
+      status: "ACTIVE"
+    },
+    select: {
+      id: true,
+      retailOrgId: true,
+      customerId: true,
+      customer: {
+        select: {
+          customerNo: true,
+          fullName: true,
+          email: true,
+          phone: true
+        }
+      },
+      addresses: {
+        orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+        select: {
+          id: true,
+          label: true,
+          recipientName: true,
+          phone: true,
+          addressLine1: true,
+          addressLine2: true,
+          city: true,
+          region: true,
+          countryCode: true,
+          postalCode: true,
+          deliveryNote: true,
+          isDefault: true
+        }
+      }
+    }
+  });
+
+  if (!account) {
+    throw new EcommerceAuthError("Your customer account is no longer available.", 404);
+  }
+
+  return account;
+}
+
+export async function getEcommerceCustomerAccount(storeCode: string) {
+  return mapEcommerceCustomerAccount(await requireEcommerceCustomerAccount(storeCode));
+}
+
+export async function updateEcommerceCustomerProfile(input: {
+  storeCode: string;
+  fullName?: unknown;
+}) {
+  const account = await requireEcommerceCustomerAccount(input.storeCode);
+  const fullName = optionalText(input.fullName);
+  if (!fullName || fullName.length < 2 || fullName.length > 200) {
+    throw new EcommerceAuthError("Enter a full name between 2 and 200 characters.");
+  }
+
+  await prisma.customer.update({
+    where: { id: account.customerId },
+    data: {
+      fullName,
+      lastModifiedByNodeCode: "ECOMMERCE",
+      recordVersion: { increment: 1 }
+    }
+  });
+
+  return getEcommerceCustomerAccount(input.storeCode);
+}
+
+type EcommerceCustomerAddressInput = {
+  id?: unknown;
+  label?: unknown;
+  recipientName?: unknown;
+  phone?: unknown;
+  addressLine1?: unknown;
+  addressLine2?: unknown;
+  city?: unknown;
+  region?: unknown;
+  postalCode?: unknown;
+  deliveryNote?: unknown;
+  makeDefault?: unknown;
+};
+
+function readEcommerceCustomerAddress(input: EcommerceCustomerAddressInput) {
+  const recipientName = optionalText(input.recipientName);
+  const phone = optionalText(input.phone);
+  const addressLine1 = optionalText(input.addressLine1);
+  const city = optionalText(input.city);
+  const label = optionalText(input.label);
+  const addressLine2 = optionalText(input.addressLine2);
+  const region = optionalText(input.region);
+  const postalCode = optionalText(input.postalCode);
+  const deliveryNote = optionalText(input.deliveryNote);
+
+  if (!recipientName || recipientName.length > 200) {
+    throw new EcommerceAuthError("Enter the recipient's name.");
+  }
+  if (!phone || phone.length > 40) {
+    throw new EcommerceAuthError("Enter a delivery phone number.");
+  }
+  if (!addressLine1 || addressLine1.length > 300) {
+    throw new EcommerceAuthError("Enter the first address line.");
+  }
+  if (!city || city.length > 160) {
+    throw new EcommerceAuthError("Enter the delivery city or town.");
+  }
+
+  return {
+    label: label?.slice(0, 120) ?? null,
+    recipientName,
+    phone,
+    addressLine1,
+    addressLine2: addressLine2?.slice(0, 300) ?? null,
+    city,
+    region: region?.slice(0, 160) ?? null,
+    postalCode: postalCode?.slice(0, 40) ?? null,
+    deliveryNote: deliveryNote?.slice(0, 2_000) ?? null,
+    makeDefault: input.makeDefault === true
+  };
+}
+
+export async function saveEcommerceCustomerAddress(input: {
+  storeCode: string;
+  address: EcommerceCustomerAddressInput;
+}) {
+  const account = await requireEcommerceCustomerAccount(input.storeCode);
+  const address = readEcommerceCustomerAddress(input.address);
+  const { makeDefault, ...addressData } = address;
+  const addressId = optionalText(input.address.id);
+
+  await prisma.$transaction(async (tx) => {
+    if (addressId) {
+      const existing = await tx.ecommerceCustomerAddress.findFirst({
+        where: { id: addressId, customerAccountId: account.id },
+        select: { id: true, isDefault: true }
+      });
+      if (!existing) {
+        throw new EcommerceAuthError("That delivery address was not found.", 404);
+      }
+      if (makeDefault) {
+        await tx.ecommerceCustomerAddress.updateMany({
+          where: { customerAccountId: account.id },
+          data: { isDefault: false }
+        });
+      }
+      await tx.ecommerceCustomerAddress.update({
+        where: { id: existing.id },
+        data: {
+          ...addressData,
+          isDefault: makeDefault ? true : existing.isDefault
+        }
+      });
+      return;
+    }
+
+    const hasSavedAddress = await tx.ecommerceCustomerAddress.count({
+      where: { customerAccountId: account.id }
+    });
+    const isDefault = makeDefault || hasSavedAddress === 0;
+    if (isDefault) {
+      await tx.ecommerceCustomerAddress.updateMany({
+        where: { customerAccountId: account.id },
+        data: { isDefault: false }
+      });
+    }
+    await tx.ecommerceCustomerAddress.create({
+      data: {
+        customerAccountId: account.id,
+        ...addressData,
+        countryCode: "GH",
+        isDefault
+      }
+    });
+  });
+
+  return getEcommerceCustomerAccount(input.storeCode);
+}
+
+export async function deleteEcommerceCustomerAddress(input: {
+  storeCode: string;
+  addressId: string;
+}) {
+  const account = await requireEcommerceCustomerAccount(input.storeCode);
+
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.ecommerceCustomerAddress.findFirst({
+      where: { id: input.addressId, customerAccountId: account.id },
+      select: { id: true, isDefault: true }
+    });
+    if (!existing) {
+      throw new EcommerceAuthError("That delivery address was not found.", 404);
+    }
+
+    await tx.ecommerceCustomerAddress.delete({ where: { id: existing.id } });
+    if (existing.isDefault) {
+      const replacement = await tx.ecommerceCustomerAddress.findFirst({
+        where: { customerAccountId: account.id },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true }
+      });
+      if (replacement) {
+        await tx.ecommerceCustomerAddress.update({
+          where: { id: replacement.id },
+          data: { isDefault: true }
+        });
+      }
+    }
+  });
+
+  return getEcommerceCustomerAccount(input.storeCode);
+}
+
 export async function getEcommerceCustomerOrders(storeCode: string) {
   const session = await getEcommerceCustomerSession({ storeCode, required: true });
   const store = await getPublicStore(storeCode);

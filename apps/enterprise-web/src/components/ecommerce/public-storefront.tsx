@@ -11,11 +11,14 @@ import {
   Clock3,
   CreditCard,
   Heart,
+  KeyRound,
   LoaderCircle,
   LocateFixed,
   LogIn,
+  MapPin,
   Minus,
   PackageCheck,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -41,7 +44,7 @@ type Product = PublicStorefrontData["products"][number];
 type Variant = Product["variants"][number];
 type SellingUnit = Product["sellingUnits"][number];
 type ProductPromotion = NonNullable<Product["promotion"]>;
-type DrawerView = "cart" | "checkout" | "orders" | null;
+type DrawerView = "cart" | "checkout" | "orders" | "account" | null;
 type CheckoutPaymentOption = {
   code: string;
   name: string;
@@ -98,6 +101,31 @@ type CustomerSession = {
     email: string | null;
     phone: string | null;
   };
+};
+
+type CustomerAddress = {
+  id: string;
+  label: string | null;
+  recipientName: string;
+  phone: string;
+  addressLine1: string;
+  addressLine2: string | null;
+  city: string;
+  region: string | null;
+  countryCode: string;
+  postalCode: string | null;
+  deliveryNote: string | null;
+  isDefault: boolean;
+};
+
+type CustomerAccount = {
+  customer: NonNullable<CustomerSession["customer"]>;
+  addresses: CustomerAddress[];
+};
+
+type CustomerAddressDraft = Omit<CustomerAddress, "id" | "countryCode" | "isDefault"> & {
+  id?: string;
+  makeDefault: boolean;
 };
 
 type CustomerOrder = {
@@ -472,6 +500,9 @@ export function PublicStorefront({
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [ordersBusy, setOrdersBusy] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<CustomerOrder | null>(null);
+  const [account, setAccount] = useState<CustomerAccount | null>(null);
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountSaving, setAccountSaving] = useState(false);
   const [deliveryMethod, setDeliveryMethod] = useState<"DELIVERY" | "PICKUP">(
     storefront.store.allowDelivery ? "DELIVERY" : "PICKUP"
   );
@@ -648,6 +679,28 @@ export function PublicStorefront({
       setReceiptEmail((value) => value || session.customer?.email || "");
     }
   }, [session.customer]);
+
+  useEffect(() => {
+    if (session.authenticated && !account) {
+      void refreshAccount(true);
+    }
+    if (!session.authenticated) {
+      setAccount(null);
+    }
+  }, [session.authenticated]);
+
+  useEffect(() => {
+    const defaultAddress = account?.addresses.find((address) => address.isDefault);
+    if (!defaultAddress) return;
+
+    setRecipientName((value) => value || defaultAddress.recipientName);
+    setDeliveryPhone((value) => value || defaultAddress.phone);
+    setAddressLine1((value) => value || defaultAddress.addressLine1);
+    setAddressLine2((value) => value || defaultAddress.addressLine2 || "");
+    setCity((value) => value || defaultAddress.city);
+    setRegion((value) => value || defaultAddress.region || "");
+    setDeliveryNote((value) => value || defaultAddress.deliveryNote || "");
+  }, [account]);
 
   useEffect(() => {
     const product = storefront.products.find((entry) => entry.code === initialProductCode) ?? null;
@@ -1190,6 +1243,109 @@ export function PublicStorefront({
     }
   }
 
+  async function refreshAccount(silent = false) {
+    setAccountBusy(true);
+    try {
+      const result = await readJson<CustomerAccount>(
+        await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/account`, {
+          cache: "no-store"
+        })
+      );
+      setAccount(result);
+    } catch (error) {
+      if (!silent) {
+        showToast(error instanceof Error ? error.message : "Your account could not be loaded.");
+      }
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function openAccount() {
+    if (!session.authenticated) {
+      setAuthMode("SIGN_IN");
+      setAuthOpen(true);
+      return;
+    }
+    setDrawerView("account");
+    await refreshAccount();
+  }
+
+  async function saveAccountProfile(fullName: string) {
+    setAccountSaving(true);
+    try {
+      const result = await readJson<CustomerAccount>(
+        await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/account`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ fullName })
+        })
+      );
+      setAccount(result);
+      await refreshSession();
+      showToast("Profile updated");
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Your profile could not be updated.");
+      return false;
+    } finally {
+      setAccountSaving(false);
+    }
+  }
+
+  async function saveAccountAddress(address: CustomerAddressDraft) {
+    setAccountSaving(true);
+    try {
+      const addressPath = address.id
+        ? `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/account/addresses/${encodeURIComponent(address.id)}`
+        : `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/account/addresses`;
+      const result = await readJson<CustomerAccount>(
+        await fetch(addressPath, {
+          method: address.id ? "PATCH" : "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(address)
+        })
+      );
+      setAccount(result);
+      showToast(address.id ? "Delivery address updated" : "Delivery address saved");
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Your delivery address could not be saved.");
+      return false;
+    } finally {
+      setAccountSaving(false);
+    }
+  }
+
+  async function removeAccountAddress(address: CustomerAddress) {
+    setAccountSaving(true);
+    try {
+      const result = await readJson<CustomerAccount>(
+        await fetch(
+          `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/account/addresses/${encodeURIComponent(address.id)}`,
+          { method: "DELETE" }
+        )
+      );
+      setAccount(result);
+      showToast("Delivery address removed");
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Your delivery address could not be removed.");
+      return false;
+    } finally {
+      setAccountSaving(false);
+    }
+  }
+
+  function openPasswordReset() {
+    setIdentifier(session.customer?.email ?? session.customer?.phone ?? "");
+    setPassword("");
+    setAuthError(null);
+    setAuthMode("RESET");
+    setDrawerView(null);
+    setAuthOpen(true);
+  }
+
   async function requestRefund(order: CustomerOrder) {
     try {
       await readJson(
@@ -1218,6 +1374,7 @@ export function PublicStorefront({
       method: "POST"
     });
     setSession({ authenticated: false, customer: null });
+    setAccount(null);
     setDrawerView(null);
     showToast("Signed out");
   }
@@ -1286,8 +1443,12 @@ export function PublicStorefront({
             <button
               className={styles.iconButton}
               onClick={() => {
-                setAuthMode(session.authenticated ? "SIGN_IN" : "SIGN_IN");
-                session.authenticated ? void openOrders() : setAuthOpen(true);
+                if (session.authenticated) {
+                  void openAccount();
+                } else {
+                  setAuthMode("SIGN_IN");
+                  setAuthOpen(true);
+                }
               }}
               title={session.authenticated ? "My account" : "Sign in"}
               type="button"
@@ -1485,7 +1646,7 @@ export function PublicStorefront({
         <button className={!drawerView ? styles.mobileNavActive : undefined} onClick={() => { setDrawerView(null); if (quickProduct) closeProduct(); }} type="button"><ShoppingBag size={20} /><span>Shop</span></button>
         <button className={drawerView === "orders" ? styles.mobileNavActive : undefined} onClick={() => void openOrders()} type="button"><PackageCheck size={20} /><span>Orders</span></button>
         <button className={drawerView === "cart" || drawerView === "checkout" ? styles.mobileNavActive : undefined} onClick={() => setDrawerView("cart")} type="button"><ShoppingCart size={20} /><span>Cart</span><b>{cartQuantity}</b></button>
-        <button onClick={() => session.authenticated ? void openOrders() : setAuthOpen(true)} type="button"><CircleUserRound size={20} /><span>Account</span></button>
+        <button className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => session.authenticated ? void openAccount() : setAuthOpen(true)} type="button"><CircleUserRound size={20} /><span>Account</span></button>
       </nav>
 
       {cartQuantity > 0 && !drawerView ? (
@@ -1658,6 +1819,20 @@ export function PublicStorefront({
             orders={orders}
             selectedOrder={selectedOrder}
             session={session}
+          />
+        ) : null}
+        {drawerView === "account" ? (
+          <AccountPanel
+            account={account}
+            busy={accountBusy}
+            saving={accountSaving}
+            onClose={() => setDrawerView(null)}
+            onRefresh={refreshAccount}
+            onSaveProfile={saveAccountProfile}
+            onSaveAddress={saveAccountAddress}
+            onDeleteAddress={removeAccountAddress}
+            onResetPassword={openPasswordReset}
+            onSignOut={signOut}
           />
         ) : null}
       </aside>
@@ -1996,6 +2171,125 @@ function CheckoutPanel(props: {
           {props.busy ? <LoaderCircle className={styles.spin} size={19} /> : props.orderType === "LAYAWAY" ? <WalletCards size={19} /> : <ShoppingBag size={19} />} {props.orderType === "LAYAWAY" ? `Start Layaway · ${props.money.format(props.layawayDepositAmount)}` : `Place order · ${props.money.format(props.checkoutTotal)}`}
         </button>
       </div>
+    </div>
+  );
+}
+
+function createCustomerAddressDraft(address?: CustomerAddress): CustomerAddressDraft {
+  return {
+    id: address?.id,
+    label: address?.label ?? "",
+    recipientName: address?.recipientName ?? "",
+    phone: address?.phone ?? "",
+    addressLine1: address?.addressLine1 ?? "",
+    addressLine2: address?.addressLine2 ?? "",
+    city: address?.city ?? "",
+    region: address?.region ?? "",
+    postalCode: address?.postalCode ?? "",
+    deliveryNote: address?.deliveryNote ?? "",
+    makeDefault: address?.isDefault ?? false
+  };
+}
+
+function AccountPanel(props: {
+  account: CustomerAccount | null;
+  busy: boolean;
+  saving: boolean;
+  onClose: () => void;
+  onRefresh: () => void;
+  onSaveProfile: (fullName: string) => Promise<boolean>;
+  onSaveAddress: (address: CustomerAddressDraft) => Promise<boolean>;
+  onDeleteAddress: (address: CustomerAddress) => Promise<boolean>;
+  onResetPassword: () => void;
+  onSignOut: () => void;
+}) {
+  const [fullName, setFullName] = useState("");
+  const [addressEditorOpen, setAddressEditorOpen] = useState(false);
+  const [addressDraft, setAddressDraft] = useState<CustomerAddressDraft>(() => createCustomerAddressDraft());
+
+  useEffect(() => {
+    setFullName(props.account?.customer.fullName ?? "");
+  }, [props.account?.customer.fullName]);
+
+  function beginAddressEdit(address?: CustomerAddress) {
+    setAddressDraft(createCustomerAddressDraft(address));
+    setAddressEditorOpen(true);
+  }
+
+  async function saveAddress() {
+    if (await props.onSaveAddress(addressDraft)) {
+      setAddressEditorOpen(false);
+      setAddressDraft(createCustomerAddressDraft());
+    }
+  }
+
+  async function deleteAddress(address: CustomerAddress) {
+    if (!window.confirm(`Remove the saved address${address.label ? ` '${address.label}'` : ""}?`)) {
+      return;
+    }
+    if (await props.onDeleteAddress(address) && addressDraft.id === address.id) {
+      setAddressEditorOpen(false);
+      setAddressDraft(createCustomerAddressDraft());
+    }
+  }
+
+  return (
+    <div className={styles.drawerContent}>
+      <DrawerHeader busy={props.busy} onClose={props.onClose} onRefresh={props.onRefresh} title="My account" />
+      {props.busy && !props.account ? (
+        <div className={styles.drawerEmpty}><LoaderCircle className={styles.spin} size={30} /></div>
+      ) : !props.account ? (
+        <div className={styles.drawerEmpty}><CircleUserRound size={34} /><h3>Account unavailable</h3><button className={styles.secondaryButton} onClick={props.onRefresh} type="button">Try again</button></div>
+      ) : (
+        <div className={styles.accountPanelScroll}>
+          <section className={styles.accountHero}>
+            <span><CircleUserRound size={26} /></span>
+            <div><small>Customer account</small><h2>{props.account.customer.fullName}</h2><p>{props.account.customer.customerNo}</p></div>
+          </section>
+
+          <section className={styles.accountSection}>
+            <div className={styles.accountSectionHeading}><div><span>Profile</span><h3>Personal details</h3></div></div>
+            <label className={styles.field}><span>Full name</span><input autoComplete="name" onChange={(event) => setFullName(event.target.value)} value={fullName} /></label>
+            <div className={styles.readonlyDetails}>
+              <span><small>Email</small><strong>{props.account.customer.email ?? "Not provided"}</strong></span>
+              <span><small>Phone</small><strong>{props.account.customer.phone ?? "Not provided"}</strong></span>
+            </div>
+            <div className={styles.accountActions}>
+              <button className={styles.secondaryButton} disabled={props.saving || fullName.trim() === props.account.customer.fullName} onClick={() => void props.onSaveProfile(fullName)} type="button"><Check size={17} />Save profile</button>
+              <button className={styles.textButton} onClick={props.onResetPassword} type="button"><KeyRound size={16} />Change password</button>
+            </div>
+          </section>
+
+          <section className={styles.accountSection}>
+            <div className={styles.accountSectionHeading}><div><span>Delivery</span><h3>Saved addresses</h3></div><button className={styles.iconTextButton} onClick={() => beginAddressEdit()} type="button"><Plus size={16} />Add</button></div>
+            {props.account.addresses.length === 0 ? <div className={styles.addressEmpty}><MapPin size={22} /><span>No saved delivery addresses yet.</span></div> : <div className={styles.addressList}>{props.account.addresses.map((address) => <article key={address.id} className={address.isDefault ? styles.addressDefault : undefined}><div><span className={styles.addressIcon}><MapPin size={18} /></span><span><strong>{address.label || "Delivery address"}{address.isDefault ? <em>Default</em> : null}</strong><small>{address.recipientName} · {address.phone}</small><p>{[address.addressLine1, address.addressLine2, address.city, address.region].filter(Boolean).join(", ")}</p></span></div><footer><button aria-label="Edit delivery address" className={styles.iconButton} onClick={() => beginAddressEdit(address)} title="Edit address" type="button"><Pencil size={16} /></button>{!address.isDefault ? <button className={styles.textButton} disabled={props.saving} onClick={() => void props.onSaveAddress({ ...createCustomerAddressDraft(address), makeDefault: true })} type="button">Make default</button> : null}<button aria-label="Remove delivery address" className={styles.iconButtonDanger} disabled={props.saving} onClick={() => void deleteAddress(address)} title="Remove address" type="button"><Trash2 size={16} /></button></footer></article>)}</div>}
+          </section>
+
+          {addressEditorOpen ? (
+            <section className={styles.accountSection}>
+              <div className={styles.accountSectionHeading}><div><span>{addressDraft.id ? "Edit" : "New"}</span><h3>{addressDraft.id ? "Update address" : "Add delivery address"}</h3></div><button className={styles.iconButton} aria-label="Close address editor" onClick={() => setAddressEditorOpen(false)} title="Close" type="button"><X size={17} /></button></div>
+              <div className={styles.accountFormGrid}>
+                <label className={styles.field}><span>Label</span><input onChange={(event) => setAddressDraft((current) => ({ ...current, label: event.target.value }))} placeholder="Home, Office, etc." value={addressDraft.label ?? ""} /></label>
+                <label className={styles.field}><span>Recipient</span><input autoComplete="name" onChange={(event) => setAddressDraft((current) => ({ ...current, recipientName: event.target.value }))} value={addressDraft.recipientName} /></label>
+                <label className={styles.field}><span>Phone</span><input autoComplete="tel" inputMode="tel" onChange={(event) => setAddressDraft((current) => ({ ...current, phone: event.target.value }))} value={addressDraft.phone} /></label>
+                <label className={styles.field}><span>Address line 1</span><input autoComplete="address-line1" onChange={(event) => setAddressDraft((current) => ({ ...current, addressLine1: event.target.value }))} value={addressDraft.addressLine1} /></label>
+                <label className={styles.field}><span>Address line 2</span><input autoComplete="address-line2" onChange={(event) => setAddressDraft((current) => ({ ...current, addressLine2: event.target.value }))} value={addressDraft.addressLine2 ?? ""} /></label>
+                <label className={styles.field}><span>City or town</span><input autoComplete="address-level2" onChange={(event) => setAddressDraft((current) => ({ ...current, city: event.target.value }))} value={addressDraft.city} /></label>
+                <label className={styles.field}><span>Region</span><input autoComplete="address-level1" onChange={(event) => setAddressDraft((current) => ({ ...current, region: event.target.value }))} value={addressDraft.region ?? ""} /></label>
+                <label className={styles.field}><span>Delivery note</span><textarea onChange={(event) => setAddressDraft((current) => ({ ...current, deliveryNote: event.target.value }))} placeholder="Landmark, gate, or delivery note" rows={3} value={addressDraft.deliveryNote ?? ""} /></label>
+              </div>
+              <label className={styles.checkField}><input checked={addressDraft.makeDefault} onChange={(event) => setAddressDraft((current) => ({ ...current, makeDefault: event.target.checked }))} type="checkbox" /><span>Use this as my default delivery address</span></label>
+              <div className={styles.accountActions}><button className={styles.secondaryButton} disabled={props.saving} onClick={() => void saveAddress()} type="button">{props.saving ? <LoaderCircle className={styles.spin} size={17} /> : <Check size={17} />}{addressDraft.id ? "Save address" : "Add address"}</button><button className={styles.textButton} onClick={() => setAddressEditorOpen(false)} type="button">Cancel</button></div>
+            </section>
+          ) : null}
+
+          <section className={styles.accountSection}>
+            <div className={styles.accountSectionHeading}><div><span>Security</span><h3>Access and sign out</h3></div></div>
+            <p className={styles.accountHelp}>Email and phone are verified sign-in details. Use a verification code when changing your password.</p>
+            <div className={styles.accountActions}><button className={styles.secondaryButton} onClick={props.onResetPassword} type="button"><KeyRound size={17} />Change password</button><button className={styles.textButton} onClick={props.onSignOut} type="button">Sign out</button></div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

@@ -2198,6 +2198,285 @@
   font-weight: 800;
 }
 
+.accountPanelScroll {
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.accountHero {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 16px;
+  border: 1px solid #bfe5d0;
+  border-radius: 8px;
+  background: #edf9f1;
+}
+
+.accountHero > span,
+.addressIcon {
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: white;
+  color: var(--brand);
+}
+
+.accountHero > span {
+  width: 52px;
+  height: 52px;
+}
+
+.accountHero small,
+.accountHero p {
+  display: block;
+  margin: 0;
+  color: #5b6b60;
+  font-size: 11px;
+}
+
+.accountHero h2 {
+  overflow: hidden;
+  margin: 3px 0;
+  color: var(--ink);
+  font-size: 19px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountSection {
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.accountSectionHeading {
+  display: flex;
+  min-height: 30px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.accountSectionHeading span,
+.accountSectionHeading h3 {
+  display: block;
+}
+
+.accountSectionHeading span {
+  color: var(--brand);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.accountSectionHeading h3 {
+  margin: 2px 0 0;
+  font-size: 15px;
+}
+
+.readonlyDetails {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.readonlyDetails > span {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #e3e9e5;
+  border-radius: 8px;
+  background: #f8faf8;
+}
+
+.readonlyDetails small,
+.readonlyDetails strong {
+  display: block;
+}
+
+.readonlyDetails small {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.readonlyDetails strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.accountActions .secondaryButton {
+  width: auto;
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.accountActions .textButton,
+.iconTextButton {
+  display: inline-flex;
+  width: auto;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.iconTextButton {
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.addressEmpty {
+  display: flex;
+  min-height: 90px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px;
+  border: 1px dashed #c7d5cc;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.addressList {
+  display: grid;
+  gap: 9px;
+}
+
+.addressList article {
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.addressList article.addressDefault {
+  border-color: #a9d9be;
+  background: #f4fbf6;
+}
+
+.addressList article > div {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 9px;
+}
+
+.addressIcon {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #d9e8df;
+}
+
+.addressList strong,
+.addressList small,
+.addressList p {
+  display: block;
+}
+
+.addressList strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addressList em {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: #dff4e7;
+  color: #147345;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 850;
+  vertical-align: 1px;
+}
+
+.addressList small,
+.addressList p,
+.accountHelp {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.addressList small {
+  margin-top: 3px;
+}
+
+.addressList p,
+.accountHelp {
+  margin: 5px 0 0;
+}
+
+.addressList footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.addressList footer .iconButton,
+.iconButtonDanger {
+  width: 34px;
+  height: 34px;
+}
+
+.addressList footer .textButton {
+  width: auto;
+  min-height: 34px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.iconButtonDanger {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #f5bfba;
+  border-radius: 8px;
+  background: #fff7f6;
+  color: #c63129;
+}
+
+.accountFormGrid {
+  display: grid;
+  gap: 0;
+}
+
+.accountFormGrid .field:last-child {
+  grid-column: 1 / -1;
+}
+
+.accountSection .checkField {
+  margin: 0 0 13px;
+}
+
 .refreshButton {
   display: inline-flex;
   align-items: center;
@@ -2560,6 +2839,15 @@
   .formGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
+  }
+
+  .accountFormGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .accountFormGrid .field {
+    margin-bottom: 0;
   }
 }
 
