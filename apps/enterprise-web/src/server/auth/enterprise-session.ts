@@ -91,7 +91,7 @@ function isHttpsUrl(value: string | null | undefined) {
   }
 }
 
-async function shouldUseSecureCookies() {
+export async function shouldUseSecureCookies() {
   const explicit =
     readBooleanEnvironment(process.env.FLASH_ERP_COOKIE_SECURE) ??
     readBooleanEnvironment(process.env.FLASH_ERP_AUTH_COOKIE_SECURE);

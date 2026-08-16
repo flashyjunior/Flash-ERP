@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { cookies, headers } from "next/headers";
 
 import { prisma } from "@/lib/db/prisma";
+import { shouldUseSecureCookies } from "@/server/auth/enterprise-session";
 import { deliverEnterpriseMfaCode } from "@/server/services/enterprise-mfa-delivery";
 
 const ecommerceSessionCookieName = "flash_erp_shop_session";
@@ -412,7 +413,7 @@ async function createCustomerSession(input: {
   const cookieStore = await cookies();
   cookieStore.set(ecommerceSessionCookieName, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: await shouldUseSecureCookies(),
     sameSite: "lax",
     path: "/",
     expires: expiresAt
