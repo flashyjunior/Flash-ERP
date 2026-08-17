@@ -1917,7 +1917,6 @@ function ProductCard({ product, money, onOpen, onPreview, compact = false }: {
         <div className={styles.cardRating}><StarRating rating={product.averageRating} /><span>{product.reviewCount > 0 ? product.reviewCount : "New"}</span></div>
         <div className={styles.productCardFooter}>
           <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : "Available to order"}</small></div>
-          <button className={styles.addIconButton} onClick={() => onOpen(product)} title={`Add ${product.name}`} type="button"><Plus size={20} /></button>
         </div>
       </div>
     </article>
