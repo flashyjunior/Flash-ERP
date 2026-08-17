@@ -586,6 +586,12 @@ function formatMoney(value: number | null | undefined) {
   return moneyFormatter.format(value ?? 0);
 }
 
+function formatCatalogPrice(
+  item: Pick<StoreCatalogBrowseItem, "unitPrice" | "mustEnterPriceAtPos">,
+) {
+  return item.mustEnterPriceAtPos ? "Enter price" : formatMoney(item.unitPrice);
+}
+
 function formatNumber(value: number | null | undefined) {
   return numberFormatter.format(value ?? 0);
 }
@@ -5443,13 +5449,19 @@ export function ModernDesktopApp() {
         sellingUnitOfMeasure:
           selectedSellingUnit?.unitOfMeasureCode ??
           lookup.selectedSellingUnitOfMeasure,
-        unitPrice: lookup.mustEnterPriceAtPos
-          ? ""
-          : (
-              selectedSellingUnit?.unitPrice ??
-              selectedMatrixVariant?.unitPrice ??
-              lookup.unitPrice
-            ).toFixed(2),
+        unitPrice:
+          !lookup.mustEnterPriceAtPos &&
+          (
+            selectedSellingUnit?.unitPrice ??
+            selectedMatrixVariant?.unitPrice ??
+            lookup.unitPrice
+          ) > 0
+            ? (
+                selectedSellingUnit?.unitPrice ??
+                selectedMatrixVariant?.unitPrice ??
+                lookup.unitPrice
+              ).toFixed(2)
+            : "",
         mustEnterPriceAtPos: lookup.mustEnterPriceAtPos,
         isSerialized: lookup.isSerialized,
         trackExpiry: lookup.trackExpiry,
@@ -5554,13 +5566,19 @@ export function ModernDesktopApp() {
         sellingUnitOfMeasure:
           selectedSellingUnit?.unitOfMeasureCode ??
           lookup.selectedSellingUnitOfMeasure,
-        unitPrice: lookup.mustEnterPriceAtPos
-          ? ""
-          : (
-              selectedSellingUnit?.unitPrice ??
-              selectedMatrixVariant?.unitPrice ??
-              lookup.unitPrice
-            ).toFixed(2),
+        unitPrice:
+          !lookup.mustEnterPriceAtPos &&
+          (
+            selectedSellingUnit?.unitPrice ??
+            selectedMatrixVariant?.unitPrice ??
+            lookup.unitPrice
+          ) > 0
+            ? (
+                selectedSellingUnit?.unitPrice ??
+                selectedMatrixVariant?.unitPrice ??
+                lookup.unitPrice
+              ).toFixed(2)
+            : "",
         mustEnterPriceAtPos: lookup.mustEnterPriceAtPos,
         isSerialized: lookup.isSerialized,
         trackExpiry: lookup.trackExpiry,
@@ -16288,9 +16306,7 @@ function POSWorkspace(props: {
                     </span>
                   </div>
                   <small>
-                    {item.mustEnterPriceAtPos
-                      ? "Enter price"
-                      : formatMoney(item.unitPrice)}
+                    {formatCatalogPrice(item)}
                   </small>
                 </button>
               ))}
@@ -16908,9 +16924,7 @@ function POSWorkspace(props: {
                   {formatCatalogItemAvailability(item)}
                 </span>
                 <b>
-                  {item.mustEnterPriceAtPos
-                    ? "Enter price"
-                    : formatMoney(item.unitPrice)}
+                  {formatCatalogPrice(item)}
                 </b>
               </button>
             ))

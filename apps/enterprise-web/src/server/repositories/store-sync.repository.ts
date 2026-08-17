@@ -1963,7 +1963,7 @@ async function queueAutomaticStoreMasterDataPublications(
   const mode = options?.mode ?? "delta";
   const bootstrapToken =
     mode === "bootstrap" ? `${target.storeNode.code}:${now.getTime()}` : null;
-  const existingPublicationKeys =
+  const existingMasterPublications =
     mode === "delta"
       ? (
           await tx.syncOutboxEvent.findMany({
@@ -1997,10 +1997,35 @@ async function queueAutomaticStoreMasterDataPublications(
             },
             select: {
               idempotencyKey: true,
+              aggregateId: true,
+              eventType: true,
+              payload: true,
+              createdAt: true,
             },
           })
-        ).map((event) => event.idempotencyKey)
+        )
       : [];
+  const existingPublicationKeys = existingMasterPublications.map(
+    (event) => event.idempotencyKey,
+  );
+  const latestProductPublicationByAggregateId = new Map<
+    string,
+    { payload: unknown; createdAt: Date }
+  >();
+
+  for (const event of existingMasterPublications) {
+    if (event.eventType !== "catalog.product.published") {
+      continue;
+    }
+
+    const existing = latestProductPublicationByAggregateId.get(event.aggregateId);
+    if (!existing || event.createdAt > existing.createdAt) {
+      latestProductPublicationByAggregateId.set(event.aggregateId, {
+        payload: event.payload,
+        createdAt: event.createdAt,
+      });
+    }
+  }
 
   if (bootstrapToken) {
     const inFlightBootstrapCount = await tx.syncOutboxEvent.count({
@@ -3779,16 +3804,8 @@ async function queueAutomaticStoreMasterDataPublications(
       ...storeVariantVersionStamps,
       ...productSellingUnits.map((sellingUnit) => sellingUnit.updatedAt.getTime()),
     );
-    const shouldPublishProduct =
-      mode !== "delta" ||
-      !hasExistingMasterPublication(
-        "product",
-        product.code,
-        productVersionStamp,
-      );
     const priceEntry = priceEntryByProductId.get(product.id);
-    if (shouldPublishProduct) {
-      const payload: EnterpriseCatalogProductPublishedPayload = {
+    const payload: EnterpriseCatalogProductPublishedPayload = {
         storeCode: target.storeNode.store.code,
         productCode: product.code,
         productName: product.name,
@@ -3885,8 +3902,30 @@ async function queueAutomaticStoreMasterDataPublications(
             };
           }),
         publishedAt: now.toISOString(),
-      };
+    };
+    const lastPublishedProduct = readJsonObject(
+      latestProductPublicationByAggregateId.get(product.id)?.payload,
+    );
+    const publishedProductMatchesCurrentProfile =
+      lastPublishedProduct.productCode === payload.productCode &&
+      lastPublishedProduct.productType === payload.productType &&
+      lastPublishedProduct.trackInventory === payload.trackInventory &&
+      lastPublishedProduct.trackExpiry === payload.trackExpiry &&
+      lastPublishedProduct.trackSize === payload.trackSize &&
+      lastPublishedProduct.trackColor === payload.trackColor &&
+      lastPublishedProduct.allowPriceOverride === payload.allowPriceOverride &&
+      lastPublishedProduct.mustEnterPriceAtPos === payload.mustEnterPriceAtPos &&
+      Number(lastPublishedProduct.unitPrice) === payload.unitPrice;
+    const shouldPublishProduct =
+      mode !== "delta" ||
+      !hasExistingMasterPublication(
+        "product",
+        product.code,
+        productVersionStamp,
+      ) ||
+      !publishedProductMatchesCurrentProfile;
 
+    if (shouldPublishProduct) {
       outboxRows.push({
         id: randomUUID(),
         syncNodeId: target.enterpriseNode.id,
