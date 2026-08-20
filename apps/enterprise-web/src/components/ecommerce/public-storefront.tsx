@@ -74,6 +74,14 @@ type EcommerceQuote = {
   discountAmount: number;
   taxAmount: number;
   totalAmount: number;
+  fulfillment: {
+    method: "DELIVERY" | "PICKUP";
+    storeCode: string;
+    storeName: string;
+    inventoryLocationCode: string;
+    inventoryLocationName: string;
+    routingMethod: string;
+  };
   lines: Array<{
     lineIndex: number;
     productId: string;
@@ -149,6 +157,15 @@ type CustomerOrder = {
   placedAt: string;
   deliveryAddress: string;
   trackingReference: string | null;
+  fulfillment: {
+    storeCode: string;
+    storeName: string;
+    inventoryLocationCode: string | null;
+    inventoryLocationName: string | null;
+    status: string;
+    fulfilmentMethod: string;
+    routingMethod: string;
+  } | null;
   lines: Array<{
     id: string;
     productName: string;
@@ -309,7 +326,9 @@ function isProductOutOfStock(product: Product) {
   if (product.variants.length === 0) {
     return product.availableQuantity <= 0;
   }
-  return product.variants.length > 0 && product.variants.every((variant) => variant.availableQuantity <= 0);
+  return product.variants.length > 0 && product.variants.every(
+    (variant) => variant.availableQuantity !== null && variant.availableQuantity <= 0,
+  );
 }
 
 function getProductPrice(product: Product, variant: Variant | null = null) {
@@ -535,6 +554,9 @@ export function PublicStorefront({
   const [deliveryMethod, setDeliveryMethod] = useState<"DELIVERY" | "PICKUP">(
     storefront.store.allowDelivery ? "DELIVERY" : "PICKUP"
   );
+  const [pickupStoreCode, setPickupStoreCode] = useState(
+    storefront.store.pickupLocations[0]?.storeCode ?? "",
+  );
   const [recipientName, setRecipientName] = useState("");
   const [deliveryPhone, setDeliveryPhone] = useState("");
   const [addressLine1, setAddressLine1] = useState("");
@@ -555,6 +577,7 @@ export function PublicStorefront({
     paymentTiming: "ON_DELIVERY" | "PREPAY";
     orderType: "SALES_ORDER" | "LAYAWAY";
     paymentAmountDueNow: number;
+    fulfillment: EcommerceQuote["fulfillment"];
   } | null>(null);
   const [checkoutOrderType, setCheckoutOrderType] = useState<"SALES_ORDER" | "LAYAWAY">("SALES_ORDER");
   const [layawayDepositAmount, setLayawayDepositAmount] = useState(0);
@@ -817,9 +840,11 @@ export function PublicStorefront({
       : getProductPreviewTotal(quickProduct, quickVariant, quickQuantity, selectedProductPrice)
     : 0;
   const cartQuantity = cart.reduce((sum, line) => sum + line.quantity, 0);
-  const cartQuoteKey = JSON.stringify(
-    cart.map((line) => [line.productId, line.variantCode, line.sellingUnitOfMeasure, line.quantity])
-  );
+  const cartQuoteKey = JSON.stringify({
+    lines: cart.map((line) => [line.productId, line.variantCode, line.sellingUnitOfMeasure, line.quantity]),
+    fulfilmentMethod: deliveryMethod,
+    pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
+  });
   const fallbackCartSubtotal = toCartMoney(
     cart.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0)
   );
@@ -895,7 +920,11 @@ export function PublicStorefront({
                 variantCode: line.variantCode,
                 sellingUnitOfMeasure: line.sellingUnitOfMeasure,
                 quantity: line.quantity
-              }))
+              })),
+              delivery: {
+                fulfilmentMethod: deliveryMethod,
+                pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
+              },
             }),
             signal: controller.signal
           }
@@ -915,7 +944,7 @@ export function PublicStorefront({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [cart, cartQuoteKey, storefront.store.code]);
+  }, [cart, cartQuoteKey, deliveryMethod, pickupStoreCode, storefront.store.code]);
 
   useEffect(() => {
     if (quickMaximumQuantity === null || quickMaximumQuantity <= 0) {
@@ -1175,7 +1204,11 @@ export function PublicStorefront({
               variantCode: line.variantCode,
               sellingUnitOfMeasure: line.sellingUnitOfMeasure,
               quantity: line.quantity
-            }))
+            })),
+            delivery: {
+              fulfilmentMethod: deliveryMethod,
+              pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
+            },
           })
         }
       );
@@ -1238,6 +1271,7 @@ export function PublicStorefront({
         paymentTiming: "ON_DELIVERY" | "PREPAY";
         orderType: "SALES_ORDER" | "LAYAWAY";
         paymentAmountDueNow: number;
+        fulfillment: EcommerceQuote["fulfillment"];
       }>(
         await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/orders`, {
           method: "POST",
@@ -1254,6 +1288,7 @@ export function PublicStorefront({
             })),
             delivery: {
               fulfilmentMethod: deliveryMethod,
+              pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
               recipientName,
               phone: deliveryPhone,
               addressLine1,
@@ -1861,9 +1896,11 @@ export function PublicStorefront({
             checkoutError={checkoutError}
             stockError={cartStockError}
             checkoutTotal={checkoutTotal}
+            fulfillment={currentCartQuote?.fulfillment ?? null}
             city={city}
             createdOrder={createdOrder}
             deliveryMethod={deliveryMethod}
+            pickupStoreCode={pickupStoreCode}
             deliveryNote={deliveryNote}
             deliveryPhone={deliveryPhone}
             money={money}
@@ -1873,6 +1910,7 @@ export function PublicStorefront({
             onCity={setCity}
             onClose={() => setDrawerView(null)}
             onDeliveryMethod={setDeliveryMethod}
+            onPickupStoreCode={setPickupStoreCode}
             onDeliveryNote={setDeliveryNote}
             onDeliveryPhone={setDeliveryPhone}
             onPay={startPayment}
@@ -2138,8 +2176,10 @@ function CheckoutPanel(props: {
   subtotal: number;
   discount: number;
   checkoutTotal: number;
+  fulfillment: EcommerceQuote["fulfillment"] | null;
   money: Intl.NumberFormat;
   deliveryMethod: "DELIVERY" | "PICKUP";
+  pickupStoreCode: string;
   recipientName: string;
   deliveryPhone: string;
   addressLine1: string;
@@ -2160,6 +2200,7 @@ function CheckoutPanel(props: {
     paymentTiming: "ON_DELIVERY" | "PREPAY";
     orderType: "SALES_ORDER" | "LAYAWAY";
     paymentAmountDueNow: number;
+    fulfillment: EcommerceQuote["fulfillment"];
   } | null;
   paymentOptions: CheckoutPaymentOption[];
   selectedPaymentCode: string;
@@ -2170,6 +2211,7 @@ function CheckoutPanel(props: {
   onClose: () => void;
   onBack: () => void;
   onDeliveryMethod: (value: "DELIVERY" | "PICKUP") => void;
+  onPickupStoreCode: (value: string) => void;
   onRecipientName: (value: string) => void;
   onDeliveryPhone: (value: string) => void;
   onAddressLine1: (value: string) => void;
@@ -2185,6 +2227,9 @@ function CheckoutPanel(props: {
   onReceiptEmail: (value: string) => void;
   onPay: (tenderMethodCode: string) => void;
 }) {
+  const pickupLocation = props.store.pickupLocations.find(
+    (location) => location.storeCode === props.pickupStoreCode,
+  );
   if (props.createdOrder) {
     return (
       <div className={styles.drawerContent}>
@@ -2195,6 +2240,7 @@ function CheckoutPanel(props: {
           <p>{props.createdOrder.orderNo}</p>
           <strong>{props.money.format(props.createdOrder.totalAmount)}</strong>
           {props.createdOrder.orderType === "LAYAWAY" ? <small>Deposit due now: {props.money.format(props.createdOrder.paymentAmountDueNow)}</small> : null}
+          <div className={styles.pickupInfo}><Store size={21} /><div><strong>Fulfilled by {props.createdOrder.fulfillment.storeName}</strong><p>{props.createdOrder.fulfillment.inventoryLocationName}</p></div></div>
         </div>
         <div className={styles.paymentSection}>
           {props.createdOrder.paymentTiming === "PREPAY" ? (
@@ -2250,8 +2296,30 @@ function CheckoutPanel(props: {
             <label className={styles.checkField}><input checked={props.saveAddress} onChange={(event) => props.onSaveAddress(event.target.checked)} type="checkbox" /><span>Save this address</span></label>
           </section>
         ) : (
-          <div className={styles.pickupInfo}><LocateFixed size={22} /><div><strong>{props.store.name}</strong><p>{props.store.address || "Pickup details will appear with your order."}</p></div></div>
+          <section className={styles.checkoutSection}>
+            <h3>Pickup shop</h3>
+            <label className={styles.field}>
+              <span>Collect from</span>
+              <select onChange={(event) => props.onPickupStoreCode(event.target.value)} value={props.pickupStoreCode}>
+                {props.store.pickupLocations.map((location) => (
+                  <option key={location.storeCode} value={location.storeCode}>{location.name}</option>
+                ))}
+              </select>
+            </label>
+            {pickupLocation?.address ? (
+              <div className={styles.pickupInfo}><LocateFixed size={22} /><div><strong>{pickupLocation.name}</strong><p>{pickupLocation.address}</p></div></div>
+            ) : null}
+          </section>
         )}
+        {props.fulfillment ? (
+          <div className={styles.pickupInfo}>
+            <Store size={21} />
+            <div>
+              <strong>{props.deliveryMethod === "PICKUP" ? "Pickup stock assigned" : "Stock assigned for delivery"}</strong>
+              <p>{props.fulfillment.storeName} · {props.fulfillment.inventoryLocationName}</p>
+            </div>
+          </div>
+        ) : null}
         <section className={styles.checkoutSection}>
           <h3>Payment</h3>
           {props.orderType === "LAYAWAY" ? (
@@ -2451,6 +2519,7 @@ function OrdersPanel(props: {
             {order.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant ?? `${line.quantity} item(s)`}</small></span><b>{props.money.format(line.lineTotal)}</b></div>)}
           </section>
           {order.deliveryAddress ? <div className={styles.pickupInfo}><Truck size={21} /><div><strong>Delivery</strong><p>{order.deliveryAddress}</p>{order.trackingReference ? <small>{order.trackingReference}</small> : null}</div></div> : null}
+          {order.fulfilmentMethod === "PICKUP" && order.fulfillment ? <div className={styles.pickupInfo}><Store size={21} /><div><strong>Pickup from {order.fulfillment.storeName}</strong><p>{order.fulfillment.inventoryLocationName ?? "Store sales location"}</p></div></div> : null}
           {order.orderType === "LAYAWAY" && order.balanceAmount > 0 && order.selectedPaymentMethodCode ? (
             <section className={styles.checkoutSection}>
               <h3>Pay Layaway balance</h3>
