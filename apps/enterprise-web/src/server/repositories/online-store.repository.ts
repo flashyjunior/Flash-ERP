@@ -61,7 +61,8 @@ import {
   ensureLayawayLifecycleSchemaCompatibility,
   ensureOperatingExpenseSchemaCompatibility,
   ensureInventoryExpirySchemaCompatibility,
-  ensureProductVariantSalesOrderDepositSchemaCompatibility
+  ensureProductVariantSalesOrderDepositSchemaCompatibility,
+  ensureMultiBranchEcommerceSchemaCompatibility
 } from "@/server/repositories/schema-compatibility.repository";
 import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
 import { reserveErpDocumentNumberInTransaction } from "@/server/services/erp-document-numbering";
@@ -3850,7 +3851,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     ensureInventoryExpirySchemaCompatibility(),
     ensureAlternateUomSellingSchemaCompatibility(),
     ensureLayawayLifecycleSchemaCompatibility(),
-    ensureProductVariantSalesOrderDepositSchemaCompatibility()
+    ensureProductVariantSalesOrderDepositSchemaCompatibility(),
+    ensureMultiBranchEcommerceSchemaCompatibility()
   ]);
 
   const assignment = await getOnlineStoreAssignment();
@@ -8822,19 +8824,29 @@ async function completeOnlineStoreParkedTransaction(
   });
 
   if (openSalesOrder) {
-    if (openSalesOrder.orderType === "LAYAWAY") {
-      await tx.salesOrderInventoryReservation.updateMany({
-        where: {
-          salesOrderId: openSalesOrder.id,
-          status: "ACTIVE",
-        },
-        data: {
-          status: "CONSUMED",
-          releaseReason: "Consumed by layaway fulfilment.",
-          releasedAt: transaction.completedAt ?? completedAt,
-        },
-      });
-    }
+    const reservationConsumedAt = transaction.completedAt ?? completedAt;
+    const consumedReservationCount = await tx.salesOrderInventoryReservation.updateMany({
+      where: {
+        salesOrderId: openSalesOrder.id,
+        status: "ACTIVE",
+      },
+      data: {
+        status: "CONSUMED",
+        releaseReason:
+          openSalesOrder.orderType === "LAYAWAY"
+            ? "Consumed by layaway fulfilment."
+            : "Consumed by ecommerce order fulfilment.",
+        releasedAt: reservationConsumedAt,
+      },
+    });
+    await tx.ecommerceFulfillment.updateMany({
+      where: { salesOrderId: openSalesOrder.id },
+      data: { status: "FULFILLED", fulfilledAt: reservationConsumedAt },
+    });
+    await tx.ecommerceFulfillmentLine.updateMany({
+      where: { ecommerceFulfillment: { salesOrderId: openSalesOrder.id } },
+      data: { status: "FULFILLED" },
+    });
     await tx.salesOrder.update({
       where: {
         id: openSalesOrder.id
@@ -8844,10 +8856,10 @@ async function completeOnlineStoreParkedTransaction(
         totalAmount: sourceTotals.totalAmount,
         paidAmount,
         balanceAmount: 0,
-        ...(openSalesOrder.orderType === "LAYAWAY"
+        ...(openSalesOrder.orderType === "LAYAWAY" || consumedReservationCount.count > 0
           ? {
               reservationStatus: "CONSUMED",
-              reservationReleasedAt: transaction.completedAt ?? completedAt,
+              reservationReleasedAt: reservationConsumedAt,
             }
           : {}),
         fulfilledTransactionId: transaction.id,

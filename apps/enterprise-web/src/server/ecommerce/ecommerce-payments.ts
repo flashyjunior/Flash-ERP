@@ -17,6 +17,7 @@ import {
   requireEcommerceIdempotencyKey
 } from "@/server/ecommerce/ecommerce-idempotency";
 import { postLayawayAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
+import { ensureMultiBranchEcommerceSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 
 type SupportedGateway = "PAYSTACK" | "FLUTTERWAVE";
 const ecommerceTerminalCode = "ecommerce-web";
@@ -68,19 +69,28 @@ async function activateEcommerceLayawayReservation(
   );
   if (!policy.reserveStockOnDeposit) return "NOT_APPLICABLE";
 
-  const location = await tx.inventoryLocation.findFirst({
-    where: {
-      retailOrgId: input.retailOrgId,
-      storeId: input.storeId,
-      status: "ACTIVE",
+  const assignedFulfillment = await tx.ecommerceFulfillment.findUnique({
+    where: { salesOrderId: input.salesOrderId },
+    select: {
+      inventoryLocation: { select: { id: true, code: true, status: true } },
     },
-    orderBy: [
-      { useForSalesOrderDefault: "desc" },
-      { useForSalesDefault: "desc" },
-      { name: "asc" },
-    ],
-    select: { id: true, code: true },
   });
+  const location =
+    assignedFulfillment?.inventoryLocation?.status === "ACTIVE"
+      ? assignedFulfillment.inventoryLocation
+      : await tx.inventoryLocation.findFirst({
+          where: {
+            retailOrgId: input.retailOrgId,
+            storeId: input.storeId,
+            status: "ACTIVE",
+          },
+          orderBy: [
+            { useForSalesOrderDefault: "desc" },
+            { useForSalesDefault: "desc" },
+            { name: "asc" },
+          ],
+          select: { id: true, code: true },
+        });
   if (!location) {
     throw new EcommerceAuthError(
       "The shop needs an active sales-order inventory location before this Layaway deposit can be accepted.",
@@ -281,6 +291,7 @@ export async function initializeEcommercePayment(input: {
   amount?: unknown;
   idempotencyKey?: unknown;
 }) {
+  await ensureMultiBranchEcommerceSchemaCompatibility();
   const session = await getEcommerceCustomerSession({ storeCode: input.storeCode, required: true });
   if (!session) {
     throw new EcommerceAuthError("Sign in to pay for this order.", 401);
@@ -615,6 +626,7 @@ export async function verifyEcommercePayment(input: {
   providerTransactionId?: string | null;
   customerAccountId?: string | null;
 }) {
+  await ensureMultiBranchEcommerceSchemaCompatibility();
   const payment = await prisma.ecommercePayment.findUnique({
     where: { reference: input.reference },
     include: {
@@ -838,6 +850,7 @@ function timingSafeSignature(expected: string, actual: string) {
 }
 
 export async function processPaystackWebhook(rawBody: string, signature: string | null) {
+  await ensureMultiBranchEcommerceSchemaCompatibility();
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(rawBody) as Record<string, unknown>;
@@ -868,6 +881,7 @@ export async function processPaystackWebhook(rawBody: string, signature: string 
 }
 
 export async function processFlutterwaveWebhook(rawBody: string, signature: string | null) {
+  await ensureMultiBranchEcommerceSchemaCompatibility();
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(rawBody) as Record<string, unknown>;

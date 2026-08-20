@@ -9,6 +9,7 @@ let inventoryExpirySchemaReady: Promise<void> | null = null;
 let alternateUomSellingSchemaReady: Promise<void> | null = null;
 let layawayLifecycleSchemaReady: Promise<void> | null = null;
 let syncOutboxFailureSchemaReady: Promise<void> | null = null;
+let multiBranchEcommerceSchemaReady: Promise<void> | null = null;
 
 export function ensureSyncOutboxFailureSchemaCompatibility() {
   syncOutboxFailureSchemaReady ??= (async () => {
@@ -30,6 +31,199 @@ export function ensureSyncOutboxFailureSchemaCompatibility() {
   });
 
   return syncOutboxFailureSchemaReady;
+}
+
+export function ensureMultiBranchEcommerceSchemaCompatibility() {
+  multiBranchEcommerceSchemaReady ??= (async () => {
+    if (isEnterpriseSqlServerDatabase()) {
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.EcommerceOrder', N'storefrontStoreId') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[EcommerceOrder] ADD [storefrontStoreId] NVARCHAR(1000) NULL;
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF OBJECT_ID(N'[dbo].[EcommerceFulfillmentLocation]', N'U') IS NULL
+        BEGIN
+          CREATE TABLE [dbo].[EcommerceFulfillmentLocation] (
+            [id] NVARCHAR(1000) NOT NULL,
+            [retailOrgId] NVARCHAR(1000) NOT NULL,
+            [storefrontStoreId] NVARCHAR(1000) NOT NULL,
+            [storeId] NVARCHAR(1000) NOT NULL,
+            [inventoryLocationId] NVARCHAR(1000) NOT NULL,
+            [status] NVARCHAR(1000) NOT NULL CONSTRAINT [EcommerceFulfillmentLocation_status_df] DEFAULT N'ACTIVE',
+            [supportsPickup] BIT NOT NULL CONSTRAINT [EcommerceFulfillmentLocation_supportsPickup_df] DEFAULT 1,
+            [supportsDelivery] BIT NOT NULL CONSTRAINT [EcommerceFulfillmentLocation_supportsDelivery_df] DEFAULT 1,
+            [routingPriority] INT NOT NULL CONSTRAINT [EcommerceFulfillmentLocation_routingPriority_df] DEFAULT 100,
+            [createdAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillmentLocation_createdAt_df] DEFAULT CURRENT_TIMESTAMP,
+            [updatedAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillmentLocation_updatedAt_df] DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT [EcommerceFulfillmentLocation_pkey] PRIMARY KEY CLUSTERED ([id]),
+            CONSTRAINT [EcommerceFulfillmentLocation_storefrontStoreId_inventoryLocationId_key]
+              UNIQUE NONCLUSTERED ([storefrontStoreId], [inventoryLocationId])
+          );
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF OBJECT_ID(N'[dbo].[EcommerceFulfillment]', N'U') IS NULL
+        BEGIN
+          CREATE TABLE [dbo].[EcommerceFulfillment] (
+            [id] NVARCHAR(1000) NOT NULL,
+            [retailOrgId] NVARCHAR(1000) NOT NULL,
+            [ecommerceOrderId] NVARCHAR(1000) NOT NULL,
+            [ecommerceFulfillmentLocationId] NVARCHAR(1000) NULL,
+            [storeId] NVARCHAR(1000) NOT NULL,
+            [inventoryLocationId] NVARCHAR(1000) NULL,
+            [salesOrderId] NVARCHAR(1000) NOT NULL,
+            [sequenceNo] INT NOT NULL CONSTRAINT [EcommerceFulfillment_sequenceNo_df] DEFAULT 1,
+            [status] NVARCHAR(1000) NOT NULL CONSTRAINT [EcommerceFulfillment_status_df] DEFAULT N'PLACED',
+            [fulfilmentMethod] NVARCHAR(1000) NOT NULL,
+            [routingMethod] NVARCHAR(1000) NOT NULL CONSTRAINT [EcommerceFulfillment_routingMethod_df] DEFAULT N'PRIORITY_STOCK',
+            [storeCodeSnapshot] NVARCHAR(1000) NOT NULL,
+            [storeNameSnapshot] NVARCHAR(1000) NOT NULL,
+            [inventoryLocationCodeSnapshot] NVARCHAR(1000) NULL,
+            [inventoryLocationNameSnapshot] NVARCHAR(1000) NULL,
+            [assignedAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillment_assignedAt_df] DEFAULT CURRENT_TIMESTAMP,
+            [fulfilledAt] DATETIME2(3) NULL,
+            [cancelledAt] DATETIME2(3) NULL,
+            [createdAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillment_createdAt_df] DEFAULT CURRENT_TIMESTAMP,
+            [updatedAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillment_updatedAt_df] DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT [EcommerceFulfillment_pkey] PRIMARY KEY CLUSTERED ([id]),
+            CONSTRAINT [EcommerceFulfillment_salesOrderId_key] UNIQUE NONCLUSTERED ([salesOrderId]),
+            CONSTRAINT [EcommerceFulfillment_ecommerceOrderId_sequenceNo_key]
+              UNIQUE NONCLUSTERED ([ecommerceOrderId], [sequenceNo])
+          );
+        END
+      `);
+      await prisma.$executeRawUnsafe(`
+        IF OBJECT_ID(N'[dbo].[EcommerceFulfillmentLine]', N'U') IS NULL
+        BEGIN
+          CREATE TABLE [dbo].[EcommerceFulfillmentLine] (
+            [id] NVARCHAR(1000) NOT NULL,
+            [ecommerceFulfillmentId] NVARCHAR(1000) NOT NULL,
+            [salesOrderLineId] NVARCHAR(1000) NOT NULL,
+            [productCodeSnapshot] NVARCHAR(1000) NOT NULL,
+            [productVariantCodeSnapshot] NVARCHAR(1000) NULL,
+            [productNameSnapshot] NVARCHAR(1000) NOT NULL,
+            [sellingUnitOfMeasure] NVARCHAR(1000) NOT NULL,
+            [baseUnitOfMeasure] NVARCHAR(1000) NOT NULL,
+            [uomConversionFactor] DECIMAL(18, 6) NOT NULL,
+            [quantity] DECIMAL(18, 3) NOT NULL,
+            [baseQuantity] DECIMAL(18, 3) NOT NULL,
+            [status] NVARCHAR(1000) NOT NULL CONSTRAINT [EcommerceFulfillmentLine_status_df] DEFAULT N'ALLOCATED',
+            [createdAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillmentLine_createdAt_df] DEFAULT CURRENT_TIMESTAMP,
+            [updatedAt] DATETIME2(3) NOT NULL CONSTRAINT [EcommerceFulfillmentLine_updatedAt_df] DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT [EcommerceFulfillmentLine_pkey] PRIMARY KEY CLUSTERED ([id]),
+            CONSTRAINT [EcommerceFulfillmentLine_salesOrderLineId_key] UNIQUE NONCLUSTERED ([salesOrderLineId])
+          );
+        END
+      `);
+      const indexes = [
+        ["EcommerceOrder_storefrontStoreId_status_updatedAt_idx", "EcommerceOrder", "[storefrontStoreId], [status], [updatedAt]"],
+        ["EcommerceFulfillmentLocation_retailOrgId_storefrontStoreId_status_routingPriority_idx", "EcommerceFulfillmentLocation", "[retailOrgId], [storefrontStoreId], [status], [routingPriority]"],
+        ["EcommerceFulfillmentLocation_storeId_status_idx", "EcommerceFulfillmentLocation", "[storeId], [status]"],
+        ["EcommerceFulfillmentLocation_inventoryLocationId_idx", "EcommerceFulfillmentLocation", "[inventoryLocationId]"],
+        ["EcommerceFulfillment_retailOrgId_storeId_status_updatedAt_idx", "EcommerceFulfillment", "[retailOrgId], [storeId], [status], [updatedAt]"],
+        ["EcommerceFulfillment_ecommerceFulfillmentLocationId_idx", "EcommerceFulfillment", "[ecommerceFulfillmentLocationId]"],
+        ["EcommerceFulfillment_inventoryLocationId_idx", "EcommerceFulfillment", "[inventoryLocationId]"],
+        ["EcommerceFulfillmentLine_ecommerceFulfillmentId_status_idx", "EcommerceFulfillmentLine", "[ecommerceFulfillmentId], [status]"],
+        ["EcommerceFulfillmentLine_productCodeSnapshot_idx", "EcommerceFulfillmentLine", "[productCodeSnapshot]"],
+      ] as const;
+      for (const [indexName, tableName, columns] of indexes) {
+        await prisma.$executeRawUnsafe(`
+          IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE [name] = N'${indexName}'
+              AND [object_id] = OBJECT_ID(N'[dbo].[${tableName}]')
+          )
+          BEGIN
+            CREATE INDEX [${indexName}] ON [dbo].[${tableName}](${columns});
+          END
+        `);
+      }
+    } else {
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "EcommerceOrder" ADD COLUMN IF NOT EXISTS "storefrontStoreId" TEXT'
+      );
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "EcommerceFulfillmentLocation" (
+          "id" TEXT PRIMARY KEY,
+          "retailOrgId" TEXT NOT NULL,
+          "storefrontStoreId" TEXT NOT NULL,
+          "storeId" TEXT NOT NULL,
+          "inventoryLocationId" TEXT NOT NULL,
+          "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+          "supportsPickup" BOOLEAN NOT NULL DEFAULT true,
+          "supportsDelivery" BOOLEAN NOT NULL DEFAULT true,
+          "routingPriority" INTEGER NOT NULL DEFAULT 100,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE ("storefrontStoreId", "inventoryLocationId")
+        )
+      `);
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "EcommerceFulfillment" (
+          "id" TEXT PRIMARY KEY,
+          "retailOrgId" TEXT NOT NULL,
+          "ecommerceOrderId" TEXT NOT NULL,
+          "ecommerceFulfillmentLocationId" TEXT,
+          "storeId" TEXT NOT NULL,
+          "inventoryLocationId" TEXT,
+          "salesOrderId" TEXT NOT NULL UNIQUE,
+          "sequenceNo" INTEGER NOT NULL DEFAULT 1,
+          "status" TEXT NOT NULL DEFAULT 'PLACED',
+          "fulfilmentMethod" TEXT NOT NULL,
+          "routingMethod" TEXT NOT NULL DEFAULT 'PRIORITY_STOCK',
+          "storeCodeSnapshot" TEXT NOT NULL,
+          "storeNameSnapshot" TEXT NOT NULL,
+          "inventoryLocationCodeSnapshot" TEXT,
+          "inventoryLocationNameSnapshot" TEXT,
+          "assignedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "fulfilledAt" TIMESTAMP(3),
+          "cancelledAt" TIMESTAMP(3),
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE ("ecommerceOrderId", "sequenceNo")
+        )
+      `);
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "EcommerceFulfillmentLine" (
+          "id" TEXT PRIMARY KEY,
+          "ecommerceFulfillmentId" TEXT NOT NULL,
+          "salesOrderLineId" TEXT NOT NULL UNIQUE,
+          "productCodeSnapshot" TEXT NOT NULL,
+          "productVariantCodeSnapshot" TEXT,
+          "productNameSnapshot" TEXT NOT NULL,
+          "sellingUnitOfMeasure" TEXT NOT NULL,
+          "baseUnitOfMeasure" TEXT NOT NULL,
+          "uomConversionFactor" DECIMAL(18,6) NOT NULL,
+          "quantity" DECIMAL(18,3) NOT NULL,
+          "baseQuantity" DECIMAL(18,3) NOT NULL,
+          "status" TEXT NOT NULL DEFAULT 'ALLOCATED',
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      const indexes = [
+        'CREATE INDEX IF NOT EXISTS "EcommerceOrder_storefrontStoreId_status_updatedAt_idx" ON "EcommerceOrder"("storefrontStoreId", "status", "updatedAt")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillmentLocation_retailOrgId_storefrontStoreId_status_routingPriority_idx" ON "EcommerceFulfillmentLocation"("retailOrgId", "storefrontStoreId", "status", "routingPriority")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillmentLocation_storeId_status_idx" ON "EcommerceFulfillmentLocation"("storeId", "status")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillmentLocation_inventoryLocationId_idx" ON "EcommerceFulfillmentLocation"("inventoryLocationId")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillment_retailOrgId_storeId_status_updatedAt_idx" ON "EcommerceFulfillment"("retailOrgId", "storeId", "status", "updatedAt")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillment_ecommerceFulfillmentLocationId_idx" ON "EcommerceFulfillment"("ecommerceFulfillmentLocationId")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillment_inventoryLocationId_idx" ON "EcommerceFulfillment"("inventoryLocationId")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillmentLine_ecommerceFulfillmentId_status_idx" ON "EcommerceFulfillmentLine"("ecommerceFulfillmentId", "status")',
+        'CREATE INDEX IF NOT EXISTS "EcommerceFulfillmentLine_productCodeSnapshot_idx" ON "EcommerceFulfillmentLine"("productCodeSnapshot")',
+      ];
+      for (const statement of indexes) {
+        await prisma.$executeRawUnsafe(statement);
+      }
+    }
+  })().catch((error) => {
+    multiBranchEcommerceSchemaReady = null;
+    throw error;
+  });
+
+  return multiBranchEcommerceSchemaReady;
 }
 
 export function ensureInterStoreTransferSchemaCompatibility() {

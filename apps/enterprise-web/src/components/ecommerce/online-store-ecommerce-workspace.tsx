@@ -11,14 +11,17 @@ import {
   Eye,
   LoaderCircle,
   Image as ImageIcon,
+  MapPin,
   PackageCheck,
   Pencil,
+  Plus,
   RefreshCw,
   Search,
   Settings2,
   ShoppingBag,
   Store,
   Truck,
+  Trash2,
   UploadCloud,
   WalletCards,
   X
@@ -107,6 +110,14 @@ export function OnlineStoreEcommerceWorkspace({
     ecommerceLayawayEnabled: workspace.store.ecommerceLayawayEnabled,
   });
   const [paymentMethods, setPaymentMethods] = useState(workspace.paymentMethods);
+  const [fulfillmentLocations, setFulfillmentLocations] = useState(
+    workspace.fulfillmentLocations.map((location) => ({
+      inventoryLocationId: location.inventoryLocationId,
+      supportsPickup: location.supportsPickup,
+      supportsDelivery: location.supportsDelivery,
+      routingPriority: location.routingPriority,
+    })),
+  );
   const liveSignatureRef = useRef("");
   const liveOrderCountRef = useRef(workspace.orders.length);
 
@@ -140,6 +151,14 @@ export function OnlineStoreEcommerceWorkspace({
     );
     setWorkspace(fresh);
     setPaymentMethods(fresh.paymentMethods);
+    setFulfillmentLocations(
+      fresh.fulfillmentLocations.map((location) => ({
+        inventoryLocationId: location.inventoryLocationId,
+        supportsPickup: location.supportsPickup,
+        supportsDelivery: location.supportsDelivery,
+        routingPriority: location.routingPriority,
+      })),
+    );
   }
 
   useEffect(() => {
@@ -269,10 +288,41 @@ export function OnlineStoreEcommerceWorkspace({
         await fetch("/api/online-store/ecommerce/settings", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(settings)
+          body: JSON.stringify({ ...settings, fulfillmentLocations })
         })
       )
     );
+  }
+
+  function addFulfillmentLocation() {
+    const selectedIds = new Set(fulfillmentLocations.map((location) => location.inventoryLocationId));
+    const nextLocation = workspace.availableFulfillmentLocations.find(
+      (location) => !selectedIds.has(location.id),
+    );
+    if (!nextLocation) {
+      setError("Every active shop sales location is already listed.");
+      return;
+    }
+    setFulfillmentLocations((current) => [
+      ...current,
+      {
+        inventoryLocationId: nextLocation.id,
+        supportsPickup: true,
+        supportsDelivery: true,
+        routingPriority: (current.length + 1) * 10,
+      },
+    ]);
+  }
+
+  function updateFulfillmentLocation(
+    inventoryLocationId: string,
+    patch: Partial<(typeof fulfillmentLocations)[number]>,
+  ) {
+    setFulfillmentLocations((current) => current.map((location) =>
+      location.inventoryLocationId === inventoryLocationId
+        ? { ...location, ...patch }
+        : location,
+    ));
   }
 
   const content = (
@@ -335,7 +385,7 @@ export function OnlineStoreEcommerceWorkspace({
                       <td><strong>{order.orderNo}</strong><small>{order.orderType === "LAYAWAY" ? "Layaway" : "Customer order"}</small><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatStatus(order.status)}</span></td>
                       <td><strong>{order.customer.fullName}</strong><small>{order.customer.phone ?? order.customer.email ?? order.customer.customerNo}</small></td>
                       <td>{new Date(order.placedAt).toLocaleString()}</td>
-                      <td>{formatStatus(order.fulfilmentMethod)}</td>
+                      <td><strong>{formatStatus(order.fulfilmentMethod)}</strong><small>{order.fulfillment?.storeName ?? workspace.store.name}{order.fulfillment?.inventoryLocationName ? ` · ${order.fulfillment.inventoryLocationName}` : ""}</small></td>
                       <td><span className={`${styles.pill} ${toneForStatus(order.paymentStatus)}`}>{formatStatus(order.paymentStatus)}</span></td>
                       <td><strong>{money(order.currencyCode, order.totalAmount)}</strong><small>{order.balanceAmount > 0 ? `${money(order.currencyCode, order.balanceAmount)} due` : "Settled"}</small></td>
                       <td><button aria-label={`View ${order.orderNo}`} onClick={() => setSelectedOrderId(order.id)} title="View order" type="button"><Eye size={18} /></button></td>
@@ -480,6 +530,43 @@ export function OnlineStoreEcommerceWorkspace({
                 <label><input checked={settings.ecommerceAllowDelivery} onChange={(event) => setSettings((current) => ({ ...current, ecommerceAllowDelivery: event.target.checked }))} type="checkbox" /><Truck size={19} /><span><strong>Delivery</strong><small>Collect a delivery address.</small></span></label>
                 <label><input checked={settings.ecommerceAllowPickup} onChange={(event) => setSettings((current) => ({ ...current, ecommerceAllowPickup: event.target.checked }))} type="checkbox" /><Store size={19} /><span><strong>Store pickup</strong><small>Customer collects at the shop.</small></span></label>
               </div>
+              <section className={styles.fulfillmentLocations}>
+                <header>
+                  <span><MapPin size={18} /><strong>Fulfilment locations</strong></span>
+                  <button onClick={addFulfillmentLocation} type="button"><Plus size={16} />Add location</button>
+                </header>
+                <p>Delivery routes to the first listed location that can supply the whole stock-tracked order. Customers choose a listed pickup shop.</p>
+                {fulfillmentLocations.length > 0 ? (
+                  <div className={styles.fulfillmentLocationRows}>
+                    {fulfillmentLocations.map((location) => (
+                      <div className={styles.fulfillmentLocationRow} key={location.inventoryLocationId}>
+                        <label>
+                          <span>Sales location</span>
+                          <select
+                            onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { inventoryLocationId: event.target.value })}
+                            value={location.inventoryLocationId}
+                          >
+                            {workspace.availableFulfillmentLocations.map((availableLocation) => (
+                              <option key={availableLocation.id} value={availableLocation.id}>
+                                {[availableLocation.storeName, availableLocation.name, availableLocation.code].filter(Boolean).join(" - ")}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>Priority</span>
+                          <input min={1} onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { routingPriority: Math.max(1, Number(event.target.value) || 1) })} type="number" value={location.routingPriority} />
+                        </label>
+                        <label className={styles.fulfillmentCheck}><input checked={location.supportsDelivery} onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { supportsDelivery: event.target.checked })} type="checkbox" /><Truck size={16} />Delivery</label>
+                        <label className={styles.fulfillmentCheck}><input checked={location.supportsPickup} onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { supportsPickup: event.target.checked })} type="checkbox" /><Store size={16} />Pickup</label>
+                        <button aria-label="Remove fulfilment location" onClick={() => setFulfillmentLocations((current) => current.filter((entry) => entry.inventoryLocationId !== location.inventoryLocationId))} title="Remove fulfilment location" type="button"><Trash2 size={17} /></button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className={styles.fulfillmentFallback}>The storefront currently uses its own default sales location.</div>
+                )}
+              </section>
               <button className={styles.saveButton} disabled={busyKey === "settings"} type="submit">{busyKey === "settings" ? <LoaderCircle className={styles.spin} size={18} /> : <Check size={18} />}Save storefront</button>
             </form>
           </section>
@@ -508,6 +595,7 @@ export function OnlineStoreEcommerceWorkspace({
                 <h3>Delivery</h3>
                 <p><strong>{selectedOrder.recipientName}</strong><br />{selectedOrder.deliveryPhone}<br />{selectedOrder.fulfilmentMethod === "DELIVERY" ? selectedOrder.deliveryAddress : "Store pickup"}</p>
                 {selectedOrder.deliveryNote ? <p><small>Customer note</small><br />{selectedOrder.deliveryNote}</p> : null}
+                {selectedOrder.fulfillment ? <><h3>Fulfilment location</h3><p><strong>{selectedOrder.fulfillment.storeName}</strong><br />{selectedOrder.fulfillment.inventoryLocationName ?? "Store sales location"}<br /><small>{formatStatus(selectedOrder.fulfillment.status)}</small></p></> : null}
                 <h3>Customer</h3>
                 <p>{selectedOrder.customer.fullName}<br />{selectedOrder.customer.phone ?? ""}<br />{selectedOrder.customer.email ?? ""}</p>
                 {selectedOrder.refundRequests.length > 0 ? (

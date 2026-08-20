@@ -1254,8 +1254,19 @@ test.describe("public ecommerce extension", () => {
       }
     );
     expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
-    const createdOrder = (await orderResponse.json()) as { orderNo: string; status: string };
+    const createdOrder = (await orderResponse.json()) as {
+      orderNo: string;
+      status: string;
+      fulfillment: {
+        storeCode: string;
+        storeName: string;
+        inventoryLocationCode: string;
+        inventoryLocationName: string;
+      };
+    };
     expect(createdOrder.orderNo).toMatch(/^SO-/);
+    expect(createdOrder.fulfillment.storeCode).toBeTruthy();
+    expect(createdOrder.fulfillment.inventoryLocationCode).toBeTruthy();
     createdOrderNo = createdOrder.orderNo;
     const ecommerceOrder = await prisma.ecommerceOrder.findFirstOrThrow({
       where: { orderNo: createdOrder.orderNo },
@@ -1266,15 +1277,31 @@ test.describe("public ecommerce extension", () => {
         deliveryFeeAmount: true,
         salesOrder: {
           select: {
+            storeId: true,
             lines: { select: { productCodeSnapshot: true } }
           }
-        }
+        },
+        fulfillments: {
+          select: {
+            storeId: true,
+            storeCodeSnapshot: true,
+            inventoryLocationCodeSnapshot: true,
+            status: true,
+          },
+        },
       }
     });
     createdEcommerceOrderId = ecommerceOrder.id;
     createdSalesOrderId = ecommerceOrder.salesOrderId;
     expect(ecommerceOrder.status).toBe("PLACED");
     expect(Number(ecommerceOrder.deliveryFeeAmount)).toBe(0);
+    expect(ecommerceOrder.fulfillments).toHaveLength(1);
+    expect(ecommerceOrder.fulfillments[0]).toMatchObject({
+      storeId: ecommerceOrder.salesOrder.storeId,
+      storeCodeSnapshot: createdOrder.fulfillment.storeCode,
+      inventoryLocationCodeSnapshot: createdOrder.fulfillment.inventoryLocationCode,
+      status: "PLACED",
+    });
     expect(ecommerceOrder.salesOrder.lines).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ productCodeSnapshot: "ECOM-DELIVERY" })])
     );
@@ -1295,11 +1322,19 @@ test.describe("public ecommerce extension", () => {
     );
     expect(ordersResponse.ok()).toBeTruthy();
     const orders = (await ordersResponse.json()) as {
-      orders: Array<{ orderNo: string; lines: Array<{ productName: string }> }>;
+      orders: Array<{
+        orderNo: string;
+        lines: Array<{ productName: string }>;
+        fulfillment: { storeCode: string; inventoryLocationCode: string } | null;
+      }>;
     };
     const savedOrder = orders.orders.find((order) => order.orderNo === createdOrder.orderNo);
     expect(savedOrder?.lines).toHaveLength(1);
     expect(savedOrder?.lines[0]?.productName).toBe(orderProduct.name);
+    expect(savedOrder?.fulfillment).toMatchObject({
+      storeCode: createdOrder.fulfillment.storeCode,
+      inventoryLocationCode: createdOrder.fulfillment.inventoryLocationCode,
+    });
 
     const sessionRefresh = page.waitForResponse(
       (response) =>

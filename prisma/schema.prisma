@@ -43,6 +43,8 @@ model RetailOrg {
   ecommerceCustomerSessions         EcommerceCustomerSession[]
   ecommerceOtpChallenges            EcommerceOtpChallenge[]
   ecommerceOrders                   EcommerceOrder[]
+  ecommerceFulfillmentLocations     EcommerceFulfillmentLocation[]
+  ecommerceFulfillments             EcommerceFulfillment[]
   ecommercePaymentMethods           EcommerceStorePaymentMethod[]
   ecommerceProductReviews           EcommerceProductReview[]
   customerAccountEntries            CustomerAccountEntry[]
@@ -368,6 +370,10 @@ model Store {
   storeProductPrices                StoreProductPrice[]
   storeProductSellingUnits          StoreProductSellingUnit[]
   ecommerceOrders                   EcommerceOrder[]
+  ecommerceStorefrontOrders         EcommerceOrder[]              @relation("EcommerceStorefront")
+  ecommerceFulfillmentLocations     EcommerceFulfillmentLocation[] @relation("EcommerceFulfillmentStore")
+  ecommerceStorefrontFulfillmentLocations EcommerceFulfillmentLocation[] @relation("EcommerceStorefrontFulfillmentLocation")
+  ecommerceFulfillments             EcommerceFulfillment[]
   ecommercePaymentMethods           EcommerceStorePaymentMethod[]
   licenseEvents                     LicenseEvent[]
 
@@ -4211,6 +4217,8 @@ model InventoryLocation {
   inventoryLedgerEntries      InventoryLedgerEntry[]
   inventorySerialUnits        InventorySerialUnit[]
   inventoryBatches            InventoryBatch[]
+  ecommerceFulfillmentLocations EcommerceFulfillmentLocation[]
+  ecommerceFulfillments       EcommerceFulfillment[]
   purchaseOrders              PurchaseOrder[]
   supplierClaims              SupplierClaim[]
   supplierReturns             SupplierReturn[]
@@ -4921,6 +4929,7 @@ model SalesOrder {
   lines                           SalesOrderLine[]
   inventoryReservations           SalesOrderInventoryReservation[]
   ecommerceOrder                  EcommerceOrder?
+  ecommerceFulfillment            EcommerceFulfillment?
 
   @@unique([retailOrgId, orderNo])
   @@index([storeId, status, updatedAt])
@@ -4951,6 +4960,7 @@ model SalesOrderLine {
   appliedPromotionName       String?
   salesOrder                 SalesOrder                       @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
   inventoryReservations      SalesOrderInventoryReservation[]
+  ecommerceFulfillmentLine   EcommerceFulfillmentLine?
 
   @@index([salesOrderId])
   @@index([productCodeSnapshot])
@@ -5082,10 +5092,35 @@ model EcommerceCustomerAddress {
   @@index([customerAccountId, isDefault])
 }
 
+model EcommerceFulfillmentLocation {
+  id                  String            @id @default(uuid())
+  retailOrgId         String
+  storefrontStoreId   String
+  storeId             String
+  inventoryLocationId String
+  status              String            @default("ACTIVE")
+  supportsPickup      Boolean           @default(true)
+  supportsDelivery    Boolean           @default(true)
+  routingPriority     Int               @default(100)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  retailOrg           RetailOrg         @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  storefrontStore     Store             @relation("EcommerceStorefrontFulfillmentLocation", fields: [storefrontStoreId], references: [id], onDelete: Cascade)
+  store               Store             @relation("EcommerceFulfillmentStore", fields: [storeId], references: [id], onDelete: Cascade)
+  inventoryLocation   InventoryLocation @relation(fields: [inventoryLocationId], references: [id], onDelete: Cascade)
+  fulfillments        EcommerceFulfillment[]
+
+  @@unique([storefrontStoreId, inventoryLocationId])
+  @@index([retailOrgId, storefrontStoreId, status, routingPriority])
+  @@index([storeId, status])
+  @@index([inventoryLocationId])
+}
+
 model EcommerceOrder {
   id                        String                      @id @default(uuid())
   retailOrgId               String
   storeId                   String
+  storefrontStoreId         String?
   salesOrderId              String                      @unique
   customerAccountId         String
   orderNo                   String
@@ -5129,18 +5164,78 @@ model EcommerceOrder {
   updatedAt                 DateTime                    @updatedAt
   retailOrg                 RetailOrg                   @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
   store                     Store                       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  storefrontStore           Store?                      @relation("EcommerceStorefront", fields: [storefrontStoreId], references: [id], onDelete: SetNull)
   salesOrder                SalesOrder                  @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
   customerAccount           EcommerceCustomerAccount    @relation(fields: [customerAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   payments                  EcommercePayment[]
   refundRequests            EcommerceRefundRequest[]
   statusEvents              EcommerceOrderStatusEvent[]
   reviews                   EcommerceProductReview[]
+  fulfillments              EcommerceFulfillment[]
 
   @@unique([retailOrgId, orderNo])
   @@index([storeId, status, updatedAt])
+  @@index([storefrontStoreId, status, updatedAt])
   @@index([customerAccountId, placedAt])
   @@index([paymentStatus, updatedAt])
   @@index([deliveryStatus, updatedAt])
+}
+
+model EcommerceFulfillment {
+  id                            String                       @id @default(uuid())
+  retailOrgId                   String
+  ecommerceOrderId              String
+  ecommerceFulfillmentLocationId String?
+  storeId                       String
+  inventoryLocationId           String?
+  salesOrderId                  String                       @unique
+  sequenceNo                    Int                          @default(1)
+  status                        String                       @default("PLACED")
+  fulfilmentMethod              String
+  routingMethod                 String                       @default("PRIORITY_STOCK")
+  storeCodeSnapshot             String
+  storeNameSnapshot             String
+  inventoryLocationCodeSnapshot String?
+  inventoryLocationNameSnapshot String?
+  assignedAt                    DateTime                     @default(now())
+  fulfilledAt                   DateTime?
+  cancelledAt                   DateTime?
+  createdAt                     DateTime                     @default(now())
+  updatedAt                     DateTime                     @updatedAt
+  retailOrg                     RetailOrg                    @relation(fields: [retailOrgId], references: [id], onDelete: Cascade)
+  ecommerceOrder                EcommerceOrder               @relation(fields: [ecommerceOrderId], references: [id], onDelete: Cascade)
+  ecommerceFulfillmentLocation  EcommerceFulfillmentLocation? @relation(fields: [ecommerceFulfillmentLocationId], references: [id], onDelete: SetNull)
+  store                         Store                        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  inventoryLocation             InventoryLocation?           @relation(fields: [inventoryLocationId], references: [id], onDelete: SetNull)
+  salesOrder                    SalesOrder                   @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  lines                         EcommerceFulfillmentLine[]
+
+  @@unique([ecommerceOrderId, sequenceNo])
+  @@index([retailOrgId, storeId, status, updatedAt])
+  @@index([ecommerceFulfillmentLocationId])
+  @@index([inventoryLocationId])
+}
+
+model EcommerceFulfillmentLine {
+  id                          String                @id @default(uuid())
+  ecommerceFulfillmentId       String
+  salesOrderLineId             String                @unique
+  productCodeSnapshot          String
+  productVariantCodeSnapshot   String?
+  productNameSnapshot          String
+  sellingUnitOfMeasure         String
+  baseUnitOfMeasure            String
+  uomConversionFactor          Decimal               @db.Decimal(18, 6)
+  quantity                     Decimal               @db.Decimal(18, 3)
+  baseQuantity                 Decimal               @db.Decimal(18, 3)
+  status                       String                @default("ALLOCATED")
+  createdAt                    DateTime              @default(now())
+  updatedAt                    DateTime              @updatedAt
+  ecommerceFulfillment         EcommerceFulfillment  @relation(fields: [ecommerceFulfillmentId], references: [id], onDelete: Cascade)
+  salesOrderLine               SalesOrderLine         @relation(fields: [salesOrderLineId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ecommerceFulfillmentId, status])
+  @@index([productCodeSnapshot])
 }
 
 model EcommercePayment {

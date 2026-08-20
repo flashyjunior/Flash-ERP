@@ -584,6 +584,121 @@
   font-weight: 400;
 }
 
+.fulfillmentLocations {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #d9e5dc;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fbfdfb;
+}
+
+.fulfillmentLocations > header,
+.fulfillmentLocations > header > span,
+.fulfillmentLocationRow,
+.fulfillmentCheck {
+  display: flex;
+  align-items: center;
+}
+
+.fulfillmentLocations > header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fulfillmentLocations > header > span {
+  gap: 8px;
+  color: #193827;
+}
+
+.fulfillmentLocations > header > button,
+.fulfillmentLocationRow > button {
+  border: 1px solid #bcd6c4;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e7044;
+  cursor: pointer;
+}
+
+.fulfillmentLocations > header > button {
+  min-height: 34px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+
+.fulfillmentLocations > p {
+  margin: 0;
+  color: #607265;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.fulfillmentLocationRows {
+  display: grid;
+  gap: 8px;
+}
+
+.fulfillmentLocationRow {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 96px auto auto 38px;
+  gap: 10px;
+  align-items: end;
+  padding: 10px;
+  border-radius: 6px;
+  background: #f3f8f4;
+}
+
+.fulfillmentLocationRow > label:not(.fulfillmentCheck) {
+  display: grid;
+  gap: 5px;
+}
+
+.fulfillmentLocationRow > label > span {
+  color: #52635a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.fulfillmentLocationRow select,
+.fulfillmentLocationRow input[type="number"] {
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid #c9d9cf;
+  border-radius: 6px;
+  padding: 0 9px;
+  background: #fff;
+}
+
+.fulfillmentCheck {
+  min-height: 38px;
+  align-self: end;
+  gap: 6px;
+  color: #345443;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.fulfillmentLocationRow > button {
+  width: 38px;
+  min-height: 38px;
+  display: grid;
+  place-items: center;
+  color: #b64332;
+  border-color: #ebc7bf;
+}
+
+.fulfillmentFallback {
+  padding: 10px 12px;
+  border-radius: 6px;
+  color: #65756a;
+  background: #f2f5f2;
+  font-size: 13px;
+}
+
 .paymentSetup {
   max-width: 920px;
   padding: 20px;
@@ -1175,6 +1290,16 @@
   .formGrid,
   .fulfilmentOptions {
     grid-template-columns: 1fr;
+  }
+
+  .fulfillmentLocationRow {
+    grid-template-columns: minmax(0, 1fr) 80px;
+    align-items: end;
+  }
+
+  .fulfillmentCheck {
+    align-self: start;
+    min-height: 30px;
   }
 
   .pagination {
