@@ -1781,6 +1781,21 @@
   margin-top: 16px;
 }
 
+.stockAvailable,
+.stockUnavailable {
+  margin: 14px 0 -6px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.stockAvailable {
+  color: #067647;
+}
+
+.stockUnavailable {
+  color: #b42318;
+}
+
 .modalPurchase .quantityStepper {
   height: 48px;
 }

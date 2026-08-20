@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { Prisma } from "@prisma/client";
 import {
   buildLayawayPolicySnapshot,
+  calculateLayawayAvailableBaseQuantity,
   calculateLayawayMinimumDeposit,
   normalizeLayawaySettings,
   resolvePosSellingUom,
@@ -98,6 +99,21 @@ function toMoney(value: number) {
 
 function toQuantity(value: number | Prisma.Decimal | string | null | undefined) {
   return Number(Number(value ?? 0).toFixed(3));
+}
+
+function isEcommerceStockManagedProduct(product: {
+  productType?: string | null;
+  trackInventory?: boolean | null;
+}) {
+  return Boolean(product.trackInventory) && product.productType?.trim().toUpperCase() !== "SERVICE";
+}
+
+function ecommerceInventoryPositionKey(productId: string, productVariantId?: string | null) {
+  return `${productId}:${productVariantId ?? ""}`;
+}
+
+function ecommerceReservationSnapshotKey(productCode: string, productVariantCode?: string | null) {
+  return `${productCode.trim().toUpperCase()}:${productVariantCode?.trim().toUpperCase() ?? ""}`;
 }
 
 function readStringArray(value: string | null | undefined) {
@@ -451,6 +467,130 @@ async function getSalesLocation(storeId: string) {
   });
 }
 
+type EcommerceInventoryClient = Pick<
+  Prisma.TransactionClient,
+  "inventoryLedgerEntry" | "inventoryLocation" | "salesOrderInventoryReservation"
+>;
+
+async function assertEcommerceStockAvailable(
+  client: EcommerceInventoryClient,
+  store: Awaited<ReturnType<typeof getPublicStore>>,
+  lines: Array<{
+    product: {
+      id: string;
+      code: string;
+      name: string;
+      productType: string;
+      trackInventory: boolean;
+    };
+    variant: {
+      id: string;
+      code: string;
+      displayName: string | null;
+    } | null;
+    baseQuantity: number;
+  }>,
+  actionLabel: string,
+) {
+  const inventoryLines = lines.filter((line) => isEcommerceStockManagedProduct(line.product));
+  if (inventoryLines.length === 0) {
+    return;
+  }
+
+  const salesLocation = await client.inventoryLocation.findFirst({
+    where: { storeId: store.id, status: "ACTIVE" },
+    orderBy: [{ useForSalesDefault: "desc" }, { name: "asc" }],
+    select: { id: true, code: true },
+  });
+  if (!salesLocation) {
+    throw new EcommerceAuthError(
+      "This shop cannot accept stock-tracked products until an active sales inventory location is configured.",
+      409,
+    );
+  }
+
+  const requestedByPosition = new Map<string, number>();
+  for (const line of inventoryLines) {
+    const key = ecommerceInventoryPositionKey(line.product.id, line.variant?.id);
+    requestedByPosition.set(
+      key,
+      toQuantity((requestedByPosition.get(key) ?? 0) + line.baseQuantity),
+    );
+  }
+
+  const productIds = [...new Set(inventoryLines.map((line) => line.product.id))];
+  const stockPositions = await client.inventoryLedgerEntry.groupBy({
+    by: ["productId", "productVariantId"],
+    where: {
+      retailOrgId: store.retailOrgId,
+      storeId: store.id,
+      inventoryLocationId: salesLocation.id,
+      productId: { in: productIds },
+    },
+    _sum: { quantity: true },
+  });
+  const onHandByPosition = new Map(
+    stockPositions.map((position) => [
+      ecommerceInventoryPositionKey(position.productId, position.productVariantId),
+      toQuantity(position._sum.quantity),
+    ] as const),
+  );
+
+  const productCodes = [...new Set(inventoryLines.map((line) => line.product.code))];
+  const activeReservations = await client.salesOrderInventoryReservation.findMany({
+    where: {
+      inventoryLocationId: salesLocation.id,
+      status: "ACTIVE",
+      productCodeSnapshot: { in: productCodes },
+    },
+    select: {
+      productCodeSnapshot: true,
+      productVariantCodeSnapshot: true,
+      baseQuantity: true,
+    },
+  });
+  const reservedBySnapshot = new Map<string, number>();
+  for (const reservation of activeReservations) {
+    const key = ecommerceReservationSnapshotKey(
+      reservation.productCodeSnapshot,
+      reservation.productVariantCodeSnapshot,
+    );
+    reservedBySnapshot.set(
+      key,
+      toQuantity((reservedBySnapshot.get(key) ?? 0) + Number(reservation.baseQuantity)),
+    );
+  }
+
+  const checkedPositions = new Set<string>();
+  for (const line of inventoryLines) {
+    const positionKey = ecommerceInventoryPositionKey(line.product.id, line.variant?.id);
+    if (checkedPositions.has(positionKey)) {
+      continue;
+    }
+    checkedPositions.add(positionKey);
+
+    const requestedQuantity = requestedByPosition.get(positionKey) ?? 0;
+    const availableQuantity = calculateLayawayAvailableBaseQuantity({
+      onHandBaseQuantity: onHandByPosition.get(positionKey) ?? 0,
+      activeReservedBaseQuantity:
+        reservedBySnapshot.get(
+          ecommerceReservationSnapshotKey(line.product.code, line.variant?.code),
+        ) ?? 0,
+    });
+    if (requestedQuantity <= availableQuantity + 0.0005) {
+      continue;
+    }
+
+    const itemLabel = line.variant
+      ? `${line.product.name} (${line.variant.displayName ?? line.variant.code})`
+      : line.product.name;
+    throw new EcommerceAuthError(
+      `Only ${toQuantity(availableQuantity).toFixed(3)} base unit(s) of ${itemLabel} are available at this shop. Update your cart before ${actionLabel}.`,
+      409,
+    );
+  }
+}
+
 export type PublicStorefrontData = Awaited<ReturnType<typeof loadPublicStorefront>>;
 
 async function loadPublicStorefront(storeCodeOrSlug: string) {
@@ -565,7 +705,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
   });
   const stockRows = salesLocation
     ? await prisma.inventoryLedgerEntry.groupBy({
-        by: ["productId"],
+        by: ["productId", "productVariantId"],
         where: {
           retailOrgId: store.retailOrgId,
           storeId: store.id,
@@ -573,11 +713,53 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
           productId: { in: products.map((product) => product.id) }
         },
         _sum: { quantity: true }
+    })
+    : [];
+  const onHandByPosition = new Map(
+    stockRows.map((row) => [
+      ecommerceInventoryPositionKey(row.productId, row.productVariantId),
+      toQuantity(row._sum.quantity),
+    ] as const)
+  );
+  const activeReservations = salesLocation
+    ? await prisma.salesOrderInventoryReservation.findMany({
+        where: {
+          inventoryLocationId: salesLocation.id,
+          status: "ACTIVE",
+          productCodeSnapshot: { in: products.map((product) => product.code) },
+        },
+        select: {
+          productCodeSnapshot: true,
+          productVariantCodeSnapshot: true,
+          baseQuantity: true,
+        },
       })
     : [];
-  const stockByProductId = new Map(
-    stockRows.map((row) => [row.productId, toQuantity(row._sum.quantity)] as const)
-  );
+  const reservedBySnapshot = new Map<string, number>();
+  for (const reservation of activeReservations) {
+    const key = ecommerceReservationSnapshotKey(
+      reservation.productCodeSnapshot,
+      reservation.productVariantCodeSnapshot,
+    );
+    reservedBySnapshot.set(
+      key,
+      toQuantity((reservedBySnapshot.get(key) ?? 0) + Number(reservation.baseQuantity)),
+    );
+  }
+  const availableCatalogQuantity = (
+    product: { id: string; code: string; productType: string; trackInventory: boolean },
+    variant?: { id: string; code: string } | null,
+  ) => {
+    if (!isEcommerceStockManagedProduct(product)) {
+      return null;
+    }
+    return toQuantity(Math.max(0, calculateLayawayAvailableBaseQuantity({
+      onHandBaseQuantity:
+        onHandByPosition.get(ecommerceInventoryPositionKey(product.id, variant?.id)) ?? 0,
+      activeReservedBaseQuantity:
+        reservedBySnapshot.get(ecommerceReservationSnapshotKey(product.code, variant?.code)) ?? 0,
+    })));
+  };
   const reviewSummaryRows = products.length > 0
     ? await prisma.ecommerceProductReview.groupBy({
         by: ["productId"],
@@ -707,9 +889,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
         createdAt: review.createdAt.toISOString()
       })),
       availableQuantity:
-        product.trackInventory && product.productType !== "SERVICE"
-          ? stockByProductId.get(product.id) ?? 0
-          : null,
+        availableCatalogQuantity(product),
       variants: product.matrixVariants.map((variant) => {
         const variantUnitPrice = Number(
           variant.storeProductPrices[0]?.unitPrice ?? variant.unitPrice
@@ -743,7 +923,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
             })),
           promotion: variantPromotions[0] ?? null,
           promotions: variantPromotions,
-          availableQuantity: Number(variant.quantityOnHand),
+          availableQuantity: availableCatalogQuantity(product, variant),
           attributes: variant.values.map((value) => ({
             name: value.attribute.name,
             value: value.valueLabelSnapshot || value.attributeValue.label
@@ -889,6 +1069,7 @@ async function priceEcommerceLines(input: {
       unitOfMeasure: true,
       baseUnitOfMeasure: { select: { code: true } },
       baseUnitPrice: true,
+      trackInventory: true,
       isSerialized: true,
       storeProductSellingUnits: {
         where: { storeId: input.store.id, status: "ACTIVE" },
@@ -1081,6 +1262,7 @@ export async function quoteEcommerceOrder(input: {
     customerType: customerSession?.customerAccount.customer.customerType ?? "INDIVIDUAL",
     loyaltyTier: customerSession?.customerAccount.customer.loyaltyTier
   });
+  await assertEcommerceStockAvailable(prisma, store, pricing.orderLines, "checking out");
 
   return {
     currencyCode: store.currencyCode || store.retailOrg.baseCurrencyCode,
@@ -1351,6 +1533,7 @@ export async function createEcommerceOrder(input: {
 
   try {
     return await prisma.$transaction(async (tx) => {
+    await assertEcommerceStockAvailable(tx, store, orderLines, "placing this order");
     const terminal = await tx.terminal.upsert({
       where: { storeId_code: { storeId: store.id, code: ecommerceTerminalCode } },
       update: { status: "ACTIVE", lastHeartbeatAt: now },
