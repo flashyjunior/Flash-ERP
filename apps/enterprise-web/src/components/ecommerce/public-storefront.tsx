@@ -283,6 +283,35 @@ function resolveProductSellingUnit(
   );
 }
 
+function getAvailableBaseQuantity(product: Product, variant: Variant | null = null) {
+  const quantity = variant?.availableQuantity ?? product.availableQuantity;
+  return typeof quantity === "number" ? Math.max(0, quantity) : null;
+}
+
+function getMaximumOrderQuantity(
+  product: Product,
+  variant: Variant | null,
+  sellingUnit: SellingUnit | null,
+) {
+  const availableBaseQuantity = getAvailableBaseQuantity(product, variant);
+  if (availableBaseQuantity === null) {
+    return null;
+  }
+
+  const conversionFactor = Math.max(0.001, Number(sellingUnit?.conversionFactor ?? 1));
+  return Math.max(0, Math.floor((availableBaseQuantity + 0.0005) / conversionFactor));
+}
+
+function isProductOutOfStock(product: Product) {
+  if (product.availableQuantity === null) {
+    return false;
+  }
+  if (product.variants.length === 0) {
+    return product.availableQuantity <= 0;
+  }
+  return product.variants.length > 0 && product.variants.every((variant) => variant.availableQuantity <= 0);
+}
+
 function getProductPrice(product: Product, variant: Variant | null = null) {
   const unitPrice = variant?.unitPrice ?? product.unitPrice;
   return getProductPromotion(product, variant)?.promotionalUnitPrice ?? unitPrice;
@@ -516,6 +545,7 @@ export function PublicStorefront({
   const [saveAddress, setSaveAddress] = useState(true);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [cartStockError, setCartStockError] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<{
     orderNo: string;
     totalAmount: number;
@@ -766,6 +796,10 @@ export function PublicStorefront({
   const selectedProductPrice = quickProduct
     ? selectedProductSellingUnit?.unitPrice ?? getProductPrice(quickProduct, quickVariant)
     : 0;
+  const quickMaximumQuantity = quickProduct && (quickProduct.variants.length === 0 || quickVariant)
+    ? getMaximumOrderQuantity(quickProduct, quickVariant, selectedProductSellingUnit)
+    : null;
+  const quickOutOfStock = quickMaximumQuantity === 0;
   const selectedProductOriginalPrice = quickProduct
     ? getProductOriginalPrice(quickProduct, quickVariant)
     : null;
@@ -842,6 +876,7 @@ export function PublicStorefront({
   useEffect(() => {
     if (cart.length === 0) {
       setCartQuote(null);
+      setCartStockError(null);
       return;
     }
 
@@ -865,12 +900,13 @@ export function PublicStorefront({
             signal: controller.signal
           }
         );
-        if (response.ok) {
-          setCartQuote({ key: quoteKey, value: await response.json() as EcommerceQuote });
-        }
+        const quote = await readJson<EcommerceQuote>(response);
+        setCartQuote({ key: quoteKey, value: quote });
+        setCartStockError(null);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
           setCartQuote(null);
+          setCartStockError(error instanceof Error ? error.message : "Some cart items are no longer available.");
         }
       }
     }, 120);
@@ -880,6 +916,13 @@ export function PublicStorefront({
       controller.abort();
     };
   }, [cart, cartQuoteKey, storefront.store.code]);
+
+  useEffect(() => {
+    if (quickMaximumQuantity === null || quickMaximumQuantity <= 0) {
+      return;
+    }
+    setQuickQuantity((current) => Math.min(current, quickMaximumQuantity));
+  }, [quickMaximumQuantity]);
 
   async function refreshSession() {
     const response = await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/auth/session`, {
@@ -972,6 +1015,35 @@ export function PublicStorefront({
   ) {
     const unitOfMeasure = sellingUnit?.unitOfMeasureCode ?? product.baseUnitOfMeasure;
     const key = `${product.id}:${variant?.code ?? "base"}:${unitOfMeasure}`;
+    const availableBaseQuantity = getAvailableBaseQuantity(product, variant);
+    const requestedBaseQuantity = quantity * Math.max(0.001, Number(sellingUnit?.conversionFactor ?? 1));
+    const existingBaseQuantity = cart
+      .filter(
+        (line) =>
+          line.productId === product.id &&
+          line.variantCode === (variant?.code ?? null)
+      )
+      .reduce(
+        (total, line) => total + line.quantity * Math.max(0.001, line.uomConversionFactor),
+        0
+      );
+
+    if (
+      availableBaseQuantity !== null &&
+      existingBaseQuantity + requestedBaseQuantity > availableBaseQuantity + 0.0005
+    ) {
+      const remainingQuantity = Math.max(0, Math.floor(
+        (availableBaseQuantity - existingBaseQuantity + 0.0005) /
+          Math.max(0.001, Number(sellingUnit?.conversionFactor ?? 1))
+      ));
+      showToast(
+        remainingQuantity <= 0
+          ? `${product.name} is currently out of stock.`
+          : `Only ${remainingQuantity} more ${sellingUnit?.unitOfMeasureName ?? unitOfMeasure} can be ordered for ${product.name}.`
+      );
+      return;
+    }
+
     setCart((current) => {
       const existing = current.find((line) => line.key === key);
       if (existing) {
@@ -1082,13 +1154,40 @@ export function PublicStorefront({
     }
   }
 
-  function beginCheckout() {
+  async function beginCheckout() {
     if (cart.length === 0) {
       return;
     }
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
       setAuthOpen(true);
+      return;
+    }
+    try {
+      const response = await fetch(
+        `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/quote`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            lines: cart.map((line) => ({
+              productId: line.productId,
+              variantCode: line.variantCode,
+              sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+              quantity: line.quantity
+            }))
+          })
+        }
+      );
+      const quote = await readJson<EcommerceQuote>(response);
+      setCartQuote({ key: cartQuoteKey, value: quote });
+      setCartStockError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Some cart items are no longer available.";
+      setCartStockError(message);
+      setCheckoutError(message);
+      setDrawerView("cart");
+      showToast(message);
       return;
     }
     const availablePaymentOptions = checkoutOrderType === "LAYAWAY"
@@ -1179,7 +1278,11 @@ export function PublicStorefront({
       setCart([]);
       showToast("Order placed");
     } catch (error) {
-      setCheckoutError(error instanceof Error ? error.message : "Order could not be placed.");
+      const message = error instanceof Error ? error.message : "Order could not be placed.";
+      setCheckoutError(message);
+      if (/available|stock/i.test(message)) {
+        setCartStockError(message);
+      }
     } finally {
       setCheckoutBusy(false);
     }
@@ -1533,7 +1636,7 @@ export function PublicStorefront({
               {quickProduct.variants.length > 0 ? (
                 <div className={styles.variantGrid}>
                   {quickProduct.variants.map((variant) => (
-                    <button className={quickVariant?.code === variant.code ? styles.variantActive : undefined} key={variant.code} onClick={() => {
+                    <button className={quickVariant?.code === variant.code ? styles.variantActive : undefined} disabled={getMaximumOrderQuantity(quickProduct, variant, resolveProductSellingUnit(quickProduct, variant)) === 0} key={variant.code} onClick={() => {
                       setQuickVariant(variant);
                       setQuickSellingUnitOfMeasure(
                         resolveProductSellingUnit(quickProduct, variant)?.unitOfMeasureCode ?? ""
@@ -1560,10 +1663,11 @@ export function PublicStorefront({
                 </div>
               ) : null}
               <div className={styles.purchaseAssurance}><BadgeCheck size={17} /><span>Secure order tracking</span><CreditCard size={17} /><span>{checkoutPaymentOptions.length} payment option{checkoutPaymentOptions.length === 1 ? "" : "s"}</span></div>
+              {quickMaximumQuantity !== null ? <p className={quickOutOfStock ? styles.stockUnavailable : styles.stockAvailable}>{quickOutOfStock ? "Out of stock" : `${quickMaximumQuantity} available to order`}</p> : null}
               <div className={styles.modalPurchase}>
-                <QuantityStepper onChange={setQuickQuantity} value={quickQuantity} />
-                <button className={styles.primaryButton} disabled={quickProduct.variants.length > 0 && !quickVariant} onClick={() => addProduct(quickProduct, quickVariant, quickQuantity, selectedProductSellingUnit)} type="button">
-                  <ShoppingCart size={19} /> Add · {money.format(selectedProductTotal)}
+                <QuantityStepper max={quickMaximumQuantity} onChange={setQuickQuantity} value={quickQuantity} />
+                <button className={styles.primaryButton} disabled={(quickProduct.variants.length > 0 && !quickVariant) || quickOutOfStock} onClick={() => addProduct(quickProduct, quickVariant, quickQuantity, selectedProductSellingUnit)} type="button">
+                  <ShoppingCart size={19} /> {quickOutOfStock ? "Out of stock" : `Add · ${money.format(selectedProductTotal)}`}
                 </button>
               </div>
             </div>
@@ -1738,8 +1842,9 @@ export function PublicStorefront({
         {drawerView === "cart" ? (
           <CartPanel
             cart={cart}
+            stockError={cartStockError}
             money={money}
-            onCheckout={beginCheckout}
+            onCheckout={() => void beginCheckout()}
             onClose={() => setDrawerView(null)}
             onQuantity={updateCartQuantity}
             quote={currentCartQuote}
@@ -1754,6 +1859,7 @@ export function PublicStorefront({
             addressLine2={addressLine2}
             busy={checkoutBusy}
             checkoutError={checkoutError}
+            stockError={cartStockError}
             checkoutTotal={checkoutTotal}
             city={city}
             createdOrder={createdOrder}
@@ -1916,7 +2022,7 @@ function ProductCard({ product, money, onOpen, onPreview, compact = false }: {
         <button onClick={() => onOpen(product)} type="button"><h3>{product.name}</h3></button>
         <div className={styles.cardRating}><StarRating rating={product.averageRating} /><span>{product.reviewCount > 0 ? product.reviewCount : "New"}</span></div>
         <div className={styles.productCardFooter}>
-          <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : "Available to order"}</small></div>
+          <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : isProductOutOfStock(product) ? "Out of stock" : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : `${Math.floor(product.availableQuantity)} available`}</small></div>
         </div>
       </div>
     </article>
@@ -1947,12 +2053,13 @@ function StarRating({ rating }: { rating: number }) {
   return <span aria-label={rating > 0 ? `${rating} out of 5 stars` : "Not yet rated"} className={styles.stars}>{[1, 2, 3, 4, 5].map((value) => <Star fill={value <= rounded ? "currentColor" : "none"} key={value} size={13} />)}</span>;
 }
 
-function QuantityStepper({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+function QuantityStepper({ value, onChange, max = null }: { value: number; onChange: (value: number) => void; max?: number | null }) {
+  const maximumQuantity = max === null ? 999 : Math.max(0, max);
   return (
     <div className={styles.quantityStepper}>
       <button aria-label="Decrease quantity" onClick={() => onChange(Math.max(1, value - 1))} type="button"><Minus size={17} /></button>
       <strong>{value}</strong>
-      <button aria-label="Increase quantity" onClick={() => onChange(Math.min(999, value + 1))} type="button"><Plus size={17} /></button>
+      <button aria-label="Increase quantity" disabled={value >= maximumQuantity} onClick={() => onChange(Math.min(maximumQuantity, value + 1))} type="button"><Plus size={17} /></button>
     </div>
   );
 }
@@ -1982,8 +2089,9 @@ function DrawerHeader({
   );
 }
 
-function CartPanel({ cart, money, quote, subtotal, discount, total, onClose, onQuantity, onCheckout }: {
+function CartPanel({ cart, stockError, money, quote, subtotal, discount, total, onClose, onQuantity, onCheckout }: {
   cart: CartLine[];
+  stockError: string | null;
   money: Intl.NumberFormat;
   quote: EcommerceQuote | null;
   subtotal: number;
@@ -2016,7 +2124,8 @@ function CartPanel({ cart, money, quote, subtotal, discount, total, onClose, onQ
             <div className={styles.totalLine}><span>Subtotal</span><strong>{money.format(subtotal)}</strong></div>
             {discount > 0 ? <div className={styles.totalLine}><span>Promotion savings</span><strong>-{money.format(discount)}</strong></div> : null}
             <div className={styles.totalLine}><span>Total</span><strong>{money.format(total)}</strong></div>
-            <button className={styles.primaryButton} onClick={onCheckout} type="button">Checkout <ChevronRight size={19} /></button>
+            {stockError ? <p className={styles.formError}>{stockError}</p> : null}
+            <button className={styles.primaryButton} disabled={Boolean(stockError)} onClick={onCheckout} type="button">Checkout <ChevronRight size={19} /></button>
           </div>
         </>
       )}
@@ -2041,6 +2150,7 @@ function CheckoutPanel(props: {
   saveAddress: boolean;
   busy: boolean;
   checkoutError: string | null;
+  stockError: string | null;
   createdOrder: {
     orderNo: string;
     totalAmount: number;
@@ -2165,10 +2275,10 @@ function CheckoutPanel(props: {
           {props.discount > 0 ? <div><span>Promotion savings</span><strong>-{props.money.format(props.discount)}</strong></div> : null}
           <div><span>Total</span><strong>{props.money.format(props.checkoutTotal)}</strong></div>
         </section>
-        {props.checkoutError ? <p className={styles.formError}>{props.checkoutError}</p> : null}
+        {props.checkoutError ?? props.stockError ? <p className={styles.formError}>{props.checkoutError ?? props.stockError}</p> : null}
       </div>
       <div className={styles.drawerDock}>
-        <button className={styles.primaryButton} disabled={props.busy || !props.selectedPaymentCode} onClick={props.onPlaceOrder} type="button">
+        <button className={styles.primaryButton} disabled={props.busy || !props.selectedPaymentCode || Boolean(props.stockError)} onClick={props.onPlaceOrder} type="button">
           {props.busy ? <LoaderCircle className={styles.spin} size={19} /> : props.orderType === "LAYAWAY" ? <WalletCards size={19} /> : <ShoppingBag size={19} />} {props.orderType === "LAYAWAY" ? `Start Layaway · ${props.money.format(props.layawayDepositAmount)}` : `Place order · ${props.money.format(props.checkoutTotal)}`}
         </button>
       </div>

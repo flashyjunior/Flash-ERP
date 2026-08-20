@@ -556,6 +556,43 @@ test.describe("public ecommerce extension", () => {
         paymentMethodCode,
         customerNote: "Alternate-UOM persisted-order acceptance"
       };
+
+      const insufficientQuoteResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
+        {
+          data: {
+            lines: [{
+              productId: product.id,
+              quantity: 5,
+              sellingUnitOfMeasure: cartonUnitCode
+            }]
+          }
+        }
+      );
+      expect(insufficientQuoteResponse.status()).toBe(409);
+      await expect(insufficientQuoteResponse.json()).resolves.toMatchObject({
+        message: expect.stringContaining("available")
+      });
+
+      const insufficientOrderResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
+        {
+          headers: { "idempotency-key": `e2e-uom-insufficient-${crypto.randomUUID()}` },
+          data: {
+            ...orderRequest,
+            lines: [{
+              productId: product.id,
+              quantity: 5,
+              sellingUnitOfMeasure: cartonUnitCode
+            }]
+          }
+        }
+      );
+      expect(insufficientOrderResponse.status()).toBe(409);
+      await expect(insufficientOrderResponse.json()).resolves.toMatchObject({
+        message: expect.stringContaining("available")
+      });
+
       const checkoutRequestKey = `e2e-uom-checkout-${crypto.randomUUID()}`;
       const createOrderResponse = await page.request.post(
         `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
