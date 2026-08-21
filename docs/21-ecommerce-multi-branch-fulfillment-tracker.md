@@ -1,6 +1,6 @@
 # Ecommerce Multi-Branch Fulfilment Tracker
 
-Updated: 2026-08-20
+Updated: 2026-08-21
 
 This tracker governs the evolution of the Flash ERP public ecommerce storefront from a single-shop sales path into a centrally managed, multi-branch fulfilment operation. It is deliberately phased: a customer must never be promised stock by adding inventory from several branches unless the order has a real, auditable fulfilment plan.
 
@@ -27,10 +27,10 @@ This tracker governs the evolution of the Flash ERP public ecommerce storefront 
 ## Current Checkpoint
 
 - Repository: Flash ERP.
-- Branch: `fix/ecommerce-stock-availability`.
+- Branch: `master`.
 - Baseline implementation commit: `31a1a27` (`Rework ecommerce fulfilment across branches`).
-- Review baseline: PR #18, `Rework ecommerce fulfilment across branches`.
-- Current delivery position: central network allocation, internal-transfer routing, and staff/customer allocation visibility are code complete and covered by focused acceptance plus local production-build browser verification. This change still needs review, deployment, configuration, and production-like UAT before it is marked Done.
+- Merged implementation commit: `1fcd33f` (`Add ecommerce storefront order handoff`), PR #20.
+- Current delivery position: central network allocation, internal-transfer routing, customer and staff visibility, configurable storefront slides, and Store Desktop order handoff are merged and covered by focused acceptance plus a deploy build. The release package is ready; target deployment, fulfilment-location configuration, and production-like UAT remain before Phase 1 is marked Done.
 - This tracker distinguishes code completion from rollout acceptance. Do not mark a phase Done merely because its branch compiles.
 
 ## Phase 1: Central Delivery Allocation And Reservation
@@ -54,7 +54,7 @@ Acceptance:
 Evidence:
 
 - Prisma schema validation passed.
-- SQL Server migrations `20260820010000_multi_branch_ecommerce_fulfillment` and `20260820020000_ecommerce_network_allocation` are in the configured `prisma/migrations-sqlserver` deployment path and apply idempotently.
+- SQL Server migrations `20260820010000_multi_branch_ecommerce_fulfillment`, `20260820020000_ecommerce_network_allocation`, and `20260821010000_ecommerce_hero_slides` are in the configured `prisma/migrations-sqlserver` deployment path and apply idempotently.
 - `acceptance:ecommerce-multi-branch` passed against the central-network fulfilment contract.
 
 ### ECOM-MBF-002 - Availability, Routing, And Checkout Contract
@@ -126,9 +126,9 @@ Evidence:
 
 ### ECOM-MBF-005 - Phase 1 Rollout And UAT
 
-Status: Next
+Status: In progress
 
-- Review and merge PR #18.
+- PR #20 (`Add ecommerce storefront order handoff`) is merged at `1fcd33f`.
 - Deploy the migration with the normal Flash ERP release and database-readiness gate.
 - Configure at least two real fulfilment locations, priorities, and their delivery/pickup eligibility.
 - Test delivery from one location, then a delivery basket whose stock is deliberately split across two source locations and confirm the internal transfers reach the dispatch location.
@@ -137,11 +137,12 @@ Status: Next
 - Confirm that delivery uses the post-reservation, post-safety-stock network balance while pickup cannot use cross-shop stock.
 - Run the full production build and browser smoke on the release/build machine before production deployment.
 
-Local verification evidence (2026-08-20):
+Local verification evidence (2026-08-21):
 
-- `npm --workspace @flash-erp/enterprise-web run build` passed.
+- `npm run build:deploy` passed against merged commit `1fcd33f`.
 - `npm run acceptance:ecommerce-multi-branch`, `npm run cert:database-readiness`, and Prisma schema validation passed.
-- The production server returned HTTP 200 from both live and database-readiness endpoints, including both network-allocation migrations and the fulfilment tables.
+- Sync-core, Store Desktop, and Enterprise Web TypeScript checks passed.
+- A checksum-verified VPS release package was assembled with all three ecommerce migrations and with runtime uploads excluded.
 - Public ecommerce browser suite: 6 passed; 3 authentication-dependent flows were skipped because this local runtime intentionally does not expose development OTP/MFA codes.
 
 Exit criteria:
