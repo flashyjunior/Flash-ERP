@@ -23,7 +23,10 @@ import {
   ensureInterStoreTransferSchemaCompatibility,
   ensureMultiBranchEcommerceSchemaCompatibility,
 } from "@/server/repositories/schema-compatibility.repository";
-import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
+import {
+  queueEcommerceSalesOrderPublication,
+  queueInterStoreTransferPublication,
+} from "@/server/repositories/store-sync.repository";
 
 type SupportedGateway = "PAYSTACK" | "FLUTTERWAVE";
 const ecommerceTerminalCode = "ecommerce-web";
@@ -821,6 +824,10 @@ export async function verifyEcommercePayment(input: {
           : {}),
         recordVersion: { increment: 1 }
       }
+    });
+    await queueEcommerceSalesOrderPublication(tx, {
+      salesOrderId: payment.ecommerceOrder.salesOrderId,
+      publishedAt: now,
     });
     await tx.ecommerceOrderStatusEvent.create({
       data: {

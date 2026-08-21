@@ -41,11 +41,15 @@ import {
 import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 import {
   ensureAlternateUomSellingSchemaCompatibility,
+  ensureEcommerceHeroSlidesSchemaCompatibility,
   ensureInterStoreTransferSchemaCompatibility,
   ensureLayawayLifecycleSchemaCompatibility,
   ensureMultiBranchEcommerceSchemaCompatibility,
 } from "@/server/repositories/schema-compatibility.repository";
-import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
+import {
+  queueEcommerceSalesOrderPublication,
+  queueInterStoreTransferPublication,
+} from "@/server/repositories/store-sync.repository";
 
 const ecommerceTerminalCode = "ecommerce-web";
 
@@ -411,6 +415,7 @@ function calculateLineAmounts(input: {
 }
 
 async function getPublicStore(storeCodeOrSlug: string) {
+  await ensureEcommerceHeroSlidesSchemaCompatibility();
   const normalized = storeCodeOrSlug.trim();
   const store = await prisma.store.findFirst({
     where: {
@@ -444,6 +449,7 @@ async function getPublicStore(storeCodeOrSlug: string) {
       ecommerceSupportPhone: true,
       ecommerceSupportEmail: true,
       ecommerceHeroImageUrl: true,
+      ecommerceHeroSlidesJson: true,
       ecommerceWhatsappPhone: true,
       ecommerceAllowPickup: true,
       ecommerceAllowDelivery: true,
@@ -475,6 +481,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
     ensureAlternateUomSellingSchemaCompatibility(),
     ensureLayawayLifecycleSchemaCompatibility(),
     ensureMultiBranchEcommerceSchemaCompatibility(),
+    ensureEcommerceHeroSlidesSchemaCompatibility(),
   ]);
   const store = await getPublicStore(storeCodeOrSlug);
   const fulfillmentCandidates = await getEcommerceFulfillmentCandidates(prisma, store);
@@ -865,6 +872,11 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       supportPhone: store.ecommerceSupportPhone ?? store.phone,
       supportEmail: store.ecommerceSupportEmail ?? store.email,
       heroImageUrl: store.ecommerceHeroImageUrl ?? "/ecommerce/storefront-collection.webp",
+      heroImageUrls: (() => {
+        const configured = readStringArray(store.ecommerceHeroSlidesJson).slice(0, 4);
+        if (configured.length > 0) return configured;
+        return [store.ecommerceHeroImageUrl ?? "/ecommerce/storefront-collection.webp"];
+      })(),
       whatsappPhone: store.ecommerceWhatsappPhone,
       address: [store.addressLine1, store.addressLine2, store.city, store.region]
         .filter(Boolean)
@@ -1797,6 +1809,11 @@ export async function createEcommerceOrder(input: {
       transferReferences.push(transfer.transferNo);
     }
 
+    await queueEcommerceSalesOrderPublication(tx, {
+      salesOrderId: salesOrder.id,
+      publishedAt: now,
+    });
+
     if (fulfilmentMethod === "DELIVERY" && input.delivery?.saveAddress && deliveryAddressLine1 && deliveryCity) {
       const hasAddress = await tx.ecommerceCustomerAddress.count({
         where: { customerAccountId: customerSession.customerAccount.id }
@@ -2463,6 +2480,7 @@ export async function getOnlineStoreEcommerceWorkspace() {
   await Promise.all([
     ensureLayawayLifecycleSchemaCompatibility(),
     ensureMultiBranchEcommerceSchemaCompatibility(),
+    ensureEcommerceHeroSlidesSchemaCompatibility(),
   ]);
   const { session, store } = await requireOnlineStoreStaff();
   const [orders, products, tenderMethods, fulfillmentLocations, availableInventoryLocations] = await Promise.all([
@@ -2614,6 +2632,7 @@ export async function getOnlineStoreEcommerceWorkspace() {
       ecommerceSupportPhone: store.ecommerceSupportPhone,
       ecommerceSupportEmail: store.ecommerceSupportEmail,
       ecommerceHeroImageUrl: store.ecommerceHeroImageUrl,
+      ecommerceHeroImageUrls: readStringArray(store.ecommerceHeroSlidesJson).slice(0, 4),
       ecommerceWhatsappPhone: store.ecommerceWhatsappPhone,
       ecommerceAllowPickup: store.ecommerceAllowPickup,
       ecommerceAllowDelivery: store.ecommerceAllowDelivery,
@@ -2730,6 +2749,7 @@ export async function updateOnlineStoreEcommerceSettings(input: {
   ecommerceSupportPhone?: string | null;
   ecommerceSupportEmail?: string | null;
   ecommerceHeroImageUrl?: string | null;
+  ecommerceHeroImageUrls?: string[];
   ecommerceWhatsappPhone?: string | null;
   ecommerceAllowPickup?: boolean;
   ecommerceAllowDelivery?: boolean;
@@ -2743,7 +2763,10 @@ export async function updateOnlineStoreEcommerceSettings(input: {
     routingPriority?: number;
   }>;
 }) {
-  await ensureMultiBranchEcommerceSchemaCompatibility();
+  await Promise.all([
+    ensureMultiBranchEcommerceSchemaCompatibility(),
+    ensureEcommerceHeroSlidesSchemaCompatibility(),
+  ]);
   const { store } = await requireOnlineStoreStaff();
 
   const deliveryFee = toMoney(Number(input.ecommerceDeliveryFee ?? store.ecommerceDeliveryFee));
@@ -2757,6 +2780,12 @@ export async function updateOnlineStoreEcommerceSettings(input: {
   if (deliveryFee < 0 || (freeDeliveryThreshold !== null && Number(freeDeliveryThreshold) < 0)) {
     throw new EcommerceAuthError("Delivery charges cannot be negative.");
   }
+  const heroImageUrls = input.ecommerceHeroImageUrls === undefined
+    ? undefined
+    : input.ecommerceHeroImageUrls
+      .map((value) => optionalText(value))
+      .filter((value): value is string => Boolean(value))
+      .slice(0, 4);
 
   const requestedFulfillmentLocations = input.fulfillmentLocations === undefined
     ? undefined
@@ -2827,7 +2856,10 @@ export async function updateOnlineStoreEcommerceSettings(input: {
       ecommerceDescription: optionalText(input.ecommerceDescription),
       ecommerceSupportPhone: optionalText(input.ecommerceSupportPhone),
       ecommerceSupportEmail: optionalText(input.ecommerceSupportEmail),
-      ecommerceHeroImageUrl: optionalText(input.ecommerceHeroImageUrl),
+      ecommerceHeroImageUrl: heroImageUrls?.[0] ?? optionalText(input.ecommerceHeroImageUrl),
+      ...(heroImageUrls !== undefined
+        ? { ecommerceHeroSlidesJson: JSON.stringify(heroImageUrls) }
+        : {}),
       ecommerceWhatsappPhone: optionalText(input.ecommerceWhatsappPhone),
       ecommerceAllowPickup: input.ecommerceAllowPickup ?? store.ecommerceAllowPickup,
       ecommerceAllowDelivery: input.ecommerceAllowDelivery ?? store.ecommerceAllowDelivery,
@@ -3282,6 +3314,10 @@ export async function updateEcommerceOrderStatus(input: {
           await queueInterStoreTransferPublication(tx, { transferId: transfer.id, publishedAt: now });
         }
       }
+      await queueEcommerceSalesOrderPublication(tx, {
+        salesOrderId: order.salesOrderId,
+        publishedAt: now,
+      });
     }
   });
 

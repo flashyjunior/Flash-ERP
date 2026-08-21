@@ -83,6 +83,7 @@ Evidence:
 Status: Code complete
 
 - Reserve normal ecommerce stock at every allocated source location and create one internal transfer request per external-source line into the dispatch location.
+- Publish the customer order as a high-priority `sales-order.published` packet to an assigned Store Desktop node. The packet creates a parked local sales order, preserving the actual balance for payment-on-delivery. Source shops receive only their corresponding high-priority transfer packets.
 - Create layaway reservations and network transfers only after the verified opening deposit required by the selected store's policy.
 - Consume every active source reservation during POS fulfilment after transfer stock has reached the dispatch location.
 - Release active reservations and cancel unissued network transfers on cancellation and the relevant terminal lifecycle paths.
@@ -93,12 +94,14 @@ Acceptance:
 - A second buyer cannot place an order using inventory already reserved by the first order.
 - Cancelling an unissued network order restores each source location's availability and sends cancellation downstream.
 - POS fulfilment waits for stock at its own dispatch location, then consumes the corresponding source reservations exactly once.
+- A pickup or delivery dispatch shop that is offline receives its packet on the first successful sync after it reconnects; it cannot receive any network packet while physically offline.
 - Layaway follows the same allocation and verified-deposit rule.
 
 Evidence:
 
 - `acceptance:ecommerce-multi-branch` passed.
 - Existing public ecommerce E2E contract was updated to include fulfilment details.
+- Sync-core, Store Desktop, and Enterprise Web TypeScript checks passed after the ecommerce order-publication contract was added.
 
 ### ECOM-MBF-004 - Staff Console And Storefront UX
 

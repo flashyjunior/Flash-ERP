@@ -103,6 +103,11 @@ export function OnlineStoreEcommerceWorkspace({
     ecommerceSupportPhone: workspace.store.ecommerceSupportPhone ?? "",
     ecommerceSupportEmail: workspace.store.ecommerceSupportEmail ?? "",
     ecommerceHeroImageUrl: workspace.store.ecommerceHeroImageUrl ?? "",
+    ecommerceHeroImageUrls: workspace.store.ecommerceHeroImageUrls.length > 0
+      ? workspace.store.ecommerceHeroImageUrls
+      : workspace.store.ecommerceHeroImageUrl
+        ? [workspace.store.ecommerceHeroImageUrl]
+        : [],
     ecommerceWhatsappPhone: workspace.store.ecommerceWhatsappPhone ?? "",
     ecommerceAllowPickup: workspace.store.ecommerceAllowPickup,
     ecommerceAllowDelivery: workspace.store.ecommerceAllowDelivery,
@@ -516,10 +521,24 @@ export function OnlineStoreEcommerceWorkspace({
                 <label><span>Storefront name</span><input onChange={(event) => setSettings((current) => ({ ...current, ecommerceDisplayName: event.target.value }))} value={settings.ecommerceDisplayName} /></label>
                 <label><span>Public URL name</span><div className={styles.slugInput}><small>/shop/</small><input onChange={(event) => setSettings((current) => ({ ...current, ecommerceSlug: event.target.value.replace(/[^a-z0-9-]/gi, "").toLowerCase() }))} value={settings.ecommerceSlug} /></div></label>
               </div>
-              <div className={styles.heroUpload}>
-                <div className={styles.heroPreview}>{settings.ecommerceHeroImageUrl ? <img alt="Storefront background preview" src={settings.ecommerceHeroImageUrl} /> : <ImageIcon size={28} />}</div>
-                <label><span>Storefront background</span><small>Use a clear landscape image, ideally 1600 x 700.</small><input accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; void perform("hero-upload", async () => { const uploaded = await uploadImage(file); setSettings((current) => ({ ...current, ecommerceHeroImageUrl: uploaded.url })); return uploaded; }); }} type="file" /></label>
-              </div>
+              <section className={styles.heroUpload}>
+                <header><span><ImageIcon size={18} /><strong>Storefront banners</strong></span><small>Up to four landscape images rotate on the public storefront.</small></header>
+                <div className={styles.heroBannerGrid}>
+                  {[0, 1, 2, 3].map((index) => {
+                    const imageUrl = settings.ecommerceHeroImageUrls[index] ?? null;
+                    return (
+                      <div className={styles.heroBannerSlot} key={index}>
+                        <div className={styles.heroPreview}>{imageUrl ? <img alt={`Storefront banner ${index + 1}`} src={imageUrl} /> : <ImageIcon size={24} />}</div>
+                        <label>
+                          <span>Banner {index + 1}</span>
+                          <input accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; void perform(`hero-upload:${index}`, async () => { const uploaded = await uploadImage(file); setSettings((current) => { const ecommerceHeroImageUrls = [...current.ecommerceHeroImageUrls]; ecommerceHeroImageUrls[index] = uploaded.url; return { ...current, ecommerceHeroImageUrls, ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? "" }; }); return uploaded; }); }} type="file" />
+                        </label>
+                        {imageUrl ? <button aria-label={`Remove storefront banner ${index + 1}`} className={styles.heroBannerRemove} onClick={() => setSettings((current) => { const ecommerceHeroImageUrls = current.ecommerceHeroImageUrls.filter((_, imageIndex) => imageIndex !== index); return { ...current, ecommerceHeroImageUrls, ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? "" }; })} title="Remove banner" type="button"><Trash2 size={16} /></button> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
               <label><span>Description</span><textarea onChange={(event) => setSettings((current) => ({ ...current, ecommerceDescription: event.target.value }))} rows={4} value={settings.ecommerceDescription} /></label>
               <div className={styles.formGrid}>
                 <label><span>Support phone</span><input inputMode="tel" onChange={(event) => setSettings((current) => ({ ...current, ecommerceSupportPhone: event.target.value }))} value={settings.ecommerceSupportPhone} /></label>

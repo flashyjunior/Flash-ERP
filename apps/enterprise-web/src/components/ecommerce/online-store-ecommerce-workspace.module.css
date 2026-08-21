@@ -744,23 +744,76 @@
   border: 1px solid #d3ded6;
   border-radius: 6px;
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 1.2fr);
-  align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
-.heroUpload > label {
-  min-width: 0;
-  display: grid;
+.heroUpload > header,
+.heroUpload > header > span,
+.heroBannerSlot > label {
+  display: flex;
+  align-items: center;
+}
+
+.heroUpload > header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.heroUpload > header > span {
   gap: 7px;
 }
 
-.heroUpload > label > small {
+.heroUpload > header > small {
   color: #6b786f;
+  font-size: 12px;
+}
+
+.heroBannerGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.heroBannerSlot {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.heroBannerSlot > label {
+  gap: 8px;
+  justify-content: space-between;
+  color: #52635a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.heroBannerSlot input[type="file"] {
+  min-width: 0;
+  max-width: 145px;
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  font-size: 11px;
+}
+
+.heroBannerRemove {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid #d3ded6;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #a33e2a;
 }
 
 .heroPreview {
-  min-height: 124px;
+  min-height: 112px;
   border-radius: 5px;
   background: #edf2ee;
   color: #637168;
@@ -771,7 +824,7 @@
 
 .heroPreview img {
   width: 100%;
-  height: 124px;
+  height: 112px;
   object-fit: cover;
 }
 
@@ -1398,6 +1451,10 @@
   }
 
   .heroUpload {
+    grid-template-columns: 1fr;
+  }
+
+  .heroBannerGrid {
     grid-template-columns: 1fr;
   }
 

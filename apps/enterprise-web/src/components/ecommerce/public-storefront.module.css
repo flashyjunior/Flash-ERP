@@ -201,7 +201,8 @@
 .shopIntro {
   position: relative;
   width: min(1240px, calc(100% - 28px));
-  height: 250px;
+  height: min(390px, 28vw);
+  min-height: 290px;
   margin: 18px auto 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -209,11 +210,21 @@
   overflow: hidden;
 }
 
-.shopIntro > img {
-  width: 100%;
-  height: 100%;
+.shopIntroTrack {
+  display: flex;
   position: absolute;
   inset: 0;
+  transition: transform 620ms ease;
+}
+
+.shopIntroSlide {
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+.shopIntroSlide img {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   object-position: center;
 }
@@ -222,7 +233,7 @@
   position: absolute;
   z-index: 0;
   inset: 0;
-  background: rgba(255, 255, 255, 0.48);
+  background: rgba(33, 24, 13, 0.3);
   content: "";
 }
 
@@ -240,7 +251,7 @@
 
 .shopIntroContent > small {
   margin-bottom: 8px;
-  color: var(--brand-dark);
+  color: #fff4d8;
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -255,7 +266,7 @@
 .shopIntro p {
   max-width: 430px;
   margin: 0 0 8px;
-  color: #554a3a;
+  color: #fffaf0;
   font-size: 14px;
   line-height: 1.55;
 }
@@ -264,7 +275,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--brand-dark);
+  color: #fff7e6;
   font-size: 12px;
   font-weight: 700;
 }
@@ -282,6 +293,61 @@
   font-size: 12px;
   font-weight: 800;
   text-decoration: none;
+}
+
+.heroControls {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 14px;
+  left: 14px;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.heroControls button,
+.heroDots button {
+  cursor: pointer;
+}
+
+.heroControls button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  color: #3f321e;
+  pointer-events: auto;
+}
+
+.heroDots {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: 16px;
+  left: 0;
+  display: flex;
+  justify-content: center;
+  gap: 7px;
+}
+
+.heroDots button {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.heroDots .heroDotActive {
+  width: 24px;
+  border-radius: 6px;
+  background: var(--brand);
 }
 
 .promotionStrip {
@@ -505,7 +571,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 .productImageZoomCue,
@@ -662,6 +728,32 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 6px;
+}
+
+.productQuickAdd {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #e8c777;
+  border-radius: 6px;
+  background: white;
+  color: var(--brand-dark);
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.productQuickAdd:hover:not(:disabled) {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: white;
+}
+
+.productQuickAdd:disabled {
+  cursor: not-allowed;
+  border-color: #e5e7eb;
+  color: #a1a1aa;
 }
 
 .productCardFooter strong,
@@ -2760,10 +2852,11 @@
   }
 
   .shopIntro {
-    height: 210px;
+    height: 220px;
+    min-height: 0;
   }
 
-  .shopIntro > img {
+  .shopIntroSlide img {
     object-position: 56% center;
   }
 
@@ -2789,6 +2882,16 @@
   .shopIntro a {
     right: 10px;
     bottom: 10px;
+  }
+
+  .heroControls {
+    right: 8px;
+    left: 8px;
+  }
+
+  .heroControls button {
+    width: 34px;
+    height: 34px;
   }
 
   .productGallery {

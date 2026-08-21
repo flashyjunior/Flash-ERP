@@ -324,6 +324,7 @@ model Store {
   ecommerceSupportPhone             String?
   ecommerceSupportEmail             String?
   ecommerceHeroImageUrl             String?
+  ecommerceHeroSlidesJson           String?                       @db.NVarChar(Max)
   ecommerceWhatsappPhone            String?
   ecommerceAllowPickup              Boolean                       @default(true)
   ecommerceAllowDelivery            Boolean                       @default(true)

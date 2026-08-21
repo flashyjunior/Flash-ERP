@@ -10,6 +10,29 @@ let alternateUomSellingSchemaReady: Promise<void> | null = null;
 let layawayLifecycleSchemaReady: Promise<void> | null = null;
 let syncOutboxFailureSchemaReady: Promise<void> | null = null;
 let multiBranchEcommerceSchemaReady: Promise<void> | null = null;
+let ecommerceHeroSlidesSchemaReady: Promise<void> | null = null;
+
+export function ensureEcommerceHeroSlidesSchemaCompatibility() {
+  ecommerceHeroSlidesSchemaReady ??= (async () => {
+    if (isEnterpriseSqlServerDatabase()) {
+      await prisma.$executeRawUnsafe(`
+        IF COL_LENGTH(N'dbo.Store', N'ecommerceHeroSlidesJson') IS NULL
+        BEGIN
+          ALTER TABLE [dbo].[Store] ADD [ecommerceHeroSlidesJson] NVARCHAR(MAX) NULL;
+        END
+      `);
+    } else {
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "Store" ADD COLUMN IF NOT EXISTS "ecommerceHeroSlidesJson" TEXT',
+      );
+    }
+  })().catch((error) => {
+    ecommerceHeroSlidesSchemaReady = null;
+    throw error;
+  });
+
+  return ecommerceHeroSlidesSchemaReady;
+}
 
 export function ensureSyncOutboxFailureSchemaCompatibility() {
   syncOutboxFailureSchemaReady ??= (async () => {

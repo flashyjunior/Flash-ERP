@@ -58,6 +58,7 @@ import type {
   EnterpriseTenderMethodPublishedPayload,
   EnterpriseUnitOfMeasurePublishedPayload,
   EnterpriseInventoryTransferTaskPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseInterStoreTransferPublishedPayload,
   EnterprisePurchaseOrderPublishedPayload,
   EnterpriseSyncRecoveryTaskPayload,
@@ -98,6 +99,7 @@ import type {
   StorePosPaymentPayload,
   StorePosTransactionCompletedPayload,
   StoreSalesOrderRecordedPayload,
+  StoreSalesOrderReservationStatus,
   StoreSyncRecoveryTaskCompletedPayload,
   StoreSyncTaskCompletedPayload,
   StoreRemoteInterStoreRequestInput,
@@ -430,6 +432,7 @@ const priorityStoreTopologyEventTypes = [
   "inventory.location.published",
 ] as const;
 const priorityStoreOperationsEventTypes = [
+  "sales-order.published",
   "security.user.published",
   "security.role.published",
   "setup.unit-of-measure.published",
@@ -7225,6 +7228,300 @@ async function getInventoryLocationOnHandQuantity(
   return Number(Number(aggregate._sum.quantity ?? 0).toFixed(3));
 }
 
+export async function queueEcommerceSalesOrderPublication(
+  tx: Prisma.TransactionClient | PrismaClient,
+  input: {
+    salesOrderId: string;
+    publishedAt?: Date;
+  },
+) {
+  const salesOrder = await tx.salesOrder.findUnique({
+    where: { id: input.salesOrderId },
+    select: {
+      id: true,
+      retailOrgId: true,
+      storeId: true,
+      orderNo: true,
+      sourceTransactionId: true,
+      sourceTransactionNo: true,
+      customerId: true,
+      customerNoSnapshot: true,
+      customerNameSnapshot: true,
+      orderType: true,
+      status: true,
+      totalAmount: true,
+      depositAmount: true,
+      paidAmount: true,
+      balanceAmount: true,
+      depositTenderMethodCodeSnapshot: true,
+      depositTenderMethodNameSnapshot: true,
+      depositPaymentMethodSnapshot: true,
+      depositReference: true,
+      depositPaidAt: true,
+      layawayPolicySnapshotJson: true,
+      minimumDepositAmount: true,
+      reservationStatus: true,
+      reservationCreatedAt: true,
+      reservationReleasedAt: true,
+      layawayExpiresAt: true,
+      expiredAt: true,
+      cancellationFeeAmount: true,
+      refundedAmount: true,
+      operatorName: true,
+      note: true,
+      fulfilledTransactionId: true,
+      fulfilledTransactionNo: true,
+      fulfilledAt: true,
+      cancelledAt: true,
+      recordVersion: true,
+      createdAt: true,
+      store: { select: { code: true, name: true } },
+      lines: {
+        select: {
+          id: true,
+          productCodeSnapshot: true,
+          productVariantCodeSnapshot: true,
+          productNameSnapshot: true,
+          variantSizeSnapshot: true,
+          variantColorSnapshot: true,
+          variantAttributesSnapshot: true,
+          lineNote: true,
+          quantity: true,
+          sellingUnitOfMeasure: true,
+          baseUnitOfMeasure: true,
+          uomConversionFactor: true,
+          baseQuantity: true,
+          unitPrice: true,
+          discountAmount: true,
+          taxAmount: true,
+          lineTotal: true,
+          appliedPromotionCode: true,
+          appliedPromotionName: true,
+        },
+      },
+      inventoryReservations: {
+        select: {
+          id: true,
+          salesOrderLineId: true,
+          inventoryLocationCodeSnapshot: true,
+          productCodeSnapshot: true,
+          productVariantCodeSnapshot: true,
+          baseUnitOfMeasure: true,
+          baseQuantity: true,
+          status: true,
+          releaseReason: true,
+          createdAt: true,
+          releasedAt: true,
+        },
+      },
+      ecommerceOrder: {
+        select: {
+          fulfilmentMethod: true,
+          paymentTiming: true,
+          selectedPaymentMethodCode: true,
+          selectedPaymentMethodName: true,
+          recipientName: true,
+          deliveryPhone: true,
+          deliveryAddressLine1: true,
+          deliveryAddressLine2: true,
+          deliveryCity: true,
+          deliveryRegion: true,
+          deliveryCountryCode: true,
+          deliveryPostalCode: true,
+          deliveryNote: true,
+        },
+      },
+      ecommerceFulfillment: {
+        select: {
+          inventoryLocationCodeSnapshot: true,
+          inventoryLocationNameSnapshot: true,
+          routingMethod: true,
+        },
+      },
+    },
+  });
+
+  if (!salesOrder?.ecommerceOrder) {
+    return null;
+  }
+
+  const sourceTransaction = await tx.posTransaction.findUnique({
+    where: { id: salesOrder.sourceTransactionId },
+    select: {
+      subtotalAmount: true,
+      discountAmount: true,
+      taxAmount: true,
+    },
+  });
+
+  if (!sourceTransaction) {
+    return null;
+  }
+
+  const [enterpriseNode, targetStoreNode] = await runPrismaQueriesSequentially([
+    () =>
+      tx.syncNode.findFirst({
+        where: {
+          retailOrgId: salesOrder.retailOrgId,
+          nodeType: SyncNodeType.ENTERPRISE,
+          isPrimary: true,
+          status: RecordStatus.ACTIVE,
+        },
+        select: { id: true, code: true },
+      }),
+    () =>
+      findStoreExecutionNode(
+        tx,
+        salesOrder.retailOrgId,
+        salesOrder.storeId,
+      ),
+  ]);
+
+  if (!enterpriseNode || !targetStoreNode) {
+    return null;
+  }
+
+  const ecommerceOrder = salesOrder.ecommerceOrder;
+  const fulfillment = salesOrder.ecommerceFulfillment;
+  const dispatchInventoryLocationCode =
+    fulfillment?.inventoryLocationCodeSnapshot ?? null;
+  const deliveryAddress = [
+    ecommerceOrder.deliveryAddressLine1,
+    ecommerceOrder.deliveryAddressLine2,
+    ecommerceOrder.deliveryCity,
+    ecommerceOrder.deliveryRegion,
+    ecommerceOrder.deliveryPostalCode,
+    ecommerceOrder.deliveryCountryCode,
+  ]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join(", ") || null;
+  const networkAllocation = salesOrder.inventoryReservations.some(
+    (reservation) =>
+      reservation.inventoryLocationCodeSnapshot !== dispatchInventoryLocationCode,
+  );
+  const paymentTiming =
+    ecommerceOrder.paymentTiming === "PREPAY" ? "PREPAY" : "ON_DELIVERY";
+  const fulfillmentMethod =
+    ecommerceOrder.fulfilmentMethod === "PICKUP" ? "PICKUP" : "DELIVERY";
+  const payload: EnterpriseEcommerceSalesOrderPublishedPayload = {
+    source: "ECOMMERCE",
+    salesOrderRecordVersion: Math.max(1, salesOrder.recordVersion),
+    orderId: salesOrder.id,
+    orderNo: salesOrder.orderNo,
+    storeCode: salesOrder.store.code,
+    terminalCode: targetStoreNode.terminal?.code ?? "ecommerce-web",
+    sourceTransactionId: salesOrder.sourceTransactionId,
+    sourceTransactionNo: salesOrder.sourceTransactionNo,
+    customerId: salesOrder.customerId,
+    customerNo: salesOrder.customerNoSnapshot,
+    customerName: salesOrder.customerNameSnapshot,
+    orderType: salesOrder.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
+    subtotalAmount: Number(sourceTransaction.subtotalAmount),
+    discountAmount: Number(sourceTransaction.discountAmount),
+    taxAmount: Number(sourceTransaction.taxAmount),
+    totalAmount: Number(salesOrder.totalAmount),
+    depositAmount: Number(salesOrder.depositAmount),
+    paidAmount: Number(salesOrder.paidAmount),
+    balanceAmount: Number(salesOrder.balanceAmount),
+    depositTenderMethodCode: salesOrder.depositTenderMethodCodeSnapshot,
+    depositTenderMethodName: salesOrder.depositTenderMethodNameSnapshot,
+    depositPaymentMethod: salesOrder.depositPaymentMethodSnapshot as SyncPaymentMethod | null,
+    depositReference: salesOrder.depositReference,
+    depositPaidAt: salesOrder.depositPaidAt?.toISOString() ?? null,
+    layawayPolicySnapshotJson: salesOrder.layawayPolicySnapshotJson,
+    minimumDepositAmount: Number(salesOrder.minimumDepositAmount),
+    reservationStatus: salesOrder.reservationStatus as StoreSalesOrderReservationStatus,
+    reservationCreatedAt: salesOrder.reservationCreatedAt?.toISOString() ?? null,
+    reservationReleasedAt: salesOrder.reservationReleasedAt?.toISOString() ?? null,
+    layawayExpiresAt: salesOrder.layawayExpiresAt?.toISOString() ?? null,
+    expiredAt: salesOrder.expiredAt?.toISOString() ?? null,
+    cancellationFeeAmount: Number(salesOrder.cancellationFeeAmount),
+    refundedAmount: Number(salesOrder.refundedAmount),
+    status: salesOrder.status as StoreSalesOrderStatus,
+    operatorName: salesOrder.operatorName,
+    note: [
+      salesOrder.note,
+      fulfillmentMethod === "DELIVERY"
+        ? `Delivery to ${ecommerceOrder.recipientName}: ${deliveryAddress ?? "address pending"}.`
+        : `Pickup customer: ${ecommerceOrder.recipientName}.`,
+      ecommerceOrder.deliveryNote,
+    ]
+      .filter((part): part is string => Boolean(part?.trim()))
+      .join(" | "),
+    createdAt: salesOrder.createdAt.toISOString(),
+    fulfilledTransactionId: salesOrder.fulfilledTransactionId,
+    fulfilledTransactionNo: salesOrder.fulfilledTransactionNo,
+    fulfilledAt: salesOrder.fulfilledAt?.toISOString() ?? null,
+    cancelledAt: salesOrder.cancelledAt?.toISOString() ?? null,
+    lines: salesOrder.lines.map((line) => ({
+      lineId: line.id,
+      productCode: line.productCodeSnapshot,
+      productVariantCode: line.productVariantCodeSnapshot,
+      productName: line.productNameSnapshot,
+      variantSize: line.variantSizeSnapshot,
+      variantColor: line.variantColorSnapshot,
+      variantAttributesSnapshot: line.variantAttributesSnapshot,
+      lineNote: line.lineNote,
+      quantity: Number(line.quantity),
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      uomConversionFactor: Number(line.uomConversionFactor),
+      baseQuantity: Number(line.baseQuantity),
+      unitPrice: Number(line.unitPrice),
+      discountAmount: Number(line.discountAmount),
+      taxAmount: Number(line.taxAmount),
+      lineTotal: Number(line.lineTotal),
+      appliedPromotionCode: line.appliedPromotionCode,
+      appliedPromotionName: line.appliedPromotionName,
+    })),
+    reservations: salesOrder.inventoryReservations
+      .filter(
+        (reservation) =>
+          reservation.inventoryLocationCodeSnapshot === dispatchInventoryLocationCode,
+      )
+      .map((reservation) => ({
+        reservationId: reservation.id,
+        salesOrderLineId: reservation.salesOrderLineId,
+        inventoryLocationCode: reservation.inventoryLocationCodeSnapshot,
+        productCode: reservation.productCodeSnapshot,
+        productVariantCode: reservation.productVariantCodeSnapshot,
+        baseUnitOfMeasure: reservation.baseUnitOfMeasure,
+        baseQuantity: Number(reservation.baseQuantity),
+        status: reservation.status as StoreSalesOrderReservationStatus,
+        releaseReason: reservation.releaseReason,
+        createdAt: reservation.createdAt.toISOString(),
+        releasedAt: reservation.releasedAt?.toISOString() ?? null,
+      })),
+    fulfilmentMethod: fulfillmentMethod,
+    paymentTiming,
+    selectedPaymentMethodCode: ecommerceOrder.selectedPaymentMethodCode,
+    selectedPaymentMethodName: ecommerceOrder.selectedPaymentMethodName,
+    recipientName: ecommerceOrder.recipientName,
+    deliveryPhone: ecommerceOrder.deliveryPhone,
+    deliveryAddress,
+    dispatchInventoryLocationCode,
+    dispatchInventoryLocationName:
+      fulfillment?.inventoryLocationNameSnapshot ?? null,
+    networkAllocation,
+  };
+
+  await tx.syncOutboxEvent.create({
+    data: {
+      id: randomUUID(),
+      syncNodeId: enterpriseNode.id,
+      targetNodeCode: targetStoreNode.code,
+      aggregateType: "salesOrder",
+      aggregateId: salesOrder.id,
+      eventType: "sales-order.published",
+      idempotencyKey: `${enterpriseNode.code}:ecommerceSalesOrder:${targetStoreNode.code}:${salesOrder.id}:${salesOrder.recordVersion}`,
+      payload: serializeRequiredJsonField(payload),
+      status: SyncEventStatus.PENDING,
+    },
+  });
+
+  return { nodeCode: targetStoreNode.code };
+}
+
 async function findStoreExecutionNode(
   tx: Prisma.TransactionClient | PrismaClient,
   retailOrgId: string,
@@ -7995,7 +8292,7 @@ export async function queueInterStoreTransferPublication(
     },
   });
 
-  if (!transfer || transfer.status === InterStoreTransferStatus.CANCELLED) {
+  if (!transfer) {
     return null;
   }
 
@@ -9062,9 +9359,13 @@ async function projectStoreSalesOrder(
   } satisfies Prisma.SalesOrderUncheckedCreateInput;
 
   if (existingOrder) {
+    const isEcommerceRoutedOrder =
+      existingOrder.storeId === target.storeNode.store.id &&
+      existingOrder.originNodeCode === "ECOMMERCE";
     if (
-      existingOrder.storeId !== target.storeNode.store.id ||
-      existingOrder.originNodeCode !== target.storeNode.code
+      !isEcommerceRoutedOrder &&
+      (existingOrder.storeId !== target.storeNode.store.id ||
+        existingOrder.originNodeCode !== target.storeNode.code)
     ) {
       throw new StoreProjectionError(
         "STALE_VERSION",
