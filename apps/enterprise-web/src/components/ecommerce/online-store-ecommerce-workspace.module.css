@@ -831,6 +831,91 @@
   line-height: 1.4;
 }
 
+.networkTransferPanel {
+  display: grid;
+  gap: 9px;
+  margin: 18px 0;
+  padding: 12px;
+  border: 1px solid #ceded2;
+  border-radius: 6px;
+  background: #f5faf6;
+}
+
+.networkTransferPanel > header,
+.networkTransferRow,
+.networkTransferRow > span {
+  display: flex;
+  align-items: center;
+}
+
+.networkTransferPanel > header {
+  justify-content: space-between;
+  gap: 12px;
+  color: #204d31;
+  font-size: 13px;
+}
+
+.networkTransferPanel > header > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+}
+
+.networkTransferPanel > header > strong {
+  color: #1d7143;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.networkTransferPanel > p {
+  margin: 0;
+  color: #617267;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.networkTransferRows {
+  display: grid;
+  overflow: auto;
+  max-height: 190px;
+  border-top: 1px solid #dce8df;
+}
+
+.networkTransferRow {
+  min-width: 340px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 1px;
+  border-bottom: 1px solid #dce8df;
+}
+
+.networkTransferRow > span {
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.networkTransferRow > span:last-child {
+  align-items: flex-end;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.networkTransferRow strong,
+.networkTransferRow small {
+  overflow: hidden;
+  max-width: 190px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.networkTransferRow small {
+  color: #64736a;
+  font-size: 11px;
+}
+
 .orderDialog {
   width: min(1120px, 96vw);
   height: min(820px, 92dvh);
@@ -1324,6 +1409,10 @@
     width: 100vw;
     height: 100dvh;
     border-radius: 0;
+  }
+
+  .networkTransferRow {
+    min-width: 290px;
   }
 
   .productDialog {

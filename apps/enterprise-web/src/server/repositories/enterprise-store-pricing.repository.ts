@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
 import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { invalidateEnterpriseReadCache } from "@/server/performance/enterprise-read-cache";
 import {
   ensureAlternateUomSellingSchemaCompatibility,
   ensureProductVariantSalesOrderDepositSchemaCompatibility
@@ -489,7 +490,7 @@ export async function updateStoreProductSellingUnits(
     throw new Error("Select at least one shop for this selling unit.");
   }
 
-  return prisma.$transaction(async (tx) => {
+  const response = await prisma.$transaction(async (tx) => {
     const [enterpriseNode, product, activeStores] = await Promise.all([
       tx.syncNode.findFirst({
         where: {
@@ -710,13 +711,15 @@ export async function updateStoreProductSellingUnits(
       serverProcessedAt: new Date().toISOString()
     };
   });
+  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  return response;
 }
 
 export async function deleteStoreProductSellingUnit(sellingUnitId: string) {
   await ensureAlternateUomSellingSchemaCompatibility();
   const session = await assertEnterprisePermission(["master.product.manage"]);
 
-  return prisma.$transaction(async (tx) => {
+  const response = await prisma.$transaction(async (tx) => {
     const sellingUnit = await tx.storeProductSellingUnit.findFirst({
       where: { id: sellingUnitId, retailOrgId: session.retailOrgId },
       select: {
@@ -743,6 +746,8 @@ export async function deleteStoreProductSellingUnit(sellingUnitId: string) {
       serverProcessedAt: new Date().toISOString()
     };
   });
+  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  return response;
 }
 
 export async function updateStoreProductPrices(
@@ -762,7 +767,7 @@ export async function updateStoreProductPrices(
     throw new Error("Select at least one shop for this price.");
   }
 
-  return prisma.$transaction(async (tx) => {
+  const response = await prisma.$transaction(async (tx) => {
     const [enterpriseNode, product, activeStores] = await Promise.all([
       tx.syncNode.findFirst({
         where: {
@@ -898,13 +903,15 @@ export async function updateStoreProductPrices(
       serverProcessedAt: new Date().toISOString()
     };
   });
+  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  return response;
 }
 
 export async function deleteStoreProductPrice(priceId: string) {
   await ensureProductVariantSalesOrderDepositSchemaCompatibility();
   const session = await assertEnterprisePermission(["master.product.manage"]);
 
-  return prisma.$transaction(async (tx) => {
+  const response = await prisma.$transaction(async (tx) => {
     const price = await tx.storeProductPrice.findFirst({
       where: {
         id: priceId,
@@ -951,4 +958,6 @@ export async function deleteStoreProductPrice(priceId: string) {
       serverProcessedAt: new Date().toISOString()
     };
   });
+  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  return response;
 }

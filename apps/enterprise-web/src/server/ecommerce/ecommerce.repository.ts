@@ -3,10 +3,11 @@ import crypto from "node:crypto";
 import { Prisma } from "@prisma/client";
 import {
   buildLayawayPolicySnapshot,
-  calculateLayawayAvailableBaseQuantity,
   calculateLayawayMinimumDeposit,
   normalizeLayawaySettings,
   resolvePosSellingUom,
+  InterStoreTransferOrigin,
+  InterStoreTransferStatus,
 } from "@flash-erp/domain";
 import {
   applyAutomaticPromotions,
@@ -22,6 +23,11 @@ import {
   EcommerceAuthError,
   getEcommerceCustomerSession
 } from "@/server/ecommerce/ecommerce-customer-auth";
+import {
+  calculateEcommerceSellableBaseQuantity,
+  getEcommerceFulfillmentCandidates,
+  resolveEcommerceFulfillmentPlan,
+} from "@/server/ecommerce/ecommerce-fulfillment";
 import { createEcommerceUuid } from "@/server/ecommerce/ecommerce-identifiers";
 import {
   hashEcommerceIdempotencyPayload,
@@ -35,9 +41,11 @@ import {
 import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 import {
   ensureAlternateUomSellingSchemaCompatibility,
+  ensureInterStoreTransferSchemaCompatibility,
   ensureLayawayLifecycleSchemaCompatibility,
   ensureMultiBranchEcommerceSchemaCompatibility,
 } from "@/server/repositories/schema-compatibility.repository";
+import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
 
 const ecommerceTerminalCode = "ecommerce-web";
 
@@ -460,296 +468,6 @@ async function getPublicStore(storeCodeOrSlug: string) {
   return store;
 }
 
-type EcommerceFulfilmentMethod = "DELIVERY" | "PICKUP";
-
-type EcommerceFulfillmentCandidate = {
-  configurationId: string | null;
-  retailOrgId: string;
-  storefrontStoreId: string;
-  store: {
-    id: string;
-    code: string;
-    name: string;
-    shortName: string | null;
-    addressLine1: string | null;
-    addressLine2: string | null;
-    city: string | null;
-    region: string | null;
-  };
-  inventoryLocation: {
-    id: string;
-    code: string;
-    name: string;
-  };
-  supportsPickup: boolean;
-  supportsDelivery: boolean;
-  routingPriority: number;
-  routingMethod: "PRIORITY_STOCK" | "PICKUP_SELECTION" | "DEFAULT_LOCATION";
-};
-
-type EcommerceInventoryClient = Pick<
-  Prisma.TransactionClient,
-  "ecommerceFulfillmentLocation" | "inventoryLedgerEntry" | "inventoryLocation" | "salesOrderInventoryReservation"
->;
-
-async function getEcommerceFulfillmentCandidates(
-  client: EcommerceInventoryClient,
-  storefrontStore: Awaited<ReturnType<typeof getPublicStore>>,
-  fulfilmentMethod?: EcommerceFulfilmentMethod,
-  pickupStoreCode?: string | null,
-): Promise<EcommerceFulfillmentCandidate[]> {
-  const configuredLocations = await client.ecommerceFulfillmentLocation.findMany({
-    where: {
-      retailOrgId: storefrontStore.retailOrgId,
-      storefrontStoreId: storefrontStore.id,
-      status: "ACTIVE",
-      store: { status: "ACTIVE", salesEnabled: true },
-      inventoryLocation: { status: "ACTIVE" },
-    },
-    orderBy: [{ routingPriority: "asc" }, { store: { name: "asc" } }, { inventoryLocation: { name: "asc" } }],
-    select: {
-      id: true,
-      supportsPickup: true,
-      supportsDelivery: true,
-      routingPriority: true,
-      store: {
-        select: {
-          id: true,
-          code: true,
-          name: true,
-          shortName: true,
-          addressLine1: true,
-          addressLine2: true,
-          city: true,
-          region: true,
-        },
-      },
-      inventoryLocation: { select: { id: true, code: true, name: true } },
-    },
-  });
-
-  const candidates: EcommerceFulfillmentCandidate[] = configuredLocations.map((location) => ({
-    configurationId: location.id,
-    retailOrgId: storefrontStore.retailOrgId,
-    storefrontStoreId: storefrontStore.id,
-    store: location.store,
-    inventoryLocation: location.inventoryLocation,
-    supportsPickup: location.supportsPickup,
-    supportsDelivery: location.supportsDelivery,
-    routingPriority: location.routingPriority,
-    routingMethod: "PRIORITY_STOCK",
-  }));
-
-  // Existing shops remain operational until a supervisor explicitly configures multi-branch fulfilment.
-  if (candidates.length === 0) {
-    const defaultLocation = await client.inventoryLocation.findFirst({
-      where: { storeId: storefrontStore.id, status: "ACTIVE" },
-      orderBy: [
-        { useForSalesOrderDefault: "desc" },
-        { useForSalesDefault: "desc" },
-        { name: "asc" },
-      ],
-      select: { id: true, code: true, name: true },
-    });
-    if (defaultLocation) {
-      candidates.push({
-        configurationId: null,
-        retailOrgId: storefrontStore.retailOrgId,
-        storefrontStoreId: storefrontStore.id,
-        store: {
-          id: storefrontStore.id,
-          code: storefrontStore.code,
-          name: storefrontStore.name,
-          shortName: storefrontStore.shortName,
-          addressLine1: storefrontStore.addressLine1,
-          addressLine2: storefrontStore.addressLine2,
-          city: storefrontStore.city,
-          region: storefrontStore.region,
-        },
-        inventoryLocation: defaultLocation,
-        supportsPickup: storefrontStore.ecommerceAllowPickup,
-        supportsDelivery: storefrontStore.ecommerceAllowDelivery,
-        routingPriority: 100,
-        routingMethod: "DEFAULT_LOCATION",
-      });
-    }
-  }
-
-  const expectedPickupStoreCode = optionalText(pickupStoreCode)?.toUpperCase();
-  return candidates.filter((candidate) => {
-    if (fulfilmentMethod === "PICKUP" && !candidate.supportsPickup) return false;
-    if (fulfilmentMethod === "DELIVERY" && !candidate.supportsDelivery) return false;
-    return !expectedPickupStoreCode || candidate.store.code.toUpperCase() === expectedPickupStoreCode;
-  });
-}
-
-async function assertEcommerceStockAvailable(
-  client: EcommerceInventoryClient,
-  candidate: EcommerceFulfillmentCandidate,
-  lines: Array<{
-    product: {
-      id: string;
-      code: string;
-      name: string;
-      productType: string;
-      trackInventory: boolean;
-    };
-    variant: {
-      id: string;
-      code: string;
-      displayName: string | null;
-    } | null;
-    baseQuantity: number;
-  }>,
-  actionLabel: string,
-) {
-  const inventoryLines = lines.filter((line) => isEcommerceStockManagedProduct(line.product));
-  if (inventoryLines.length === 0) {
-    return;
-  }
-
-  const requestedByPosition = new Map<string, number>();
-  for (const line of inventoryLines) {
-    const key = ecommerceInventoryPositionKey(line.product.id, line.variant?.id);
-    requestedByPosition.set(
-      key,
-      toQuantity((requestedByPosition.get(key) ?? 0) + line.baseQuantity),
-    );
-  }
-
-  const productIds = [...new Set(inventoryLines.map((line) => line.product.id))];
-  const stockPositions = await client.inventoryLedgerEntry.groupBy({
-    by: ["productId", "productVariantId"],
-    where: {
-      retailOrgId: candidate.retailOrgId,
-      storeId: candidate.store.id,
-      inventoryLocationId: candidate.inventoryLocation.id,
-      productId: { in: productIds },
-    },
-    _sum: { quantity: true },
-  });
-  const onHandByPosition = new Map(
-    stockPositions.map((position) => [
-      ecommerceInventoryPositionKey(position.productId, position.productVariantId),
-      toQuantity(position._sum.quantity),
-    ] as const),
-  );
-
-  const productCodes = [...new Set(inventoryLines.map((line) => line.product.code))];
-  const activeReservations = await client.salesOrderInventoryReservation.findMany({
-    where: {
-      inventoryLocationId: candidate.inventoryLocation.id,
-      status: "ACTIVE",
-      productCodeSnapshot: { in: productCodes },
-    },
-    select: {
-      productCodeSnapshot: true,
-      productVariantCodeSnapshot: true,
-      baseQuantity: true,
-    },
-  });
-  const reservedBySnapshot = new Map<string, number>();
-  for (const reservation of activeReservations) {
-    const key = ecommerceReservationSnapshotKey(
-      reservation.productCodeSnapshot,
-      reservation.productVariantCodeSnapshot,
-    );
-    reservedBySnapshot.set(
-      key,
-      toQuantity((reservedBySnapshot.get(key) ?? 0) + Number(reservation.baseQuantity)),
-    );
-  }
-
-  const checkedPositions = new Set<string>();
-  for (const line of inventoryLines) {
-    const positionKey = ecommerceInventoryPositionKey(line.product.id, line.variant?.id);
-    if (checkedPositions.has(positionKey)) {
-      continue;
-    }
-    checkedPositions.add(positionKey);
-
-    const requestedQuantity = requestedByPosition.get(positionKey) ?? 0;
-    const availableQuantity = calculateLayawayAvailableBaseQuantity({
-      onHandBaseQuantity: onHandByPosition.get(positionKey) ?? 0,
-      activeReservedBaseQuantity:
-        reservedBySnapshot.get(
-          ecommerceReservationSnapshotKey(line.product.code, line.variant?.code),
-        ) ?? 0,
-    });
-    if (requestedQuantity <= availableQuantity + 0.0005) {
-      continue;
-    }
-
-    const itemLabel = line.variant
-      ? `${line.product.name} (${line.variant.displayName ?? line.variant.code})`
-      : line.product.name;
-    throw new EcommerceAuthError(
-      `Only ${toQuantity(availableQuantity).toFixed(3)} base unit(s) of ${itemLabel} are available at ${candidate.store.name}. Update your cart before ${actionLabel}.`,
-      409,
-    );
-  }
-}
-
-async function resolveEcommerceFulfillmentCandidate(
-  client: EcommerceInventoryClient,
-  storefrontStore: Awaited<ReturnType<typeof getPublicStore>>,
-  lines: Parameters<typeof assertEcommerceStockAvailable>[2],
-  input: {
-    fulfilmentMethod: EcommerceFulfilmentMethod;
-    pickupStoreCode?: string | null;
-    actionLabel: string;
-  },
-) {
-  const candidates = await getEcommerceFulfillmentCandidates(
-    client,
-    storefrontStore,
-    input.fulfilmentMethod,
-    input.pickupStoreCode,
-  );
-  if (candidates.length === 0) {
-    throw new EcommerceAuthError(
-      input.fulfilmentMethod === "PICKUP"
-        ? "Choose an available pickup shop."
-        : "No fulfilment location is currently configured for delivery.",
-      409,
-    );
-  }
-
-  if (
-    input.fulfilmentMethod === "PICKUP" &&
-    !optionalText(input.pickupStoreCode) &&
-    candidates.length > 1
-  ) {
-    throw new EcommerceAuthError("Choose the shop where you will collect this order.", 409);
-  }
-
-  let lastAvailabilityError: EcommerceAuthError | null = null;
-  for (const candidate of candidates) {
-    try {
-      await assertEcommerceStockAvailable(client, candidate, lines, input.actionLabel);
-      return {
-        ...candidate,
-        routingMethod:
-          input.fulfilmentMethod === "PICKUP"
-            ? "PICKUP_SELECTION" as const
-            : candidate.routingMethod,
-      };
-    } catch (error) {
-      if (error instanceof EcommerceAuthError && error.status === 409) {
-        lastAvailabilityError = error;
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  throw new EcommerceAuthError(
-    lastAvailabilityError?.message ??
-      "No single fulfilment location can supply every stock-tracked item in this order.",
-    409,
-  );
-}
-
 export type PublicStorefrontData = Awaited<ReturnType<typeof loadPublicStorefront>>;
 
 async function loadPublicStorefront(storeCodeOrSlug: string) {
@@ -793,6 +511,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       baseUnitOfMeasure: { select: { code: true } },
       primaryImageUrl: true,
       baseUnitPrice: true,
+      safetyStockLevel: true,
       storeProductSellingUnits: {
         where: { storeId: store.id, status: "ACTIVE" },
         orderBy: [{ isDefault: "desc" }, { unitOfMeasureCodeSnapshot: "asc" }],
@@ -911,27 +630,36 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
     );
   }
   const availableCatalogQuantity = (
-    product: { id: string; code: string; productType: string; trackInventory: boolean },
+    product: {
+      id: string;
+      code: string;
+      productType: string;
+      trackInventory: boolean;
+      safetyStockLevel: Prisma.Decimal | null;
+    },
     variant?: { id: string; code: string } | null,
   ) => {
     if (!isEcommerceStockManagedProduct(product)) {
       return null;
     }
-    return toQuantity(Math.max(
-      0,
-      ...fulfillmentCandidates.map((candidate) =>
-        calculateLayawayAvailableBaseQuantity({
-          onHandBaseQuantity:
-            onHandByPosition.get(
-              `${candidate.inventoryLocation.id}:${ecommerceInventoryPositionKey(product.id, variant?.id)}`,
-            ) ?? 0,
-          activeReservedBaseQuantity:
-            reservedBySnapshot.get(
-              `${candidate.inventoryLocation.id}:${ecommerceReservationSnapshotKey(product.code, variant?.code)}`,
-            ) ?? 0,
-        }),
+    return toQuantity(
+      fulfillmentCandidates.reduce(
+        (sum, candidate) =>
+          sum +
+          calculateEcommerceSellableBaseQuantity({
+            onHandBaseQuantity:
+              onHandByPosition.get(
+                `${candidate.inventoryLocation.id}:${ecommerceInventoryPositionKey(product.id, variant?.id)}`,
+              ) ?? 0,
+            activeReservedBaseQuantity:
+              reservedBySnapshot.get(
+                `${candidate.inventoryLocation.id}:${ecommerceReservationSnapshotKey(product.code, variant?.code)}`,
+              ) ?? 0,
+            safetyStockBaseQuantity: Number(product.safetyStockLevel ?? 0),
+          }),
+        0,
       ),
-    ));
+    );
   };
   const reviewSummaryRows = products.length > 0
     ? await prisma.ecommerceProductReview.groupBy({
@@ -1262,6 +990,8 @@ async function priceEcommerceLines(input: {
       unitOfMeasure: true,
       baseUnitOfMeasure: { select: { code: true } },
       baseUnitPrice: true,
+      baseCostPrice: true,
+      safetyStockLevel: true,
       trackInventory: true,
       isSerialized: true,
       storeProductSellingUnits: {
@@ -1464,7 +1194,7 @@ export async function quoteEcommerceOrder(input: {
   if (fulfilmentMethod === "DELIVERY" && !store.ecommerceAllowDelivery) {
     throw new EcommerceAuthError("Delivery is not available for this shop.", 409);
   }
-  const fulfillment = await resolveEcommerceFulfillmentCandidate(prisma, store, pricing.orderLines, {
+  const fulfillment = await resolveEcommerceFulfillmentPlan(prisma, store, pricing.orderLines, {
     fulfilmentMethod,
     pickupStoreCode: input.delivery?.pickupStoreCode,
     actionLabel: "checking out",
@@ -1483,6 +1213,7 @@ export async function quoteEcommerceOrder(input: {
       inventoryLocationCode: fulfillment.inventoryLocation.code,
       inventoryLocationName: fulfillment.inventoryLocation.name,
       routingMethod: fulfillment.routingMethod,
+      networkAllocation: fulfillment.requiresInterStoreTransfer,
     },
     lines: pricing.orderLines.map((line, index) => ({
       lineIndex: index,
@@ -1514,7 +1245,10 @@ export async function createEcommerceOrder(input: {
   orderType?: "SALES_ORDER" | "LAYAWAY";
   layawayDepositAmount?: number | null;
 }) {
-  await ensureMultiBranchEcommerceSchemaCompatibility();
+  await Promise.all([
+    ensureMultiBranchEcommerceSchemaCompatibility(),
+    ensureInterStoreTransferSchemaCompatibility(),
+  ]);
   const customerSession = await getEcommerceCustomerSession({
     storeCode: input.storeCode,
     required: true
@@ -1598,6 +1332,7 @@ export async function createEcommerceOrder(input: {
           storeNameSnapshot: true,
           inventoryLocationCodeSnapshot: true,
           inventoryLocationNameSnapshot: true,
+          fulfilmentMethod: true,
           routingMethod: true,
         },
       },
@@ -1628,11 +1363,13 @@ export async function createEcommerceOrder(input: {
             ? Number(order.salesOrder.balanceAmount)
             : 0,
       fulfillment: {
+        method: fulfillment?.fulfilmentMethod === "PICKUP" ? "PICKUP" : "DELIVERY",
         storeCode: fulfillment?.storeCodeSnapshot ?? order.store.code,
         storeName: fulfillment?.storeNameSnapshot ?? order.store.shortName ?? order.store.name,
         inventoryLocationCode: fulfillment?.inventoryLocationCodeSnapshot ?? "",
         inventoryLocationName: fulfillment?.inventoryLocationNameSnapshot ?? "Store sales location",
         routingMethod: fulfillment?.routingMethod ?? "LEGACY_DEFAULT_LOCATION",
+        networkAllocation: fulfillment?.routingMethod === "NETWORK_TRANSFER",
       },
       message: "Your order has already been placed.",
       idempotentReplay: true
@@ -1765,7 +1502,7 @@ export async function createEcommerceOrder(input: {
   }
   try {
     return await prisma.$transaction(async (tx) => {
-    const fulfillment = await resolveEcommerceFulfillmentCandidate(tx, store, orderLines, {
+    const fulfillment = await resolveEcommerceFulfillmentPlan(tx, store, orderLines, {
       fulfilmentMethod,
       pickupStoreCode,
       actionLabel: "placing this order",
@@ -1910,23 +1647,24 @@ export async function createEcommerceOrder(input: {
         },
       }
     });
-    const reservableLines = persistedOrderLines.filter((line) =>
-      !isLayaway && isEcommerceStockManagedProduct(line.product),
-    );
-    if (reservableLines.length > 0) {
+    const reservationAllocations = isLayaway ? [] : fulfillment.allocations;
+    if (reservationAllocations.length > 0) {
       await tx.salesOrderInventoryReservation.createMany({
-        data: reservableLines.map((line) => ({
+        data: reservationAllocations.map((allocation) => {
+          const line = persistedOrderLines[allocation.lineIndex];
+          return {
           salesOrderId: salesOrder.id,
           salesOrderLineId: line.id,
-          inventoryLocationId: fulfillment.inventoryLocation.id,
-          inventoryLocationCodeSnapshot: fulfillment.inventoryLocation.code,
+          inventoryLocationId: allocation.candidate.inventoryLocation.id,
+          inventoryLocationCodeSnapshot: allocation.candidate.inventoryLocation.code,
           productCodeSnapshot: line.product.code,
           productVariantCodeSnapshot: line.variant?.code ?? null,
           baseUnitOfMeasure: line.baseUnitOfMeasure,
-          baseQuantity: line.baseQuantity,
+          baseQuantity: allocation.baseQuantity,
           status: "ACTIVE",
           createdAt: now,
-        })),
+          };
+        }),
       });
     }
     const ecommerceOrder = await tx.ecommerceOrder.create({
@@ -2014,6 +1752,51 @@ export async function createEcommerceOrder(input: {
       },
     });
 
+    const transferAllocations = isLayaway
+      ? []
+      : fulfillment.allocations.filter(
+          (allocation) => allocation.candidate.inventoryLocation.id !== fulfillment.inventoryLocation.id,
+        );
+    const transferBatchNo = transferAllocations.length > 0
+      ? `ECOM-ALLOC-${salesOrder.orderNo.replace(/[^A-Z0-9]/gi, "").slice(-24)}-${now.getTime()}`
+      : null;
+    const transferReferences: string[] = [];
+    for (const [index, allocation] of transferAllocations.entries()) {
+      const line = persistedOrderLines[allocation.lineIndex];
+      const transfer = await tx.interStoreTransfer.create({
+        data: {
+          retailOrgId: store.retailOrgId,
+          sourceStoreId: allocation.candidate.store.id,
+          destinationStoreId: fulfillment.store.id,
+          sourceInventoryLocationId: allocation.candidate.inventoryLocation.id,
+          destinationInventoryLocationId: fulfillment.inventoryLocation.id,
+          productId: line.product.id,
+          transferNo: `${transferBatchNo}-${index + 1}`,
+          transferBatchNo,
+          lineNo: index + 1,
+          externalReference: ecommerceOrder.orderNo,
+          workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+          origin: InterStoreTransferOrigin.ENTERPRISE,
+          status: InterStoreTransferStatus.REQUESTED,
+          requestedQuantity: allocation.baseQuantity,
+          requestedUnitOfMeasure: line.baseUnitOfMeasure,
+          requestedUnitQuantity: allocation.baseQuantity,
+          uomConversionFactor: 1,
+          baseUnitOfMeasure: line.baseUnitOfMeasure,
+          unitCost: line.product.baseCostPrice,
+          requestNote: `Network allocation for ecommerce order ${ecommerceOrder.orderNo}.`,
+          requestOperatorName: "Customer ecommerce",
+          requestedByNodeCode: "ECOMMERCE",
+          sourceNodeCode: allocation.candidate.store.code,
+          destinationNodeCode: fulfillment.store.code,
+          requestedAt: now,
+        },
+        select: { id: true, transferNo: true },
+      });
+      await queueInterStoreTransferPublication(tx, { transferId: transfer.id, publishedAt: now });
+      transferReferences.push(transfer.transferNo);
+    }
+
     if (fulfilmentMethod === "DELIVERY" && input.delivery?.saveAddress && deliveryAddressLine1 && deliveryCity) {
       const hasAddress = await tx.ecommerceCustomerAddress.count({
         where: { customerAccountId: customerSession.customerAccount.id }
@@ -2053,6 +1836,9 @@ export async function createEcommerceOrder(input: {
           fulfillmentStoreCode: fulfillment.store.code,
           fulfillmentLocationCode: fulfillment.inventoryLocation.code,
           routingMethod: fulfillment.routingMethod,
+          networkAllocation: fulfillment.requiresInterStoreTransfer,
+          transferBatchNo,
+          transferCount: transferReferences.length,
           fulfilmentMethod,
           paymentMethodCode: paymentSelection.code,
           paymentTiming: paymentSelection.timing,
@@ -2072,11 +1858,13 @@ export async function createEcommerceOrder(input: {
       totalAmount: Number(ecommerceOrder.totalAmount),
       currencyCode: store.currencyCode,
       fulfillment: {
+        method: fulfilmentMethod,
         storeCode: fulfillment.store.code,
         storeName: fulfillment.store.shortName ?? fulfillment.store.name,
         inventoryLocationCode: fulfillment.inventoryLocation.code,
         inventoryLocationName: fulfillment.inventoryLocation.name,
         routingMethod: fulfillment.routingMethod,
+        networkAllocation: fulfillment.requiresInterStoreTransfer,
       },
       paymentMethodCode: paymentSelection.code,
       paymentMethodName: paymentSelection.name,
@@ -2090,7 +1878,9 @@ export async function createEcommerceOrder(input: {
             : 0,
       message: isLayaway
         ? "Your layaway has been created. Complete the opening deposit to activate it."
-        : "Your order has been placed.",
+        : fulfillment.requiresInterStoreTransfer
+          ? "Your order has been placed. The shop is routing stock from its fulfilment network."
+          : "Your order has been placed.",
       idempotentReplay: false
     };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
@@ -2780,6 +2570,34 @@ export async function getOnlineStoreEcommerceWorkspace() {
       },
     }),
   ]);
+  const networkTransfers = orders.length > 0
+    ? await prisma.interStoreTransfer.findMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          externalReference: { in: orders.map((order) => order.orderNo) },
+          workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+        },
+        orderBy: [{ requestedAt: "asc" }, { transferNo: "asc" }],
+        select: {
+          externalReference: true,
+          transferNo: true,
+          status: true,
+          requestedQuantity: true,
+          issuedQuantity: true,
+          receivedQuantity: true,
+          product: { select: { code: true, name: true } },
+          sourceStore: { select: { code: true, name: true } },
+          sourceInventoryLocation: { select: { code: true, name: true } },
+        },
+      })
+    : [];
+  const networkTransfersByOrderNo = new Map<string, typeof networkTransfers>();
+  for (const transfer of networkTransfers) {
+    if (!transfer.externalReference) continue;
+    const current = networkTransfersByOrderNo.get(transfer.externalReference) ?? [];
+    current.push(transfer);
+    networkTransfersByOrderNo.set(transfer.externalReference, current);
+  }
 
   return {
     staff: {
@@ -2857,19 +2675,46 @@ export async function getOnlineStoreEcommerceWorkspace() {
       storeCode: location.store?.code ?? null,
       storeName: location.store?.name ?? null,
     })),
-    orders: orders.map((order) => ({
-      ...mapCustomerOrder(order),
-      customer: order.customerAccount.customer,
-      fulfillments: order.fulfillments.map((fulfillment) => ({
-        storeCode: fulfillment.storeCodeSnapshot,
-        storeName: fulfillment.storeNameSnapshot,
-        inventoryLocationCode: fulfillment.inventoryLocationCodeSnapshot,
-        inventoryLocationName: fulfillment.inventoryLocationNameSnapshot,
-        status: fulfillment.status,
-        fulfilmentMethod: fulfillment.fulfilmentMethod,
-        routingMethod: fulfillment.routingMethod,
-      })),
-    }))
+    orders: orders.map((order) => {
+      const orderNetworkTransfers = networkTransfersByOrderNo.get(order.orderNo) ?? [];
+      const receivedNetworkTransferCount = orderNetworkTransfers.filter(
+        (transfer) =>
+          transfer.status === InterStoreTransferStatus.RECEIVED ||
+          transfer.status === InterStoreTransferStatus.CLOSED,
+      ).length;
+
+      return {
+        ...mapCustomerOrder(order),
+        customer: order.customerAccount.customer,
+        fulfillments: order.fulfillments.map((fulfillment) => ({
+          storeCode: fulfillment.storeCodeSnapshot,
+          storeName: fulfillment.storeNameSnapshot,
+          inventoryLocationCode: fulfillment.inventoryLocationCodeSnapshot,
+          inventoryLocationName: fulfillment.inventoryLocationNameSnapshot,
+          status: fulfillment.status,
+          fulfilmentMethod: fulfillment.fulfilmentMethod,
+          routingMethod: fulfillment.routingMethod,
+        })),
+        networkTransferSummary: {
+          total: orderNetworkTransfers.length,
+          received: receivedNetworkTransferCount,
+          outstanding: orderNetworkTransfers.length - receivedNetworkTransferCount,
+        },
+        networkTransfers: orderNetworkTransfers.map((transfer) => ({
+          transferNo: transfer.transferNo,
+          status: transfer.status,
+          requestedQuantity: Number(transfer.requestedQuantity),
+          issuedQuantity: Number(transfer.issuedQuantity),
+          receivedQuantity: Number(transfer.receivedQuantity),
+          productCode: transfer.product.code,
+          productName: transfer.product.name,
+          sourceStoreCode: transfer.sourceStore.code,
+          sourceStoreName: transfer.sourceStore.name,
+          sourceInventoryLocationCode: transfer.sourceInventoryLocation.code,
+          sourceInventoryLocationName: transfer.sourceInventoryLocation.name,
+        })),
+      };
+    })
   };
 }
 
@@ -3244,7 +3089,10 @@ export async function updateEcommerceOrderStatus(input: {
   trackingReference?: string | null;
   note?: string | null;
 }) {
-  await ensureMultiBranchEcommerceSchemaCompatibility();
+  await Promise.all([
+    ensureMultiBranchEcommerceSchemaCompatibility(),
+    ensureInterStoreTransferSchemaCompatibility(),
+  ]);
   const { session, store } = await requireOnlineStoreStaff();
   const status = input.status.trim().toUpperCase();
   const order = await prisma.ecommerceOrder.findFirst({
@@ -3292,6 +3140,49 @@ export async function updateEcommerceOrderStatus(input: {
         : `Order ${order.orderNo} requires confirmed payment before staff can accept it.`,
       409
     );
+  }
+  if (status === "CANCELLED") {
+    const inFlightNetworkTransfer = await prisma.interStoreTransfer.findFirst({
+      where: {
+        retailOrgId: session.retailOrgId,
+        externalReference: order.orderNo,
+        workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+        status: {
+          in: [
+            InterStoreTransferStatus.PART_ISSUED,
+            InterStoreTransferStatus.ISSUED,
+            InterStoreTransferStatus.PART_RECEIVED,
+            InterStoreTransferStatus.RECEIVED,
+            InterStoreTransferStatus.CLOSED,
+          ],
+        },
+      },
+      select: { transferNo: true },
+    });
+    if (inFlightNetworkTransfer) {
+      throw new EcommerceAuthError(
+        `Ecommerce order ${order.orderNo} has stock already moving under transfer ${inFlightNetworkTransfer.transferNo}. Complete or reverse that transfer before cancelling the customer order.`,
+        409,
+      );
+    }
+  }
+  if (["READY", "OUT_FOR_DELIVERY", "DELIVERED"].includes(status)) {
+    const pendingNetworkTransfer = await prisma.interStoreTransfer.findFirst({
+      where: {
+        retailOrgId: session.retailOrgId,
+        externalReference: order.orderNo,
+        workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+        status: { notIn: [InterStoreTransferStatus.RECEIVED, InterStoreTransferStatus.CLOSED] },
+      },
+      orderBy: { requestedAt: "asc" },
+      select: { transferNo: true, status: true },
+    });
+    if (pendingNetworkTransfer) {
+      throw new EcommerceAuthError(
+        `Ecommerce order ${order.orderNo} cannot move to ${status.replace(/_/g, " ").toLowerCase()} while network transfer ${pendingNetworkTransfer.transferNo} is ${pendingNetworkTransfer.status.toLowerCase()}. Receive all transfer stock at the dispatch location first.`,
+        409,
+      );
+    }
   }
 
   const now = new Date();
@@ -3369,6 +3260,28 @@ export async function updateEcommerceOrderStatus(input: {
         where: { ecommerceFulfillment: { ecommerceOrderId: order.id } },
         data: { status: "CANCELLED" },
       });
+      const cancelableTransfers = await tx.interStoreTransfer.findMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          externalReference: order.orderNo,
+          workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+          status: { in: [InterStoreTransferStatus.DRAFT, InterStoreTransferStatus.REQUESTED] },
+        },
+        select: { id: true },
+      });
+      if (cancelableTransfers.length > 0) {
+        await tx.interStoreTransfer.updateMany({
+          where: { id: { in: cancelableTransfers.map((transfer) => transfer.id) } },
+          data: {
+            status: InterStoreTransferStatus.CANCELLED,
+            issueNote: "Cancelled because the ecommerce order was cancelled before stock issue.",
+            closedAt: now,
+          },
+        });
+        for (const transfer of cancelableTransfers) {
+          await queueInterStoreTransferPublication(tx, { transferId: transfer.id, publishedAt: now });
+        }
+      }
     }
   });
 

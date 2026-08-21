@@ -50,7 +50,7 @@
     "acceptance:layaway:sqlserver": "node --import tsx scripts/layaway-sqlserver-migration-gate.ts",
     "acceptance:layaway-finance": "tsx --tsconfig apps/enterprise-web/tsconfig.json scripts/layaway-finance-reporting-gate.ts",
     "acceptance:layaway-ecommerce": "node --import tsx scripts/ecommerce-layaway-offer-gate.ts",
-    "acceptance:ecommerce-multi-branch": "node --import tsx scripts/ecommerce-multi-branch-fulfillment-gate.ts",
+    "acceptance:ecommerce-multi-branch": "node --import tsx scripts/ecommerce-multi-branch-fulfillment-gate.ts && tsx --tsconfig apps/enterprise-web/tsconfig.json scripts/ecommerce-network-allocation-gate.ts",
     "acceptance:sync-chaos": "tsx scripts/sync-chaos-reconciliation-gate.ts",
     "cert:installed-soak": "tsx scripts/installed-desktop-soak-evidence-gate.ts",
     "cert:security-providers": "tsx scripts/security-provider-certification-gate.ts",

@@ -535,7 +535,7 @@ export function OnlineStoreEcommerceWorkspace({
                   <span><MapPin size={18} /><strong>Fulfilment locations</strong></span>
                   <button onClick={addFulfillmentLocation} type="button"><Plus size={16} />Add location</button>
                 </header>
-                <p>Delivery routes to the first listed location that can supply the whole stock-tracked order. Customers choose a listed pickup shop.</p>
+                <p>Delivery uses eligible network stock, reserves each source location, and creates internal transfers to the chosen dispatch location when needed. Pickup only accepts stock available at the selected shop.</p>
                 {fulfillmentLocations.length > 0 ? (
                   <div className={styles.fulfillmentLocationRows}>
                     {fulfillmentLocations.map((location) => (
@@ -588,6 +588,9 @@ export function OnlineStoreEcommerceWorkspace({
                 {selectedOrder.status === "PLACED" ? (
                   <div className={styles.acceptanceNotice}><BellRing size={18} /><span><strong>{selectedOrder.orderType === "LAYAWAY" && selectedOrder.paidAmount + 0.005 >= selectedOrder.minimumDepositAmount ? "Layaway deposit received" : selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Awaiting payment" : "Awaiting acceptance"}</strong><small>{selectedOrder.orderType === "LAYAWAY" && selectedOrder.paidAmount + 0.005 >= selectedOrder.minimumDepositAmount ? "The minimum deposit is satisfied. Staff may accept the Layaway; full-payment fulfilment rules still apply." : selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Confirm the required online payment before accepting this order." : "This order is not available in the POS fulfilment lane until staff accepts it."}</small></span></div>
                 ) : null}
+                {selectedOrder.networkTransferSummary.outstanding > 0 ? (
+                  <div className={styles.acceptanceNotice}><Truck size={18} /><span><strong>Stock is still routing to the dispatch shop</strong><small>{selectedOrder.networkTransferSummary.outstanding} of {selectedOrder.networkTransferSummary.total} network transfer{selectedOrder.networkTransferSummary.total === 1 ? "" : "s"} must be received before this order can be marked ready for the customer.</small></span></div>
+                ) : null}
                 <h3>Items</h3>
                 <div className={styles.lineItems}>{selectedOrder.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant || line.productCode}</small></span><span>{line.quantity} x {money(selectedOrder.currencyCode, line.unitPrice)}</span><strong>{money(selectedOrder.currencyCode, line.lineTotal)}</strong></div>)}</div>
               </section>
@@ -595,7 +598,21 @@ export function OnlineStoreEcommerceWorkspace({
                 <h3>Delivery</h3>
                 <p><strong>{selectedOrder.recipientName}</strong><br />{selectedOrder.deliveryPhone}<br />{selectedOrder.fulfilmentMethod === "DELIVERY" ? selectedOrder.deliveryAddress : "Store pickup"}</p>
                 {selectedOrder.deliveryNote ? <p><small>Customer note</small><br />{selectedOrder.deliveryNote}</p> : null}
-                {selectedOrder.fulfillment ? <><h3>Fulfilment location</h3><p><strong>{selectedOrder.fulfillment.storeName}</strong><br />{selectedOrder.fulfillment.inventoryLocationName ?? "Store sales location"}<br /><small>{formatStatus(selectedOrder.fulfillment.status)}</small></p></> : null}
+                {selectedOrder.fulfillment ? <><h3>{selectedOrder.fulfilmentMethod === "PICKUP" ? "Pickup location" : "Delivery fulfilment"}</h3><p><strong>{selectedOrder.fulfillment.storeName}</strong><br />{selectedOrder.fulfillment.inventoryLocationName ?? "Store sales location"}<br /><small>{selectedOrder.fulfillment.routingMethod === "NETWORK_TRANSFER" ? "Network allocation - source transfer(s) may be pending" : formatStatus(selectedOrder.fulfillment.status)}</small></p></> : null}
+                {selectedOrder.networkTransfers.length > 0 ? (
+                  <section className={styles.networkTransferPanel}>
+                    <header><span><Truck size={17} />Network stock routing</span><strong>{selectedOrder.networkTransferSummary.received} of {selectedOrder.networkTransferSummary.total} received</strong></header>
+                    <p>{selectedOrder.networkTransferSummary.outstanding > 0 ? "The dispatch shop must receive the remaining transfer stock before this customer order can be marked ready." : "All planned network stock has arrived at the dispatch shop."}</p>
+                    <div className={styles.networkTransferRows}>
+                      {selectedOrder.networkTransfers.map((transfer) => (
+                        <div className={styles.networkTransferRow} key={transfer.transferNo}>
+                          <span><strong>{transfer.productName}</strong><small>{transfer.productCode} · from {transfer.sourceStoreName}</small></span>
+                          <span><strong>{transfer.receivedQuantity} / {transfer.requestedQuantity}</strong><small>{formatStatus(transfer.status)}</small></span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
                 <h3>Customer</h3>
                 <p>{selectedOrder.customer.fullName}<br />{selectedOrder.customer.phone ?? ""}<br />{selectedOrder.customer.email ?? ""}</p>
                 {selectedOrder.refundRequests.length > 0 ? (
@@ -619,7 +636,9 @@ export function OnlineStoreEcommerceWorkspace({
               <div><span className={`${styles.pill} ${toneForStatus(selectedOrder.status)}`}>{formatStatus(selectedOrder.status)}</span><small>{new Date(selectedOrder.placedAt).toLocaleString()}</small></div>
               <div className={styles.statusActions}>{(nextStatuses[selectedOrder.status] ?? []).map((status) => {
                 const paymentBlocksAcceptance = status === "CONFIRMED" && selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID";
-                return <button className={status === "CANCELLED" ? styles.cancelAction : undefined} disabled={busyKey === `order:${selectedOrder.id}` || paymentBlocksAcceptance} key={status} onClick={() => void updateOrderStatus(selectedOrder, status)} title={paymentBlocksAcceptance ? "Online payment must be confirmed first" : undefined} type="button">{status === "CONFIRMED" ? "Accept order" : formatStatus(status)}</button>;
+                const transferBlocksProgress = ["READY", "OUT_FOR_DELIVERY", "DELIVERED"].includes(status) && selectedOrder.networkTransferSummary.outstanding > 0;
+                const blockedTitle = paymentBlocksAcceptance ? "Online payment must be confirmed first" : transferBlocksProgress ? "Receive all network transfer stock at the dispatch shop first" : undefined;
+                return <button className={status === "CANCELLED" ? styles.cancelAction : undefined} disabled={busyKey === `order:${selectedOrder.id}` || paymentBlocksAcceptance || transferBlocksProgress} key={status} onClick={() => void updateOrderStatus(selectedOrder, status)} title={blockedTitle} type="button">{status === "CONFIRMED" ? "Accept order" : formatStatus(status)}</button>;
               })}</div>
             </footer>
           </section>

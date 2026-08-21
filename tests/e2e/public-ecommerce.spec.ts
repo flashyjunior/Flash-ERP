@@ -65,6 +65,41 @@ async function dismissInventoryStartupAlert(page: Page) {
   }
 }
 
+type PublicCatalogSnapshot = {
+  products?: Array<{
+    code?: string;
+    promotion?: { code?: string } | null;
+  }>;
+  promotions?: Array<{ code?: string }>;
+};
+
+async function waitForPublicCatalog(
+  page: Page,
+  description: string,
+  predicate: (catalog: PublicCatalogSnapshot) => boolean
+) {
+  await expect
+    .poll(
+      async () => {
+        try {
+          const response = await page.request.get(
+            `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+          );
+          if (!response.ok()) return false;
+          return predicate((await response.json()) as PublicCatalogSnapshot);
+        } catch {
+          return false;
+        }
+      },
+      {
+        message: `Waiting for ${description} to reach the public storefront catalog.`,
+        timeout: 35_000,
+        intervals: [250, 500, 1_000]
+      }
+    )
+    .toBe(true);
+}
+
 test.describe("public ecommerce extension", () => {
   test.skip(!storeCode, "Set FLASH_ERP_E2E_ECOMMERCE_STORE to an enabled public storefront.");
 
@@ -389,6 +424,10 @@ test.describe("public ecommerce extension", () => {
         message: expect.stringContaining("not an active sale unit")
       });
 
+      await waitForPublicCatalog(page, "the alternate-UOM product", (catalog) =>
+        catalog.products?.some((candidate) => candidate.code === productCode) ?? false
+      );
+
       await page.goto(
         `/shop/${encodeURIComponent(storeCode ?? "")}/products/${encodeURIComponent(productCode)}`
       );
@@ -459,7 +498,7 @@ test.describe("public ecommerce extension", () => {
         await page.locator(".rms-scan-strip input").first().fill("Alternate UOM Browser QA");
         const productSuggestion = page
           .locator(".rms-customer-suggestions.is-product button")
-          .filter({ hasText: "Alternate UOM Browser QA" });
+          .filter({ hasText: productCode });
         await expect(productSuggestion).toHaveCount(1);
         await productSuggestion.click();
 
@@ -841,6 +880,7 @@ test.describe("public ecommerce extension", () => {
   });
 
   test("advertises an eligible promotion before checkout", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     const normalizedStoreCode = (storeCode ?? "").trim();
@@ -947,6 +987,13 @@ test.describe("public ecommerce extension", () => {
     });
 
     try {
+      await waitForPublicCatalog(page, "the storefront promotion fixtures", (catalog) => {
+        const promotionCodes = new Set(catalog.promotions?.map((promotion) => promotion.code) ?? []);
+        const promotedProduct = catalog.products?.find((candidate) => candidate.code === product.code);
+        return promotionCodes.has(storewidePromotionCode) &&
+          promotedProduct?.promotion?.code === bonusPromotionCode;
+      });
+
       const catalogResponse = await page.request.get(
         `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
       );
@@ -1094,55 +1141,120 @@ test.describe("public ecommerce extension", () => {
           code: { in: [promotionCode, bonusPromotionCode, storewidePromotionCode] }
         }
       });
+      await waitForPublicCatalog(page, "the promotion fixture cleanup", (catalog) => {
+        const promotionCodes = new Set(catalog.promotions?.map((promotion) => promotion.code) ?? []);
+        const visibleProductPromotion = catalog.products?.find(
+          (candidate) => candidate.code === product.code
+        )?.promotion?.code;
+        return !promotionCodes.has(storewidePromotionCode) &&
+          ![promotionCode, bonusPromotionCode].includes(visibleProductPromotion ?? "");
+      });
     }
   });
 
   test("quotes bonus-buy totals and navigates the product gallery", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
-    const catalogResponse = await page.request.get(
-      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
-    );
-    expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
-    const catalog = (await catalogResponse.json()) as {
-      store: { currencyCode: string };
-      products: Array<{
-        id: string;
-        code: string;
-        name: string;
-        unitPrice: number;
-        galleryImageUrls: string[];
-        promotion: null | { code: string };
-      }>;
-    };
-    const product = catalog.products.find((candidate) => candidate.code === "FLASH-COLA-50CL");
-    expect(product).toBeTruthy();
-    expect(product?.promotion?.code).toBe("FLASH-COLA-BUY2GET1");
-
-    const quoteResponse = await page.request.post(
-      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
-      { data: { lines: [{ productId: product?.id, variantCode: null, quantity: 3 }] } }
-    );
-    expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
-    const quote = (await quoteResponse.json()) as {
-      subtotalAmount: number;
-      discountAmount: number;
-      totalAmount: number;
-      lines: Array<{ appliedPromotionCode: string | null }>;
-    };
-    expect(quote).toMatchObject({
-      subtotalAmount: 7.5,
-      discountAmount: 2.5,
-      totalAmount: 5
+    const normalizedStoreCode = (storeCode ?? "").trim();
+    const store = await prisma.store.findFirstOrThrow({
+      where: {
+        OR: [
+          { code: normalizedStoreCode.toUpperCase() },
+          { ecommerceSlug: normalizedStoreCode.toLowerCase() }
+        ]
+      },
+      select: { code: true, retailOrgId: true }
     });
-    expect(quote.lines[0]?.appliedPromotionCode).toBe("FLASH-COLA-BUY2GET1");
+    const promotionCode = `E2E-STOREFRONT-BONUS-${crypto.randomBytes(5).toString("hex").toUpperCase()}`;
+    const activeDaysOfWeek = JSON.stringify([
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+      "SUNDAY"
+    ]);
 
-    await page.goto(
-      `/shop/${encodeURIComponent(storeCode ?? "")}/products/FLASH-COLA-50CL`
-    );
-    await expect(page.getByRole("heading", { level: 1, name: product?.name })).toBeVisible();
+    await prisma.promotionCampaign.create({
+      data: {
+        retailOrgId: store.retailOrgId,
+        code: promotionCode,
+        name: "Flash Cola bonus-buy storefront QA",
+        description: "Gallery and bonus-buy checkout verification.",
+        discountType: "PERCENT",
+        targetScope: "PRODUCT",
+        discountValue: 100,
+        minimumLineQuantity: 3,
+        buyQuantity: 2,
+        rewardQuantity: 1,
+        targetProductCode: "FLASH-COLA-50CL",
+        eligibleStoreCodes: JSON.stringify([store.code]),
+        activeDaysOfWeek,
+        activeFromMinutes: 0,
+        activeToMinutes: 1439,
+        priority: -2_000_000_010,
+        status: "ACTIVE",
+        originNodeCode: "E2E",
+        lastModifiedByNodeCode: "E2E"
+      }
+    });
 
-    if ((product?.galleryImageUrls.length ?? 0) > 1) {
+    try {
+      await waitForPublicCatalog(page, "the bonus-buy gallery fixture", (catalog) =>
+        catalog.products?.some(
+          (candidate) =>
+            candidate.code === "FLASH-COLA-50CL" && candidate.promotion?.code === promotionCode
+        ) ?? false
+      );
+
+      const catalogResponse = await page.request.get(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+      );
+      expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+      const catalog = (await catalogResponse.json()) as {
+        store: { currencyCode: string };
+        products: Array<{
+          id: string;
+          code: string;
+          name: string;
+          unitPrice: number;
+          galleryImageUrls: string[];
+          promotion: null | { code: string };
+        }>;
+      };
+      const product = catalog.products.find((candidate) => candidate.code === "FLASH-COLA-50CL");
+      expect(product).toBeTruthy();
+      expect(product?.promotion?.code).toBe(promotionCode);
+
+      const quoteResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
+        { data: { lines: [{ productId: product?.id, variantCode: null, quantity: 3 }] } }
+      );
+      expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
+      const quote = (await quoteResponse.json()) as {
+        subtotalAmount: number;
+        discountAmount: number;
+        totalAmount: number;
+        lines: Array<{ appliedPromotionCode: string | null }>;
+      };
+      const expectedDiscount = Number(product!.unitPrice.toFixed(2));
+      const expectedSubtotal = Number((product!.unitPrice * 3).toFixed(2));
+      const expectedTotal = Number((product!.unitPrice * 2).toFixed(2));
+      expect(quote).toMatchObject({
+        subtotalAmount: expectedSubtotal,
+        discountAmount: expectedDiscount,
+        totalAmount: expectedTotal
+      });
+      expect(quote.lines[0]?.appliedPromotionCode).toBe(promotionCode);
+
+      await page.goto(
+        `/shop/${encodeURIComponent(storeCode ?? "")}/products/FLASH-COLA-50CL`
+      );
+      await expect(page.getByRole("heading", { level: 1, name: product?.name })).toBeVisible();
+
+      if ((product?.galleryImageUrls.length ?? 0) > 1) {
       const mainImage = page.getByRole("button", {
         name: `Open image viewer for ${product?.name}`
       }).locator("img");
@@ -1158,23 +1270,34 @@ test.describe("public ecommerce extension", () => {
       await viewer.getByRole("button", { name: "Next product image" }).click();
       await expect(viewerImage).not.toHaveAttribute("src", viewerImageUrl ?? "");
       await viewer.getByRole("button", { name: "Close image viewer" }).click();
-    }
+      }
 
-    await page.getByRole("button", { name: "Increase quantity" }).click();
-    await page.getByRole("button", { name: "Increase quantity" }).click();
-    const formattedTotal = new Intl.NumberFormat("en-GH", {
-      style: "currency",
-      currency: catalog.store.currencyCode,
-      maximumFractionDigits: 2
-    }).format(5);
-    const addButton = page.getByRole("button", { name: `Add · ${formattedTotal}` });
-    await expect(addButton).toBeVisible();
-    await addButton.click();
-    await page.getByRole("button", { name: "Open cart" }).click();
-    await expect(page.getByText("Promotion savings", { exact: true })).toBeVisible();
-    await expect(page.getByText(formattedTotal, { exact: true }).last()).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("bonus-buy-cart-and-gallery.png"), fullPage: false });
-    expect(pageErrors).toEqual([]);
+      await page.getByRole("button", { name: "Increase quantity" }).click();
+      await page.getByRole("button", { name: "Increase quantity" }).click();
+      const formattedTotal = new Intl.NumberFormat("en-GH", {
+        style: "currency",
+        currency: catalog.store.currencyCode,
+        maximumFractionDigits: 2
+      }).format(expectedTotal);
+      const addButton = page.getByRole("button", { name: `Add · ${formattedTotal}` });
+      await expect(addButton).toBeVisible();
+      await addButton.click();
+      await page.getByRole("button", { name: "Open cart" }).click();
+      await expect(page.getByText("Promotion savings", { exact: true })).toBeVisible();
+      await expect(page.getByText(formattedTotal, { exact: true }).last()).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath("bonus-buy-cart-and-gallery.png"), fullPage: false });
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await prisma.promotionCampaign.deleteMany({
+        where: { retailOrgId: store.retailOrgId, code: promotionCode }
+      });
+      await waitForPublicCatalog(page, "the bonus-buy gallery fixture cleanup", (catalog) =>
+        !catalog.products?.some(
+          (candidate) =>
+            candidate.code === "FLASH-COLA-50CL" && candidate.promotion?.code === promotionCode
+        )
+      );
+    }
   });
 
   test("creates a verified customer and bridges checkout into a trackable sales order", async ({
