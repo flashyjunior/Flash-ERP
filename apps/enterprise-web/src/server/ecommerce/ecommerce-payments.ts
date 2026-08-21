@@ -902,7 +902,10 @@ export async function processPaystackWebhook(rawBody: string, signature: string 
   }
   const payment = await prisma.ecommercePayment.findUnique({
     where: { reference },
-    include: { tenderMethod: true }
+    include: {
+      tenderMethod: true,
+      ecommerceOrder: { include: { store: { select: { code: true } } } },
+    }
   });
   if (!payment?.tenderMethod) {
     throw new EcommerceAuthError("Payment reference was not recognized.", 404);
@@ -915,7 +918,7 @@ export async function processPaystackWebhook(rawBody: string, signature: string 
   if (event.event === "charge.success") {
     await verifyEcommercePayment({ reference });
   }
-  return { received: true };
+  return { received: true, storeCode: payment.ecommerceOrder.store.code };
 }
 
 export async function processFlutterwaveWebhook(rawBody: string, signature: string | null) {
@@ -933,7 +936,10 @@ export async function processFlutterwaveWebhook(rawBody: string, signature: stri
   }
   const payment = await prisma.ecommercePayment.findUnique({
     where: { reference },
-    include: { tenderMethod: true }
+    include: {
+      tenderMethod: true,
+      ecommerceOrder: { include: { store: { select: { code: true } } } },
+    }
   });
   if (!payment?.tenderMethod) {
     throw new EcommerceAuthError("Payment reference was not recognized.", 404);
@@ -952,5 +958,5 @@ export async function processFlutterwaveWebhook(rawBody: string, signature: stri
   if (event.type === "charge.completed" || event.event === "charge.completed") {
     await verifyEcommercePayment({ reference, providerTransactionId: transactionId });
   }
-  return { received: true };
+  return { received: true, storeCode: payment.ecommerceOrder.store.code };
 }

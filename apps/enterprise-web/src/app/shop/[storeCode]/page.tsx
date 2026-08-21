@@ -3,7 +3,8 @@ import { notFound } from "next/navigation";
 import { PublicStorefront } from "@/components/ecommerce/public-storefront";
 import { getPublicStorefront } from "@/server/ecommerce/ecommerce.repository";
 
-export const dynamic = "force-dynamic";
+export const dynamic = "force-static";
+export const revalidate = 15;
 export const dynamicParams = true;
 
 export default async function PublicShopPage({

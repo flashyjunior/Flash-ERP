@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   ArrowUpRight,
   BellRing,
   Check,
@@ -38,7 +39,63 @@ import styles from "./online-store-ecommerce-workspace.module.css";
 type Workspace = OnlineStoreEcommerceWorkspaceData;
 type Order = Workspace["orders"][number];
 type Product = Workspace["products"][number];
-type Tab = "ORDERS" | "PRODUCTS" | "PAYMENTS" | "STOREFRONT";
+type Tab = "ORDERS" | "PRODUCTS" | "PAYMENTS" | "STOREFRONT" | "MONITORING";
+type MonitoringOperation = {
+  requests: number;
+  completed: number;
+  failed: number;
+  averageDurationMs: number;
+  p95DurationMs: number;
+  maxDurationMs: number;
+  lastCompletedAt: string | null;
+  lastFailureAt: string | null;
+};
+type OperationalHealthIncident = {
+  key: string;
+  severity: "warning" | "critical";
+  count: number;
+  oldestAt: string | null;
+  detail: string;
+};
+type OperationalHealth = {
+  status: "healthy" | "attention" | "critical";
+  checkedAt: string;
+  thresholds: {
+    staleReservationHours: number;
+    paymentFailureWindowHours: number;
+    blockedTransferHours: number;
+    queueAgeHours: number;
+  };
+  scan: {
+    limit: number;
+    scannedActiveReservations: number;
+    activeReservationCount: number;
+    activeOrderCount: number;
+    limited: boolean;
+  };
+  incidents: OperationalHealthIncident[];
+};
+type MonitoringSnapshot = {
+  status: "awaiting-data" | "healthy" | "degraded";
+  startedAt: string;
+  checkedAt: string;
+  slowRequestThresholdMs: number;
+  sampleLimit: number;
+  operations: Record<string, MonitoringOperation>;
+  operationalHealth: OperationalHealth | null;
+  operationalHealthError: string | null;
+};
+
+const monitoringOperations = [
+  ["CATALOG", "Catalog"],
+  ["PRODUCT_DETAIL", "Product detail"],
+  ["QUOTE", "Quote"],
+  ["ORDER_CREATE", "Order placement"],
+  ["PAYMENT_INITIALIZE", "Payment start"],
+  ["PAYMENT_VERIFY", "Payment verification"],
+  ["PAYMENT_WEBHOOK", "Payment webhook"],
+  ["STAFF_QUEUE", "Staff queue"],
+] as const;
 const productPageSize = 20;
 
 const nextStatuses: Record<string, string[]> = {
@@ -79,6 +136,39 @@ function toneForStatus(status: string) {
   return styles.neutral;
 }
 
+function formatDuration(milliseconds: number | undefined) {
+  if (!milliseconds) return "-";
+  return `${Math.round(milliseconds)} ms`;
+}
+
+function formatObservedAt(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleTimeString() : "-";
+}
+
+function monitoringTone(status: MonitoringSnapshot["status"] | undefined) {
+  if (status === "healthy") return styles.good;
+  if (status === "degraded") return styles.warning;
+  return styles.neutral;
+}
+
+function monitoringLabel(status: MonitoringSnapshot["status"] | undefined) {
+  if (status === "healthy") return "Healthy";
+  if (status === "degraded") return "Needs attention";
+  return "Awaiting traffic";
+}
+
+function healthTone(status: OperationalHealth["status"] | undefined) {
+  if (status === "healthy") return styles.good;
+  if (status === "critical") return styles.bad;
+  return styles.warning;
+}
+
+function healthLabel(status: OperationalHealth["status"] | undefined) {
+  if (status === "healthy") return "Operationally healthy";
+  if (status === "critical") return "Critical operational risk";
+  return "Operational review needed";
+}
+
 export function OnlineStoreEcommerceWorkspace({
   initialWorkspace,
   embedded = false
@@ -95,6 +185,9 @@ export function OnlineStoreEcommerceWorkspace({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [monitoring, setMonitoring] = useState<MonitoringSnapshot | null>(null);
+  const [monitoringBusy, setMonitoringBusy] = useState(false);
+  const [monitoringError, setMonitoringError] = useState<string | null>(null);
   const [settings, setSettings] = useState({
     ecommerceEnabled: workspace.store.ecommerceEnabled,
     ecommerceSlug: workspace.store.ecommerceSlug ?? "",
@@ -166,6 +259,25 @@ export function OnlineStoreEcommerceWorkspace({
     );
   }
 
+  async function refreshMonitoring() {
+    setMonitoringBusy(true);
+    try {
+      const snapshot = await readJson<MonitoringSnapshot>(
+        await fetch("/api/online-store/ecommerce/performance", { cache: "no-store" })
+      );
+      setMonitoring(snapshot);
+      setMonitoringError(null);
+    } catch (refreshError) {
+      setMonitoringError(
+        refreshError instanceof Error
+          ? refreshError.message
+          : "Ecommerce performance data could not be loaded."
+      );
+    } finally {
+      setMonitoringBusy(false);
+    }
+  }
+
   useEffect(() => {
     void refreshWorkspace().catch((refreshError: unknown) => {
       setError(
@@ -206,6 +318,13 @@ export function OnlineStoreEcommerceWorkspace({
   useEffect(() => {
     setProductPage((current) => Math.min(current, productPageCount));
   }, [productPageCount]);
+
+  useEffect(() => {
+    if (activeTab !== "MONITORING") return;
+    void refreshMonitoring();
+    const interval = window.setInterval(() => void refreshMonitoring(), 30_000);
+    return () => window.clearInterval(interval);
+  }, [activeTab]);
 
   async function perform(key: string, action: () => Promise<{ message?: string }>) {
     setBusyKey(key);
@@ -345,6 +464,7 @@ export function OnlineStoreEcommerceWorkspace({
               disabled={busyKey === "refresh"}
               onClick={() => perform("refresh", async () => {
                 await refreshWorkspace();
+                if (activeTab === "MONITORING") await refreshMonitoring();
                 return { message: "Ecommerce workspace refreshed." };
               })}
               title="Refresh"
@@ -373,6 +493,7 @@ export function OnlineStoreEcommerceWorkspace({
           <button className={activeTab === "PRODUCTS" ? styles.activeTab : undefined} onClick={() => setActiveTab("PRODUCTS")} role="tab" type="button"><ShoppingBag size={18} />Products</button>
           <button className={activeTab === "PAYMENTS" ? styles.activeTab : undefined} onClick={() => setActiveTab("PAYMENTS")} role="tab" type="button"><WalletCards size={18} />Payments</button>
           <button className={activeTab === "STOREFRONT" ? styles.activeTab : undefined} onClick={() => setActiveTab("STOREFRONT")} role="tab" type="button"><Settings2 size={18} />Storefront</button>
+          <button className={activeTab === "MONITORING" ? styles.activeTab : undefined} onClick={() => setActiveTab("MONITORING")} role="tab" type="button"><Activity size={18} />Monitoring</button>
         </div>
 
         {activeTab === "ORDERS" ? (
@@ -502,6 +623,79 @@ export function OnlineStoreEcommerceWorkspace({
               ))}
               {paymentMethods.length === 0 ? <div className={styles.empty}>Configure a Paystack or Flutterwave tender method before enabling prepayment.</div> : null}
               <button className={styles.saveButton} disabled={busyKey === "payments"} onClick={() => void savePaymentOptions()} type="button">{busyKey === "payments" ? <LoaderCircle className={styles.spin} size={18} /> : <Check size={18} />}Save payment options</button>
+            </div>
+          </section>
+        ) : null}
+
+        {activeTab === "MONITORING" ? (
+          <section className={styles.surface}>
+            <div className={styles.sectionHeading}>
+              <div><span>Live process data</span><h2>Storefront performance</h2></div>
+              <button
+                aria-label="Refresh performance monitoring"
+                className={styles.monitoringRefresh}
+                disabled={monitoringBusy}
+                onClick={() => void refreshMonitoring()}
+                title="Refresh performance monitoring"
+                type="button"
+              >
+                {monitoringBusy ? <LoaderCircle className={styles.spin} size={18} /> : <RefreshCw size={18} />}
+              </button>
+            </div>
+            <div className={styles.monitoringSummary}>
+              <span className={`${styles.pill} ${monitoringTone(monitoring?.status)}`}>{monitoringLabel(monitoring?.status)}</span>
+              <small>{monitoring ? `p95 threshold ${monitoring.slowRequestThresholdMs} ms` : "Loading live measurements"}</small>
+              {monitoring?.startedAt ? <small>Since {new Date(monitoring.startedAt).toLocaleString()}</small> : null}
+            </div>
+            {monitoringError ? <div className={styles.monitoringError}><X size={16} />{monitoringError}</div> : null}
+            {monitoring?.operationalHealthError ? <div className={styles.monitoringError}><X size={16} />{monitoring.operationalHealthError}</div> : null}
+            {monitoring?.operationalHealth ? (
+              <>
+                <div className={styles.operationalHealthSummary}>
+                  <span className={`${styles.pill} ${healthTone(monitoring.operationalHealth.status)}`}>{healthLabel(monitoring.operationalHealth.status)}</span>
+                  <small>{monitoring.operationalHealth.incidents.length} active condition(s)</small>
+                  <small>{monitoring.operationalHealth.scan.limited ? `Sampled up to ${monitoring.operationalHealth.scan.limit} active records` : "Complete active queue scan"}</small>
+                  <small>Checked {new Date(monitoring.operationalHealth.checkedAt).toLocaleTimeString()}</small>
+                </div>
+                <div className={styles.tableWrap}>
+                  <table className={styles.operationalHealthTable}>
+                    <thead><tr><th>Operational condition</th><th>Severity</th><th>Count</th><th>Oldest signal</th><th>Current detail</th></tr></thead>
+                    <tbody>
+                      {monitoring.operationalHealth.incidents.map((incident) => (
+                        <tr key={incident.key}>
+                          <td><strong>{formatStatus(incident.key)}</strong></td>
+                          <td><span className={`${styles.pill} ${incident.severity === "critical" ? styles.bad : styles.warning}`}>{incident.severity}</span></td>
+                          <td>{incident.count}</td>
+                          <td>{formatObservedAt(incident.oldestAt)}</td>
+                          <td className={styles.operationalHealthDetail}>{incident.detail}</td>
+                        </tr>
+                      ))}
+                      {monitoring.operationalHealth.incidents.length === 0 ? <tr><td className={styles.empty} colSpan={5}>No active ecommerce operational conditions.</td></tr> : null}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : null}
+            <div className={styles.tableWrap}>
+              <table className={styles.monitoringTable}>
+                <thead><tr><th>Operation</th><th>Requests</th><th>Average</th><th>p95</th><th>Maximum</th><th>Failures</th><th>Last signal</th></tr></thead>
+                <tbody>
+                  {monitoringOperations.map(([operation, label]) => {
+                    const metric = monitoring?.operations[operation];
+                    return (
+                      <tr key={operation}>
+                        <td><strong>{label}</strong><small>{operation.replaceAll("_", " ")}</small></td>
+                        <td>{metric?.requests ?? 0}</td>
+                        <td>{formatDuration(metric?.averageDurationMs)}</td>
+                        <td>{formatDuration(metric?.p95DurationMs)}</td>
+                        <td>{formatDuration(metric?.maxDurationMs)}</td>
+                        <td><span className={`${styles.pill} ${metric?.failed ? styles.bad : styles.neutral}`}>{metric?.failed ?? 0}</span></td>
+                        <td><strong>{formatObservedAt(metric?.lastCompletedAt)}</strong><small>{metric?.lastFailureAt ? `Failure ${formatObservedAt(metric.lastFailureAt)}` : "No recent failure"}</small></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </section>
         ) : null}

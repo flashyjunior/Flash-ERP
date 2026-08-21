@@ -1220,13 +1220,31 @@ test.describe("public ecommerce extension", () => {
           code: string;
           name: string;
           unitPrice: number;
-          galleryImageUrls: string[];
           promotion: null | { code: string };
         }>;
       };
       const product = catalog.products.find((candidate) => candidate.code === "FLASH-COLA-50CL");
       expect(product).toBeTruthy();
       expect(product?.promotion?.code).toBe(promotionCode);
+      expect(product).not.toHaveProperty("description");
+      expect(product).not.toHaveProperty("galleryImageUrls");
+      expect(product).not.toHaveProperty("reviews");
+
+      const productDetailResponse = await page.request.get(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/products/${encodeURIComponent(product?.code ?? "")}`,
+      );
+      expect(productDetailResponse.ok(), await productDetailResponse.text()).toBeTruthy();
+      const productDetail = (await productDetailResponse.json()) as {
+        id: string;
+        code: string;
+        galleryImageUrls: string[];
+        specifications: Array<{ name: string; value: string }>;
+        reviews: Array<{ id: string }>;
+      };
+      expect(productDetail).toMatchObject({ id: product?.id, code: product?.code });
+      expect(Array.isArray(productDetail.galleryImageUrls)).toBe(true);
+      expect(Array.isArray(productDetail.specifications)).toBe(true);
+      expect(Array.isArray(productDetail.reviews)).toBe(true);
 
       const quoteResponse = await page.request.post(
         `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
@@ -1254,7 +1272,7 @@ test.describe("public ecommerce extension", () => {
       );
       await expect(page.getByRole("heading", { level: 1, name: product?.name })).toBeVisible();
 
-      if ((product?.galleryImageUrls.length ?? 0) > 1) {
+      if (productDetail.galleryImageUrls.length > 1) {
       const mainImage = page.getByRole("button", {
         name: `Open image viewer for ${product?.name}`
       }).locator("img");

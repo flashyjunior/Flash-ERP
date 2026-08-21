@@ -37,6 +37,8 @@ A simultaneous mixed 200-request authenticated HQ burst then completed with zero
 
 The transactional concurrency probe submitted 50 simultaneous ecommerce checkout requests with one persisted idempotency key. Every request succeeded with the same order number, exactly one order was stored, and reusing the key with changed order details returned HTTP 409. The production HTTP write boundary admitted at most 32 writes concurrently and queued up to 17 during the probe. Payment-initialization idempotency is implemented and statically gated; live duplicate gateway initialization remains part of payment-provider certification.
 
+A separate disposable-fixture checkout-contention runner is available for the missing distinct-buyer reservation test. It determines a low-stock product's current pickup capacity through quote preflight, submits one additional set of independent customer checkouts concurrently, verifies the exact persisted active reservation quantity, confirms that no further unit can be quoted, and cancels every generated order through the normal staff workflow. No production-like run has been recorded yet.
+
 ## Acceptance Targets
 
 Unless a customer workload requires stricter limits, the first production certification target is:
@@ -196,6 +198,22 @@ npm run capacity:idempotency
 ```
 
 Never use a production administrator session or run write scenarios from this GET-only command. Transactional capacity tests require isolated test data, idempotency assertions, and reconciliation evidence.
+
+Run the distinct-buyer ecommerce oversell probe only against a disposable low-stock pickup fixture. Supply two different disposable customer sessions separated by `|`, an online-store staff session permitted to cancel orders for the storefront, and a product whose sellable quantity is below `FLASH_ERP_ECOMMERCE_CONTENTION_MAX_PROBE`. The command refuses remote targets until both write-test flags are set, records no session values in its evidence file, and cancels every accepted test order before reporting success:
+
+```powershell
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_RUN = "1"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_ALLOW_REMOTE = "1"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_BASE_URL = "https://staging.example.com"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_STORE_CODE = "ACCRA-CENTRAL"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_PICKUP_STORE_CODE = "ACCRA-CENTRAL"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_PRODUCT_ID = "DISPOSABLE-LOW-STOCK-PRODUCT-ID"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_CUSTOMER_COOKIES = "flash_erp_shop_session=FIRST_TEST_SESSION|flash_erp_shop_session=SECOND_TEST_SESSION"
+$env:FLASH_ERP_ECOMMERCE_CONTENTION_STAFF_COOKIE = "flash_rms_session=STAFF_TEST_SESSION"
+npm run capacity:ecommerce-contention
+```
+
+Do not use production customer or staff sessions. The runner intentionally uses pay-on-collection and pickup so cancellation cannot collide with an issued delivery transfer; delivery-network contention remains a separate UAT scenario.
 
 Start a production build with four local workers after sizing SQL Server for the combined connection ceiling:
 

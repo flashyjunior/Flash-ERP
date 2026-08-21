@@ -244,16 +244,32 @@ Acceptance:
 
 ### ECOM-MBF-301 - Performance And Reliability
 
-Status: Planned
+Status: In progress
 
 - Measure availability lookup, quote, reservation, payment callback, and staff-queue latency under realistic concurrent checkout load.
-- Add targeted indexes, cache boundaries, retry/backoff, queue health, and alerting based on measured bottlenecks.
-- Monitor reservation expiry, allocation failure, webhook failure, stock mismatch, and branch queue age.
+- Serve managed ecommerce images through responsive AVIF/WebP derivatives, use a high-priority first hero image, and lazy-load noncritical product and gallery images.
+- Cache immutable ecommerce upload URLs for one year and render public storefront and product pages as 15-second revalidated output rather than forcing an uncached server render for every visit.
+- Return compact product-card records in the storefront catalogue; load rich descriptions, galleries, specifications, and reviews from a separately cached product-detail route only when a customer opens that product.
+- Record bounded, per-storefront live-process timing and failure metrics for catalogue availability, product details, quotes, order placement, payment start/verification/webhooks, and staff queues. Return the matching `Server-Timing` measurement from those routes and expose the current storefront snapshot to authorised staff in the ecommerce Monitoring tab.
+- Surface durable operational health from the ecommerce records: stale active reservations, persisted payment failures, overdue network transfers, aged fulfilment queues, and ledger-versus-reservation stock shortfalls. Bound the scan and visibly report when the configured scan limit prevents a complete shortfall review.
+- Provide an explicitly gated disposable-fixture checkout-contention runner. It requires two distinct customer sessions, proves the exact stock-reservation boundary with concurrent pay-on-collection orders, verifies persisted location reservations, and cancels all generated orders through the governed staff workflow before it reports success.
+- Add targeted indexes, broader cache boundaries, retry/backoff, queue health, CDN/object storage, and alerting based on measured bottlenecks.
+- Retain webhook failure history and issue automated notifications only after the operations policy and storage/alerting boundary are approved; current-process webhook failures are already visible in the live timing snapshot.
 
 Acceptance:
 
 - Load tests show stock cannot be oversold under concurrent checkout.
 - Operational dashboards surface stale reservations, failed callbacks, and blocked fulfilments before customers are affected.
+
+Evidence:
+
+- Enterprise Web production build and TypeScript validation passed after responsive image delivery and static route revalidation were introduced.
+- Local production runtime served an ecommerce upload with `Cache-Control: public, max-age=31536000, immutable`; its 384px image-optimizer response was AVIF and 22,202 bytes from a 102,682-byte JPEG source.
+- Public ecommerce Playwright specification parses with compact-catalog and on-demand product-detail assertions; its browser run remains part of production-like UAT.
+- `npm run acceptance:ecommerce-performance`, Enterprise Web TypeScript validation, and `npm run acceptance:ecommerce-multi-branch` passed after route timing, webhook attribution, and staff monitoring were added.
+- The ecommerce performance gate now verifies persistent-health severity escalation for stale reservations and reserved-stock shortfalls; the staff monitoring API combines this durable snapshot with the live route timings.
+- `npm run acceptance:capacity-hardening` and `npm run acceptance:ecommerce-performance` passed after the checkout-contention runner was added. Its local guard was exercised without a fixture and refused to issue writes until the required explicit opt-in is supplied; a production-like run with disposable customer/staff sessions remains UAT evidence.
+- Browser verification remains outstanding because the local database contains no enabled public storefront; production-like UAT will include mobile and desktop image/network checks.
 
 ## Explicitly Out Of Scope Until A Later Approved Phase
 

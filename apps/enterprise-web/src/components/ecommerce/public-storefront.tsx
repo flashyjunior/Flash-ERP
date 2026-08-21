@@ -33,17 +33,56 @@ import {
   ZoomIn,
   ZoomOut
 } from "lucide-react";
+import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import type { PublicStorefrontData } from "@/server/ecommerce/ecommerce.repository";
+import type {
+  PublicStorefrontData,
+  PublicStorefrontProductDetail,
+} from "@/server/ecommerce/ecommerce.repository";
 
 import styles from "./public-storefront.module.css";
 
 type Product = PublicStorefrontData["products"][number];
+type ProductDetail = PublicStorefrontProductDetail;
 type Variant = Product["variants"][number];
 type SellingUnit = Product["sellingUnits"][number];
 type ProductPromotion = NonNullable<Product["promotion"]>;
+
+function normalizeProductCode(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isOptimizableStorefrontImage(src: string) {
+  return src.startsWith("/") && !src.startsWith("//");
+}
+
+function StorefrontImage({
+  alt,
+  priority = false,
+  sizes,
+  src,
+}: {
+  alt: string;
+  priority?: boolean;
+  sizes: string;
+  src: string;
+}) {
+  if (!isOptimizableStorefrontImage(src)) {
+    return (
+      <img
+        alt={alt}
+        decoding="async"
+        fetchPriority={priority ? "high" : "auto"}
+        loading={priority ? "eager" : "lazy"}
+        src={src}
+      />
+    );
+  }
+
+  return <Image alt={alt} fill priority={priority} sizes={sizes} src={src} />;
+}
 type DrawerView = "cart" | "checkout" | "orders" | "account" | null;
 type CheckoutPaymentOption = {
   code: string;
@@ -505,10 +544,12 @@ function getPromotionTerms(
 
 export function PublicStorefront({
   storefront,
-  initialProductCode = null
+  initialProductCode = null,
+  initialProduct = null,
 }: {
   storefront: PublicStorefrontData;
   initialProductCode?: string | null;
+  initialProduct?: ProductDetail | null;
 }) {
   const router = useRouter();
   const storageKey = `flash-erp-cart:${storefront.store.code}`;
@@ -518,8 +559,9 @@ export function PublicStorefront({
   const [cart, setCart] = useState<CartLine[]>([]);
   const [cartReady, setCartReady] = useState(false);
   const [drawerView, setDrawerView] = useState<DrawerView>(null);
-  const [quickProduct, setQuickProduct] = useState<Product | null>(() =>
-    storefront.products.find((product) => product.code === initialProductCode) ?? null
+  const [quickProduct, setQuickProduct] = useState<ProductDetail | null>(initialProduct);
+  const [productDetailsBusy, setProductDetailsBusy] = useState(
+    Boolean(initialProductCode && !initialProduct),
   );
   const [quickVariant, setQuickVariant] = useState<Variant | null>(null);
   const [quickSellingUnitOfMeasure, setQuickSellingUnitOfMeasure] = useState("");
@@ -527,7 +569,7 @@ export function PublicStorefront({
   const [quickImageUrl, setQuickImageUrl] = useState<string | null>(null);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
   const [imageViewerZoomed, setImageViewerZoomed] = useState(false);
-  const [imageViewerProduct, setImageViewerProduct] = useState<Product | null>(null);
+  const [imageViewerProduct, setImageViewerProduct] = useState<ProductDetail | null>(null);
   const [imageViewerUrl, setImageViewerUrl] = useState<string | null>(null);
   const [productDetailTab, setProductDetailTab] = useState<"DESCRIPTION" | "SPECIFICATIONS" | "REVIEWS">("DESCRIPTION");
   const [reviewRating, setReviewRating] = useState(5);
@@ -591,6 +633,10 @@ export function PublicStorefront({
   const [paymentBusy, setPaymentBusy] = useState(false);
   const checkoutRequestKeyRef = useRef<string | null>(null);
   const paymentRequestKeyRef = useRef<string | null>(null);
+  const productDetailsRef = useRef(new Map<string, ProductDetail>(
+    initialProduct ? [[normalizeProductCode(initialProduct.code), initialProduct]] : [],
+  ));
+  const productDetailRequestIdRef = useRef(0);
   const [toast, setToast] = useState<string | null>(null);
   const [quickQuote, setQuickQuote] = useState<{ key: string; value: EcommerceQuote } | null>(null);
   const [cartQuote, setCartQuote] = useState<{ key: string; value: EcommerceQuote } | null>(null);
@@ -757,21 +803,43 @@ export function PublicStorefront({
   }, [account]);
 
   useEffect(() => {
-    const product = storefront.products.find((entry) => entry.code === initialProductCode) ?? null;
-    const variant = product?.variants.length === 1 ? product.variants[0] : null;
-    setQuickProduct(product);
-    setQuickVariant(variant);
-    setQuickSellingUnitOfMeasure(
-      product ? resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? "" : ""
+    if (!initialProductCode) {
+      productDetailRequestIdRef.current += 1;
+      setQuickProduct(null);
+      setQuickVariant(null);
+      setQuickSellingUnitOfMeasure("");
+      setQuickQuantity(1);
+      setQuickImageUrl(null);
+      setProductDetailsBusy(false);
+      setImageViewerOpen(false);
+      setImageViewerZoomed(false);
+      setImageViewerProduct(null);
+      setImageViewerUrl(null);
+      setProductDetailTab("DESCRIPTION");
+      return;
+    }
+
+    if (initialProduct) {
+      productDetailRequestIdRef.current += 1;
+      productDetailsRef.current.set(
+        normalizeProductCode(initialProduct.code),
+        initialProduct,
+      );
+      applyQuickProduct(initialProduct);
+      return;
+    }
+
+    const product = storefront.products.find(
+      (entry) => normalizeProductCode(entry.code) === normalizeProductCode(initialProductCode),
     );
-    setQuickQuantity(1);
-    setQuickImageUrl(product ? product.galleryImageUrls[0] ?? product.imageUrl : null);
-    setImageViewerOpen(false);
-    setImageViewerZoomed(false);
-    setImageViewerProduct(null);
-    setImageViewerUrl(null);
-    setProductDetailTab("DESCRIPTION");
-  }, [initialProductCode, storefront.products]);
+    if (product) {
+      void loadProductDetails(product);
+      return;
+    }
+
+    setQuickProduct(null);
+    setProductDetailsBusy(false);
+  }, [initialProduct, initialProductCode, storefront.products]);
 
   useEffect(() => {
     if (!imageViewerOpen) return;
@@ -803,7 +871,7 @@ export function PublicStorefront({
       const categoryMatches = category === "ALL" || product.category === category;
       const searchMatches =
         !normalizedSearch ||
-        [product.name, product.code, product.brand, product.category, product.description]
+        [product.name, product.shortName, product.code, product.brand, product.category]
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(normalizedSearch));
       return categoryMatches && searchMatches;
@@ -967,33 +1035,79 @@ export function PublicStorefront({
     setToast(message);
   }
 
-  function openProduct(product: Product) {
+  function applyQuickProduct(product: ProductDetail) {
     const variant = product.variants.length === 1 ? product.variants[0] : null;
     setQuickProduct(product);
     setQuickVariant(variant);
     setQuickSellingUnitOfMeasure(
-      resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? ""
+      resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? "",
     );
     setQuickQuantity(1);
     setQuickImageUrl(product.galleryImageUrls[0] ?? product.imageUrl);
+    setProductDetailsBusy(false);
+    setImageViewerOpen(false);
+    setImageViewerZoomed(false);
+    setImageViewerProduct(null);
+    setImageViewerUrl(null);
     setProductDetailTab("DESCRIPTION");
     setReviewMessage(null);
+  }
+
+  async function loadProductDetails(product: Product) {
+    const productKey = normalizeProductCode(product.code);
+    const cached = productDetailsRef.current.get(productKey);
+    if (cached) {
+      applyQuickProduct(cached);
+      return;
+    }
+
+    const requestId = productDetailRequestIdRef.current + 1;
+    productDetailRequestIdRef.current = requestId;
+    setProductDetailsBusy(true);
+    try {
+      const detail = await readJson<ProductDetail>(
+        await fetch(
+          `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/products/${encodeURIComponent(product.code)}`,
+          { cache: "force-cache" },
+        ),
+      );
+      if (requestId !== productDetailRequestIdRef.current) {
+        return;
+      }
+      productDetailsRef.current.set(productKey, detail);
+      applyQuickProduct(detail);
+    } catch (error) {
+      if (requestId !== productDetailRequestIdRef.current) {
+        return;
+      }
+      setQuickProduct(null);
+      setProductDetailsBusy(false);
+      showToast(error instanceof Error ? error.message : "The product could not be loaded.");
+    }
+  }
+
+  function openProduct(product: Product) {
+    void loadProductDetails(product);
     router.push(
       `${publicStoreHref}/products/${encodeURIComponent(product.code)}`
     );
   }
 
   function closeProduct() {
+    productDetailRequestIdRef.current += 1;
     closeImageViewer();
     setQuickProduct(null);
+    setProductDetailsBusy(false);
     router.push(publicStoreHref);
   }
 
   function updateGlobalSearch(value: string) {
     setSearchText(value);
     if (quickProduct) {
+      productDetailRequestIdRef.current += 1;
       closeImageViewer();
       setQuickProduct(null);
+      setProductDetailsBusy(false);
       router.push(publicStoreHref);
     }
   }
@@ -1008,7 +1122,7 @@ export function PublicStorefront({
     setQuickImageUrl(quickProduct.galleryImageUrls[nextIndex]);
   }
 
-  function openImageViewer(product: Product, imageUrl: string | null) {
+  function openImageViewer(product: ProductDetail, imageUrl: string | null) {
     if (!imageUrl) {
       openProduct(product);
       return;
@@ -1663,7 +1777,7 @@ export function PublicStorefront({
               {quickProduct.galleryImageUrls.length > 1 ? (
                 <div className={styles.thumbnailRail}>
                   {quickProduct.galleryImageUrls.map((imageUrl, index) => (
-                    <button aria-label={`View product image ${index + 1}`} className={quickImageUrl === imageUrl ? styles.thumbnailActive : undefined} key={imageUrl} onClick={() => setQuickImageUrl(imageUrl)} type="button"><img alt="" src={imageUrl} /></button>
+                    <button aria-label={`View product image ${index + 1}`} className={quickImageUrl === imageUrl ? styles.thumbnailActive : undefined} key={imageUrl} onClick={() => setQuickImageUrl(imageUrl)} type="button"><StorefrontImage alt="" sizes="58px" src={imageUrl} /></button>
                   ))}
                 </div>
               ) : null}
@@ -1755,6 +1869,11 @@ export function PublicStorefront({
             </div>
           </section>
         </article>
+      ) : productDetailsBusy ? (
+        <section aria-live="polite" className={styles.emptyState}>
+          <LoaderCircle className={styles.spin} size={28} />
+          <h2>Loading product</h2>
+        </section>
       ) : (
         <>
           {storefront.promotions.length > 0 && !promotionStripDismissed ? (
@@ -1878,7 +1997,7 @@ export function PublicStorefront({
               onClick={() => setImageViewerZoomed((value) => !value)}
               type="button"
             >
-              <img alt={imageViewerProduct.name} src={imageViewerUrl} />
+              <img alt={imageViewerProduct.name} decoding="async" fetchPriority="high" src={imageViewerUrl} />
             </button>
           </div>
         </div>
@@ -2071,7 +2190,7 @@ function StorefrontHero({ store }: { store: PublicStorefrontData["store"] }) {
       onMouseLeave={() => setPaused(false)}
     >
       <div className={styles.shopIntroTrack} style={{ transform: `translateX(-${activeSlide * 100}%)` }}>
-        {slides.map((imageUrl, index) => <div aria-hidden={index !== activeSlide} className={styles.shopIntroSlide} key={`${imageUrl}-${index}`}><img alt={index === 0 ? `${store.name} storefront` : ""} src={imageUrl} /></div>)}
+        {slides.map((imageUrl, index) => <div aria-hidden={index !== activeSlide} className={styles.shopIntroSlide} key={`${imageUrl}-${index}`}><StorefrontImage alt={index === 0 ? `${store.name} storefront` : ""} priority={index === 0} sizes="(max-width: 639px) calc(100vw - 28px), (max-width: 1268px) calc(100vw - 28px), 1240px" src={imageUrl} /></div>)}
       </div>
       <div className={styles.shopIntroContent}>
         <small>Shop from anywhere</small><h1>{store.name}</h1><p>{store.description}</p>
@@ -2093,7 +2212,7 @@ function ProductCard({ product, money, onOpen, onAdd, compact = false }: {
   const promotion = getProductPromotion(product);
   const displayPrice = getProductPrice(product);
   const originalPrice = getProductOriginalPrice(product);
-  const previewImageUrl = product.galleryImageUrls[0] ?? product.imageUrl;
+  const previewImageUrl = product.imageUrl;
 
   return (
     <article className={classNames(styles.productCard, compact && styles.productCardCompact)}>
@@ -2134,9 +2253,12 @@ function WhatsAppMark() {
 }
 
 function ProductVisual({ product, large = false, imageUrl = product.imageUrl }: { product: Product; large?: boolean; imageUrl?: string | null }) {
+  const sizes = large
+    ? "(max-width: 899px) calc(100vw - 44px), (max-width: 1199px) 50vw, 620px"
+    : "(max-width: 639px) 50vw, (max-width: 899px) 33vw, (max-width: 1179px) 25vw, 248px";
   return (
     <div className={classNames(styles.productVisual, large && styles.productVisualLarge)}>
-      {imageUrl ? <img alt={product.name} loading="lazy" src={imageUrl} /> : <span>{productInitials(product.name)}</span>}
+      {imageUrl ? <StorefrontImage alt={product.name} sizes={sizes} src={imageUrl} /> : <span>{productInitials(product.name)}</span>}
     </div>
   );
 }
@@ -2204,7 +2326,7 @@ function CartPanel({ cart, stockError, money, quote, subtotal, discount, total, 
           <div className={styles.cartLines}>
             {cart.map((line, index) => (
               <article className={styles.cartLine} key={line.key}>
-                <div className={styles.cartThumb}>{line.imageUrl ? <img alt="" src={line.imageUrl} /> : productInitials(line.name)}</div>
+                <div className={styles.cartThumb}>{line.imageUrl ? <StorefrontImage alt="" sizes="72px" src={line.imageUrl} /> : productInitials(line.name)}</div>
                 <div className={styles.cartLineMain}><strong>{line.name}</strong><span>{line.variantName ?? line.productCode} · {line.sellingUnitName}{line.uomConversionFactor !== 1 ? ` (${line.uomConversionFactor} ${line.baseUnitOfMeasure})` : ""}</span><small>{quote?.lines[index]?.appliedPromotionName ? `${quote.lines[index].appliedPromotionName} · ` : ""}{money.format(quote?.lines[index]?.totalAmount ?? line.unitPrice * line.quantity)}</small></div>
                 <div className={styles.cartLineActions}>
                   <QuantityStepper onChange={(quantity) => onQuantity(line.key, quantity)} value={line.quantity} />

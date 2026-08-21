@@ -218,6 +218,7 @@
 }
 
 .shopIntroSlide {
+  position: relative;
   flex: 0 0 100%;
   min-width: 0;
 }
@@ -599,6 +600,7 @@
 }
 
 .productVisual {
+  position: relative;
   display: grid;
   overflow: hidden;
   width: 100%;
@@ -1108,6 +1110,7 @@
 }
 
 .cartThumb {
+  position: relative;
   display: grid;
   overflow: hidden;
   width: 62px;
@@ -1548,6 +1551,7 @@
 }
 
 .thumbnailRail button {
+  position: relative;
   width: 58px;
   height: 58px;
   flex: 0 0 58px;

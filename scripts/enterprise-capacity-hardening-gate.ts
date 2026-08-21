@@ -28,6 +28,7 @@ const queryAudit = read("scripts/enterprise-query-budget-audit.ts");
 const pagination = read("apps/enterprise-web/src/server/performance/enterprise-pagination.ts");
 const dataGrid = read("apps/enterprise-web/src/components/data-grid/data-grid.tsx");
 const capacityTestUser = read("scripts/enterprise-capacity-test-user.ts");
+const ecommerceContentionRunner = read("scripts/ecommerce-checkout-contention-test.ts");
 const authSession = read("apps/enterprise-web/src/server/auth/enterprise-session.ts");
 const clusterLauncher = read("scripts/start-enterprise-web-cluster.mjs");
 const productionServer = read("scripts/start-enterprise-web.mjs");
@@ -185,6 +186,11 @@ for (const entryPoint of [
 requireIncludes(capacityTestUser, 'action !== "provision" && action !== "disable"', "Capacity test users must require an explicit lifecycle action.");
 requireIncludes(capacityTestUser, "passwordHash: null", "Capacity test cleanup must remove the temporary credential.");
 requireIncludes(capacityTestUser, "retailUserSession.updateMany", "Capacity test cleanup must revoke active sessions.");
+requireIncludes(ecommerceContentionRunner, "FLASH_ERP_ECOMMERCE_CONTENTION_RUN", "Checkout contention must require an explicit write-test opt-in.");
+requireIncludes(ecommerceContentionRunner, "FLASH_ERP_ECOMMERCE_CONTENTION_ALLOW_REMOTE", "Remote checkout contention must require a separate acknowledgement.");
+requireIncludes(ecommerceContentionRunner, "FLASH_ERP_ECOMMERCE_CONTENTION_CUSTOMER_COOKIES", "Checkout contention must use explicit disposable customer sessions.");
+requireIncludes(ecommerceContentionRunner, "salesOrderInventoryReservation", "Checkout contention must verify persisted location reservations.");
+requireIncludes(ecommerceContentionRunner, "/api/online-store/ecommerce/orders/", "Checkout contention must cancel through the governed staff workflow.");
 for (const entryPoint of authenticatedReadEntryPoints) {
   requireIncludes(
     read(entryPoint),

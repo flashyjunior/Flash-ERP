@@ -475,6 +475,21 @@ async function getPublicStore(storeCodeOrSlug: string) {
 }
 
 export type PublicStorefrontData = Awaited<ReturnType<typeof loadPublicStorefront>>;
+export type PublicStorefrontProduct = PublicStorefrontData["products"][number];
+export type PublicStorefrontProductDetail = PublicStorefrontProduct & {
+  description: string | null;
+  galleryImageUrls: string[];
+  specifications: Array<{ name: string; value: string }>;
+  reviews: Array<{
+    id: string;
+    rating: number;
+    title: string | null;
+    body: string | null;
+    verifiedPurchase: boolean;
+    customerName: string;
+    createdAt: string;
+  }>;
+};
 
 async function loadPublicStorefront(storeCodeOrSlug: string) {
   await Promise.all([
@@ -504,11 +519,7 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       sku: true,
       name: true,
       shortName: true,
-      description: true,
-      ecommerceDescription: true,
       ecommerceCompareAtPrice: true,
-      ecommerceSpecificationsJson: true,
-      ecommerceGalleryJson: true,
       productType: true,
       department: true,
       category: true,
@@ -542,22 +553,6 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       trackSize: true,
       trackColor: true,
       ecommerceFeatured: true,
-      ecommerceReviews: {
-        where: { status: "PUBLISHED" },
-        orderBy: { createdAt: "desc" },
-        take: 12,
-        select: {
-          id: true,
-          rating: true,
-          title: true,
-          body: true,
-          verifiedPurchase: true,
-          createdAt: true,
-          customerAccount: {
-            select: { customer: { select: { fullName: true } } }
-          }
-        }
-      },
       storeProductPrices: {
         where: { storeId: store.id, status: "ACTIVE", productVariantId: null },
         take: 1,
@@ -744,9 +739,6 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       sku: product.sku,
       name: product.name,
       shortName: product.shortName,
-      description: sanitizeEcommerceProductDescription(
-        product.ecommerceDescription ?? product.description
-      ),
       productType: product.productType,
       department: product.department,
       category: product.category,
@@ -774,11 +766,6 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
           : Number(product.ecommerceCompareAtPrice),
       promotion,
       promotions,
-      galleryImageUrls: [
-        product.primaryImageUrl,
-        ...readStringArray(product.ecommerceGalleryJson)
-      ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index),
-      specifications: readSpecifications(product.ecommerceSpecificationsJson),
       trackInventory: product.trackInventory,
       isSerialized: product.isSerialized,
       trackExpiry: product.trackExpiry,
@@ -787,15 +774,6 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       featured: product.ecommerceFeatured,
       reviewCount: reviewSummaryByProductId.get(product.id)?.reviewCount ?? 0,
       averageRating: reviewSummaryByProductId.get(product.id)?.averageRating ?? 0,
-      reviews: product.ecommerceReviews.map((review) => ({
-        id: review.id,
-        rating: review.rating,
-        title: review.title,
-        body: review.body,
-        verifiedPurchase: review.verifiedPurchase,
-        customerName: review.customerAccount.customer.fullName,
-        createdAt: review.createdAt.toISOString()
-      })),
       availableQuantity:
         availableCatalogQuantity(product),
       variants: product.matrixVariants.map((variant) => {
@@ -946,6 +924,98 @@ export async function getPublicStorefront(storeCodeOrSlug: string) {
     () => runEnterpriseOperation("PUBLIC_READ", () => loadPublicStorefront(storeCodeOrSlug)),
     { ttlMs: 15_000, staleWhileRevalidateMs: 60_000 }
   );
+}
+
+async function loadPublicStorefrontProductDetail(
+  storeCodeOrSlug: string,
+  productCode: string,
+): Promise<PublicStorefrontProductDetail> {
+  const storefront = await getPublicStorefront(storeCodeOrSlug);
+  const normalizedProductCode = productCode.trim().toUpperCase();
+  const summary = storefront.products.find(
+    (product) => product.code.trim().toUpperCase() === normalizedProductCode,
+  );
+
+  if (!summary) {
+    throw new EcommerceAuthError("This product is not available from the online shop.", 404);
+  }
+
+  const detail = await prisma.product.findFirst({
+    where: {
+      id: summary.id,
+      ecommercePublished: true,
+      status: "ACTIVE",
+      deletedAt: null,
+    },
+    select: {
+      description: true,
+      ecommerceDescription: true,
+      ecommerceSpecificationsJson: true,
+      ecommerceGalleryJson: true,
+      ecommerceReviews: {
+        where: { status: "PUBLISHED" },
+        orderBy: { createdAt: "desc" },
+        take: 12,
+        select: {
+          id: true,
+          rating: true,
+          title: true,
+          body: true,
+          verifiedPurchase: true,
+          createdAt: true,
+          customerAccount: {
+            select: { customer: { select: { fullName: true } } },
+          },
+        },
+      },
+    },
+  });
+
+  if (!detail) {
+    throw new EcommerceAuthError("This product is not available from the online shop.", 404);
+  }
+
+  return {
+    ...summary,
+    description: sanitizeEcommerceProductDescription(
+      detail.ecommerceDescription ?? detail.description,
+    ),
+    galleryImageUrls: [
+      summary.imageUrl,
+      ...readStringArray(detail.ecommerceGalleryJson),
+    ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index),
+    specifications: readSpecifications(detail.ecommerceSpecificationsJson),
+    reviews: detail.ecommerceReviews.map((review) => ({
+      id: review.id,
+      rating: review.rating,
+      title: review.title,
+      body: review.body,
+      verifiedPurchase: review.verifiedPurchase,
+      customerName: review.customerAccount.customer.fullName,
+      createdAt: review.createdAt.toISOString(),
+    })),
+  };
+}
+
+export async function getPublicStorefrontProductDetail(
+  storeCodeOrSlug: string,
+  productCode: string,
+) {
+  const storeKey = storeCodeOrSlug.trim().toLowerCase();
+  const productKey = productCode.trim().toLowerCase();
+  return getEnterpriseCachedRead(
+    `ecommerce:product-detail:${storeKey}:${productKey}`,
+    () => runEnterpriseOperation(
+      "PUBLIC_READ",
+      () => loadPublicStorefrontProductDetail(storeCodeOrSlug, productCode),
+    ),
+    { ttlMs: 15_000, staleWhileRevalidateMs: 60_000 },
+  );
+}
+
+function invalidatePublicStorefrontReadCaches() {
+  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  invalidateEnterpriseReadCache("ecommerce:product-detail:");
 }
 
 type EcommerceOrderLineInput = {
@@ -2870,7 +2940,7 @@ export async function updateOnlineStoreEcommerceSettings(input: {
     }
   });
 
-  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  invalidatePublicStorefrontReadCaches();
 
   return { message: "Ecommerce storefront settings saved." };
 }
@@ -2932,7 +3002,7 @@ export async function updateEcommerceProductPublication(input: {
     throw new EcommerceAuthError("That product could not be found.", 404);
   }
 
-  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  invalidatePublicStorefrontReadCaches();
 
   return { message: "Product ecommerce visibility saved." };
 }
@@ -3000,7 +3070,7 @@ export async function updateEcommercePaymentOptions(input: {
     }
   });
 
-  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  invalidatePublicStorefrontReadCaches();
 
   return { message: "Customer payment options saved." };
 }
@@ -3102,7 +3172,7 @@ export async function submitEcommerceProductReview(input: {
     }
   });
 
-  invalidateEnterpriseReadCache("ecommerce:storefront:");
+  invalidatePublicStorefrontReadCaches();
 
   return { message: "Thank you. Your verified-purchase review is now visible." };
 }
