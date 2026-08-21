@@ -4984,7 +4984,7 @@ model SalesOrderInventoryReservation {
   salesOrder                    SalesOrder     @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
   salesOrderLine                SalesOrderLine @relation(fields: [salesOrderLineId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
-  @@unique([salesOrderId, salesOrderLineId])
+  @@unique([salesOrderId, salesOrderLineId, inventoryLocationId])
   @@index([salesOrderId, status])
   @@index([inventoryLocationId, productCodeSnapshot, productVariantCodeSnapshot, status])
   @@index([productCodeSnapshot, status])

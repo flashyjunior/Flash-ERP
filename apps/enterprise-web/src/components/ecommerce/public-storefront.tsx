@@ -81,6 +81,7 @@ type EcommerceQuote = {
     inventoryLocationCode: string;
     inventoryLocationName: string;
     routingMethod: string;
+    networkAllocation: boolean;
   };
   lines: Array<{
     lineIndex: number;
@@ -2240,7 +2241,19 @@ function CheckoutPanel(props: {
           <p>{props.createdOrder.orderNo}</p>
           <strong>{props.money.format(props.createdOrder.totalAmount)}</strong>
           {props.createdOrder.orderType === "LAYAWAY" ? <small>Deposit due now: {props.money.format(props.createdOrder.paymentAmountDueNow)}</small> : null}
-          <div className={styles.pickupInfo}><Store size={21} /><div><strong>Fulfilled by {props.createdOrder.fulfillment.storeName}</strong><p>{props.createdOrder.fulfillment.inventoryLocationName}</p></div></div>
+          <div className={styles.pickupInfo}>
+            <Store size={21} />
+            <div>
+              <strong>
+                {props.createdOrder.fulfillment.routingMethod === "NETWORK_TRANSFER"
+                  ? "Network fulfilment is being arranged"
+                  : props.createdOrder.fulfillment.method === "PICKUP"
+                    ? `Pickup from ${props.createdOrder.fulfillment.storeName}`
+                    : `Delivery dispatching from ${props.createdOrder.fulfillment.storeName}`}
+              </strong>
+              <p>{props.createdOrder.fulfillment.inventoryLocationName}</p>
+            </div>
+          </div>
         </div>
         <div className={styles.paymentSection}>
           {props.createdOrder.paymentTiming === "PREPAY" ? (
@@ -2315,8 +2328,17 @@ function CheckoutPanel(props: {
           <div className={styles.pickupInfo}>
             <Store size={21} />
             <div>
-              <strong>{props.deliveryMethod === "PICKUP" ? "Pickup stock assigned" : "Stock assigned for delivery"}</strong>
-              <p>{props.fulfillment.storeName} · {props.fulfillment.inventoryLocationName}</p>
+              <strong>
+                {props.deliveryMethod === "PICKUP"
+                  ? "Pickup stock assigned"
+                  : props.fulfillment.networkAllocation
+                    ? "Delivery stock secured across the fulfilment network"
+                    : "Delivery stock assigned"}
+              </strong>
+              <p>
+                {props.deliveryMethod === "PICKUP" ? "Collect from" : "Dispatching from"} {props.fulfillment.storeName}
+                {" · "}{props.fulfillment.inventoryLocationName}
+              </p>
             </div>
           </div>
         ) : null}
@@ -2519,6 +2541,7 @@ function OrdersPanel(props: {
             {order.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant ?? `${line.quantity} item(s)`}</small></span><b>{props.money.format(line.lineTotal)}</b></div>)}
           </section>
           {order.deliveryAddress ? <div className={styles.pickupInfo}><Truck size={21} /><div><strong>Delivery</strong><p>{order.deliveryAddress}</p>{order.trackingReference ? <small>{order.trackingReference}</small> : null}</div></div> : null}
+          {order.fulfilmentMethod === "DELIVERY" && order.fulfillment ? <div className={styles.pickupInfo}><Truck size={21} /><div><strong>Delivery prepared by {order.fulfillment.storeName}</strong><p>{order.fulfillment.routingMethod === "NETWORK_TRANSFER" ? "The dispatch shop is coordinating stock for one delivery." : order.fulfillment.inventoryLocationName ?? "Store sales location"}</p></div></div> : null}
           {order.fulfilmentMethod === "PICKUP" && order.fulfillment ? <div className={styles.pickupInfo}><Store size={21} /><div><strong>Pickup from {order.fulfillment.storeName}</strong><p>{order.fulfillment.inventoryLocationName ?? "Store sales location"}</p></div></div> : null}
           {order.orderType === "LAYAWAY" && order.balanceAmount > 0 && order.selectedPaymentMethodCode ? (
             <section className={styles.checkoutSection}>

@@ -117,6 +117,42 @@ export function ensureMultiBranchEcommerceSchemaCompatibility() {
           );
         END
       `);
+      await prisma.$executeRawUnsafe(`
+        IF OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]', N'U') IS NOT NULL
+        BEGIN
+          IF EXISTS (
+            SELECT 1
+            FROM sys.key_constraints
+            WHERE [name] = N'SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_key'
+              AND [parent_object_id] = OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]')
+          )
+          BEGIN
+            ALTER TABLE [dbo].[SalesOrderInventoryReservation]
+              DROP CONSTRAINT [SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_key];
+          END
+          ELSE IF EXISTS (
+            SELECT 1
+            FROM sys.indexes
+            WHERE [name] = N'SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_key'
+              AND [object_id] = OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]')
+          )
+          BEGIN
+            DROP INDEX [SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_key]
+              ON [dbo].[SalesOrderInventoryReservation];
+          END
+
+          IF NOT EXISTS (
+            SELECT 1
+            FROM sys.indexes
+            WHERE [name] = N'SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_inventoryLocationId_key'
+              AND [object_id] = OBJECT_ID(N'[dbo].[SalesOrderInventoryReservation]')
+          )
+          BEGIN
+            CREATE UNIQUE NONCLUSTERED INDEX [SalesOrderInventoryReservation_salesOrderId_salesOrderLineId_inventoryLocationId_key]
+              ON [dbo].[SalesOrderInventoryReservation]([salesOrderId], [salesOrderLineId], [inventoryLocationId]);
+          END
+        END
+      `);
       const indexes = [
         ["EcommerceOrder_storefrontStoreId_status_updatedAt_idx", "EcommerceOrder", "[storefrontStoreId], [status], [updatedAt]"],
         ["EcommerceFulfillmentLocation_retailOrgId_storefrontStoreId_status_routingPriority_idx", "EcommerceFulfillmentLocation", "[retailOrgId], [storefrontStoreId], [status], [routingPriority]"],

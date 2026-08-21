@@ -17,6 +17,8 @@ const requiredMigrationNames = [
   "20260814030000_ecommerce_layaway",
   "20260814040000_sync_downstream_failure_details",
   "20260814050000_sqlserver_schema_reconciliation",
+  "20260820010000_multi_branch_ecommerce_fulfillment",
+  "20260820020000_ecommerce_network_allocation",
 ];
 
 const requiredTables = [
@@ -43,6 +45,9 @@ const requiredTables = [
   "EcommerceOrderStatusEvent",
   "EcommerceStorePaymentMethod",
   "EcommerceProductReview",
+  "EcommerceFulfillmentLocation",
+  "EcommerceFulfillment",
+  "EcommerceFulfillmentLine",
   "StoreProductSellingUnit",
   "SalesOrderInventoryReservation",
 ];
@@ -105,6 +110,7 @@ const requiredColumns = [
   { tableName: "Product", columnName: "ecommerceGalleryJson" },
   { tableName: "EcommerceOrder", columnName: "paymentTiming" },
   { tableName: "EcommerceOrder", columnName: "selectedPaymentMethodCode" },
+  { tableName: "EcommerceOrder", columnName: "storefrontStoreId" },
   { tableName: "EcommerceCustomerAccount", columnName: "failedLoginAttempts" },
   { tableName: "EcommerceCustomerAccount", columnName: "lockedUntil" },
   { tableName: "EcommerceOrder", columnName: "checkoutRequestKey" },

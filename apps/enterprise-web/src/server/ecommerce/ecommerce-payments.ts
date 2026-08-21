@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 
 import { Prisma } from "@prisma/client";
 import {
-  calculateLayawayAvailableBaseQuantity,
+  InterStoreTransferOrigin,
+  InterStoreTransferStatus,
   normalizeLayawaySettings,
 } from "@flash-erp/domain";
 
@@ -11,13 +12,18 @@ import {
   EcommerceAuthError,
   getEcommerceCustomerSession
 } from "@/server/ecommerce/ecommerce-customer-auth";
+import { resolveEcommerceFulfillmentPlan } from "@/server/ecommerce/ecommerce-fulfillment";
 import {
   hashEcommerceIdempotencyPayload,
   isUniqueConstraintError,
   requireEcommerceIdempotencyKey
 } from "@/server/ecommerce/ecommerce-idempotency";
 import { postLayawayAccountingInTransaction } from "@/server/services/erp-pos-sale-accounting";
-import { ensureMultiBranchEcommerceSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
+import {
+  ensureInterStoreTransferSchemaCompatibility,
+  ensureMultiBranchEcommerceSchemaCompatibility,
+} from "@/server/repositories/schema-compatibility.repository";
+import { queueInterStoreTransferPublication } from "@/server/repositories/store-sync.repository";
 
 type SupportedGateway = "PAYSTACK" | "FLUTTERWAVE";
 const ecommerceTerminalCode = "ecommerce-web";
@@ -52,6 +58,7 @@ async function activateEcommerceLayawayReservation(
     retailOrgId: string;
     storeId: string;
     salesOrderId: string;
+    salesOrderNo: string;
     reservationStatus: string;
     layawayPolicySnapshotJson: string | null;
     lines: Array<{
@@ -72,31 +79,55 @@ async function activateEcommerceLayawayReservation(
   const assignedFulfillment = await tx.ecommerceFulfillment.findUnique({
     where: { salesOrderId: input.salesOrderId },
     select: {
+      id: true,
+      storeCodeSnapshot: true,
       inventoryLocation: { select: { id: true, code: true, status: true } },
+      ecommerceOrder: {
+        select: {
+          id: true,
+          orderNo: true,
+          fulfilmentMethod: true,
+          storefrontStore: {
+            select: {
+              id: true,
+              retailOrgId: true,
+              code: true,
+              name: true,
+              shortName: true,
+              addressLine1: true,
+              addressLine2: true,
+              city: true,
+              region: true,
+              ecommerceAllowPickup: true,
+              ecommerceAllowDelivery: true,
+            },
+          },
+          store: {
+            select: {
+              id: true,
+              retailOrgId: true,
+              code: true,
+              name: true,
+              shortName: true,
+              addressLine1: true,
+              addressLine2: true,
+              city: true,
+              region: true,
+              ecommerceAllowPickup: true,
+              ecommerceAllowDelivery: true,
+            },
+          },
+        },
+      },
     },
   });
-  const location =
-    assignedFulfillment?.inventoryLocation?.status === "ACTIVE"
-      ? assignedFulfillment.inventoryLocation
-      : await tx.inventoryLocation.findFirst({
-          where: {
-            retailOrgId: input.retailOrgId,
-            storeId: input.storeId,
-            status: "ACTIVE",
-          },
-          orderBy: [
-            { useForSalesOrderDefault: "desc" },
-            { useForSalesDefault: "desc" },
-            { name: "asc" },
-          ],
-          select: { id: true, code: true },
-        });
-  if (!location) {
+  if (!assignedFulfillment?.inventoryLocation || assignedFulfillment.inventoryLocation.status !== "ACTIVE") {
     throw new EcommerceAuthError(
       "The shop needs an active sales-order inventory location before this Layaway deposit can be accepted.",
       409,
     );
   }
+  const storefrontStore = assignedFulfillment.ecommerceOrder.storefrontStore ?? assignedFulfillment.ecommerceOrder.store;
 
   const productCodes = [...new Set(input.lines.map((line) => line.productCodeSnapshot))];
   const products = await tx.product.findMany({
@@ -112,106 +143,102 @@ async function activateEcommerceLayawayReservation(
       name: true,
       productType: true,
       trackInventory: true,
+      safetyStockLevel: true,
+      baseCostPrice: true,
       matrixVariants: {
-        select: { id: true, code: true },
+        select: { id: true, code: true, displayName: true },
       },
     },
   });
   const productsByCode = new Map(products.map((product) => [product.code, product] as const));
-  const reservableLines = input.lines.flatMap((line) => {
+  const reservableLines = input.lines.flatMap((line, lineIndex) => {
     const product = productsByCode.get(line.productCodeSnapshot);
     if (!product || !product.trackInventory || product.productType === "SERVICE") return [];
-    const variantId = line.productVariantCodeSnapshot
-      ? product.matrixVariants.find((variant) => variant.code === line.productVariantCodeSnapshot)?.id ?? null
+    const variant = line.productVariantCodeSnapshot
+      ? product.matrixVariants.find((candidate) => candidate.code === line.productVariantCodeSnapshot) ?? null
       : null;
-    return [{ line, product, variantId }];
+    return [{ line, lineIndex, product, variant }];
   });
   if (reservableLines.length === 0) return "ACTIVE";
 
-  const positionKey = (productId: string, variantId: string | null) =>
-    `${productId}:${variantId ?? ""}`;
-  const snapshotKey = (productCode: string, variantCode: string | null) =>
-    `${productCode.trim().toUpperCase()}:${variantCode?.trim().toUpperCase() ?? ""}`;
-  const requestedByPosition = new Map<string, number>();
-  for (const { line, product, variantId } of reservableLines) {
-    const key = positionKey(product.id, variantId);
-    requestedByPosition.set(
-      key,
-      toQuantity((requestedByPosition.get(key) ?? 0) + Number(line.baseQuantity)),
-    );
-  }
-  const stockPositions = await tx.inventoryLedgerEntry.groupBy({
-    by: ["productId", "productVariantId"],
-    where: {
-      retailOrgId: input.retailOrgId,
-      storeId: input.storeId,
-      inventoryLocationId: location.id,
-      productId: { in: [...new Set(reservableLines.map(({ product }) => product.id))] },
+  const plan = await resolveEcommerceFulfillmentPlan(
+    tx,
+    storefrontStore,
+    reservableLines.map(({ product, variant, line }) => ({
+      product,
+      variant,
+      baseQuantity: Number(line.baseQuantity),
+    })),
+    {
+      fulfilmentMethod:
+        assignedFulfillment.ecommerceOrder.fulfilmentMethod === "PICKUP" ? "PICKUP" : "DELIVERY",
+      pickupStoreCode:
+        assignedFulfillment.ecommerceOrder.fulfilmentMethod === "PICKUP"
+          ? assignedFulfillment.storeCodeSnapshot
+          : null,
+      preferredDestinationInventoryLocationId: assignedFulfillment.inventoryLocation.id,
+      actionLabel: "accepting this Layaway deposit",
     },
-    _sum: { quantity: true },
-  });
-  const onHandByPosition = new Map(
-    stockPositions.map((position) => [
-      positionKey(position.productId, position.productVariantId),
-      toQuantity(position._sum.quantity),
-    ] as const),
   );
-  const activeReservations = await tx.salesOrderInventoryReservation.findMany({
-    where: {
-      inventoryLocationId: location.id,
-      status: "ACTIVE",
-      productCodeSnapshot: { in: productCodes },
-    },
-    select: {
-      productCodeSnapshot: true,
-      productVariantCodeSnapshot: true,
-      baseQuantity: true,
-    },
-  });
-  const activeReservedBySnapshot = new Map<string, number>();
-  for (const reservation of activeReservations) {
-    const key = snapshotKey(
-      reservation.productCodeSnapshot,
-      reservation.productVariantCodeSnapshot,
-    );
-    activeReservedBySnapshot.set(
-      key,
-      toQuantity((activeReservedBySnapshot.get(key) ?? 0) + Number(reservation.baseQuantity)),
-    );
-  }
-  const checkedPositions = new Set<string>();
-  for (const { line, product, variantId } of reservableLines) {
-    const key = positionKey(product.id, variantId);
-    if (checkedPositions.has(key)) continue;
-    checkedPositions.add(key);
-    const available = calculateLayawayAvailableBaseQuantity({
-      onHandBaseQuantity: onHandByPosition.get(key) ?? 0,
-      activeReservedBaseQuantity:
-        activeReservedBySnapshot.get(
-          snapshotKey(line.productCodeSnapshot, line.productVariantCodeSnapshot),
-        ) ?? 0,
-    });
-    const requested = requestedByPosition.get(key) ?? 0;
-    if (requested > available + 0.0005) {
-      throw new EcommerceAuthError(
-        `Only ${available.toFixed(3)} base unit(s) of ${product.name} remain after active Layaway reservations.`,
-        409,
-      );
-    }
-  }
 
   await tx.salesOrderInventoryReservation.createMany({
-    data: reservableLines.map(({ line }) => ({
-      salesOrderId: input.salesOrderId,
-      salesOrderLineId: line.id,
-      inventoryLocationId: location.id,
-      inventoryLocationCodeSnapshot: location.code,
-      productCodeSnapshot: line.productCodeSnapshot,
-      productVariantCodeSnapshot: line.productVariantCodeSnapshot,
-      baseUnitOfMeasure: line.baseUnitOfMeasure,
-      baseQuantity: line.baseQuantity,
-      status: "ACTIVE",
-    })),
+    data: plan.allocations.map((allocation) => {
+      const source = reservableLines[allocation.lineIndex];
+      return {
+        salesOrderId: input.salesOrderId,
+        salesOrderLineId: source.line.id,
+        inventoryLocationId: allocation.candidate.inventoryLocation.id,
+        inventoryLocationCodeSnapshot: allocation.candidate.inventoryLocation.code,
+        productCodeSnapshot: source.line.productCodeSnapshot,
+        productVariantCodeSnapshot: source.line.productVariantCodeSnapshot,
+        baseUnitOfMeasure: source.line.baseUnitOfMeasure,
+        baseQuantity: allocation.baseQuantity,
+        status: "ACTIVE",
+      };
+    }),
+  });
+  const transferAllocations = plan.allocations.filter(
+    (allocation) => allocation.candidate.inventoryLocation.id !== plan.inventoryLocation.id,
+  );
+  const transferBatchNo = transferAllocations.length > 0
+    ? `ECOM-ALLOC-${input.salesOrderNo.replace(/[^A-Z0-9]/gi, "").slice(-24)}-${Date.now()}`
+    : null;
+  for (const [index, allocation] of transferAllocations.entries()) {
+    const source = reservableLines[allocation.lineIndex];
+    const transfer = await tx.interStoreTransfer.create({
+      data: {
+        retailOrgId: input.retailOrgId,
+        sourceStoreId: allocation.candidate.store.id,
+        destinationStoreId: plan.store.id,
+        sourceInventoryLocationId: allocation.candidate.inventoryLocation.id,
+        destinationInventoryLocationId: plan.inventoryLocation.id,
+        productId: source.product.id,
+        transferNo: `${transferBatchNo}-${index + 1}`,
+        transferBatchNo,
+        lineNo: index + 1,
+        externalReference: assignedFulfillment.ecommerceOrder.orderNo,
+        workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+        origin: InterStoreTransferOrigin.ENTERPRISE,
+        status: InterStoreTransferStatus.REQUESTED,
+        requestedQuantity: allocation.baseQuantity,
+        requestedUnitOfMeasure: source.line.baseUnitOfMeasure,
+        requestedUnitQuantity: allocation.baseQuantity,
+        uomConversionFactor: 1,
+        baseUnitOfMeasure: source.line.baseUnitOfMeasure,
+        unitCost: source.product.baseCostPrice,
+        requestNote: `Network allocation for ecommerce Layaway ${assignedFulfillment.ecommerceOrder.orderNo}.`,
+        requestOperatorName: "Customer ecommerce",
+        requestedByNodeCode: "ECOMMERCE",
+        sourceNodeCode: allocation.candidate.store.code,
+        destinationNodeCode: plan.store.code,
+      },
+      select: { id: true },
+    });
+    await queueInterStoreTransferPublication(tx, { transferId: transfer.id });
+  }
+  await tx.ecommerceFulfillment.update({
+    where: { id: assignedFulfillment.id },
+    data: { routingMethod: plan.routingMethod },
   });
   return "ACTIVE";
 }
@@ -626,7 +653,10 @@ export async function verifyEcommercePayment(input: {
   providerTransactionId?: string | null;
   customerAccountId?: string | null;
 }) {
-  await ensureMultiBranchEcommerceSchemaCompatibility();
+  await Promise.all([
+    ensureMultiBranchEcommerceSchemaCompatibility(),
+    ensureInterStoreTransferSchemaCompatibility(),
+  ]);
   const payment = await prisma.ecommercePayment.findUnique({
     where: { reference: input.reference },
     include: {
@@ -711,6 +741,7 @@ export async function verifyEcommercePayment(input: {
           retailOrgId: currentSalesOrder.retailOrgId,
           storeId: currentSalesOrder.storeId,
           salesOrderId: currentSalesOrder.id,
+          salesOrderNo: currentSalesOrder.orderNo,
           reservationStatus: currentSalesOrder.reservationStatus,
           layawayPolicySnapshotJson: currentSalesOrder.layawayPolicySnapshotJson,
           lines: currentSalesOrder.lines,
