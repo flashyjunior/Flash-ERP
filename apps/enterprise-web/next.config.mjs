@@ -29,6 +29,7 @@ const nextConfig = {
   },
   ...(deployBuild
     ? {
+        output: "standalone",
         typescript: {
           ignoreBuildErrors: true,
         },
