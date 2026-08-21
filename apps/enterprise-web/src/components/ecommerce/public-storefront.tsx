@@ -1103,6 +1103,24 @@ export function PublicStorefront({
     showToast(`${product.name} added to cart`);
   }
 
+  function addProductFromCard(product: Product) {
+    const variant = product.variants.length === 1 ? product.variants[0] : null;
+    const sellingUnits = getProductSellingUnits(product, variant);
+
+    if (product.variants.length > 1 || sellingUnits.length !== 1) {
+      openProduct(product);
+      return;
+    }
+
+    const sellingUnit = resolveProductSellingUnit(product, variant);
+    if (getMaximumOrderQuantity(product, variant, sellingUnit) === 0) {
+      showToast(`${product.name} is currently out of stock.`);
+      return;
+    }
+
+    addProduct(product, variant, 1, sellingUnit);
+  }
+
   function updateCartQuantity(key: string, quantity: number) {
     if (quantity <= 0) {
       setCart((current) => current.filter((line) => line.key !== key));
@@ -1762,19 +1780,12 @@ export function PublicStorefront({
               </button>
             </section>
           ) : null}
-          <section className={styles.shopIntro}>
-            <img alt={`${storefront.store.name} storefront`} src={storefront.store.heroImageUrl} />
-            <div className={styles.shopIntroContent}>
-              <small>Shop from anywhere</small><h1>{storefront.store.name}</h1><p>{storefront.store.description}</p>
-              <span><Truck size={16} /> {storefront.store.allowDelivery ? "Delivery available" : "Pickup only"}</span>
-            </div>
-            {storefront.store.supportPhone ? <a href={`tel:${storefront.store.supportPhone}`}>Call shop</a> : null}
-          </section>
+          <StorefrontHero store={storefront.store} />
           <section className={styles.discovery}>
             <div className={styles.categoryRail}><button className={category === "ALL" ? styles.categoryActive : undefined} onClick={() => setCategory("ALL")} type="button">All</button>{storefront.categories.map((item) => <button className={category === item ? styles.categoryActive : undefined} key={item} onClick={() => setCategory(item)} type="button">{item}</button>)}</div>
           </section>
-          {featuredProducts.length > 0 && category === "ALL" && !searchText ? <section className={styles.featuredSection}><div className={styles.sectionHeading}><div><span>Featured</span><h2>Popular right now</h2></div><Heart size={20} /></div><div className={styles.featuredRail}>{featuredProducts.map((product) => <ProductCard key={`featured-${product.id}`} money={money} onOpen={openProduct} onPreview={openImageViewer} product={product} compact />)}</div></section> : null}
-          <section className={styles.catalogSection}><div className={styles.sectionHeading}><div><span>{category === "ALL" ? "Shop" : category}</span><h2>{visibleProducts.length} product{visibleProducts.length === 1 ? "" : "s"}</h2></div></div>{visibleProducts.length > 0 ? <div className={styles.productGrid}>{visibleProducts.map((product) => <ProductCard key={product.id} money={money} onOpen={openProduct} onPreview={openImageViewer} product={product} />)}</div> : <div className={styles.emptyState}><Search size={28} /><h3>No matching products</h3><button onClick={() => { setSearchText(""); setCategory("ALL"); }} type="button">Clear filters</button></div>}</section>
+          {featuredProducts.length > 0 && category === "ALL" && !searchText ? <section className={styles.featuredSection}><div className={styles.sectionHeading}><div><span>Featured</span><h2>Popular right now</h2></div><Heart size={20} /></div><div className={styles.featuredRail}>{featuredProducts.map((product) => <ProductCard key={`featured-${product.id}`} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} compact />)}</div></section> : null}
+          <section className={styles.catalogSection}><div className={styles.sectionHeading}><div><span>{category === "ALL" ? "Shop" : category}</span><h2>{visibleProducts.length} product{visibleProducts.length === 1 ? "" : "s"}</h2></div></div>{visibleProducts.length > 0 ? <div className={styles.productGrid}>{visibleProducts.map((product) => <ProductCard key={product.id} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} />)}</div> : <div className={styles.emptyState}><Search size={28} /><h3>No matching products</h3><button onClick={() => { setSearchText(""); setCategory("ALL"); }} type="button">Clear filters</button></div>}</section>
         </>
       )}
 
@@ -2029,11 +2040,54 @@ export function PublicStorefront({
   );
 }
 
-function ProductCard({ product, money, onOpen, onPreview, compact = false }: {
+function StorefrontHero({ store }: { store: PublicStorefrontData["store"] }) {
+  const slides = store.heroImageUrls.length > 0 ? store.heroImageUrls : [store.heroImageUrl];
+  const slideSignature = slides.join("|");
+  const [activeSlide, setActiveSlide] = useState(0);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    setActiveSlide(0);
+  }, [slideSignature]);
+
+  useEffect(() => {
+    if (paused || slides.length < 2) return;
+    const timer = window.setInterval(
+      () => setActiveSlide((current) => (current + 1) % slides.length),
+      5500,
+    );
+    return () => window.clearInterval(timer);
+  }, [paused, slides.length]);
+
+  const moveSlide = (direction: -1 | 1) => {
+    setActiveSlide((current) => (current + direction + slides.length) % slides.length);
+  };
+
+  return (
+    <section
+      aria-label={`${store.name} offers`}
+      className={styles.shopIntro}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+    >
+      <div className={styles.shopIntroTrack} style={{ transform: `translateX(-${activeSlide * 100}%)` }}>
+        {slides.map((imageUrl, index) => <div aria-hidden={index !== activeSlide} className={styles.shopIntroSlide} key={`${imageUrl}-${index}`}><img alt={index === 0 ? `${store.name} storefront` : ""} src={imageUrl} /></div>)}
+      </div>
+      <div className={styles.shopIntroContent}>
+        <small>Shop from anywhere</small><h1>{store.name}</h1><p>{store.description}</p>
+        <span><Truck size={16} /> {store.allowDelivery ? "Delivery available" : "Pickup only"}</span>
+      </div>
+      {slides.length > 1 ? <><div className={styles.heroControls}><button aria-label="Previous banner" onClick={() => moveSlide(-1)} title="Previous banner" type="button"><ChevronLeft size={22} /></button><button aria-label="Next banner" onClick={() => moveSlide(1)} title="Next banner" type="button"><ChevronRight size={22} /></button></div><div aria-label="Storefront banners" className={styles.heroDots}>{slides.map((imageUrl, index) => <button aria-label={`Show banner ${index + 1}`} aria-pressed={index === activeSlide} className={index === activeSlide ? styles.heroDotActive : undefined} key={`${imageUrl}-dot-${index}`} onClick={() => setActiveSlide(index)} title={`Show banner ${index + 1}`} type="button" />)}</div></> : null}
+      {store.supportPhone ? <a href={`tel:${store.supportPhone}`}>Call shop</a> : null}
+    </section>
+  );
+}
+
+function ProductCard({ product, money, onOpen, onAdd, compact = false }: {
   product: Product;
   money: Intl.NumberFormat;
   onOpen: (product: Product) => void;
-  onPreview: (product: Product, imageUrl: string | null) => void;
+  onAdd: (product: Product) => void;
   compact?: boolean;
 }) {
   const promotion = getProductPromotion(product);
@@ -2044,14 +2098,13 @@ function ProductCard({ product, money, onOpen, onPreview, compact = false }: {
   return (
     <article className={classNames(styles.productCard, compact && styles.productCardCompact)}>
       <button
-        aria-label={previewImageUrl ? `Preview image for ${product.name}` : `View details for ${product.name}`}
+        aria-label={`View details for ${product.name}`}
         className={styles.productVisualButton}
-        onClick={() => previewImageUrl ? onPreview(product, previewImageUrl) : onOpen(product)}
-        title={previewImageUrl ? "Preview product image" : "View product details"}
+        onClick={() => onOpen(product)}
+        title="View product details"
         type="button"
       >
         <ProductVisual imageUrl={previewImageUrl} product={product} />
-        {previewImageUrl ? <span className={styles.productImageZoomCue}><ZoomIn size={16} /></span> : null}
         {promotion ? (
           <span className={styles.promotionBadge}><BadgePercent size={13} />{getPromotionLabel(promotion, money)}</span>
         ) : product.featured ? <span className={styles.featuredBadge}>Featured</span> : null}
@@ -2062,6 +2115,7 @@ function ProductCard({ product, money, onOpen, onPreview, compact = false }: {
         <div className={styles.cardRating}><StarRating rating={product.averageRating} /><span>{product.reviewCount > 0 ? product.reviewCount : "New"}</span></div>
         <div className={styles.productCardFooter}>
           <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : isProductOutOfStock(product) ? "Out of stock" : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : `${Math.floor(product.availableQuantity)} available`}</small></div>
+          <button aria-label={`Add ${product.name} to cart`} className={styles.productQuickAdd} disabled={isProductOutOfStock(product)} onClick={() => onAdd(product)} title="Add to cart" type="button"><ShoppingCart size={18} /></button>
         </div>
       </div>
     </article>

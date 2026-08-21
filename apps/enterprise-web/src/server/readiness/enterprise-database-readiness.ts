@@ -99,6 +99,7 @@ const requiredColumns = [
   { tableName: "Store", columnName: "ecommerceAllowPickup" },
   { tableName: "Store", columnName: "ecommerceAllowDelivery" },
   { tableName: "Store", columnName: "ecommerceHeroImageUrl" },
+  { tableName: "Store", columnName: "ecommerceHeroSlidesJson" },
   { tableName: "Store", columnName: "ecommerceWhatsappPhone" },
   { tableName: "Store", columnName: "ecommercePayOnDeliveryEnabled" },
   { tableName: "Product", columnName: "ecommercePublished" },

@@ -11,6 +11,7 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseBankAccountPublishedPayload,
   EnterpriseInterStoreTransferPublishedPayload,
   EnterpriseInterStoreTransferRequestTargetPublishedPayload,
@@ -23518,6 +23519,229 @@ export class LocalStoreService {
           );
       }
 
+      return;
+    }
+
+    if (
+      event.aggregateType === "salesOrder" &&
+      event.eventType === "sales-order.published"
+    ) {
+      const order =
+        payload as Partial<EnterpriseEcommerceSalesOrderPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        order.source !== "ECOMMERCE" ||
+        order.storeCode !== storeCode ||
+        typeof order.orderId !== "string" ||
+        typeof order.orderNo !== "string" ||
+        typeof order.sourceTransactionId !== "string" ||
+        typeof order.sourceTransactionNo !== "string" ||
+        typeof order.totalAmount !== "number" ||
+        typeof order.paidAmount !== "number" ||
+        typeof order.balanceAmount !== "number" ||
+        typeof order.salesOrderRecordVersion !== "number" ||
+        !Array.isArray(order.lines) ||
+        !Array.isArray(order.reservations) ||
+        (order.fulfilmentMethod !== "PICKUP" && order.fulfilmentMethod !== "DELIVERY") ||
+        (order.paymentTiming !== "PREPAY" && order.paymentTiming !== "ON_DELIVERY") ||
+        (order.status !== "OPEN" && order.status !== "CANCELLED" && order.status !== "EXPIRED")
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid ecommerce sales-order publication payload.",
+        );
+      }
+
+      const existing = this.db
+        .prepare(
+          "SELECT record_version FROM sales_order WHERE id = ? LIMIT 1",
+        )
+        .get(order.orderId) as { record_version: number | string } | undefined;
+      if (
+        existing &&
+        asNumber(existing.record_version) > order.salesOrderRecordVersion
+      ) {
+        return;
+      }
+
+      for (const line of order.lines) {
+        if (
+          typeof line !== "object" ||
+          line === null ||
+          typeof line.lineId !== "string" ||
+          typeof line.productCode !== "string" ||
+          typeof line.productName !== "string" ||
+          typeof line.quantity !== "number" ||
+          typeof line.unitPrice !== "number" ||
+          typeof line.lineTotal !== "number"
+        ) {
+          throw new Error(
+            "Flash ERP received an invalid ecommerce sales-order line.",
+          );
+        }
+        const product = this.db
+          .prepare("SELECT id FROM product_snapshot WHERE product_code = ? LIMIT 1")
+          .get(line.productCode) as { id: string } | undefined;
+        if (!product) {
+          throw new Error(
+            `Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`,
+          );
+        }
+      }
+
+      const transactionStatus = order.status === "OPEN" ? "PARKED" : "VOIDED";
+      const detailJson = JSON.stringify({
+        source: "ECOMMERCE",
+        fulfilmentMethod: order.fulfilmentMethod,
+        paymentTiming: order.paymentTiming,
+        selectedPaymentMethodCode: order.selectedPaymentMethodCode ?? null,
+        selectedPaymentMethodName: order.selectedPaymentMethodName ?? null,
+        recipientName: order.recipientName ?? null,
+        deliveryPhone: order.deliveryPhone ?? null,
+        deliveryAddress: order.deliveryAddress ?? null,
+        networkAllocation: order.networkAllocation === true,
+      });
+
+      this.db
+        .prepare(
+          "INSERT INTO pos_transaction (id, transaction_no, shift_id, cashier_code, customer_id, source_transaction_id, source_transaction_no, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, header_reference, additional_details, record_version, updated_at) VALUES (?, ?, NULL, 'ECOMMERCE', ?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, customer_id = excluded.customer_id, subtotal_amount = excluded.subtotal_amount, discount_amount = excluded.discount_amount, tax_amount = excluded.tax_amount, total_amount = excluded.total_amount, paid_amount = excluded.paid_amount, notes = excluded.notes, header_reference = excluded.header_reference, additional_details = excluded.additional_details, record_version = excluded.record_version, updated_at = excluded.updated_at",
+        )
+        .run(
+          order.sourceTransactionId,
+          order.sourceTransactionNo,
+          order.customerId ?? null,
+          order.sourceTransactionId,
+          order.sourceTransactionNo,
+          transactionStatus,
+          order.subtotalAmount ?? order.totalAmount,
+          order.discountAmount ?? 0,
+          order.taxAmount ?? 0,
+          order.totalAmount,
+          order.paidAmount,
+          order.note ?? null,
+          order.orderNo,
+          detailJson,
+          order.salesOrderRecordVersion,
+          appliedAt,
+        );
+
+      if (!existing) {
+        for (const line of order.lines) {
+          const product = this.db
+            .prepare("SELECT id FROM product_snapshot WHERE product_code = ? LIMIT 1")
+            .get(line.productCode) as { id: string };
+          this.db
+            .prepare(
+              "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, inventory_location_code, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, selling_unit_of_measure, base_unit_of_measure, uom_conversion_factor, base_quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override) VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+            )
+            .run(
+              line.lineId,
+              order.sourceTransactionId,
+              product.id,
+              line.lineId,
+              order.dispatchInventoryLocationCode ?? null,
+              line.appliedPromotionCode ?? null,
+              line.appliedPromotionName ?? null,
+              line.productCode,
+              line.productVariantCode ?? null,
+              line.productName,
+              line.variantSize ?? null,
+              line.variantColor ?? null,
+              line.variantAttributesSnapshot ?? null,
+              line.lineNote ?? null,
+              line.quantity,
+              line.sellingUnitOfMeasure ?? "EA",
+              line.baseUnitOfMeasure ?? "EA",
+              line.uomConversionFactor ?? 1,
+              line.baseQuantity ?? line.quantity,
+              line.unitPrice,
+              line.discountAmount ?? 0,
+              line.taxAmount ?? 0,
+              line.lineTotal,
+            );
+        }
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO sales_order (id, order_no, source_transaction_id, source_transaction_no, customer_id, customer_no, customer_name, order_type, status, total_amount, deposit_amount, paid_amount, balance_amount, deposit_tender_method_code, deposit_tender_method_name, deposit_payment_method, deposit_reference, deposit_paid_at, layaway_policy_snapshot_json, minimum_deposit_amount, reservation_status, reservation_created_at, reservation_released_at, layaway_expires_at, expired_at, cancellation_fee_amount, refunded_amount, record_version, operator_name, note, fulfilled_transaction_id, fulfilled_transaction_no, synced_at, created_at, fulfilled_at, cancelled_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, total_amount = excluded.total_amount, deposit_amount = excluded.deposit_amount, paid_amount = excluded.paid_amount, balance_amount = excluded.balance_amount, deposit_tender_method_code = excluded.deposit_tender_method_code, deposit_tender_method_name = excluded.deposit_tender_method_name, deposit_payment_method = excluded.deposit_payment_method, deposit_reference = excluded.deposit_reference, deposit_paid_at = excluded.deposit_paid_at, reservation_status = excluded.reservation_status, reservation_created_at = excluded.reservation_created_at, reservation_released_at = excluded.reservation_released_at, layaway_expires_at = excluded.layaway_expires_at, expired_at = excluded.expired_at, cancellation_fee_amount = excluded.cancellation_fee_amount, refunded_amount = excluded.refunded_amount, record_version = excluded.record_version, note = excluded.note, fulfilled_transaction_id = excluded.fulfilled_transaction_id, fulfilled_transaction_no = excluded.fulfilled_transaction_no, fulfilled_at = excluded.fulfilled_at, cancelled_at = excluded.cancelled_at, updated_at = excluded.updated_at",
+        )
+        .run(
+          order.orderId,
+          order.orderNo,
+          order.sourceTransactionId,
+          order.sourceTransactionNo,
+          order.customerId ?? null,
+          order.customerNo ?? null,
+          order.customerName ?? null,
+          order.orderType ?? "SALES_ORDER",
+          order.status,
+          order.totalAmount,
+          order.depositAmount ?? 0,
+          order.paidAmount,
+          order.balanceAmount,
+          order.depositTenderMethodCode ?? null,
+          order.depositTenderMethodName ?? null,
+          order.depositPaymentMethod ?? null,
+          order.depositReference ?? null,
+          order.depositPaidAt ?? null,
+          order.layawayPolicySnapshotJson ?? null,
+          order.minimumDepositAmount ?? 0,
+          order.reservationStatus ?? "NOT_APPLICABLE",
+          order.reservationCreatedAt ?? null,
+          order.reservationReleasedAt ?? null,
+          order.layawayExpiresAt ?? null,
+          order.expiredAt ?? null,
+          order.cancellationFeeAmount ?? 0,
+          order.refundedAmount ?? 0,
+          order.salesOrderRecordVersion,
+          order.operatorName ?? "Customer web order",
+          order.note ?? null,
+          order.fulfilledTransactionId ?? null,
+          order.fulfilledTransactionNo ?? null,
+          order.createdAt ?? appliedAt,
+          order.fulfilledAt ?? null,
+          order.cancelledAt ?? null,
+          appliedAt,
+        );
+
+      this.db
+        .prepare("DELETE FROM sales_order_inventory_reservation WHERE sales_order_id = ?")
+        .run(order.orderId);
+      for (const reservation of order.reservations) {
+        if (
+          typeof reservation !== "object" ||
+          reservation === null ||
+          typeof reservation.reservationId !== "string" ||
+          typeof reservation.salesOrderLineId !== "string" ||
+          typeof reservation.productCode !== "string" ||
+          typeof reservation.baseQuantity !== "number"
+        ) {
+          throw new Error(
+            "Flash ERP received an invalid ecommerce sales-order reservation.",
+          );
+        }
+        this.db
+          .prepare(
+            "INSERT INTO sales_order_inventory_reservation (id, sales_order_id, sales_order_line_id, inventory_location_code, product_code, product_variant_code, base_unit_of_measure, base_quantity, status, release_reason, created_at, released_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            reservation.reservationId,
+            order.orderId,
+            reservation.salesOrderLineId,
+            reservation.inventoryLocationCode ?? null,
+            reservation.productCode,
+            reservation.productVariantCode ?? null,
+            reservation.baseUnitOfMeasure,
+            reservation.baseQuantity,
+            reservation.status,
+            reservation.releaseReason ?? null,
+            reservation.createdAt,
+            reservation.releasedAt ?? null,
+            appliedAt,
+          );
+      }
       return;
     }
 

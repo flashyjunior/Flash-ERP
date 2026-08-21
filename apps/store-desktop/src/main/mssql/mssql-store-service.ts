@@ -26,6 +26,7 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseGiftCertificatePublishedPayload,
   EnterpriseInventoryLocationPublishedPayload,
   EnterpriseInventorySerialSnapshotPublishedPayload,
@@ -21955,6 +21956,113 @@ export class MssqlStoreService {
         runner,
       );
 
+      return;
+    }
+
+    if (
+      event.aggregateType === "salesOrder" &&
+      event.eventType === "sales-order.published"
+    ) {
+      const order = payload as Partial<EnterpriseEcommerceSalesOrderPublishedPayload>;
+      const expectedStoreCode = expectedInboundStoreCode(order.storeCode);
+      if (
+        order.source !== "ECOMMERCE" ||
+        order.storeCode !== expectedStoreCode ||
+        typeof order.orderId !== "string" ||
+        typeof order.orderNo !== "string" ||
+        typeof order.sourceTransactionId !== "string" ||
+        typeof order.sourceTransactionNo !== "string" ||
+        typeof order.totalAmount !== "number" ||
+        typeof order.paidAmount !== "number" ||
+        typeof order.balanceAmount !== "number" ||
+        typeof order.salesOrderRecordVersion !== "number" ||
+        !Array.isArray(order.lines) ||
+        !Array.isArray(order.reservations) ||
+        (order.fulfilmentMethod !== "PICKUP" && order.fulfilmentMethod !== "DELIVERY") ||
+        (order.paymentTiming !== "PREPAY" && order.paymentTiming !== "ON_DELIVERY") ||
+        (order.status !== "OPEN" && order.status !== "CANCELLED" && order.status !== "EXPIRED")
+      ) {
+        throw new Error("Flash ERP received an invalid ecommerce sales-order publication payload.");
+      }
+      await rememberInboundStoreCode(order.storeCode);
+      const existingRows = await this.query<{ record_version: number }>(
+        "SELECT [record_version] FROM [dbo].[sales_order] WHERE [id] = @orderId",
+        { orderId: order.orderId }, runner,
+      );
+      if (existingRows[0] && existingRows[0].record_version > order.salesOrderRecordVersion) return;
+
+      await this.mergeRow("pos_transaction", ["id"], {
+        id: order.sourceTransactionId,
+        transaction_no: order.sourceTransactionNo,
+        shift_id: null,
+        cashier_code: "ECOMMERCE",
+        customer_id: order.customerId ?? null,
+        source_transaction_id: order.sourceTransactionId,
+        source_transaction_no: order.sourceTransactionNo,
+        transaction_type: "SALE",
+        status: order.status === "OPEN" ? "PARKED" : "VOIDED",
+        subtotal_amount: order.subtotalAmount ?? order.totalAmount,
+        discount_amount: order.discountAmount ?? 0,
+        loyalty_redemption_points: 0,
+        loyalty_redemption_amount: 0,
+        tax_amount: order.taxAmount ?? 0,
+        total_amount: order.totalAmount,
+        paid_amount: order.paidAmount,
+        change_amount: 0,
+        notes: order.note ?? null,
+        header_reference: order.orderNo,
+        additional_details: JSON.stringify({ source: "ECOMMERCE", fulfilmentMethod: order.fulfilmentMethod, paymentTiming: order.paymentTiming, recipientName: order.recipientName ?? null, deliveryPhone: order.deliveryPhone ?? null, deliveryAddress: order.deliveryAddress ?? null, networkAllocation: order.networkAllocation === true }),
+        completed_at: null,
+        record_version: order.salesOrderRecordVersion,
+        deleted_at: null,
+        updated_at: appliedAt,
+      }, runner);
+      await this.query("DELETE FROM [dbo].[pos_transaction_line] WHERE [pos_transaction_id] = @transactionId", { transactionId: order.sourceTransactionId }, runner);
+      for (const line of order.lines) {
+        if (typeof line !== "object" || line === null || typeof line.lineId !== "string" || typeof line.productCode !== "string" || typeof line.productName !== "string" || typeof line.quantity !== "number" || typeof line.unitPrice !== "number" || typeof line.lineTotal !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order line.");
+        const products = await this.query<{ id: string }>("SELECT [id] FROM [dbo].[product_snapshot] WHERE [product_code] = @productCode", { productCode: line.productCode }, runner);
+        if (!products[0]) throw new Error(`Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`);
+        await this.mergeRow("pos_transaction_line", ["id"], {
+          id: line.lineId, pos_transaction_id: order.sourceTransactionId, product_id: products[0].id,
+          line_intent: "SALE", source_line_id: line.lineId, inventory_location_code: order.dispatchInventoryLocationCode ?? null,
+          applied_promotion_code: line.appliedPromotionCode ?? null, applied_promotion_name: line.appliedPromotionName ?? null,
+          product_code_snapshot: line.productCode, product_variant_code_snapshot: line.productVariantCode ?? null,
+          product_name_snapshot: line.productName, variant_size: line.variantSize ?? null, variant_color: line.variantColor ?? null,
+          variant_attributes_snapshot: line.variantAttributesSnapshot ?? null, line_note: line.lineNote ?? null,
+          serial_numbers_json: "[]", batch_allocations_json: "[]", quantity: line.quantity,
+          selling_unit_of_measure: line.sellingUnitOfMeasure ?? "EA", base_unit_of_measure: line.baseUnitOfMeasure ?? "EA",
+          uom_conversion_factor: line.uomConversionFactor ?? 1, base_quantity: line.baseQuantity ?? line.quantity,
+          unit_price: line.unitPrice, discount_amount: line.discountAmount ?? 0, tax_amount: line.taxAmount ?? 0,
+          line_total: line.lineTotal, manual_price_override: 0, manual_discount_override: 0,
+        }, runner);
+      }
+      await this.mergeRow("sales_order", ["id"], {
+        id: order.orderId, order_no: order.orderNo, source_transaction_id: order.sourceTransactionId, source_transaction_no: order.sourceTransactionNo,
+        customer_id: order.customerId ?? null, customer_no: order.customerNo ?? null, customer_name: order.customerName ?? null,
+        order_type: order.orderType ?? "SALES_ORDER", status: order.status, total_amount: order.totalAmount,
+        deposit_amount: order.depositAmount ?? 0, paid_amount: order.paidAmount, balance_amount: order.balanceAmount,
+        deposit_tender_method_code: order.depositTenderMethodCode ?? null, deposit_tender_method_name: order.depositTenderMethodName ?? null,
+        deposit_payment_method: order.depositPaymentMethod ?? null, deposit_reference: order.depositReference ?? null, deposit_paid_at: order.depositPaidAt ?? null,
+        layaway_policy_snapshot_json: order.layawayPolicySnapshotJson ?? null, minimum_deposit_amount: order.minimumDepositAmount ?? 0,
+        reservation_status: order.reservationStatus ?? "NOT_APPLICABLE", reservation_created_at: order.reservationCreatedAt ?? null,
+        reservation_released_at: order.reservationReleasedAt ?? null, layaway_expires_at: order.layawayExpiresAt ?? null, expired_at: order.expiredAt ?? null,
+        cancellation_fee_amount: order.cancellationFeeAmount ?? 0, refunded_amount: order.refundedAmount ?? 0,
+        record_version: order.salesOrderRecordVersion, operator_name: order.operatorName ?? "Customer web order", note: order.note ?? null,
+        fulfilled_transaction_id: order.fulfilledTransactionId ?? null, fulfilled_transaction_no: order.fulfilledTransactionNo ?? null,
+        synced_at: null, created_at: order.createdAt ?? appliedAt, fulfilled_at: order.fulfilledAt ?? null,
+        cancelled_at: order.cancelledAt ?? null, updated_at: appliedAt,
+      }, runner);
+      await this.query("DELETE FROM [dbo].[sales_order_inventory_reservation] WHERE [sales_order_id] = @orderId", { orderId: order.orderId }, runner);
+      for (const reservation of order.reservations) {
+        if (typeof reservation !== "object" || reservation === null || typeof reservation.reservationId !== "string" || typeof reservation.salesOrderLineId !== "string" || typeof reservation.productCode !== "string" || typeof reservation.baseQuantity !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order reservation.");
+        await this.mergeRow("sales_order_inventory_reservation", ["id"], {
+          id: reservation.reservationId, sales_order_id: order.orderId, sales_order_line_id: reservation.salesOrderLineId,
+          inventory_location_code: reservation.inventoryLocationCode ?? null, product_code: reservation.productCode,
+          product_variant_code: reservation.productVariantCode ?? null, base_unit_of_measure: reservation.baseUnitOfMeasure,
+          base_quantity: reservation.baseQuantity, status: reservation.status, release_reason: reservation.releaseReason ?? null,
+          created_at: reservation.createdAt, released_at: reservation.releasedAt ?? null, updated_at: appliedAt,
+        }, runner);
+      }
       return;
     }
 

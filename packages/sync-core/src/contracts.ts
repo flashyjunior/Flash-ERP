@@ -348,6 +348,22 @@ export type StoreSalesOrderRecordedPayload = {
   reservations?: StoreSalesOrderReservationPayload[];
 };
 
+export type EnterpriseEcommerceSalesOrderPublishedPayload =
+  StoreSalesOrderRecordedPayload & {
+    source: "ECOMMERCE";
+    salesOrderRecordVersion: number;
+    fulfilmentMethod: "PICKUP" | "DELIVERY";
+    paymentTiming: "PREPAY" | "ON_DELIVERY";
+    selectedPaymentMethodCode: string | null;
+    selectedPaymentMethodName: string | null;
+    recipientName: string;
+    deliveryPhone: string;
+    deliveryAddress: string | null;
+    dispatchInventoryLocationCode: string | null;
+    dispatchInventoryLocationName: string | null;
+    networkAllocation: boolean;
+  };
+
 export type StoreSalesOrderLinePayload = {
   lineId: string;
   productCode: string;
