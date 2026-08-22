@@ -28,9 +28,26 @@ export type StorefrontDepartmentNode = {
 };
 
 const UNCATEGORIZED_LABEL = "Other";
+const LOWERCASE_TITLE_WORDS = new Set(["and", "for", "in", "of", "on", "or", "the", "to"]);
+
+export function formatStorefrontTaxonomyLabel(value: string | null | undefined) {
+  const normalized = value?.trim().replace(/\s+/g, " ");
+  if (!normalized) return UNCATEGORIZED_LABEL;
+
+  return normalized
+    .toLowerCase()
+    .split(" ")
+    .map((word, index) => {
+      if (index > 0 && LOWERCASE_TITLE_WORDS.has(word)) return word;
+      return word.replace(/(^|[-/])([a-z])/g, (_, separator: string, letter: string) =>
+        `${separator}${letter.toUpperCase()}`
+      );
+    })
+    .join(" ");
+}
 
 function normalizeCatalogValue(value: string | null | undefined) {
-  return value?.trim() || UNCATEGORIZED_LABEL;
+  return formatStorefrontTaxonomyLabel(value);
 }
 
 export function buildStorefrontCategoryTree(

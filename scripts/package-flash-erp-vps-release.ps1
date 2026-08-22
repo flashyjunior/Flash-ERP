@@ -197,7 +197,29 @@ try {
     $relativeToNext = $aliasLink.FullName.Substring($nextSource.Length + 1)
     $aliasDestination = Join-Path $nextDestination $relativeToNext
     Invoke-Robocopy -Source $aliasLink.FullName -Destination $aliasDestination
-    $requiredFiles = @("index.js", "package.json")
+    $packageJsonPath = Join-Path $aliasDestination "package.json"
+    if (-not (Test-Path -LiteralPath $packageJsonPath -PathType Leaf)) {
+      throw "Materialized runtime alias is missing package.json: $aliasDestination"
+    }
+
+    $packageMetadata = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
+    $mainRelativePath = ([string]$packageMetadata.main).Replace("/", "\")
+    if ($mainRelativePath.StartsWith(".\")) {
+      $mainRelativePath = $mainRelativePath.Substring(2)
+    }
+    if (
+      [string]::IsNullOrWhiteSpace($mainRelativePath) -or
+      [IO.Path]::IsPathRooted($mainRelativePath) -or
+      @($mainRelativePath.Split("\") | Where-Object { $_ -eq ".." }).Count -gt 0
+    ) {
+      throw "Runtime alias has no safe package main entrypoint: $aliasDestination"
+    }
+
+    $requiredFiles = @("package.json", $mainRelativePath)
+    if ($relativeToNext.Replace("\", "/") -like "node_modules/@prisma/client-*") {
+      $requiredFiles += "index.js"
+    }
+    $requiredFiles = @($requiredFiles | Select-Object -Unique)
     foreach ($requiredFile in $requiredFiles) {
       if (-not (Test-Path -LiteralPath (Join-Path $aliasDestination $requiredFile) -PathType Leaf)) {
         throw "Materialized runtime alias is missing $requiredFile`: $aliasDestination"

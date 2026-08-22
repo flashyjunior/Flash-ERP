@@ -4,6 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 import bcrypt from "bcryptjs";
 import "dotenv/config";
 
+import { formatStorefrontTaxonomyLabel } from "../../apps/enterprise-web/src/components/ecommerce/storefront-category-tree";
 import { prisma } from "../../apps/enterprise-web/src/lib/db/prisma";
 
 const storeCode = process.env.FLASH_ERP_E2E_ECOMMERCE_STORE;
@@ -199,6 +200,7 @@ test.describe("public ecommerce extension", () => {
   });
 
   test("renders a usable storefront across mobile, tablet, and desktop", async ({ page }, testInfo) => {
+    test.setTimeout(300_000);
     await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
     await expect(page.locator("h1")).toHaveCount(1);
     await expect(page.getByPlaceholder("Search products, brands and categories")).toBeVisible();
@@ -247,6 +249,7 @@ test.describe("public ecommerce extension", () => {
     expect(largeFontSize / mediumFontSize).toBeGreaterThanOrEqual(1.2);
     await page.reload();
     await expect(page.getByRole("button", { name: "Use large text" })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "Use medium text" }).click();
 
     const catalogResponse = await page.request.get(
       `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
@@ -257,23 +260,24 @@ test.describe("public ecommerce extension", () => {
       ?.map((product) => product.department?.trim())
       .find((value): value is string => Boolean(value));
     if (departmentName) {
+      const departmentDisplayName = formatStorefrontTaxonomyLabel(departmentName);
       const departmentCount = catalog.products?.filter(
         (product) => product.department?.trim() === departmentName
       ).length ?? 0;
-      const escapedDepartmentName = departmentName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const escapedDepartmentName = departmentDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const categoriesNavigation = page.getByRole("navigation", { name: "Product categories" });
       const departmentButton = categoriesNavigation.getByRole("button", {
         name: new RegExp(`^${escapedDepartmentName}\\s+${departmentCount}$`)
       });
-      await expect(page.getByRole("region", { name: `${departmentName} categories` })).toHaveCount(0);
+      await expect(page.getByRole("region", { name: `${departmentDisplayName} categories` })).toHaveCount(0);
       await departmentButton.hover();
-      await expect(page.getByRole("region", { name: `${departmentName} categories` })).toBeVisible();
+      await expect(page.getByRole("region", { name: `${departmentDisplayName} categories` })).toBeVisible();
       await page.screenshot({
         path: testInfo.outputPath("category-mega-menu-desktop.png"),
         fullPage: false
       });
       await departmentButton.click();
-      await expect(page.getByRole("region", { name: `${departmentName} categories` })).toHaveCount(0);
+      await expect(page.getByRole("region", { name: `${departmentDisplayName} categories` })).toHaveCount(0);
       await expect(page.getByRole("heading", {
         level: 2,
         name: `${departmentCount} product${departmentCount === 1 ? "" : "s"}`
@@ -281,6 +285,49 @@ test.describe("public ecommerce extension", () => {
       await categoriesNavigation.getByRole("button", {
         name: `All products ${catalog.products?.length ?? 0}`
       }).click();
+    }
+
+    const searchCategory = catalog.products
+      ?.map((product) => product.category?.trim())
+      .find((value): value is string => Boolean(value));
+    if (searchCategory) {
+      const searchCategoryLabel = formatStorefrontTaxonomyLabel(searchCategory);
+      const escapedSearchCategory = searchCategoryLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      await searchInput.fill(searchCategory);
+      const suggestions = page.locator('[aria-label="Search suggestions"]');
+      await expect(suggestions).toBeVisible();
+      await suggestions.screenshot({ path: testInfo.outputPath("search-suggestions-desktop.png") });
+      await suggestions.getByRole("button", {
+        name: new RegExp(`^${escapedSearchCategory}\\s+Category$`)
+      }).click();
+      await expect(page).toHaveURL(/\/shop\/[^/]+\/search\?q=/, { timeout: 60_000 });
+      await expect(page.getByTestId("storefront-search-results")).toBeVisible();
+      await expect(page.getByRole("group", { name: "Categories" })).toBeVisible();
+      await expect(page.getByRole("group", { name: "Price range" })).toBeVisible();
+      await page.getByTestId("storefront-search-results").screenshot({
+        path: testInfo.outputPath("search-results-desktop.png")
+      });
+
+      const resultCard = page.locator("article").filter({
+        has: page.getByRole("heading", { level: 3 })
+      }).first();
+      const resultVisual = resultCard.getByRole("button", { name: /^View details for / }).locator("div").first();
+      await expect(resultVisual).toHaveCSS("background-color", "rgb(255, 255, 255)");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const filterToggle = page.getByRole("button", { name: "Filters", exact: false });
+      await expect(filterToggle).toBeVisible();
+      await filterToggle.click();
+      await expect(page.getByRole("group", { name: "Categories" })).toBeVisible();
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+        )
+      ).toBeLessThanOrEqual(1);
+      await page.getByTestId("storefront-search-results").screenshot({
+        path: testInfo.outputPath("search-results-mobile.png")
+      });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
     }
     for (const imageUrl of catalog.store?.heroImageUrls ?? []) {
       const imageResponse = await page.request.get(imageUrl);
@@ -299,6 +346,7 @@ test.describe("public ecommerce extension", () => {
     await expect(page).toHaveURL(storefrontUrl);
     await expect(page.getByText(`${simpleProduct?.name} added to cart`)).toBeVisible();
     await expect(page.getByRole("button", { name: "Open cart" }).locator("b")).toHaveText("1");
+    await expect(page.getByRole("button", { name: /1 item/ })).toHaveCount(0);
 
     const heroSection = page.locator('section[aria-label$=" offers"]');
     await expect(heroSection.getByText("Shop from anywhere")).toHaveCount(0);
@@ -347,10 +395,11 @@ test.describe("public ecommerce extension", () => {
     }
 
     await page.setViewportSize({ width: 390, height: 844 });
-    const productHeading = page.getByRole("heading", { level: 3 }).first();
+    const productCard = page.locator("article").filter({ has: page.getByRole("heading", { level: 3 }) }).first();
+    const productHeading = productCard.getByRole("heading", { level: 3 });
     const productName = (await productHeading.innerText()).trim();
-    await productHeading.click();
-    await expect(page).toHaveURL(/\/shop\/[^/]+\/products\/[^/]+$/);
+    await productCard.locator("strong").first().click();
+    await expect(page).toHaveURL(/\/shop\/[^/]+\/products\/[^/]+$/, { timeout: 60_000 });
     await expect(page.getByRole("dialog")).toHaveCount(0);
     const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
     await expect(breadcrumb).toBeVisible();

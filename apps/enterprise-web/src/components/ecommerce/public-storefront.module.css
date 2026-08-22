@@ -101,10 +101,17 @@
   gap: 7px;
 }
 
-.headerSearch {
-  display: flex;
+.searchArea {
+  position: relative;
+  z-index: 3;
   grid-column: 1;
   grid-row: 2;
+  width: 100%;
+  min-width: 0;
+}
+
+.headerSearch {
+  display: flex;
   width: 100%;
   height: 46px;
   min-width: 0;
@@ -154,6 +161,125 @@
 .headerSearch button:hover {
   background: #e5e7eb;
   color: #475467;
+}
+
+.searchSuggestions {
+  position: absolute;
+  z-index: 45;
+  top: calc(100% + 7px);
+  right: 0;
+  left: 0;
+  overflow-y: auto;
+  max-height: min(68vh, 620px);
+  border: 1px solid #dfe3e1;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 18px 42px rgba(25, 34, 29, 0.2);
+}
+
+.searchSuggestionGroup {
+  padding: 8px;
+}
+
+.searchSuggestionGroup + .searchSuggestionGroup {
+  border-top: 1px solid #eef0ef;
+}
+
+.searchSuggestionGroup h2 {
+  margin: 2px 6px 6px;
+  color: #68736c;
+  font-size: 0.6875em;
+  font-weight: 850;
+}
+
+.searchSuggestionGroup > button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.searchSuggestionGroup > button:hover,
+.searchSuggestionGroup > button:focus-visible {
+  background: #f3f5f4;
+  outline: 0;
+}
+
+.searchSuggestionGroup > button > span:nth-child(2) {
+  min-width: 0;
+}
+
+.searchSuggestionGroup strong,
+.searchSuggestionGroup small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchSuggestionGroup strong {
+  font-size: 0.8125em;
+}
+
+.searchSuggestionGroup small {
+  margin-top: 3px;
+  color: #7b847f;
+  font-size: 0.625em;
+}
+
+.searchSuggestionGroup > button > svg {
+  color: #98a19c;
+}
+
+.searchSuggestionVisual {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid #e8ebe9;
+  border-radius: 6px;
+  background: #f2f4f3;
+  color: #56615b;
+}
+
+.searchSuggestionVisual img {
+  object-fit: contain;
+}
+
+.searchAllResults {
+  display: flex;
+  width: 100%;
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 0;
+  border-top: 1px solid #e2e6e3;
+  background: #fff8e9;
+  color: var(--brand-dark);
+  font-weight: 800;
+}
+
+.searchAllResults:hover {
+  background: #fff0cf;
+}
+
+.searchSuggestionEmpty {
+  padding: 22px 16px;
+  color: var(--muted);
+  font-size: 0.8125em;
+  text-align: center;
 }
 
 .textSizeControl {
@@ -521,7 +647,6 @@
   overflow: hidden;
   font-size: 0.75em;
   text-overflow: ellipsis;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -802,6 +927,291 @@
   gap: 0;
 }
 
+.searchResultsPage {
+  width: calc(100% - 28px);
+  margin: 0 auto 34px;
+  padding-top: 18px;
+}
+
+.searchBreadcrumb {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 16px;
+  color: #7b847f;
+  font-size: 0.75em;
+}
+
+.searchBreadcrumb button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand-dark);
+}
+
+.searchResultsHeading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e3e7e4;
+}
+
+.searchResultsHeading span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--brand-dark);
+  font-size: 0.6875em;
+  font-weight: 850;
+}
+
+.searchResultsHeading h1 {
+  max-width: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.25em;
+  line-height: 1.25;
+}
+
+.searchFilterToggle {
+  display: inline-flex;
+  min-height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid #dfe3e1;
+  border-radius: 7px;
+  background: white;
+  color: #37413c;
+  font-weight: 750;
+}
+
+.searchFilterToggle b {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--brand);
+  color: white;
+  font-size: 0.625em;
+}
+
+.searchResultsLayout {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+  padding-top: 18px;
+}
+
+.searchFilters {
+  display: none;
+  min-width: 0;
+  border-bottom: 1px solid #e3e7e4;
+  padding-bottom: 18px;
+}
+
+.searchFiltersOpen {
+  display: block;
+}
+
+.searchFiltersHeader {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.searchFiltersHeader > strong {
+  font-size: 0.9375em;
+}
+
+.searchFiltersHeader button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: #f0f2f1;
+  color: #536059;
+}
+
+.searchFilterGroup,
+.searchPriceFilter {
+  min-width: 0;
+  padding: 16px 0 0;
+  border: 0;
+  margin: 0;
+}
+
+.searchFilterGroup + .searchFilterGroup,
+.searchPriceFilter {
+  margin-top: 15px;
+  border-top: 1px solid #e6e9e7;
+}
+
+.searchFilterGroup legend,
+.searchPriceFilter legend {
+  padding: 0;
+  color: #242c28;
+  font-size: 0.8125em;
+  font-weight: 850;
+}
+
+.searchFilterGroup label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  color: #4e5953;
+  font-size: 0.75em;
+}
+
+.searchFilterGroup label:first-of-type {
+  margin-top: 7px;
+}
+
+.searchFilterGroup input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
+}
+
+.searchFilterGroup span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchFilterGroup small {
+  color: #8a938e;
+  font-size: 0.875em;
+}
+
+.searchPriceValues {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 13px;
+  color: #4b5650;
+  font-size: 0.6875em;
+  font-weight: 750;
+}
+
+.searchPriceRange {
+  position: relative;
+  height: 34px;
+  margin-top: 3px;
+}
+
+.searchPriceRange::before,
+.searchPriceRangeActive {
+  position: absolute;
+  top: 16px;
+  right: 0;
+  left: 0;
+  height: 4px;
+  border-radius: 4px;
+  content: "";
+}
+
+.searchPriceRange::before {
+  background: #dfe3e1;
+}
+
+.searchPriceRangeActive {
+  z-index: 1;
+  background: var(--brand);
+}
+
+.searchPriceRange input {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 0;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.searchPriceRange input::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--brand);
+  border-radius: 50%;
+  appearance: none;
+  background: white;
+  box-shadow: 0 2px 6px rgba(61, 43, 19, 0.2);
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.searchPriceRange input::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--brand);
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 2px 6px rgba(61, 43, 19, 0.2);
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.clearSearchFilters {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 18px;
+  border: 1px solid #dfe3e1;
+  border-radius: 7px;
+  background: white;
+  color: var(--brand-dark);
+  font-size: 0.75em;
+  font-weight: 800;
+}
+
+.searchResultsContent {
+  min-width: 0;
+}
+
+.searchResultsToolbar {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #edf0ee;
+}
+
+.searchResultsToolbar strong {
+  font-size: 0.875em;
+}
+
+.searchResultsToolbar span {
+  color: #7b847f;
+  font-size: 0.6875em;
+  text-align: right;
+}
+
+.searchProductGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  padding-top: 10px;
+}
+
 .productCard {
   overflow: hidden;
   min-width: 0;
@@ -809,6 +1219,7 @@
   border-radius: 0;
   background: var(--surface);
   box-shadow: none;
+  cursor: pointer;
   transition: border-radius 180ms ease, box-shadow 180ms ease, transform 180ms ease;
   scroll-snap-align: start;
 }
@@ -866,7 +1277,7 @@
   width: 100%;
   aspect-ratio: 1 / 0.88;
   place-items: center;
-  background: #e9edef;
+  background: #ffffff;
   color: #667085;
   font-size: 1.75em;
   font-weight: 850;
@@ -1103,44 +1514,11 @@
   font-size: 0.5625em;
 }
 
-.floatingCart {
-  position: fixed;
-  z-index: 28;
-  right: 14px;
-  bottom: 78px;
-  left: 14px;
-  display: flex;
-  min-height: 52px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 16px;
-  border: 1px solid #f0c873;
-  border-radius: 8px;
-  background: #fff7e4;
-  color: var(--brand-dark);
-  box-shadow: 0 12px 30px rgba(163, 98, 9, 0.16);
-  animation: riseIn 220ms ease both;
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
-}
-
-.floatingCart:hover {
-  border-color: var(--brand);
-  background: #fff0cf;
-  transform: translateY(-2px);
-}
-
-.floatingCart span {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
 .whatsappButton {
   position: fixed;
   z-index: 29;
   right: 16px;
-  bottom: 146px;
+  bottom: 78px;
   width: 52px;
   height: 52px;
   border: 2px solid #ffffff;
@@ -3412,6 +3790,7 @@
   .promotionStrip,
   .featuredSection,
   .catalogSection,
+  .searchResultsPage,
   .footer {
     width: calc(100% - 40px);
   }
@@ -3428,6 +3807,10 @@
   .productGrid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0;
+  }
+
+  .searchProductGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .productCardCompact {
@@ -3473,9 +3856,13 @@
     grid-template-columns: minmax(190px, 250px) minmax(260px, 1fr) auto auto;
   }
 
+  .searchArea,
   .headerSearch {
     grid-column: auto;
     grid-row: auto;
+  }
+
+  .headerSearch {
     height: 48px;
   }
 
@@ -3570,20 +3957,45 @@
     gap: 0;
   }
 
+  .searchResultsPage {
+    width: calc(100% - 40px);
+    max-width: 1420px;
+    padding-top: 24px;
+  }
+
+  .searchFilterToggle {
+    display: none;
+  }
+
+  .searchResultsLayout {
+    grid-template-columns: 248px minmax(0, 1fr);
+    gap: 26px;
+    padding-top: 22px;
+  }
+
+  .searchFilters {
+    display: block;
+    align-self: start;
+    border-right: 1px solid #e3e7e4;
+    border-bottom: 0;
+    padding: 0 22px 20px 0;
+  }
+
+  .searchFiltersHeader button {
+    display: none;
+  }
+
+  .searchProductGrid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+
   .mobileNav {
     display: none;
   }
 
-  .floatingCart {
-    right: 24px;
-    bottom: 24px;
-    left: auto;
-    width: 360px;
-  }
-
   .whatsappButton {
     right: 24px;
-    bottom: 92px;
+    bottom: 24px;
   }
 
   .drawer {

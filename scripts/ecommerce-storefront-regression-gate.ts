@@ -4,6 +4,7 @@ import path from "node:path";
 import { productCardRequiresSelection } from "../apps/enterprise-web/src/components/ecommerce/storefront-card-action";
 import {
   buildStorefrontCategoryTree,
+  formatStorefrontTaxonomyLabel,
   getStorefrontSelectionLabel,
   productMatchesStorefrontSelection,
 } from "../apps/enterprise-web/src/components/ecommerce/storefront-category-tree";
@@ -21,12 +22,23 @@ assert.equal(productCardRequiresSelection(1), false, "A product with one variant
 assert.equal(productCardRequiresSelection(2), true, "A product with multiple variants must open selection.");
 
 const hierarchyProducts = [
-  { department: "Electronics", category: "Computers", subcategory: "Laptops" },
+  { department: "ELECTRONICS", category: "COMPUTERS", subcategory: "LAPTOPS" },
   { department: "Electronics", category: "Computers", subcategory: "Desktops" },
   { department: "Electronics", category: "Accessories", subcategory: "Mice" },
   { department: "Home", category: "Furniture", subcategory: "Chairs" },
 ];
 const categoryTree = buildStorefrontCategoryTree(hierarchyProducts);
+
+assert.equal(
+  formatStorefrontTaxonomyLabel("HEALTH AND BEAUTY"),
+  "Health and Beauty",
+  "Storefront taxonomy labels must use consistent proper case without capitalising joining words.",
+);
+assert.equal(
+  formatStorefrontTaxonomyLabel("LPG"),
+  "Lpg",
+  "Uppercase source labels must not leak into the public category experience.",
+);
 
 assert.deepEqual(
   categoryTree.map((department) => [department.name, department.count]),
@@ -73,4 +85,4 @@ assert.equal(
   "The selected hierarchy label must identify the active catalogue level.",
 );
 
-console.log("Ecommerce storefront regression gate passed: uploads, product-card actions, and category hierarchy are deterministic.");
+console.log("Ecommerce storefront regression gate passed: uploads, product-card actions, proper-case taxonomy, and category hierarchy are deterministic.");

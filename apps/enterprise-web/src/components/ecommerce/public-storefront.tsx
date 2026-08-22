@@ -37,9 +37,11 @@ import {
   Shirt,
   ShoppingBag,
   ShoppingCart,
+  SlidersHorizontal,
   Sparkles,
   Star,
   Store,
+  Tags,
   Trash2,
   Truck,
   Utensils,
@@ -62,6 +64,7 @@ import styles from "./public-storefront.module.css";
 import { productCardRequiresSelection } from "./storefront-card-action";
 import {
   buildStorefrontCategoryTree,
+  formatStorefrontTaxonomyLabel,
   getStorefrontSelectionLabel,
   productMatchesStorefrontSelection,
   type StorefrontCatalogSelection,
@@ -79,6 +82,17 @@ type SocialAuthProviderOption = { id: SocialAuthProvider; enabled: boolean };
 type SocialAuthResult = {
   provider: SocialAuthProvider;
   result: "success" | "cancelled" | "conflict" | "failed" | "unavailable";
+};
+type SearchSuggestion = {
+  key: string;
+  label: string;
+  query: string;
+  type: "Product" | "Department" | "Category" | "Subcategory" | "Brand";
+  imageUrl?: string | null;
+};
+type SearchSuggestionGroup = {
+  label: "Products" | "Categories" | "Brands";
+  suggestions: SearchSuggestion[];
 };
 
 const storefrontTextSizeStorageKey = "flash-erp-storefront-text-size";
@@ -106,6 +120,37 @@ function normalizeProductCode(value: string) {
 
 function normalizeCatalogLabel(value: string | null | undefined) {
   return value?.trim().toLowerCase() ?? "";
+}
+
+function productMatchesSearch(product: Product, query: string) {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+
+  const searchableText = [
+    product.name,
+    product.shortName,
+    product.code,
+    product.sku,
+    product.brand,
+    product.department,
+    product.category,
+    product.subcategory,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return terms.every((term) => searchableText.includes(term));
+}
+
+function getProductPriceBounds(products: Product[]) {
+  const prices = products.map((product) => getProductPrice(product));
+  if (prices.length === 0) return { minimum: 0, maximum: 0 };
+
+  return {
+    minimum: Math.max(0, Math.floor(Math.min(...prices))),
+    maximum: Math.max(0, Math.ceil(Math.max(...prices))),
+  };
 }
 
 function getRelatedProductScore(product: Product, candidate: Product) {
@@ -615,15 +660,26 @@ export function PublicStorefront({
   storefront,
   initialProductCode = null,
   initialProduct = null,
+  initialSearchQuery = null,
 }: {
   storefront: PublicStorefrontData;
   initialProductCode?: string | null;
   initialProduct?: ProductDetail | null;
+  initialSearchQuery?: string | null;
 }) {
   const router = useRouter();
   const storageKey = `flash-erp-cart:${storefront.store.code}`;
   const socialAuthResumeKey = `flash-erp-social-auth-resume:${storefront.store.code}`;
-  const [searchText, setSearchText] = useState("");
+  const searchResultsMode = initialSearchQuery !== null;
+  const initialPriceBounds = getProductPriceBounds(storefront.products);
+  const priceSliderMaximum = Math.max(initialPriceBounds.minimum + 1, initialPriceBounds.maximum);
+  const [searchText, setSearchText] = useState(initialSearchQuery ?? "");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchFiltersOpen, setSearchFiltersOpen] = useState(false);
+  const [selectedSearchCategories, setSelectedSearchCategories] = useState<string[]>([]);
+  const [selectedSearchBrands, setSelectedSearchBrands] = useState<string[]>([]);
+  const [searchMinimumPrice, setSearchMinimumPrice] = useState(initialPriceBounds.minimum);
+  const [searchMaximumPrice, setSearchMaximumPrice] = useState(priceSliderMaximum);
   const [catalogSelection, setCatalogSelection] = useState<StorefrontCatalogSelection>({ level: "ALL" });
   const [textSize, setTextSize] = useState<StorefrontTextSize>("MEDIUM");
   const [textSizeReady, setTextSizeReady] = useState(false);
@@ -1040,26 +1096,126 @@ export function PublicStorefront({
     [storefront.products],
   );
   const catalogSelectionLabel = getStorefrontSelectionLabel(catalogSelection);
+  const searchSuggestionGroups = useMemo<SearchSuggestionGroup[]>(() => {
+    const query = searchText.trim();
+    if (query.length < 2) return [];
+
+    const normalizedQuery = query.toLowerCase();
+    const products = storefront.products
+      .filter((product) => productMatchesSearch(product, query))
+      .slice(0, 6)
+      .map((product) => ({
+        key: `product:${product.id}`,
+        label: product.name,
+        query,
+        type: "Product" as const,
+        imageUrl: product.imageUrl,
+      }));
+    const taxonomy = new Map<string, SearchSuggestion>();
+    const brands = new Map<string, SearchSuggestion>();
+
+    for (const product of storefront.products) {
+      for (const [type, value] of [
+        ["Department", product.department],
+        ["Category", product.category],
+        ["Subcategory", product.subcategory],
+      ] as const) {
+        if (!value) continue;
+        const label = formatStorefrontTaxonomyLabel(value);
+        if (!label.toLowerCase().includes(normalizedQuery)) continue;
+        const key = `${type.toLowerCase()}:${label.toLowerCase()}`;
+        if (!taxonomy.has(key)) {
+          taxonomy.set(key, { key, label, query: label, type });
+        }
+      }
+
+      const brand = product.brand?.trim();
+      if (brand && brand.toLowerCase().includes(normalizedQuery)) {
+        const key = `brand:${brand.toLowerCase()}`;
+        if (!brands.has(key)) {
+          brands.set(key, { key, label: brand, query: brand, type: "Brand" });
+        }
+      }
+    }
+
+    return [
+      { label: "Products", suggestions: products },
+      {
+        label: "Categories",
+        suggestions: [...taxonomy.values()]
+          .sort((left, right) => left.label.localeCompare(right.label))
+          .slice(0, 6),
+      },
+      {
+        label: "Brands",
+        suggestions: [...brands.values()]
+          .sort((left, right) => left.label.localeCompare(right.label))
+          .slice(0, 5),
+      },
+    ].filter((group) => group.suggestions.length > 0) as SearchSuggestionGroup[];
+  }, [searchText, storefront.products]);
   const visibleProducts = useMemo(() => {
-    const normalizedSearch = searchText.trim().toLowerCase();
     return storefront.products.filter((product) => {
       const categoryMatches = productMatchesStorefrontSelection(product, catalogSelection);
-      const searchMatches =
-        !normalizedSearch ||
-        [
-          product.name,
-          product.shortName,
-          product.code,
-          product.brand,
-          product.department,
-          product.category,
-          product.subcategory,
-        ]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(normalizedSearch));
-      return categoryMatches && searchMatches;
+      return categoryMatches && productMatchesSearch(product, searchText);
     });
   }, [catalogSelection, searchText, storefront.products]);
+  const activeSearchQuery = (initialSearchQuery ?? searchText).trim();
+  const searchMatchedProducts = useMemo(
+    () => storefront.products.filter((product) => productMatchesSearch(product, activeSearchQuery)),
+    [activeSearchQuery, storefront.products],
+  );
+  const searchCategoryFacets = useMemo(() => {
+    const facets = new Map<string, { value: string; label: string; count: number }>();
+    for (const product of searchMatchedProducts) {
+      const label = formatStorefrontTaxonomyLabel(product.category);
+      const value = label.toLowerCase();
+      const current = facets.get(value);
+      facets.set(value, { value, label, count: (current?.count ?? 0) + 1 });
+    }
+    return [...facets.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [searchMatchedProducts]);
+  const searchBrandFacets = useMemo(() => {
+    const facets = new Map<string, { value: string; label: string; count: number }>();
+    for (const product of searchMatchedProducts) {
+      const label = product.brand?.trim();
+      if (!label) continue;
+      const value = label.toLowerCase();
+      const current = facets.get(value);
+      facets.set(value, { value, label: current?.label ?? label, count: (current?.count ?? 0) + 1 });
+    }
+    return [...facets.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [searchMatchedProducts]);
+  const filteredSearchProducts = useMemo(
+    () => searchMatchedProducts.filter((product) => {
+      const category = formatStorefrontTaxonomyLabel(product.category).toLowerCase();
+      const brand = product.brand?.trim().toLowerCase() ?? "";
+      const price = getProductPrice(product);
+      return (
+        (selectedSearchCategories.length === 0 || selectedSearchCategories.includes(category)) &&
+        (selectedSearchBrands.length === 0 || selectedSearchBrands.includes(brand)) &&
+        price >= searchMinimumPrice &&
+        price <= searchMaximumPrice
+      );
+    }),
+    [
+      searchMatchedProducts,
+      searchMaximumPrice,
+      searchMinimumPrice,
+      selectedSearchBrands,
+      selectedSearchCategories,
+    ],
+  );
+  const activeSearchFilterCount =
+    selectedSearchCategories.length +
+    selectedSearchBrands.length +
+    Number(searchMinimumPrice !== initialPriceBounds.minimum || searchMaximumPrice !== priceSliderMaximum);
+  const searchRangeStart = priceSliderMaximum === initialPriceBounds.minimum
+    ? 0
+    : ((searchMinimumPrice - initialPriceBounds.minimum) / (priceSliderMaximum - initialPriceBounds.minimum)) * 100;
+  const searchRangeEnd = priceSliderMaximum === initialPriceBounds.minimum
+    ? 100
+    : ((searchMaximumPrice - initialPriceBounds.minimum) / (priceSliderMaximum - initialPriceBounds.minimum)) * 100;
 
   const featuredProducts = storefront.products.filter((product) => product.featured).slice(0, 8);
   const relatedProducts = useMemo(() => {
@@ -1331,6 +1487,44 @@ export function PublicStorefront({
       setProductDetailsBusy(false);
       router.push(publicStoreHref);
     }
+  }
+
+  function navigateToSearch(query: string) {
+    const normalizedQuery = query.trim();
+    setSearchFocused(false);
+    if (!normalizedQuery) {
+      setSearchText("");
+      router.push(publicStoreHref);
+      return;
+    }
+
+    setSearchText(normalizedQuery);
+    router.push(`${publicStoreHref}/search?q=${encodeURIComponent(normalizedQuery)}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function clearSearch() {
+    setSearchText("");
+    setSearchFocused(false);
+    if (searchResultsMode) {
+      router.push(publicStoreHref);
+    }
+  }
+
+  function toggleSearchFilter(
+    value: string,
+    setter: (updater: (current: string[]) => string[]) => void,
+  ) {
+    setter((current) => current.includes(value)
+      ? current.filter((candidate) => candidate !== value)
+      : [...current, value]);
+  }
+
+  function clearSearchFilters() {
+    setSelectedSearchCategories([]);
+    setSelectedSearchBrands([]);
+    setSearchMinimumPrice(initialPriceBounds.minimum);
+    setSearchMaximumPrice(priceSliderMaximum);
   }
 
   function updateGlobalSearch(value: string) {
@@ -1938,20 +2132,78 @@ export function PublicStorefront({
               <small>{storefront.store.legalName}</small>
             </span>
           </button>
-          <label className={styles.headerSearch}>
-            <Search size={20} />
-            <input
-              aria-label="Search products, brands and categories"
-              onChange={(event) => updateGlobalSearch(event.target.value)}
-              placeholder="Search products, brands and categories"
-              value={searchText}
-            />
-            {searchText ? (
-              <button aria-label="Clear search" onClick={() => updateGlobalSearch("")} type="button">
-                <X size={17} />
-              </button>
+          <form
+            className={styles.searchArea}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setSearchFocused(false);
+              }
+            }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              navigateToSearch(searchText);
+            }}
+          >
+            <label className={styles.headerSearch}>
+              <Search size={20} />
+              <input
+                aria-label="Search products, brands and categories"
+                autoComplete="off"
+                onChange={(event) => updateGlobalSearch(event.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                placeholder="Search products, brands and categories"
+                value={searchText}
+              />
+              {searchText ? (
+                <button aria-label="Clear search" onClick={clearSearch} title="Clear search" type="button">
+                  <X size={17} />
+                </button>
+              ) : null}
+            </label>
+            {searchFocused && searchText.trim().length >= 2 ? (
+              <div aria-label="Search suggestions" className={styles.searchSuggestions}>
+                {searchSuggestionGroups.length > 0 ? searchSuggestionGroups.map((group) => (
+                  <section className={styles.searchSuggestionGroup} key={group.label}>
+                    <h2>{group.label}</h2>
+                    {group.suggestions.map((suggestion) => (
+                      <button
+                        key={suggestion.key}
+                        onClick={() => navigateToSearch(suggestion.query)}
+                        type="button"
+                      >
+                        <span className={styles.searchSuggestionVisual}>
+                          {suggestion.imageUrl ? (
+                            <StorefrontImage alt="" sizes="42px" src={suggestion.imageUrl} />
+                          ) : suggestion.type === "Brand" ? (
+                            <Tags size={18} />
+                          ) : (
+                            (() => {
+                              const SuggestionIcon = resolveCategoryIcon(suggestion.label);
+                              return <SuggestionIcon size={18} />;
+                            })()
+                          )}
+                        </span>
+                        <span><strong>{suggestion.label}</strong><small>{suggestion.type}</small></span>
+                        <ChevronRight size={16} />
+                      </button>
+                    ))}
+                  </section>
+                )) : (
+                  <div className={styles.searchSuggestionEmpty}>No matching products or categories</div>
+                )}
+                {searchSuggestionGroups.length > 0 ? (
+                  <button
+                    className={styles.searchAllResults}
+                    onClick={() => navigateToSearch(searchText)}
+                    type="button"
+                  >
+                    <Search size={17} />
+                    See all results for &quot;{searchText.trim()}&quot;
+                  </button>
+                ) : null}
+              </div>
             ) : null}
-          </label>
+          </form>
           <div aria-label="Text size" className={styles.textSizeControl} role="group">
             {(["SMALL", "MEDIUM", "LARGE"] as const).map((size) => (
               <button
@@ -2044,7 +2296,7 @@ export function PublicStorefront({
               ) : null}
             </div>
             <div className={styles.productPageSummary}>
-              <span className={styles.productEyebrow}>{quickProduct.brand ?? quickProduct.category ?? "Product"}</span>
+              <span className={styles.productEyebrow}>{quickProduct.brand ?? formatStorefrontTaxonomyLabel(quickProduct.category)}</span>
               <h1>{quickProduct.name}</h1>
               <small>{quickProduct.code}</small>
               <div className={styles.productRating}><StarRating rating={quickProduct.averageRating} /><span>{quickProduct.averageRating > 0 ? quickProduct.averageRating.toFixed(1) : "New"} ({quickProduct.reviewCount} review{quickProduct.reviewCount === 1 ? "" : "s"})</span></div>
@@ -2110,9 +2362,9 @@ export function PublicStorefront({
                 <dl className={styles.productFactList}>
                   <div><dt>SKU</dt><dd>{quickProduct.sku || quickProduct.code}</dd></div>
                   {quickProduct.brand ? <div><dt>Brand</dt><dd>{quickProduct.brand}</dd></div> : null}
-                  {quickProduct.department ? <div><dt>Department</dt><dd>{quickProduct.department}</dd></div> : null}
-                  {quickProduct.category ? <div><dt>Category</dt><dd>{quickProduct.category}</dd></div> : null}
-                  {quickProduct.subcategory ? <div><dt>Subcategory</dt><dd>{quickProduct.subcategory}</dd></div> : null}
+                  {quickProduct.department ? <div><dt>Department</dt><dd>{formatStorefrontTaxonomyLabel(quickProduct.department)}</dd></div> : null}
+                  {quickProduct.category ? <div><dt>Category</dt><dd>{formatStorefrontTaxonomyLabel(quickProduct.category)}</dd></div> : null}
+                  {quickProduct.subcategory ? <div><dt>Subcategory</dt><dd>{formatStorefrontTaxonomyLabel(quickProduct.subcategory)}</dd></div> : null}
                   <div><dt>Unit</dt><dd>{selectedProductSellingUnit?.unitOfMeasureName ?? quickProduct.unitOfMeasure}</dd></div>
                 </dl>
               </section>
@@ -2188,6 +2440,135 @@ export function PublicStorefront({
           <LoaderCircle className={styles.spin} size={28} />
           <h2>Loading product</h2>
         </section>
+      ) : searchResultsMode ? (
+        <section className={styles.searchResultsPage} data-testid="storefront-search-results">
+          <nav aria-label="Search breadcrumb" className={styles.searchBreadcrumb}>
+            <button onClick={() => router.push(publicStoreHref)} type="button">Home</button>
+            <ChevronRight aria-hidden="true" size={14} />
+            <span aria-current="page">Search results</span>
+          </nav>
+          <div className={styles.searchResultsHeading}>
+            <div>
+              <span>{searchMatchedProducts.length} result{searchMatchedProducts.length === 1 ? "" : "s"}</span>
+              <h1>Products matching &quot;{activeSearchQuery}&quot;</h1>
+            </div>
+            <button
+              aria-expanded={searchFiltersOpen}
+              className={styles.searchFilterToggle}
+              onClick={() => setSearchFiltersOpen((current) => !current)}
+              type="button"
+            >
+              <SlidersHorizontal size={18} /> Filters
+              {activeSearchFilterCount > 0 ? <b>{activeSearchFilterCount}</b> : null}
+            </button>
+          </div>
+          <div className={styles.searchResultsLayout}>
+            <aside className={classNames(styles.searchFilters, searchFiltersOpen && styles.searchFiltersOpen)}>
+              <div className={styles.searchFiltersHeader}>
+                <strong>Filter results</strong>
+                <button
+                  aria-label="Close filters"
+                  onClick={() => setSearchFiltersOpen(false)}
+                  title="Close filters"
+                  type="button"
+                ><X size={18} /></button>
+              </div>
+              {searchCategoryFacets.length > 0 ? (
+                <fieldset className={styles.searchFilterGroup}>
+                  <legend>Categories</legend>
+                  {searchCategoryFacets.map((facet) => (
+                    <label key={facet.value}>
+                      <input
+                        checked={selectedSearchCategories.includes(facet.value)}
+                        onChange={() => toggleSearchFilter(facet.value, setSelectedSearchCategories)}
+                        type="checkbox"
+                      />
+                      <span>{facet.label}</span>
+                      <small>{facet.count}</small>
+                    </label>
+                  ))}
+                </fieldset>
+              ) : null}
+              {searchBrandFacets.length > 0 ? (
+                <fieldset className={styles.searchFilterGroup}>
+                  <legend>Brands</legend>
+                  {searchBrandFacets.map((facet) => (
+                    <label key={facet.value}>
+                      <input
+                        checked={selectedSearchBrands.includes(facet.value)}
+                        onChange={() => toggleSearchFilter(facet.value, setSelectedSearchBrands)}
+                        type="checkbox"
+                      />
+                      <span>{facet.label}</span>
+                      <small>{facet.count}</small>
+                    </label>
+                  ))}
+                </fieldset>
+              ) : null}
+              <fieldset className={styles.searchPriceFilter}>
+                <legend>Price range</legend>
+                <div className={styles.searchPriceValues}>
+                  <span>{money.format(searchMinimumPrice)}</span>
+                  <span>{money.format(searchMaximumPrice)}</span>
+                </div>
+                <div className={styles.searchPriceRange}>
+                  <span
+                    className={styles.searchPriceRangeActive}
+                    style={{ left: `${searchRangeStart}%`, right: `${100 - searchRangeEnd}%` }}
+                  />
+                  <input
+                    aria-label="Minimum price"
+                    max={priceSliderMaximum}
+                    min={initialPriceBounds.minimum}
+                    onChange={(event) => setSearchMinimumPrice(Math.min(Number(event.target.value), searchMaximumPrice))}
+                    step="1"
+                    type="range"
+                    value={searchMinimumPrice}
+                  />
+                  <input
+                    aria-label="Maximum price"
+                    max={priceSliderMaximum}
+                    min={initialPriceBounds.minimum}
+                    onChange={(event) => setSearchMaximumPrice(Math.max(Number(event.target.value), searchMinimumPrice))}
+                    step="1"
+                    type="range"
+                    value={searchMaximumPrice}
+                  />
+                </div>
+              </fieldset>
+              {activeSearchFilterCount > 0 ? (
+                <button className={styles.clearSearchFilters} onClick={clearSearchFilters} type="button">
+                  Clear all filters
+                </button>
+              ) : null}
+            </aside>
+            <div className={styles.searchResultsContent}>
+              <div className={styles.searchResultsToolbar}>
+                <strong>{filteredSearchProducts.length} product{filteredSearchProducts.length === 1 ? "" : "s"}</strong>
+                <span>Matched by product, category, or brand</span>
+              </div>
+              {filteredSearchProducts.length > 0 ? (
+                <div className={styles.searchProductGrid}>
+                  {filteredSearchProducts.map((product) => (
+                    <ProductCard
+                      key={product.id}
+                      money={money}
+                      onAdd={addProductFromCard}
+                      onOpen={openProduct}
+                      product={product}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.emptyState}>
+                  <Search size={28} />
+                  <h2>No products match these filters</h2>
+                  <button onClick={clearSearchFilters} type="button">Clear filters</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
       ) : (
         <>
           {storefront.promotions.length > 0 && !promotionStripDismissed ? (
@@ -2239,13 +2620,6 @@ export function PublicStorefront({
         <button className={drawerView === "cart" || drawerView === "checkout" ? styles.mobileNavActive : undefined} onClick={() => setDrawerView("cart")} type="button"><ShoppingCart size={20} /><span>Cart</span><b>{cartQuantity}</b></button>
         <button aria-label={session.authenticated ? "Open my account" : "Sign in"} className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => { if (session.authenticated) { void openAccount(); } else { setAuthMode("SIGN_IN"); setResumeCheckoutAfterAuth(false); setAuthOpen(true); } }} type="button"><CircleUserRound size={20} /><span>Account</span></button>
       </nav>
-
-      {cartQuantity > 0 && !drawerView ? (
-        <button className={styles.floatingCart} onClick={() => setDrawerView("cart")} type="button">
-          <span><ShoppingCart size={20} /><b>{cartQuantity} item{cartQuantity === 1 ? "" : "s"}</b></span>
-          <strong>{money.format(checkoutTotal)}</strong>
-        </button>
-      ) : null}
 
       {whatsappDigits ? (
         <a
@@ -2516,8 +2890,9 @@ function ProductBreadcrumb({
   product: ProductDetail;
   onSelect: (selection: StorefrontCatalogSelection) => void;
 }) {
-  const department = product.department?.trim() || "Other";
-  const category = product.category?.trim() || "Other";
+  const department = formatStorefrontTaxonomyLabel(product.department);
+  const category = formatStorefrontTaxonomyLabel(product.category);
+  const subcategory = formatStorefrontTaxonomyLabel(product.subcategory);
 
   return (
     <nav aria-label="Breadcrumb" className={styles.productBreadcrumb}>
@@ -2554,11 +2929,11 @@ function ProductBreadcrumb({
               level: "SUBCATEGORY",
               department,
               category,
-              subcategory: product.subcategory!.trim(),
+              subcategory,
             })}
             type="button"
           >
-            {product.subcategory.trim()}
+            {subcategory}
           </button>
         </>
       ) : null}
@@ -2805,11 +3180,16 @@ function ProductCard({ product, money, onOpen, onAdd, compact = false }: {
   const previewImageUrl = product.imageUrl;
 
   return (
-    <article className={classNames(styles.productCard, compact && styles.productCardCompact)}>
+    <article
+      className={classNames(styles.productCard, compact && styles.productCardCompact)}
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest(`.${styles.productQuickAdd}`)) return;
+        onOpen(product);
+      }}
+    >
       <button
         aria-label={`View details for ${product.name}`}
         className={styles.productVisualButton}
-        onClick={() => onOpen(product)}
         title="View product details"
         type="button"
       >
@@ -2819,12 +3199,22 @@ function ProductCard({ product, money, onOpen, onAdd, compact = false }: {
         ) : product.featured ? <span className={styles.featuredBadge}>Featured</span> : null}
       </button>
       <div className={styles.productCardBody}>
-        <span>{product.brand ?? product.category ?? product.code}</span>
-        <button onClick={() => onOpen(product)} type="button"><h3>{product.name}</h3></button>
+        <span>{product.brand ?? (product.category ? formatStorefrontTaxonomyLabel(product.category) : product.code)}</span>
+        <button type="button"><h3>{product.name}</h3></button>
         <div className={styles.cardRating}><StarRating rating={product.averageRating} /><span>{product.reviewCount > 0 ? product.reviewCount : "New"}</span></div>
         <div className={styles.productCardFooter}>
           <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : isProductOutOfStock(product) ? "Out of stock" : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : `${Math.floor(product.availableQuantity)} available`}</small></div>
-          <button aria-label={`Add ${product.name} to cart`} className={styles.productQuickAdd} disabled={isProductOutOfStock(product)} onClick={() => onAdd(product)} title="Add to cart" type="button"><ShoppingCart size={18} /></button>
+          <button
+            aria-label={`Add ${product.name} to cart`}
+            className={styles.productQuickAdd}
+            disabled={isProductOutOfStock(product)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdd(product);
+            }}
+            title="Add to cart"
+            type="button"
+          ><ShoppingCart size={18} /></button>
         </div>
       </div>
     </article>
