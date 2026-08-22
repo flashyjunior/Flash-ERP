@@ -677,6 +677,22 @@ export type EnterpriseCustomerPublishedPayload = {
   publishedAt: string;
 };
 
+export type EnterpriseSupplierPublishedPayload = {
+  storeCode: string;
+  supplierId: string;
+  supplierNo: string;
+  supplierName: string;
+  contactName: string | null;
+  phone: string | null;
+  email: string | null;
+  addressLine1: string | null;
+  city: string | null;
+  countryCode: string | null;
+  leadTimeDays: number | null;
+  status: string;
+  publishedAt: string;
+};
+
 export type EnterpriseProductDepartmentPublishedPayload = {
   storeCode: string;
   departmentCode: string;
@@ -1075,6 +1091,33 @@ export type StoreNodeReplayRequest = {
   operatorName?: string;
 };
 
+export type StoreMasterDataPublicationScope =
+  | "STORE_SETUP"
+  | "SECURITY"
+  | "CUSTOMERS"
+  | "SUPPLIERS"
+  | "PRODUCTS"
+  | "PRICING"
+  | "TAX_AND_TENDERS"
+  | "PROMOTIONS"
+  | "BANKING"
+  | "GIFT_CERTIFICATES";
+
+export type StoreMasterDataPublicationRequest = {
+  scopes: StoreMasterDataPublicationScope[];
+  note?: string;
+  operatorName?: string;
+};
+
+export type StoreMasterDataPublicationResponse = {
+  nodeCode: string;
+  scopes: StoreMasterDataPublicationScope[];
+  queuedCount: number;
+  note: string;
+  operatorName: string;
+  serverProcessedAt: string;
+};
+
 export type StoreNodeInboundActionRequest = {
   note?: string;
   operatorName?: string;
@@ -1185,6 +1228,7 @@ export type SyncOperatorActionType =
   | "REQUEST_COUNT_VARIANCE"
   | "REQUEST_STOCK_TRANSFER"
   | "PUBLISH_LOCATION_TOPOLOGY"
+  | "PUBLISH_MASTER_DATA"
   | "STORE_TASK_COMPLETED";
 
 export type StoreNodeSyncTrigger =

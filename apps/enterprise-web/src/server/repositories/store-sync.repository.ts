@@ -48,6 +48,7 @@ import type {
   EnterpriseRolePublishedPayload,
   EnterpriseStoreSettingsPublishedPayload,
   EnterpriseInventorySerialSnapshotPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
   EnterpriseSupplierReturnPublishedPayload,
   EnterpriseInterStoreTransferRequestTargetPublishedPayload,
   EnterpriseProductCategoryPublishedPayload,
@@ -90,6 +91,9 @@ import type {
   StoreNodePushRequest,
   StoreNodePushResponse,
   StoreNodeSyncPolicy,
+  StoreMasterDataPublicationRequest,
+  StoreMasterDataPublicationResponse,
+  StoreMasterDataPublicationScope,
   StoreBankingDepositRecordedPayload,
   StoreCustomerAccountEntryRecordedPayload,
   StoreEodReconciliationRecordedPayload,
@@ -1950,12 +1954,76 @@ export async function recordStoreSyncRequestFailure(
   });
 }
 
+const storeMasterDataEventTypesByScope: Record<
+  StoreMasterDataPublicationScope,
+  readonly string[]
+> = {
+  STORE_SETUP: [
+    "store.settings.published",
+    "inventory.location.published",
+    "inter-store-transfer.target.published",
+  ],
+  SECURITY: [
+    "security.permission.published",
+    "security.role.published",
+    "security.user.published",
+  ],
+  CUSTOMERS: ["customer.published"],
+  SUPPLIERS: ["supplier.published"],
+  PRODUCTS: [
+    "setup.product-department.published",
+    "setup.product-category.published",
+    "setup.unit-of-measure.published",
+    "catalog.product.published",
+    "catalog.barcode.published",
+    "inventory.serial-snapshot.published",
+  ],
+  PRICING: ["pricing.price-list.published"],
+  TAX_AND_TENDERS: [
+    "setup.tax-profile.published",
+    "setup.tender-method.published",
+  ],
+  PROMOTIONS: ["setup.promotion.published"],
+  BANKING: ["setup.bank-account.published"],
+  GIFT_CERTIFICATES: ["gift-certificate.published"],
+};
+
+const storeMasterDataPublicationScopes = Object.freeze(
+  Object.keys(
+    storeMasterDataEventTypesByScope,
+  ) as StoreMasterDataPublicationScope[],
+);
+
+function normalizeMasterDataPublicationScopes(
+  scopes: readonly StoreMasterDataPublicationScope[],
+) {
+  const allowedScopes = new Set(storeMasterDataPublicationScopes);
+  const normalized = [...new Set(scopes)].filter((scope) =>
+    allowedScopes.has(scope),
+  );
+
+  if (normalized.length === 0) {
+    throw new Error("Select at least one master-data group to publish.");
+  }
+
+  return normalized;
+}
+
+function masterDataEventTypesForScopes(
+  scopes: readonly StoreMasterDataPublicationScope[],
+) {
+  return new Set(
+    scopes.flatMap((scope) => [...storeMasterDataEventTypesByScope[scope]]),
+  );
+}
+
 async function queueAutomaticStoreMasterDataPublications(
   tx: Prisma.TransactionClient | PrismaClient,
   target: StoreSyncTarget,
   now: Date,
   options?: {
     mode?: "bootstrap" | "delta";
+    eventTypes?: ReadonlySet<string>;
   },
 ) {
   if (!target.storeNode.store) {
@@ -1964,6 +2032,10 @@ async function queueAutomaticStoreMasterDataPublications(
 
   const targetStore = target.storeNode.store;
   const mode = options?.mode ?? "delta";
+  const shouldPublish = (eventType: string) =>
+    options?.eventTypes ? options.eventTypes.has(eventType) : true;
+  const shouldPublishAny = (...eventTypes: string[]) =>
+    eventTypes.some((eventType) => shouldPublish(eventType));
   const bootstrapToken =
     mode === "bootstrap" ? `${target.storeNode.code}:${now.getTime()}` : null;
   const existingMasterPublications =
@@ -1982,6 +2054,7 @@ async function queueAutomaticStoreMasterDataPublications(
                   "security.role.published",
                   "security.user.published",
                   "customer.published",
+                  "supplier.published",
                   "setup.product-department.published",
                   "setup.product-category.published",
                   "setup.unit-of-measure.published",
@@ -2058,6 +2131,7 @@ async function queueAutomaticStoreMasterDataPublications(
       | "role"
       | "retailUser"
       | "customer"
+      | "supplier"
       | "promotion"
       | "productDepartment"
       | "productCategory"
@@ -2088,6 +2162,7 @@ async function queueAutomaticStoreMasterDataPublications(
     roles,
     retailUsers,
     customers,
+    suppliers,
     departments,
     categories,
     unitOfMeasures,
@@ -2403,6 +2478,28 @@ async function queueAutomaticStoreMasterDataPublications(
               name: true,
             },
           },
+        },
+      }),
+    () =>
+      tx.supplier.findMany({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          deletedAt: null,
+        },
+        orderBy: [{ name: "asc" }, { supplierNo: "asc" }],
+        select: {
+          id: true,
+          supplierNo: true,
+          name: true,
+          contactName: true,
+          phone: true,
+          email: true,
+          addressLine1: true,
+          city: true,
+          countryCode: true,
+          leadTimeDays: true,
+          status: true,
+          updatedAt: true,
         },
       }),
     () =>
@@ -3007,7 +3104,11 @@ async function queueAutomaticStoreMasterDataPublications(
     (entry) => entry.status === RecordStatus.ACTIVE,
   );
 
-  if (mode === "bootstrap" && defaultPriceList) {
+  if (
+    mode === "bootstrap" &&
+    defaultPriceList &&
+    shouldPublishAny("catalog.product.published", "pricing.price-list.published")
+  ) {
     const baseStorePriceByProductId = new Map(
       storeProductPrices
         .filter((entry) => !entry.productVariantId)
@@ -3130,13 +3231,13 @@ async function queueAutomaticStoreMasterDataPublications(
     serialUnitsByProductId.set(serialUnit.product.id, [serialUnit]);
   }
   const outboxRows: Prisma.SyncOutboxEventCreateManyInput[] = [];
-  const accountPaymentReceiptTemplate = target.storeNode.store
+  const accountPaymentReceiptTemplate = shouldPublish("store.settings.published")
     ? await ensureEnterpriseAccountPaymentReceiptTemplate(
         tx,
         target.storeNode.retailOrgId,
       )
     : null;
-  const goodsReceiptTemplate = target.storeNode.store
+  const goodsReceiptTemplate = shouldPublish("store.settings.published")
     ? await ensureEnterpriseGoodsReceiptTemplate(
         tx,
         target.storeNode.retailOrgId,
@@ -3171,6 +3272,7 @@ async function queueAutomaticStoreMasterDataPublications(
 
   if (
     storeSettings &&
+    shouldPublish("store.settings.published") &&
     !(
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3291,7 +3393,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const location of locations) {
+  for (const location of shouldPublish("inventory.location.published") ? locations : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3333,7 +3435,9 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const location of transferRequestSourceLocations) {
+  for (const location of shouldPublish("inter-store-transfer.target.published")
+    ? transferRequestSourceLocations
+    : []) {
     if (!location.store) {
       continue;
     }
@@ -3382,7 +3486,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const permission of permissions) {
+  for (const permission of shouldPublish("security.permission.published") ? permissions : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3417,7 +3521,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const role of roles) {
+  for (const role of shouldPublish("security.role.published") ? roles : []) {
     const roleVersionStamp = Math.max(
       role.updatedAt.getTime(),
       ...role.rolePermissions.map((rolePermission) =>
@@ -3463,7 +3567,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const retailUser of retailUsers) {
+  for (const retailUser of shouldPublish("security.user.published") ? retailUsers : []) {
     const userPermissionCodes = new Set<string>();
     const userRoleCodes = new Set<string>();
     const userRoleNames = new Set<string>();
@@ -3535,7 +3639,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const customer of customers) {
+  for (const customer of shouldPublish("customer.published") ? customers : []) {
     const customerVersionStamp = customer.updatedAt.getTime();
 
     if (
@@ -3591,7 +3695,52 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const department of departments) {
+  for (const supplier of shouldPublish("supplier.published") ? suppliers : []) {
+    const supplierVersionStamp = supplier.updatedAt.getTime();
+
+    if (
+      mode === "delta" &&
+      hasExistingMasterPublication(
+        "supplier",
+        supplier.supplierNo,
+        supplierVersionStamp,
+      )
+    ) {
+      continue;
+    }
+
+    const payload: EnterpriseSupplierPublishedPayload = {
+      storeCode: target.storeNode.store.code,
+      supplierId: supplier.id,
+      supplierNo: supplier.supplierNo,
+      supplierName: supplier.name,
+      contactName: supplier.contactName,
+      phone: supplier.phone,
+      email: supplier.email,
+      addressLine1: supplier.addressLine1,
+      city: supplier.city,
+      countryCode: supplier.countryCode,
+      leadTimeDays: supplier.leadTimeDays,
+      status: supplier.status,
+      publishedAt: now.toISOString(),
+    };
+
+    outboxRows.push({
+      id: randomUUID(),
+      syncNodeId: target.enterpriseNode.id,
+      targetNodeCode: target.storeNode.code,
+      aggregateType: "supplier",
+      aggregateId: supplier.id,
+      eventType: "supplier.published",
+      idempotencyKey: bootstrapToken
+        ? `${target.enterpriseNode.code}:supplier:bootstrap:${bootstrapToken}:${supplier.supplierNo}:${supplierVersionStamp}`
+        : `${target.enterpriseNode.code}:supplier:auto:${target.storeNode.code}:${supplier.supplierNo}:${supplierVersionStamp}`,
+      payload: serializeRequiredJsonField(payload),
+      status: SyncEventStatus.PENDING,
+    });
+  }
+
+  for (const department of shouldPublish("setup.product-department.published") ? departments : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3628,7 +3777,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const category of categories) {
+  for (const category of shouldPublish("setup.product-category.published") ? categories : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3667,7 +3816,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const unitOfMeasure of unitOfMeasures) {
+  for (const unitOfMeasure of shouldPublish("setup.unit-of-measure.published") ? unitOfMeasures : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3705,7 +3854,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const promotion of promotions) {
+  for (const promotion of shouldPublish("setup.promotion.published") ? promotions : []) {
     const eligibleStoreCodes = toOptionalStringArraySnapshot(
       promotion.eligibleStoreCodes,
     );
@@ -3796,7 +3945,12 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const product of productsForStore) {
+  for (const product of shouldPublishAny(
+    "catalog.product.published",
+    "inventory.serial-snapshot.published",
+  )
+    ? productsForStore
+    : []) {
     const storeProductPrice = storePriceByProductId.get(product.id);
     const productSellingUnits = sellingUnitsByProductId.get(product.id) ?? [];
     const storeVariantVersionStamps = product.matrixVariants
@@ -4000,7 +4154,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const barcode of barcodes) {
+  for (const barcode of shouldPublish("catalog.barcode.published") ? barcodes : []) {
     const productForBarcode = productsForStore.find(
       (product) => product.code === barcode.product.code,
     );
@@ -4043,7 +4197,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const taxProfile of taxProfiles) {
+  for (const taxProfile of shouldPublish("setup.tax-profile.published") ? taxProfiles : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4082,7 +4236,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const tenderMethod of tenderMethods) {
+  for (const tenderMethod of shouldPublish("setup.tender-method.published") ? tenderMethods : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4131,7 +4285,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const bankAccount of bankAccounts) {
+  for (const bankAccount of shouldPublish("setup.bank-account.published") ? bankAccounts : []) {
     const versionStamp = Math.max(
       bankAccount.updatedAt.getTime(),
       bankAccount.branch.updatedAt.getTime(),
@@ -4179,7 +4333,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const giftCertificate of giftCertificates) {
+  for (const giftCertificate of shouldPublish("gift-certificate.published") ? giftCertificates : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4221,7 +4375,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const purchaseOrder of purchaseOrders) {
+  for (const purchaseOrder of shouldPublish("purchase-order.published") ? purchaseOrders : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4337,7 +4491,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const priceList of priceLists) {
+  for (const priceList of shouldPublish("pricing.price-list.published") ? priceLists : []) {
     for (const entry of priceList.entries) {
       if (!activeProductIds.has(entry.product.id)) {
         continue;
@@ -4389,12 +4543,16 @@ async function queueAutomaticStoreMasterDataPublications(
     }
   }
 
-  if (outboxRows.length === 0) {
+  const scopedOutboxRows = options?.eventTypes
+    ? outboxRows.filter((row) => options.eventTypes?.has(row.eventType))
+    : outboxRows;
+
+  if (scopedOutboxRows.length === 0) {
     return 0;
   }
 
   const dedupedOutboxRows = Array.from(
-    new Map(outboxRows.map((row) => [row.idempotencyKey, row])).values(),
+    new Map(scopedOutboxRows.map((row) => [row.idempotencyKey, row])).values(),
   );
   const alreadyQueuedKeys = new Set(
     (
@@ -4431,6 +4589,58 @@ async function queueAutomaticStoreMasterDataPublications(
     });
 
   return result.count;
+}
+
+export async function publishStoreMasterData(
+  nodeCode: string,
+  input: StoreMasterDataPublicationRequest,
+): Promise<StoreMasterDataPublicationResponse> {
+  const scopes = normalizeMasterDataPublicationScopes(input.scopes ?? []);
+  const eventTypes = masterDataEventTypesForScopes(scopes);
+
+  return prisma.$transaction(
+    async (tx) => {
+      const target = await getStoreSyncTarget(tx, nodeCode);
+      const now = new Date();
+      const audit = toOperatorAuditInput(
+        input,
+        `Manually queueing ${scopes.join(", ").toLowerCase().replaceAll("_", " ")} master data for ${target.storeNode.name}.`,
+      );
+      const queuedCount = await queueAutomaticStoreMasterDataPublications(
+        tx,
+        target,
+        now,
+        {
+          mode: "bootstrap",
+          eventTypes,
+        },
+      );
+
+      await createOperatorAuditAction(tx, {
+        syncNodeId: target.storeNode.id,
+        syncOutboxEventId: null,
+        syncInboundEventId: null,
+        actionType: SyncOperatorActionType.PUBLISH_MASTER_DATA,
+        operatorName: audit.operatorName,
+        note: `${audit.note} Queued ${queuedCount} packet(s).`,
+        aggregateType: "masterData",
+        eventType: [...eventTypes].join(","),
+      });
+
+      return {
+        nodeCode: target.storeNode.code,
+        scopes,
+        queuedCount,
+        note: audit.note,
+        operatorName: audit.operatorName,
+        serverProcessedAt: now.toISOString(),
+      };
+    },
+    {
+      maxWait: 5_000,
+      timeout: 120_000,
+    },
+  );
 }
 
 async function createOperatorAuditAction(

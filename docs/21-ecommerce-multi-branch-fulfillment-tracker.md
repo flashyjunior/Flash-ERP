@@ -1,6 +1,6 @@
 # Ecommerce Multi-Branch Fulfilment Tracker
 
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 This tracker governs the evolution of the Flash ERP public ecommerce storefront from a single-shop sales path into a centrally managed, multi-branch fulfilment operation. It is deliberately phased: a customer must never be promised stock by adding inventory from several branches unless the order has a real, auditable fulfilment plan.
 
@@ -30,7 +30,7 @@ This tracker governs the evolution of the Flash ERP public ecommerce storefront 
 - Branch: `master`.
 - Baseline implementation commit: `31a1a27` (`Rework ecommerce fulfilment across branches`).
 - Merged implementation commit: `1fcd33f` (`Add ecommerce storefront order handoff`), PR #20.
-- Current delivery position: central network allocation, internal-transfer routing, customer and staff visibility, configurable storefront slides, and Store Desktop order handoff are merged and covered by focused acceptance plus a deploy build. The release package is ready; target deployment, fulfilment-location configuration, and production-like UAT remain before Phase 1 is marked Done.
+- Current delivery position: central network allocation, internal-transfer routing, customer and staff visibility, configurable storefront slides, and Store Desktop order handoff are merged and covered by focused acceptance plus a deploy build. The `225c682-r9` deployment window was interrupted by an abrupt VPS restart. Post-restart public health is ready, and the three remotely served storefront page/CSS assets that differ from `r9` match the archived `r7` payload, confirming that the `r7` storefront runtime recovered; the VPS-local task action still requires preflight confirmation. Neither `r8` nor `r9` may be reused. The storefront UX revision is repackaged as fresh release `225c682-r10`, but that package predates the locally completed Google/Facebook customer-authentication revision and must not be used to deploy this newer source. Fulfilment-location configuration and production-like operational UAT remain before Phase 1 is marked Done.
 - This tracker distinguishes code completion from rollout acceptance. Do not mark a phase Done merely because its branch compiles.
 
 ## Phase 1: Central Delivery Allocation And Reservation
@@ -111,18 +111,22 @@ Status: Code complete
 - Display the selected pickup or dispatching delivery branch and network-allocation status to the customer and staff.
 - Display allocation and stock context in the staff order view without changing the separate online-store POS workflow.
 - Prevent staff from marking an order ready, out for delivery, or delivered until all required internal stock transfers have been received at the dispatch location.
+- Offer Google and Facebook as additional customer sign-in and signup options when provider credentials and an HTTPS storefront origin are configured; preserve the existing ecommerce customer session and resume checkout after authentication.
 
 Acceptance:
 
 - An authorised staff member can configure at least two active fulfilment locations.
 - The customer sees the selected pickup location or assigned delivery dispatch branch at checkout and on the order without being shown internal source stock.
 - Unconfigured shops retain the backward-compatible default-location path.
+- Configured social login creates or safely links the correct customer account, rejects tampered or expired state, and returns the customer to checkout without exposing provider secrets or access tokens.
 
 Evidence:
 
 - Enterprise web TypeScript check passed.
 - Focused ecommerce acceptance passed.
 - The staff order view displays each source transfer, requested/received quantity, and remaining receipt work; browser UAT remains outstanding.
+- Local production browser acceptance on 2026-08-22 passed for the image-only hero, default-collapsed department rail with hover/focus category mega-menu, full-width desktop storefront bands, hero-aligned desktop product sections, catalogue filtering, product breadcrumbs, desktop side-thumbnail gallery, structured product/checkout/fulfilment facts, category-ranked related products, ash product placeholders, materially distinct persistent small/medium/large text controls, and mobile/tablet/desktop overflow checks. Deployment of this storefront UX revision remains pending.
+- Ecommerce OAuth regression, Enterprise Web typecheck, deploy build, provider-route smoke, and focused production browser acceptance passed for disabled-until-configured Google/Facebook controls, signed state, Google PKCE, safe return URLs, existing-session reuse, and checkout resumption. Live provider consent and callback verification remains deployment UAT after real credentials and HTTPS callback URLs are configured.
 
 ### ECOM-MBF-005 - Phase 1 Rollout And UAT
 
@@ -144,6 +148,27 @@ Local verification evidence (2026-08-21):
 - Sync-core, Store Desktop, and Enterprise Web TypeScript checks passed.
 - A checksum-verified VPS release package was assembled with all three ecommerce migrations and with runtime uploads excluded.
 - Public ecommerce browser suite: 6 passed; 3 authentication-dependent flows were skipped because this local runtime intentionally does not expose development OTP/MFA codes.
+
+Storefront UX package evidence (2026-08-22):
+
+- The `225c682-r8` deployment attempt completed migration and Prisma generation but failed before changing `FlashRMSHQ`: the same validator used for the pristine ZIP was incorrectly rerun after the deployer intentionally restored `.env`, root dependencies, and shared uploads. It rejected the approved `apps\enterprise-web\public\uploads` junction. The failed release directory is retained and `r8` must not be reused.
+- `FlashERP-HQ-225C682-R9-VPS-Deploy-Resolved.zip` was assembled with outer SHA-256 `CDEFFDFFD52B4C128DC805BE53534A9360AF4A6754E6AE10783802BB0796C0B6`; deployment remains pending.
+- The `r9` deployer separates pristine-payload validation from hydrated-release validation. Before promotion and again before the task switch, it requires the restored root `.env` to match its approved source and verifies that root `node_modules` and ecommerce uploads are junctions to their expected targets.
+- The `r9` packager reproduced that hydrated state with a harmless test environment and both junctions, then invoked the actual packaged deployer and passed the regression gate. It also re-extracted and audited both ZIP layers, passed Windows PowerShell 5.1 parsing and the no-write missing-task guard, and confirmed that `.env` files, runtime uploads, root dependencies, and Next standalone/dev/cache output were excluded from the ZIP.
+- The finished payload contains physical `@prisma/client-2c3a283f134fdcb6` runtime alias files, all three ecommerce migrations, and the direct Node service host. An executable alias smoke loaded `PrismaClient` through the same reused-root-`node_modules` model used on the VPS.
+- The `r9` deployment window was interrupted by an abrupt VPS restart and must not be resumed or reused. Post-restart external checks returned HTTP 200 for live health, database readiness with `ready: true`, catalog, and storefront. The three remotely served page/CSS assets absent from `r9` are all present in the archived `r7` payload, confirming recovery of the `r7` storefront runtime pending VPS-local task-action confirmation.
+- `FlashERP-HQ-225C682-R10-VPS-Deploy-Resolved.zip` was assembled as the clean retry with outer SHA-256 `FCA37F9AEDAF66EFDFB6AC5495E5FE789F7BFC3BC677710A9BA7D2992907956E`. The hydrated-layout regression gate, both archive audits, no-write guard, PowerShell 5.1 parse, physical Prisma alias audit, and executable alias smoke passed; deployment remains pending.
+
+Deployment evidence (2026-08-21):
+
+- `FlashRMS-225c682-r1` was switched into the `FlashRMSHQ` scheduled task on the target VPS after idempotent migrations and Prisma client generation completed.
+- External checks returned HTTP 200 for live health, database readiness, `api/ecommerce/accra-shop/catalog`, and `shop/accra-shop`.
+
+Storefront correction deployment evidence (2026-08-22):
+
+- The operator confirmed `FlashRMS-225c682-r7` is running after checksum verification, migration/Prisma preparation, endpoint checks, and the scheduled-task stability window.
+- External checks returned HTTP 200 for live health, database readiness, `api/ecommerce/accra-shop/catalog`, and `shop/accra-shop`; all four configured `/uploads/ecommerce/...` hero images returned HTTP 200.
+- Focused live Playwright acceptance passed against `84.247.188.30:3000`: the four-slide hero rendered at the increased desktop/mobile height, a simple product cart button added one item without navigating to product details, and mobile, tablet, and desktop layouts had no horizontal overflow.
 
 Exit criteria:
 
@@ -269,7 +294,7 @@ Evidence:
 - `npm run acceptance:ecommerce-performance`, Enterprise Web TypeScript validation, and `npm run acceptance:ecommerce-multi-branch` passed after route timing, webhook attribution, and staff monitoring were added.
 - The ecommerce performance gate now verifies persistent-health severity escalation for stale reservations and reserved-stock shortfalls; the staff monitoring API combines this durable snapshot with the live route timings.
 - `npm run acceptance:capacity-hardening` and `npm run acceptance:ecommerce-performance` passed after the checkout-contention runner was added. Its local guard was exercised without a fixture and refused to issue writes until the required explicit opt-in is supplied; a production-like run with disposable customer/staff sessions remains UAT evidence.
-- Browser verification remains outstanding because the local database contains no enabled public storefront; production-like UAT will include mobile and desktop image/network checks.
+- Live mobile, tablet, and desktop browser verification passed against the deployed `225c682-r7` storefront, including configured hero-image retrieval and direct simple-item card-to-cart behavior. Authentication-dependent and operational fulfilment scenarios remain part of production-like UAT.
 
 ## Explicitly Out Of Scope Until A Later Approved Phase
 

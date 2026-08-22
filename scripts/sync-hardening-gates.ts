@@ -36,6 +36,12 @@ const desktopSyncWorker = requireFile(
   "apps/store-desktop/src/main/store-sync-worker-runtime.ts"
 );
 const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.tsx");
+const syncNodeDetail = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-sync-node-detail.tsx"
+);
+const masterDataPublicationRoute = requireFile(
+  "apps/enterprise-web/src/app/api/sync/store-nodes/[nodeCode]/publish-master-data/route.ts"
+);
 const syncDocs = requireFile("docs/09-sync-hardening-and-observability.md");
 
 requireIncludes(policies, "MAX_SYNC_RETRY_ATTEMPTS", "shared retry attempt limit must exist.");
@@ -56,6 +62,16 @@ requireIncludes(
   "push responses must report rejected downstream acknowledgements."
 );
 requireIncludes(contracts, "retryAfterSeconds", "pull responses must expose downstream retry wait.");
+requireIncludes(
+  contracts,
+  "StoreMasterDataPublicationScope",
+  "sync contracts must define selectable master-data publication groups."
+);
+requireIncludes(
+  contracts,
+  "EnterpriseSupplierPublishedPayload",
+  "sync contracts must define the supplier publication payload."
+);
 requireIncludes(
   enterpriseSync,
   "sync.downstream-acknowledgement.rejected",
@@ -108,8 +124,28 @@ requireIncludes(
 );
 requireIncludes(
   enterpriseSync,
-  '"inter-store-transfer.target.published",\n                  "security.permission.published"',
+  '"inter-store-transfer.target.published"',
   "automatic master publication deduplication must include transfer-target directory packets."
+);
+requireIncludes(
+  enterpriseSync,
+  "publishStoreMasterData",
+  "enterprise must expose governed manual master-data publication."
+);
+requireIncludes(
+  enterpriseSync,
+  'SUPPLIERS: ["supplier.published"]',
+  "manual publication must include suppliers."
+);
+requireIncludes(
+  masterDataPublicationRoute,
+  'assertEnterprisePermission(["sync.admin.reseed"])',
+  "manual publication must require the sync reseed permission."
+);
+requireIncludes(
+  syncNodeDetail,
+  "Queue master data",
+  "HQ node detail must expose the manual publication workspace."
 );
 
 for (const [source, label] of [
@@ -127,6 +163,7 @@ for (const [source, label] of [
   requireIncludes(source, "last_http_status", `${label} must persist HTTP failure status.`);
   requireIncludes(source, "syncRunId", `${label} must send sync run ids to enterprise.`);
   requireIncludes(source, "POLICY_REJECTED", `${label} must leave permanent policy conflicts out of operator retry.`);
+  requireIncludes(source, 'event.eventType === "supplier.published"', `${label} must apply supplier publications.`);
 }
 
 for (const [source, label] of [
@@ -160,5 +197,10 @@ requireIncludes(
 requireIncludes(syncDocs, "retry window", "sync docs must describe retry windows.");
 requireIncludes(syncDocs, "sync run id", "sync docs must describe sync run correlation.");
 requireIncludes(syncDocs, "rejected acknowledgement", "sync docs must describe rejected ACK handling.");
+requireIncludes(
+  syncDocs,
+  "Manual Master-Data Publication",
+  "sync docs must explain when automatic and manual master publication occurs."
+);
 
 console.log("Sync hardening gate passed.");

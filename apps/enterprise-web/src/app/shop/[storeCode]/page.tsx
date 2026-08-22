@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { PublicStorefront } from "@/components/ecommerce/public-storefront";
+import { EcommerceAuthError } from "@/server/ecommerce/ecommerce-customer-auth";
 import { getPublicStorefront } from "@/server/ecommerce/ecommerce.repository";
 
 export const dynamic = "force-static";
@@ -17,7 +18,10 @@ export default async function PublicShopPage({
   try {
     const storefront = await getPublicStorefront(storeCode);
     return <PublicStorefront storefront={storefront} />;
-  } catch {
-    notFound();
+  } catch (error) {
+    if (error instanceof EcommerceAuthError && error.status === 404) {
+      notFound();
+    }
+    throw error;
   }
 }

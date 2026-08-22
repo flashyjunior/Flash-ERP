@@ -374,6 +374,30 @@ export function OnlineStoreEcommerceWorkspace({
     );
   }
 
+  async function uploadHeroBanner(index: number, file: File) {
+    const key = `hero-upload:${index}`;
+    setBusyKey(key);
+    setError(null);
+    setMessage(null);
+    try {
+      const uploaded = await uploadImage(file);
+      setSettings((current) => {
+        const ecommerceHeroImageUrls = [...current.ecommerceHeroImageUrls];
+        ecommerceHeroImageUrls[index] = uploaded.url;
+        return {
+          ...current,
+          ecommerceHeroImageUrls,
+          ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? ""
+        };
+      });
+      setMessage("Storefront banner uploaded. Save storefront settings to publish it.");
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "The storefront banner could not be uploaded.");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   function savePaymentOptions() {
     return perform("payments", async () =>
       readJson<{ message: string }>(
@@ -725,7 +749,7 @@ export function OnlineStoreEcommerceWorkspace({
                         <div className={styles.heroPreview}>{imageUrl ? <img alt={`Storefront banner ${index + 1}`} src={imageUrl} /> : <ImageIcon size={24} />}</div>
                         <label>
                           <span>Banner {index + 1}</span>
-                          <input accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; void perform(`hero-upload:${index}`, async () => { const uploaded = await uploadImage(file); setSettings((current) => { const ecommerceHeroImageUrls = [...current.ecommerceHeroImageUrls]; ecommerceHeroImageUrls[index] = uploaded.url; return { ...current, ecommerceHeroImageUrls, ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? "" }; }); return uploaded; }); }} type="file" />
+                          <input accept="image/jpeg,image/png,image/webp,image/avif" disabled={busyKey === `hero-upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; void uploadHeroBanner(index, file); }} type="file" />
                         </label>
                         {imageUrl ? <button aria-label={`Remove storefront banner ${index + 1}`} className={styles.heroBannerRemove} onClick={() => setSettings((current) => { const ecommerceHeroImageUrls = current.ecommerceHeroImageUrls.filter((_, imageIndex) => imageIndex !== index); return { ...current, ecommerceHeroImageUrls, ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? "" }; })} title="Remove banner" type="button"><Trash2 size={16} /></button> : null}
                       </div>

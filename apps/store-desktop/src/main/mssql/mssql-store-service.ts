@@ -26,6 +26,7 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
   EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseGiftCertificatePublishedPayload,
   EnterpriseInventoryLocationPublishedPayload,
@@ -21001,6 +21002,47 @@ export class MssqlStoreService {
     }
 
     if (
+      event.aggregateType === "supplier" &&
+      event.eventType === "supplier.published"
+    ) {
+      const supplierPayload =
+        payload as Partial<EnterpriseSupplierPublishedPayload>;
+
+      if (
+        typeof supplierPayload.storeCode !== "string" ||
+        supplierPayload.storeCode !== storeCode ||
+        typeof supplierPayload.supplierId !== "string" ||
+        typeof supplierPayload.supplierNo !== "string" ||
+        typeof supplierPayload.supplierName !== "string" ||
+        typeof supplierPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid supplier publication payload.",
+        );
+      }
+
+      await this.mergeRow(
+        "supplier_snapshot",
+        ["supplier_no"],
+        {
+          supplier_no: supplierPayload.supplierNo,
+          supplier_name: supplierPayload.supplierName,
+          phone: supplierPayload.phone ?? null,
+          email: supplierPayload.email ?? null,
+          tax_number: null,
+          address_line1: supplierPayload.addressLine1 ?? null,
+          city: supplierPayload.city ?? null,
+          country_code: supplierPayload.countryCode ?? null,
+          status: supplierPayload.status,
+          updated_at: appliedAt,
+        },
+        runner,
+      );
+
+      return;
+    }
+
+    if (
       event.aggregateType === "productDepartment" &&
       event.eventType === "setup.product-department.published"
     ) {
@@ -21989,7 +22031,10 @@ export class MssqlStoreService {
         "SELECT [record_version] FROM [dbo].[sales_order] WHERE [id] = @orderId",
         { orderId: order.orderId }, runner,
       );
-      if (existingRows[0] && existingRows[0].record_version > order.salesOrderRecordVersion) return;
+      if (
+        existingRows.recordset[0] &&
+        existingRows.recordset[0].record_version > order.salesOrderRecordVersion
+      ) return;
 
       await this.mergeRow("pos_transaction", ["id"], {
         id: order.sourceTransactionId,
@@ -22021,9 +22066,9 @@ export class MssqlStoreService {
       for (const line of order.lines) {
         if (typeof line !== "object" || line === null || typeof line.lineId !== "string" || typeof line.productCode !== "string" || typeof line.productName !== "string" || typeof line.quantity !== "number" || typeof line.unitPrice !== "number" || typeof line.lineTotal !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order line.");
         const products = await this.query<{ id: string }>("SELECT [id] FROM [dbo].[product_snapshot] WHERE [product_code] = @productCode", { productCode: line.productCode }, runner);
-        if (!products[0]) throw new Error(`Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`);
+        if (!products.recordset[0]) throw new Error(`Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`);
         await this.mergeRow("pos_transaction_line", ["id"], {
-          id: line.lineId, pos_transaction_id: order.sourceTransactionId, product_id: products[0].id,
+          id: line.lineId, pos_transaction_id: order.sourceTransactionId, product_id: products.recordset[0].id,
           line_intent: "SALE", source_line_id: line.lineId, inventory_location_code: order.dispatchInventoryLocationCode ?? null,
           applied_promotion_code: line.appliedPromotionCode ?? null, applied_promotion_name: line.appliedPromotionName ?? null,
           product_code_snapshot: line.productCode, product_variant_code_snapshot: line.productVariantCode ?? null,

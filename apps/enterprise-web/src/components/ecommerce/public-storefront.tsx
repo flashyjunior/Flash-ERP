@@ -2,36 +2,52 @@
 
 import {
   ArrowLeft,
+  Baby,
   BadgeCheck,
   BadgePercent,
+  BookOpen,
+  Boxes,
+  Car,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleUserRound,
   Clock3,
   CreditCard,
+  Dumbbell,
+  Fuel,
   Heart,
+  HeartPulse,
+  House,
   KeyRound,
+  Laptop,
   LoaderCircle,
+  ListTree,
   LocateFixed,
   LogIn,
   MapPin,
   Minus,
+  Package,
   PackageCheck,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  Shirt,
   ShoppingBag,
   ShoppingCart,
+  Sparkles,
   Star,
   Store,
   Trash2,
   Truck,
+  Utensils,
   WalletCards,
   X,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  type LucideIcon,
 } from "lucide-react";
 import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -43,15 +59,68 @@ import type {
 } from "@/server/ecommerce/ecommerce.repository";
 
 import styles from "./public-storefront.module.css";
+import { productCardRequiresSelection } from "./storefront-card-action";
+import {
+  buildStorefrontCategoryTree,
+  getStorefrontSelectionLabel,
+  productMatchesStorefrontSelection,
+  type StorefrontCatalogSelection,
+  type StorefrontDepartmentNode,
+} from "./storefront-category-tree";
 
 type Product = PublicStorefrontData["products"][number];
 type ProductDetail = PublicStorefrontProductDetail;
 type Variant = Product["variants"][number];
 type SellingUnit = Product["sellingUnits"][number];
 type ProductPromotion = NonNullable<Product["promotion"]>;
+type StorefrontTextSize = "SMALL" | "MEDIUM" | "LARGE";
+type SocialAuthProvider = "google" | "facebook";
+type SocialAuthProviderOption = { id: SocialAuthProvider; enabled: boolean };
+type SocialAuthResult = {
+  provider: SocialAuthProvider;
+  result: "success" | "cancelled" | "conflict" | "failed" | "unavailable";
+};
+
+const storefrontTextSizeStorageKey = "flash-erp-storefront-text-size";
+const categoryIconRules: Array<{ pattern: RegExp; icon: LucideIcon }> = [
+  { pattern: /fuel|petrol|diesel|kerosene|gas|lpg/i, icon: Fuel },
+  { pattern: /computer|electronic|phone|technology|appliance/i, icon: Laptop },
+  { pattern: /fashion|cloth|apparel|shoe/i, icon: Shirt },
+  { pattern: /food|grocery|drink|restaurant|kitchen/i, icon: Utensils },
+  { pattern: /baby|child|kid|toy/i, icon: Baby },
+  { pattern: /vehicle|automotive|motor|car/i, icon: Car },
+  { pattern: /book|office|school|stationery/i, icon: BookOpen },
+  { pattern: /sport|fitness|exercise/i, icon: Dumbbell },
+  { pattern: /beauty|cosmetic|personal care/i, icon: Sparkles },
+  { pattern: /health|medical|pharmacy/i, icon: HeartPulse },
+  { pattern: /home|furniture|garden/i, icon: House },
+];
+
+function resolveCategoryIcon(label: string) {
+  return categoryIconRules.find(({ pattern }) => pattern.test(label))?.icon ?? Package;
+}
 
 function normalizeProductCode(value: string) {
   return value.trim().toLowerCase();
+}
+
+function normalizeCatalogLabel(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function getRelatedProductScore(product: Product, candidate: Product) {
+  let score = 0;
+  const productDepartment = normalizeCatalogLabel(product.department);
+  const productCategory = normalizeCatalogLabel(product.category);
+  const productSubcategory = normalizeCatalogLabel(product.subcategory);
+  const productBrand = normalizeCatalogLabel(product.brand);
+
+  if (productDepartment && productDepartment === normalizeCatalogLabel(candidate.department)) score += 20;
+  if (productCategory && productCategory === normalizeCatalogLabel(candidate.category)) score += 40;
+  if (productSubcategory && productSubcategory === normalizeCatalogLabel(candidate.subcategory)) score += 80;
+  if (productBrand && productBrand === normalizeCatalogLabel(candidate.brand)) score += 10;
+
+  return score;
 }
 
 function isOptimizableStorefrontImage(src: string) {
@@ -553,8 +622,11 @@ export function PublicStorefront({
 }) {
   const router = useRouter();
   const storageKey = `flash-erp-cart:${storefront.store.code}`;
+  const socialAuthResumeKey = `flash-erp-social-auth-resume:${storefront.store.code}`;
   const [searchText, setSearchText] = useState("");
-  const [category, setCategory] = useState("ALL");
+  const [catalogSelection, setCatalogSelection] = useState<StorefrontCatalogSelection>({ level: "ALL" });
+  const [textSize, setTextSize] = useState<StorefrontTextSize>("MEDIUM");
+  const [textSizeReady, setTextSizeReady] = useState(false);
   const [promotionStripDismissed, setPromotionStripDismissed] = useState(false);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [cartReady, setCartReady] = useState(false);
@@ -588,6 +660,13 @@ export function PublicStorefront({
   const [developmentCode, setDevelopmentCode] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [socialAuthBusy, setSocialAuthBusy] = useState<SocialAuthProvider | null>(null);
+  const [socialAuthProviders, setSocialAuthProviders] = useState<SocialAuthProviderOption[]>([
+    { id: "google", enabled: false },
+    { id: "facebook", enabled: false },
+  ]);
+  const [socialAuthResult, setSocialAuthResult] = useState<SocialAuthResult | null>(null);
+  const [resumeCheckoutAfterAuth, setResumeCheckoutAfterAuth] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [ordersBusy, setOrdersBusy] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<CustomerOrder | null>(null);
@@ -730,6 +809,20 @@ export function PublicStorefront({
   }, [storageKey]);
 
   useEffect(() => {
+    const stored = window.localStorage.getItem(storefrontTextSizeStorageKey);
+    if (stored === "SMALL" || stored === "MEDIUM" || stored === "LARGE") {
+      setTextSize(stored);
+    }
+    setTextSizeReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (textSizeReady) {
+      window.localStorage.setItem(storefrontTextSizeStorageKey, textSize);
+    }
+  }, [textSize, textSizeReady]);
+
+  useEffect(() => {
     if (cartReady) {
       window.localStorage.setItem(storageKey, JSON.stringify(cart));
     }
@@ -738,6 +831,83 @@ export function PublicStorefront({
   useEffect(() => {
     void refreshSession();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/auth/oauth/providers`, {
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const payload = (await response.json()) as { providers?: SocialAuthProviderOption[] };
+        if (active && Array.isArray(payload.providers)) {
+          setSocialAuthProviders(payload.providers);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [storefront.store.code]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const provider = url.searchParams.get("socialProvider");
+    const result = url.searchParams.get("socialAuth");
+    if (
+      (provider === "google" || provider === "facebook") &&
+      (result === "success" ||
+        result === "cancelled" ||
+        result === "conflict" ||
+        result === "failed" ||
+        result === "unavailable")
+    ) {
+      setSocialAuthResult({ provider, result });
+    }
+    if (provider || result) {
+      url.searchParams.delete("socialProvider");
+      url.searchParams.delete("socialAuth");
+      const query = url.searchParams.toString();
+      window.history.replaceState({}, "", `${url.pathname}${query ? `?${query}` : ""}${url.hash}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!socialAuthResult || !cartReady) return;
+    const result = socialAuthResult;
+    setSocialAuthResult(null);
+    void (async () => {
+      try {
+        if (result.result !== "success") {
+          const messages: Record<Exclude<SocialAuthResult["result"], "success">, string> = {
+            cancelled: "Social sign-in was cancelled.",
+            conflict: "That social account is already linked to another customer account.",
+            failed: "Social sign-in could not be completed. Please try again.",
+            unavailable: "That social sign-in option is not available yet.",
+          };
+          setAuthError(messages[result.result]);
+          setAuthMode("SIGN_IN");
+          setAuthOpen(true);
+          return;
+        }
+
+        const nextSession = await refreshSession();
+        if (!nextSession?.authenticated) {
+          setAuthError("Your social sign-in completed, but the customer session could not be opened.");
+          setAuthOpen(true);
+          return;
+        }
+        setAuthOpen(false);
+        showToast(`Signed in with ${result.provider === "google" ? "Google" : "Facebook"}`);
+        if (window.sessionStorage.getItem(socialAuthResumeKey) === "checkout" && cart.length > 0) {
+          await beginCheckout(true);
+        }
+      } finally {
+        window.sessionStorage.removeItem(socialAuthResumeKey);
+        setSocialAuthBusy(null);
+      }
+    })();
+  }, [cartReady, socialAuthResult]);
 
   useEffect(() => {
     if (!toast) {
@@ -865,20 +1035,48 @@ export function PublicStorefront({
     };
   }, [imageViewerOpen, imageViewerProduct, imageViewerUrl]);
 
+  const catalogTree = useMemo(
+    () => buildStorefrontCategoryTree(storefront.products),
+    [storefront.products],
+  );
+  const catalogSelectionLabel = getStorefrontSelectionLabel(catalogSelection);
   const visibleProducts = useMemo(() => {
     const normalizedSearch = searchText.trim().toLowerCase();
     return storefront.products.filter((product) => {
-      const categoryMatches = category === "ALL" || product.category === category;
+      const categoryMatches = productMatchesStorefrontSelection(product, catalogSelection);
       const searchMatches =
         !normalizedSearch ||
-        [product.name, product.shortName, product.code, product.brand, product.category]
+        [
+          product.name,
+          product.shortName,
+          product.code,
+          product.brand,
+          product.department,
+          product.category,
+          product.subcategory,
+        ]
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(normalizedSearch));
       return categoryMatches && searchMatches;
     });
-  }, [category, searchText, storefront.products]);
+  }, [catalogSelection, searchText, storefront.products]);
 
   const featuredProducts = storefront.products.filter((product) => product.featured).slice(0, 8);
+  const relatedProducts = useMemo(() => {
+    if (!quickProduct) return [];
+
+    return storefront.products
+      .filter((product) => product.id !== quickProduct.id)
+      .map((product) => ({ product, score: getRelatedProductScore(quickProduct, product) }))
+      .sort((left, right) =>
+        right.score - left.score ||
+        Number(right.product.featured) - Number(left.product.featured) ||
+        right.product.averageRating - left.product.averageRating ||
+        left.product.name.localeCompare(right.product.name)
+      )
+      .slice(0, 6)
+      .map(({ product }) => product);
+  }, [quickProduct, storefront.products]);
   const selectedProductPromotion = quickProduct
     ? getProductPromotion(quickProduct, quickVariant)
     : null;
@@ -1027,8 +1225,29 @@ export function PublicStorefront({
       cache: "no-store"
     });
     if (response.ok) {
-      setSession(await response.json());
+      const nextSession = (await response.json()) as CustomerSession;
+      setSession(nextSession);
+      return nextSession;
     }
+    return null;
+  }
+
+  function startSocialAuth(provider: SocialAuthProvider) {
+    const providerOption = socialAuthProviders.find((option) => option.id === provider);
+    if (!providerOption?.enabled) {
+      setAuthError(`${provider === "google" ? "Google" : "Facebook"} sign-in is not configured yet.`);
+      return;
+    }
+    setSocialAuthBusy(provider);
+    setAuthError(null);
+    window.sessionStorage.setItem(
+      socialAuthResumeKey,
+      resumeCheckoutAfterAuth ? "checkout" : "account",
+    );
+    const returnTo = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(
+      `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/auth/oauth/${provider}/start?returnTo=${encodeURIComponent(returnTo)}`,
+    );
   }
 
   function showToast(message: string) {
@@ -1091,6 +1310,7 @@ export function PublicStorefront({
     router.push(
       `${publicStoreHref}/products/${encodeURIComponent(product.code)}`
     );
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function closeProduct() {
@@ -1099,6 +1319,18 @@ export function PublicStorefront({
     setQuickProduct(null);
     setProductDetailsBusy(false);
     router.push(publicStoreHref);
+  }
+
+  function showCatalog(selection: StorefrontCatalogSelection) {
+    setCatalogSelection(selection);
+    setSearchText("");
+    if (quickProduct) {
+      productDetailRequestIdRef.current += 1;
+      closeImageViewer();
+      setQuickProduct(null);
+      setProductDetailsBusy(false);
+      router.push(publicStoreHref);
+    }
   }
 
   function updateGlobalSearch(value: string) {
@@ -1219,9 +1451,8 @@ export function PublicStorefront({
 
   function addProductFromCard(product: Product) {
     const variant = product.variants.length === 1 ? product.variants[0] : null;
-    const sellingUnits = getProductSellingUnits(product, variant);
 
-    if (product.variants.length > 1 || sellingUnits.length !== 1) {
+    if (productCardRequiresSelection(product.variants.length)) {
       openProduct(product);
       return;
     }
@@ -1260,6 +1491,10 @@ export function PublicStorefront({
         await refreshSession();
         setAuthOpen(false);
         showToast("Welcome back");
+        if (resumeCheckoutAfterAuth) {
+          setResumeCheckoutAfterAuth(false);
+          await beginCheckout(true);
+        }
         return;
       }
 
@@ -1309,6 +1544,10 @@ export function PublicStorefront({
       await refreshSession();
       setAuthOpen(false);
       showToast("Account created");
+      if (resumeCheckoutAfterAuth) {
+        setResumeCheckoutAfterAuth(false);
+        await beginCheckout(true);
+      }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Authentication failed.");
     } finally {
@@ -1316,12 +1555,13 @@ export function PublicStorefront({
     }
   }
 
-  async function beginCheckout() {
+  async function beginCheckout(authenticated = session.authenticated) {
     if (cart.length === 0) {
       return;
     }
-    if (!session.authenticated) {
+    if (!authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(true);
       setAuthOpen(true);
       return;
     }
@@ -1492,6 +1732,7 @@ export function PublicStorefront({
   async function openOrders() {
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(false);
       setAuthOpen(true);
       return;
     }
@@ -1535,6 +1776,7 @@ export function PublicStorefront({
   async function openAccount() {
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(false);
       setAuthOpen(true);
       return;
     }
@@ -1614,6 +1856,7 @@ export function PublicStorefront({
     setPassword("");
     setAuthError(null);
     setAuthMode("RESET");
+    setResumeCheckoutAfterAuth(false);
     setDrawerView(null);
     setAuthOpen(true);
   }
@@ -1657,6 +1900,7 @@ export function PublicStorefront({
     }
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(false);
       setAuthOpen(true);
       return;
     }
@@ -1684,7 +1928,7 @@ export function PublicStorefront({
   }
 
   return (
-    <main className={styles.page}>
+    <main className={styles.page} data-text-size={textSize.toLowerCase()}>
       <header className={styles.header}>
         <div className={styles.headerInner}>
           <button className={styles.brand} onClick={() => { setDrawerView(null); if (quickProduct) closeProduct(); }} type="button">
@@ -1708,6 +1952,21 @@ export function PublicStorefront({
               </button>
             ) : null}
           </label>
+          <div aria-label="Text size" className={styles.textSizeControl} role="group">
+            {(["SMALL", "MEDIUM", "LARGE"] as const).map((size) => (
+              <button
+                aria-label={`Use ${size.toLowerCase()} text`}
+                aria-pressed={textSize === size}
+                className={styles[`textSize${size[0]}${size.slice(1).toLowerCase()}` as keyof typeof styles]}
+                key={size}
+                onClick={() => setTextSize(size)}
+                title={`${size[0]}${size.slice(1).toLowerCase()} text`}
+                type="button"
+              >
+                A
+              </button>
+            ))}
+          </div>
           <div className={styles.headerActions}>
             <button className={styles.iconButton} onClick={() => void openOrders()} title="My orders" type="button">
               <PackageCheck size={20} />
@@ -1720,6 +1979,7 @@ export function PublicStorefront({
                   void openAccount();
                 } else {
                   setAuthMode("SIGN_IN");
+                  setResumeCheckoutAfterAuth(false);
                   setAuthOpen(true);
                 }
               }}
@@ -1742,7 +2002,8 @@ export function PublicStorefront({
           <button className={styles.backToShop} onClick={closeProduct} type="button">
             <ArrowLeft size={18} /> Back to shop
           </button>
-          <div className={styles.productPageHero}>
+          <ProductBreadcrumb product={quickProduct} onSelect={showCatalog} />
+          <div className={styles.productPageHero} data-testid="product-detail-hero">
             <div className={styles.productGallery}>
               <div className={styles.productGalleryStage}>
                 <button
@@ -1839,6 +2100,39 @@ export function PublicStorefront({
                 </button>
               </div>
             </div>
+            <aside aria-label="Product information" className={styles.productFactsPanel}>
+              <div className={styles.productSeller}>
+                <span><Store size={18} /></span>
+                <div><small>Sold by</small><strong>{storefront.store.name}</strong></div>
+              </div>
+              <section>
+                <h2>Product details</h2>
+                <dl className={styles.productFactList}>
+                  <div><dt>SKU</dt><dd>{quickProduct.sku || quickProduct.code}</dd></div>
+                  {quickProduct.brand ? <div><dt>Brand</dt><dd>{quickProduct.brand}</dd></div> : null}
+                  {quickProduct.department ? <div><dt>Department</dt><dd>{quickProduct.department}</dd></div> : null}
+                  {quickProduct.category ? <div><dt>Category</dt><dd>{quickProduct.category}</dd></div> : null}
+                  {quickProduct.subcategory ? <div><dt>Subcategory</dt><dd>{quickProduct.subcategory}</dd></div> : null}
+                  <div><dt>Unit</dt><dd>{selectedProductSellingUnit?.unitOfMeasureName ?? quickProduct.unitOfMeasure}</dd></div>
+                </dl>
+              </section>
+              <section>
+                <h2>Secure checkout</h2>
+                <ul className={styles.productConfidenceList}>
+                  <li><BadgeCheck size={17} /><span>Secure order tracking</span></li>
+                  {storefront.paymentMethods.length > 0 ? <li><CreditCard size={17} /><span>Secure online payment</span></li> : null}
+                  {storefront.store.payOnDeliveryEnabled ? <li><WalletCards size={17} /><span>Pay on delivery or collection</span></li> : null}
+                </ul>
+              </section>
+              <section>
+                <h2>Fulfilment</h2>
+                <ul className={styles.productConfidenceList}>
+                  {storefront.store.allowDelivery ? <li><Truck size={17} /><span>Delivery confirmed at checkout</span></li> : null}
+                  {storefront.store.allowPickup ? <li><Store size={17} /><span>Pickup from an eligible shop</span></li> : null}
+                  {quickProduct.trackInventory ? <li><PackageCheck size={17} /><span>Normal orders reserve available stock</span></li> : null}
+                </ul>
+              </section>
+            </aside>
           </div>
           <section className={styles.productInformation}>
             <div className={styles.detailTabs} role="tablist">
@@ -1868,6 +2162,26 @@ export function PublicStorefront({
               ) : null}
             </div>
           </section>
+          {relatedProducts.length > 0 ? (
+            <section aria-label="Related products" className={styles.relatedProducts}>
+              <div className={styles.sectionHeading}>
+                <div><span>Related products</span><h2>You may also like</h2></div>
+                <ShoppingBag size={20} />
+              </div>
+              <div className={styles.relatedProductGrid}>
+                {relatedProducts.map((product) => (
+                  <ProductCard
+                    compact
+                    key={`related-${product.id}`}
+                    money={money}
+                    onAdd={addProductFromCard}
+                    onOpen={openProduct}
+                    product={product}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
         </article>
       ) : productDetailsBusy ? (
         <section aria-live="polite" className={styles.emptyState}>
@@ -1899,12 +2213,17 @@ export function PublicStorefront({
               </button>
             </section>
           ) : null}
-          <StorefrontHero store={storefront.store} />
-          <section className={styles.discovery}>
-            <div className={styles.categoryRail}><button className={category === "ALL" ? styles.categoryActive : undefined} onClick={() => setCategory("ALL")} type="button">All</button>{storefront.categories.map((item) => <button className={category === item ? styles.categoryActive : undefined} key={item} onClick={() => setCategory(item)} type="button">{item}</button>)}</div>
-          </section>
-          {featuredProducts.length > 0 && category === "ALL" && !searchText ? <section className={styles.featuredSection}><div className={styles.sectionHeading}><div><span>Featured</span><h2>Popular right now</h2></div><Heart size={20} /></div><div className={styles.featuredRail}>{featuredProducts.map((product) => <ProductCard key={`featured-${product.id}`} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} compact />)}</div></section> : null}
-          <section className={styles.catalogSection}><div className={styles.sectionHeading}><div><span>{category === "ALL" ? "Shop" : category}</span><h2>{visibleProducts.length} product{visibleProducts.length === 1 ? "" : "s"}</h2></div></div>{visibleProducts.length > 0 ? <div className={styles.productGrid}>{visibleProducts.map((product) => <ProductCard key={product.id} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} />)}</div> : <div className={styles.emptyState}><Search size={28} /><h3>No matching products</h3><button onClick={() => { setSearchText(""); setCategory("ALL"); }} type="button">Clear filters</button></div>}</section>
+          <div className={styles.heroLayout} data-testid="storefront-hero-layout">
+            <StorefrontCategoryMenu
+              departments={catalogTree}
+              onSelect={showCatalog}
+              selection={catalogSelection}
+              totalProductCount={storefront.products.length}
+            />
+            <StorefrontHero store={storefront.store} />
+          </div>
+          {featuredProducts.length > 0 && catalogSelection.level === "ALL" && !searchText ? <section className={styles.featuredSection} data-testid="storefront-featured-section"><div className={styles.sectionHeading}><div><span>Featured</span><h2>Popular right now</h2></div><Heart size={20} /></div><div className={styles.featuredRail}>{featuredProducts.map((product) => <ProductCard key={`featured-${product.id}`} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} compact />)}</div></section> : null}
+          <section className={styles.catalogSection} data-testid="storefront-catalog-section"><div className={styles.sectionHeading}><div><span>{catalogSelectionLabel}</span><h2>{visibleProducts.length} product{visibleProducts.length === 1 ? "" : "s"}</h2></div></div>{visibleProducts.length > 0 ? <div className={styles.productGrid}>{visibleProducts.map((product) => <ProductCard key={product.id} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} />)}</div> : <div className={styles.emptyState}><Search size={28} /><h3>No matching products</h3><button onClick={() => { setSearchText(""); setCatalogSelection({ level: "ALL" }); }} type="button">Clear filters</button></div>}</section>
         </>
       )}
 
@@ -1918,7 +2237,7 @@ export function PublicStorefront({
         <button className={!drawerView ? styles.mobileNavActive : undefined} onClick={() => { setDrawerView(null); if (quickProduct) closeProduct(); }} type="button"><ShoppingBag size={20} /><span>Shop</span></button>
         <button className={drawerView === "orders" ? styles.mobileNavActive : undefined} onClick={() => void openOrders()} type="button"><PackageCheck size={20} /><span>Orders</span></button>
         <button className={drawerView === "cart" || drawerView === "checkout" ? styles.mobileNavActive : undefined} onClick={() => setDrawerView("cart")} type="button"><ShoppingCart size={20} /><span>Cart</span><b>{cartQuantity}</b></button>
-        <button aria-label={session.authenticated ? "Open my account" : "Sign in"} className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => session.authenticated ? void openAccount() : setAuthOpen(true)} type="button"><CircleUserRound size={20} /><span>Account</span></button>
+        <button aria-label={session.authenticated ? "Open my account" : "Sign in"} className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => { if (session.authenticated) { void openAccount(); } else { setAuthMode("SIGN_IN"); setResumeCheckoutAfterAuth(false); setAuthOpen(true); } }} type="button"><CircleUserRound size={20} /><span>Account</span></button>
       </nav>
 
       {cartQuantity > 0 && !drawerView ? (
@@ -2121,6 +2440,37 @@ export function PublicStorefront({
             <div className={styles.authMark}><CircleUserRound size={26} /></div>
             <span className={styles.productEyebrow}>{storefront.store.name}</span>
             <h2>{authMode === "SIGN_IN" ? "Welcome back" : authMode === "SIGN_UP" ? "Create account" : authMode === "RESET" ? "Reset password" : authMode === "RESET_VERIFY" ? "Set a new password" : "Verify your account"}</h2>
+            {authMode === "SIGN_IN" || authMode === "SIGN_UP" ? (
+              <>
+                <div className={styles.socialAuthOptions}>
+                  {(["google", "facebook"] as const).map((provider) => {
+                    const enabled = socialAuthProviders.some((option) => option.id === provider && option.enabled);
+                    const label = provider === "google" ? "Google" : "Facebook";
+                    return (
+                      <button
+                        aria-label={`Continue with ${label}`}
+                        className={styles.socialAuthButton}
+                        disabled={!enabled || Boolean(socialAuthBusy)}
+                        key={provider}
+                        onClick={() => startSocialAuth(provider)}
+                        title={enabled ? `Continue with ${label}` : `${label} sign-in is not configured`}
+                        type="button"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={provider === "google" ? styles.googleAuthMark : styles.facebookAuthMark}
+                        >
+                          {provider === "google" ? "G" : "f"}
+                        </span>
+                        <strong>Continue with {label}</strong>
+                        {socialAuthBusy === provider ? <LoaderCircle className={styles.spin} size={18} /> : <span />}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className={styles.socialAuthDivider}><span>or continue with email</span></div>
+              </>
+            ) : null}
             {authMode === "VERIFY" || authMode === "RESET_VERIFY" ? (
               <>
                 <p className={styles.authCopy}>Enter the code sent to {identifier}.</p>
@@ -2159,6 +2509,249 @@ export function PublicStorefront({
   );
 }
 
+function ProductBreadcrumb({
+  product,
+  onSelect,
+}: {
+  product: ProductDetail;
+  onSelect: (selection: StorefrontCatalogSelection) => void;
+}) {
+  const department = product.department?.trim() || "Other";
+  const category = product.category?.trim() || "Other";
+
+  return (
+    <nav aria-label="Breadcrumb" className={styles.productBreadcrumb}>
+      <button onClick={() => onSelect({ level: "ALL" })} type="button">
+        <House size={15} /> Shop
+      </button>
+      {product.department?.trim() ? (
+        <>
+          <ChevronRight aria-hidden="true" size={14} />
+          <button
+            onClick={() => onSelect({ level: "DEPARTMENT", department })}
+            type="button"
+          >
+            {department}
+          </button>
+        </>
+      ) : null}
+      {product.category?.trim() ? (
+        <>
+          <ChevronRight aria-hidden="true" size={14} />
+          <button
+            onClick={() => onSelect({ level: "CATEGORY", department, category })}
+            type="button"
+          >
+            {category}
+          </button>
+        </>
+      ) : null}
+      {product.subcategory?.trim() ? (
+        <>
+          <ChevronRight aria-hidden="true" size={14} />
+          <button
+            onClick={() => onSelect({
+              level: "SUBCATEGORY",
+              department,
+              category,
+              subcategory: product.subcategory!.trim(),
+            })}
+            type="button"
+          >
+            {product.subcategory.trim()}
+          </button>
+        </>
+      ) : null}
+      <ChevronRight aria-hidden="true" size={14} />
+      <span aria-current="page">{product.name}</span>
+    </nav>
+  );
+}
+
+function StorefrontCategoryMenu({
+  departments,
+  onSelect,
+  selection,
+  totalProductCount,
+}: {
+  departments: StorefrontDepartmentNode[];
+  onSelect: (selection: StorefrontCatalogSelection) => void;
+  selection: StorefrontCatalogSelection;
+  totalProductCount: number;
+}) {
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [mobileDepartment, setMobileDepartment] = useState<string | null>(null);
+  const [hoveredDepartment, setHoveredDepartment] = useState<string | null>(null);
+  const activeDepartment = departments.find(
+    (department) => department.name === (mobileDepartment ?? hoveredDepartment),
+  ) ?? null;
+  const ActiveDepartmentIcon = activeDepartment
+    ? resolveCategoryIcon(activeDepartment.name)
+    : null;
+
+  const selectCatalog = (nextSelection: StorefrontCatalogSelection) => {
+    setMobileDepartment(null);
+    setHoveredDepartment(null);
+    onSelect(nextSelection);
+  };
+
+  return (
+    <nav
+      aria-label="Product categories"
+      className={styles.categoryMenu}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setHoveredDepartment(null);
+        }
+      }}
+      onMouseLeave={() => setHoveredDepartment(null)}
+    >
+      <button
+        aria-expanded={mobileOpen}
+        className={styles.categoryMenuHeader}
+        onClick={() => setMobileOpen((current) => {
+          if (current) setMobileDepartment(null);
+          return !current;
+        })}
+        type="button"
+      >
+        <ListTree size={19} />
+        <strong>All categories</strong>
+        <ChevronDown className={mobileOpen ? styles.categoryMenuChevronOpen : undefined} size={17} />
+      </button>
+      <div className={classNames(styles.categoryMenuBody, mobileOpen && styles.categoryMenuBodyOpen)}>
+        <div className={styles.categoryMenuScroll}>
+          <button
+            aria-current={selection.level === "ALL" ? "true" : undefined}
+            className={classNames(styles.categoryMenuAll, selection.level === "ALL" && styles.categoryMenuActive)}
+            onClick={() => selectCatalog({ level: "ALL" })}
+            type="button"
+          >
+            <Boxes size={18} />
+            <span>All products</span>
+            <small>{totalProductCount}</small>
+          </button>
+          {departments.map((department) => {
+            const DepartmentIcon = resolveCategoryIcon(department.name);
+            const departmentExpanded = mobileDepartment === department.name;
+            const departmentSelected = selection.level === "DEPARTMENT"
+              && selection.department === department.name;
+            const departmentContainsSelection = selection.level !== "ALL"
+              && selection.department === department.name;
+
+            return (
+              <div
+                className={styles.categoryMenuGroup}
+                key={department.name}
+                onMouseEnter={() => setHoveredDepartment(department.name)}
+              >
+                <div className={styles.categoryMenuRow}>
+                  <button
+                    aria-current={departmentSelected ? "true" : undefined}
+                    className={classNames(
+                      styles.categoryMenuSelect,
+                      departmentSelected && styles.categoryMenuActive,
+                      departmentContainsSelection && !departmentSelected && styles.categoryMenuAncestor,
+                    )}
+                    onFocus={() => setHoveredDepartment(department.name)}
+                    onClick={() => selectCatalog({ level: "DEPARTMENT", department: department.name })}
+                    type="button"
+                  >
+                    <DepartmentIcon size={18} />
+                    <span>{department.name}</span>
+                    <small>{department.count}</small>
+                  </button>
+                  <button
+                    aria-expanded={departmentExpanded}
+                    aria-label={`${departmentExpanded ? "Collapse" : "Expand"} ${department.name}`}
+                    className={styles.categoryMenuExpand}
+                    onClick={() => setMobileDepartment((current) => current === department.name ? null : department.name)}
+                    type="button"
+                  >
+                    <ChevronRight className={departmentExpanded ? styles.categoryMenuFlyoutToggleOpen : undefined} size={16} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {activeDepartment ? (
+        <section
+          aria-label={`${activeDepartment.name} categories`}
+          className={classNames(styles.categoryMegaMenu, styles.categoryMegaMenuOpen)}
+        >
+          <div className={styles.categoryMegaMenuHeader}>
+            {ActiveDepartmentIcon ? <ActiveDepartmentIcon size={22} /> : null}
+            <div>
+              <span>Department</span>
+              <strong>{activeDepartment.name}</strong>
+            </div>
+            <button
+              onClick={() => selectCatalog({ level: "DEPARTMENT", department: activeDepartment.name })}
+              type="button"
+            >
+              View all <ChevronRight size={15} />
+            </button>
+          </div>
+          <div className={styles.categoryMegaMenuGrid}>
+            {activeDepartment.categories.map((category) => {
+              const CategoryIcon = resolveCategoryIcon(category.name);
+              const categorySelected = selection.level === "CATEGORY"
+                && selection.department === activeDepartment.name
+                && selection.category === category.name;
+
+              return (
+                <div className={styles.categoryMegaMenuSection} key={category.name}>
+                  <button
+                    aria-current={categorySelected ? "true" : undefined}
+                    className={categorySelected ? styles.categoryMegaMenuActive : undefined}
+                    onClick={() => selectCatalog({
+                      level: "CATEGORY",
+                      department: activeDepartment.name,
+                      category: category.name,
+                    })}
+                    type="button"
+                  >
+                    <CategoryIcon size={16} />
+                    <strong>{category.name}</strong>
+                    <small>{category.count}</small>
+                  </button>
+                  <div className={styles.categoryMegaMenuLinks}>
+                    {category.subcategories.map((subcategory) => {
+                      const selected = selection.level === "SUBCATEGORY"
+                        && selection.department === activeDepartment.name
+                        && selection.category === category.name
+                        && selection.subcategory === subcategory.name;
+                      return (
+                        <button
+                          aria-current={selected ? "true" : undefined}
+                          className={selected ? styles.categoryMegaMenuActive : undefined}
+                          key={subcategory.name}
+                          onClick={() => selectCatalog({
+                            level: "SUBCATEGORY",
+                            department: activeDepartment.name,
+                            category: category.name,
+                            subcategory: subcategory.name,
+                          })}
+                          type="button"
+                        >
+                          <span>{subcategory.name}</span>
+                          <small>{subcategory.count}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+    </nav>
+  );
+}
+
 function StorefrontHero({ store }: { store: PublicStorefrontData["store"] }) {
   const slides = store.heroImageUrls.length > 0 ? store.heroImageUrls : [store.heroImageUrl];
   const slideSignature = slides.join("|");
@@ -2192,10 +2785,7 @@ function StorefrontHero({ store }: { store: PublicStorefrontData["store"] }) {
       <div className={styles.shopIntroTrack} style={{ transform: `translateX(-${activeSlide * 100}%)` }}>
         {slides.map((imageUrl, index) => <div aria-hidden={index !== activeSlide} className={styles.shopIntroSlide} key={`${imageUrl}-${index}`}><StorefrontImage alt={index === 0 ? `${store.name} storefront` : ""} priority={index === 0} sizes="(max-width: 639px) calc(100vw - 28px), (max-width: 1268px) calc(100vw - 28px), 1240px" src={imageUrl} /></div>)}
       </div>
-      <div className={styles.shopIntroContent}>
-        <small>Shop from anywhere</small><h1>{store.name}</h1><p>{store.description}</p>
-        <span><Truck size={16} /> {store.allowDelivery ? "Delivery available" : "Pickup only"}</span>
-      </div>
+      <h1 className={styles.srOnly}>{store.name}</h1>
       {slides.length > 1 ? <><div className={styles.heroControls}><button aria-label="Previous banner" onClick={() => moveSlide(-1)} title="Previous banner" type="button"><ChevronLeft size={22} /></button><button aria-label="Next banner" onClick={() => moveSlide(1)} title="Next banner" type="button"><ChevronRight size={22} /></button></div><div aria-label="Storefront banners" className={styles.heroDots}>{slides.map((imageUrl, index) => <button aria-label={`Show banner ${index + 1}`} aria-pressed={index === activeSlide} className={index === activeSlide ? styles.heroDotActive : undefined} key={`${imageUrl}-dot-${index}`} onClick={() => setActiveSlide(index)} title={`Show banner ${index + 1}`} type="button" />)}</div></> : null}
       {store.supportPhone ? <a href={`tel:${store.supportPhone}`}>Call shop</a> : null}
     </section>

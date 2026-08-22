@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { PublicStorefront } from "@/components/ecommerce/public-storefront";
+import { EcommerceAuthError } from "@/server/ecommerce/ecommerce-customer-auth";
 import {
   getPublicStorefront,
   getPublicStorefrontProductDetail,
@@ -28,7 +29,10 @@ export default async function PublicProductPage({
         storefront={storefront}
       />
     );
-  } catch {
-    notFound();
+  } catch (error) {
+    if (error instanceof EcommerceAuthError && error.status === 404) {
+      notFound();
+    }
+    throw error;
   }
 }

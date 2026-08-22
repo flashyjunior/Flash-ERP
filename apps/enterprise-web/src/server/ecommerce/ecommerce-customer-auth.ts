@@ -43,7 +43,7 @@ function positiveInteger(value: string | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function ecommerceAuthSecret() {
+export function getEcommerceAuthSecret() {
   const configuredSecret =
     process.env.FLASH_ERP_ECOMMERCE_AUTH_SECRET ??
     process.env.FLASH_ERP_AUTH_SECRET;
@@ -67,7 +67,7 @@ function hashSessionToken(token: string) {
 
 function hashOtpCode(challengeId: string, identifierNormalized: string, code: string) {
   return crypto
-    .createHmac("sha256", ecommerceAuthSecret())
+    .createHmac("sha256", getEcommerceAuthSecret())
     .update(`${challengeId}:${identifierNormalized}:${code}`)
     .digest("hex");
 }
@@ -173,7 +173,7 @@ async function requestMetadata() {
   };
 }
 
-async function findPublicStore(storeCodeOrSlug: string) {
+export async function findPublicEcommerceStore(storeCodeOrSlug: string) {
   const normalized = storeCodeOrSlug.trim();
   const store = await prisma.store.findFirst({
     where: {
@@ -206,7 +206,7 @@ export async function requestEcommerceOtp(input: {
   identifier: unknown;
   purpose?: EcommerceOtpPurpose;
 }) {
-  const store = await findPublicStore(input.storeCode);
+  const store = await findPublicEcommerceStore(input.storeCode);
   const identity = normalizeEcommerceIdentity(input.identifier);
   const purpose: EcommerceOtpPurpose =
     input.purpose === "PASSWORD_RESET" ? "PASSWORD_RESET" : "SIGN_UP";
@@ -348,7 +348,7 @@ async function consumeOtpChallenge(input: {
   code: unknown;
   purpose: EcommerceOtpPurpose;
 }) {
-  const store = await findPublicStore(input.storeCode);
+  const store = await findPublicEcommerceStore(input.storeCode);
   const challengeId = optionalText(input.challengeId);
   const code = optionalText(input.code);
 
@@ -393,7 +393,7 @@ async function consumeOtpChallenge(input: {
   });
 }
 
-async function createCustomerSession(input: {
+export async function createEcommerceCustomerSession(input: {
   retailOrgId: string;
   customerAccountId: string;
 }) {
@@ -495,7 +495,7 @@ export async function verifyEcommerceSignup(input: {
     });
   });
 
-  await createCustomerSession({
+  await createEcommerceCustomerSession({
     retailOrgId: account.retailOrgId,
     customerAccountId: account.id
   });
@@ -555,7 +555,7 @@ export async function signInEcommerceCustomer(input: {
   identifier: unknown;
   password: unknown;
 }) {
-  const store = await findPublicStore(input.storeCode);
+  const store = await findPublicEcommerceStore(input.storeCode);
   const identity = normalizeEcommerceIdentity(input.identifier);
   const password = typeof input.password === "string" ? input.password : "";
   const record = await prisma.ecommerceCustomerIdentity.findFirst({
@@ -613,7 +613,7 @@ export async function signInEcommerceCustomer(input: {
     where: { id: account.id },
     data: { lastLoginAt: now, failedLoginAttempts: 0, lockedUntil: null }
   });
-  await createCustomerSession({
+  await createEcommerceCustomerSession({
     retailOrgId: account.retailOrgId,
     customerAccountId: account.id
   });
@@ -684,7 +684,7 @@ export async function getEcommerceCustomerSession(options?: {
   }
 
   if (options?.storeCode) {
-    const store = await findPublicStore(options.storeCode);
+    const store = await findPublicEcommerceStore(options.storeCode);
     if (store.retailOrgId !== session.retailOrgId) {
       throw new EcommerceAuthError("This customer account belongs to another shop.", 403);
     }

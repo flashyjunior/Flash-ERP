@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { SyncEnvelope } from "@flash-erp/sync-core";
+
 import { LocalStoreService } from "../apps/store-desktop/src/main/offline/local-store-service.js";
 
 const testRoot = mkdtempSync(path.join(tmpdir(), "flash-rms-sync-recovery-"));
@@ -11,6 +13,7 @@ const loginId = "sync.recovery.admin";
 const password = "SyncRecovery123!";
 const retryableEventId = "sync-retryable-network";
 const permanentEventId = "sync-permanent-stale-version";
+const supplierEventId = "sync-supplier-publication";
 let activeService: LocalStoreService | null = null;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -39,6 +42,11 @@ try {
 
   const database = new DatabaseSync(databasePath);
   const timestamp = new Date().toISOString();
+  const storeCode = (
+    database
+      .prepare("SELECT value FROM app_metadata WHERE key = 'store_code'")
+      .get() as { value: string }
+  ).value;
   const insert = database.prepare(
     `INSERT INTO sync_outbox (
       id, target_node_code, aggregate_type, aggregate_id, event_type,
@@ -90,6 +98,51 @@ try {
   assert(retryableSummary.syncRunId === "sync-run-network", "Retryable sync run correlation was not exposed.");
   assert(permanentSummary?.lastHttpStatus === 409, "Permanent failure HTTP status was not exposed.");
 
+  const acknowledgedSupplierIds = (
+    service as unknown as {
+      applyDownstreamBatch(
+        events: SyncEnvelope[],
+        remoteNodeCode: string,
+        cursor: string | null,
+      ): string[];
+    }
+  ).applyDownstreamBatch(
+    [
+      {
+        eventId: supplierEventId,
+        idempotencyKey: "sync-supplier-publication-key",
+        aggregateType: "supplier",
+        aggregateId: "sync-supplier-id",
+        eventType: "supplier.published",
+        originatingNodeCode: "enterprise-primary",
+        targetNodeCode: "sync-recovery-node",
+        recordVersion: 1,
+        occurredAt: timestamp,
+        payload: {
+          storeCode,
+          supplierId: "sync-supplier-id",
+          supplierNo: "SYNC-SUP-001",
+          supplierName: "Sync Supplier",
+          contactName: "Receiving Contact",
+          phone: "+233000000001",
+          email: "sync-supplier@example.test",
+          addressLine1: "Sync Street",
+          city: "Accra",
+          countryCode: "GH",
+          leadTimeDays: 2,
+          status: "ACTIVE",
+          publishedAt: timestamp,
+        },
+      },
+    ],
+    "enterprise-primary",
+    "supplier-publication-cursor",
+  );
+  assert(
+    acknowledgedSupplierIds.includes(supplierEventId),
+    "Supplier publication was not acknowledged by the offline store.",
+  );
+
   const result = service.requeueDeadLetters();
   assert(result.message.includes("Permanent conflicts were left unchanged"), "Retry result did not explain permanent conflict handling.");
   service.close();
@@ -102,12 +155,22 @@ try {
   const permanentRow = verificationDatabase
     .prepare("SELECT status, failure_kind FROM sync_outbox WHERE id = ?")
     .get(permanentEventId) as { status: string; failure_kind: string | null };
+  const supplierRow = verificationDatabase
+    .prepare(
+      "SELECT supplier_name, phone, status FROM supplier_snapshot WHERE supplier_no = ?",
+    )
+    .get("SYNC-SUP-001") as
+    | { supplier_name: string; phone: string | null; status: string }
+    | undefined;
   verificationDatabase.close();
 
   assert(retryableRow.status === "PENDING", "Eligible network failure was not requeued.");
   assert(retryableRow.failure_kind === null, "Eligible failure metadata was not reset for retry.");
   assert(permanentRow.status === "DEAD_LETTER", "Permanent stale-version conflict was incorrectly requeued.");
   assert(permanentRow.failure_kind === "STALE_VERSION", "Permanent conflict diagnostics were erased.");
+  assert(supplierRow?.supplier_name === "Sync Supplier", "Supplier publication was not applied locally.");
+  assert(supplierRow.phone === "+233000000001", "Supplier contact data was not applied locally.");
+  assert(supplierRow.status === "ACTIVE", "Supplier status was not applied locally.");
 
   console.log("Desktop sync recovery policy gate passed.");
 } finally {

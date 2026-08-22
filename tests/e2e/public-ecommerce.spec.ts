@@ -66,8 +66,17 @@ async function dismissInventoryStartupAlert(page: Page) {
 }
 
 type PublicCatalogSnapshot = {
+  store?: {
+    heroImageUrls?: string[];
+  };
   products?: Array<{
     code?: string;
+    name?: string;
+    department?: string | null;
+    category?: string | null;
+    subcategory?: string | null;
+    availableQuantity?: number | null;
+    variants?: Array<{ code?: string }>;
     promotion?: { code?: string } | null;
   }>;
   promotions?: Array<{ code?: string }>;
@@ -191,11 +200,112 @@ test.describe("public ecommerce extension", () => {
 
   test("renders a usable storefront across mobile, tablet, and desktop", async ({ page }, testInfo) => {
     await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await expect(page.locator("h1")).toHaveCount(1);
     await expect(page.getByPlaceholder("Search products, brands and categories")).toBeVisible();
     await expect(page.locator("article").filter({ has: page.getByRole("heading", { level: 3 }) })).not.toHaveCount(0);
+    await expect(page.getByRole("navigation", { name: "Product categories" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "All categories" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /All products/ })).toBeVisible();
 
-    const hero = page.locator("section").filter({ has: page.getByRole("heading", { level: 1 }) }).locator("img").first();
+    const providerResponse = await page.request.get(
+      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/auth/oauth/providers`
+    );
+    expect(providerResponse.ok(), await providerResponse.text()).toBeTruthy();
+    const providerAvailability = (await providerResponse.json()) as {
+      providers: Array<{ id: "google" | "facebook"; enabled: boolean }>;
+    };
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    const authDialog = page.getByRole("dialog");
+    for (const provider of providerAvailability.providers) {
+      const label = provider.id === "google" ? "Google" : "Facebook";
+      const providerButton = authDialog.getByRole("button", { name: `Continue with ${label}` });
+      await expect(providerButton).toBeVisible();
+      if (provider.enabled) {
+        await expect(providerButton).toBeEnabled();
+      } else {
+        await expect(providerButton).toBeDisabled();
+      }
+    }
+    await authDialog.screenshot({ path: testInfo.outputPath("social-auth-options.png") });
+    await authDialog.getByRole("button", { name: "Create a customer account" }).click();
+    await expect(authDialog.getByRole("heading", { name: "Create account" })).toBeVisible();
+    await expect(authDialog.getByRole("button", { name: "Continue with Google" })).toBeVisible();
+    await expect(authDialog.getByRole("button", { name: "Continue with Facebook" })).toBeVisible();
+    await authDialog.screenshot({ path: testInfo.outputPath("social-signup-options.png") });
+    await authDialog.getByTitle("Close").click();
+
+    const searchInput = page.getByPlaceholder("Search products, brands and categories");
+    const mediumFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await page.getByRole("button", { name: "Use small text" }).click();
+    const smallFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await page.getByRole("button", { name: "Use medium text" }).click();
+    const restoredMediumFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await page.getByRole("button", { name: "Use large text" }).click();
+    const largeFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    expect(restoredMediumFontSize).toBeCloseTo(mediumFontSize, 1);
+    expect(mediumFontSize / smallFontSize).toBeGreaterThanOrEqual(1.1);
+    expect(largeFontSize / mediumFontSize).toBeGreaterThanOrEqual(1.2);
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Use large text" })).toHaveAttribute("aria-pressed", "true");
+
+    const catalogResponse = await page.request.get(
+      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+    );
+    expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+    const catalog = (await catalogResponse.json()) as PublicCatalogSnapshot;
+    const departmentName = catalog.products
+      ?.map((product) => product.department?.trim())
+      .find((value): value is string => Boolean(value));
+    if (departmentName) {
+      const departmentCount = catalog.products?.filter(
+        (product) => product.department?.trim() === departmentName
+      ).length ?? 0;
+      const escapedDepartmentName = departmentName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const categoriesNavigation = page.getByRole("navigation", { name: "Product categories" });
+      const departmentButton = categoriesNavigation.getByRole("button", {
+        name: new RegExp(`^${escapedDepartmentName}\\s+${departmentCount}$`)
+      });
+      await expect(page.getByRole("region", { name: `${departmentName} categories` })).toHaveCount(0);
+      await departmentButton.hover();
+      await expect(page.getByRole("region", { name: `${departmentName} categories` })).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath("category-mega-menu-desktop.png"),
+        fullPage: false
+      });
+      await departmentButton.click();
+      await expect(page.getByRole("region", { name: `${departmentName} categories` })).toHaveCount(0);
+      await expect(page.getByRole("heading", {
+        level: 2,
+        name: `${departmentCount} product${departmentCount === 1 ? "" : "s"}`
+      })).toBeVisible();
+      await categoriesNavigation.getByRole("button", {
+        name: `All products ${catalog.products?.length ?? 0}`
+      }).click();
+    }
+    for (const imageUrl of catalog.store?.heroImageUrls ?? []) {
+      const imageResponse = await page.request.get(imageUrl);
+      expect(imageResponse.ok(), `Storefront banner is unavailable: ${imageUrl}`).toBeTruthy();
+    }
+
+    const simpleProduct = catalog.products?.find(
+      (product) =>
+        product.name &&
+        (product.variants?.length ?? 0) <= 1 &&
+        product.availableQuantity !== 0
+    );
+    test.skip(!simpleProduct?.name, "The storefront has no available simple product for direct-add acceptance.");
+    const storefrontUrl = page.url();
+    await page.getByRole("button", { name: `Add ${simpleProduct?.name} to cart` }).first().click();
+    await expect(page).toHaveURL(storefrontUrl);
+    await expect(page.getByText(`${simpleProduct?.name} added to cart`)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open cart" }).locator("b")).toHaveText("1");
+
+    const heroSection = page.locator('section[aria-label$=" offers"]');
+    await expect(heroSection.getByText("Shop from anywhere")).toHaveCount(0);
+    const hiddenHeroHeadingBox = await heroSection.locator("h1").boundingBox();
+    expect(hiddenHeroHeadingBox?.width ?? 0).toBeLessThanOrEqual(1);
+    expect(hiddenHeroHeadingBox?.height ?? 0).toBeLessThanOrEqual(1);
+    const hero = heroSection.locator("img").first();
     await expect(hero).toBeVisible();
     expect(await hero.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
 
@@ -205,11 +315,31 @@ test.describe("public ecommerce extension", () => {
       { name: "desktop", width: 1440, height: 1000 }
     ]) {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.evaluate(() => window.scrollTo(0, 0));
       await expect(page.getByPlaceholder("Search products, brands and categories")).toBeVisible();
       const horizontalOverflow = await page.evaluate(
         () => document.documentElement.scrollWidth - document.documentElement.clientWidth
       );
       expect(horizontalOverflow, `${viewport.name} has horizontal page overflow`).toBeLessThanOrEqual(1);
+      if (viewport.name === "desktop") {
+        const heroBox = await heroSection.boundingBox();
+        const catalogBox = await page.getByTestId("storefront-catalog-section").boundingBox();
+        expect(heroBox?.height ?? 0).toBeGreaterThanOrEqual(470);
+        expect((await page.getByTestId("storefront-hero-layout").boundingBox())?.width ?? 0)
+          .toBeGreaterThanOrEqual(viewport.width - 50);
+        expect(Math.abs((catalogBox?.x ?? 0) - (heroBox?.x ?? 0)))
+          .toBeLessThanOrEqual(1);
+        expect(Math.abs(
+          ((catalogBox?.x ?? 0) + (catalogBox?.width ?? 0)) -
+          ((heroBox?.x ?? 0) + (heroBox?.width ?? 0))
+        )).toBeLessThanOrEqual(1);
+        const featuredSection = page.getByTestId("storefront-featured-section");
+        if (await featuredSection.count()) {
+          const featuredBox = await featuredSection.boundingBox();
+          expect(Math.abs((featuredBox?.x ?? 0) - (heroBox?.x ?? 0)))
+            .toBeLessThanOrEqual(1);
+        }
+      }
       await page.screenshot({
         path: testInfo.outputPath(`storefront-${viewport.name}.png`),
         fullPage: false
@@ -217,16 +347,43 @@ test.describe("public ecommerce extension", () => {
     }
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("heading", { level: 3 }).first().click();
+    const productHeading = page.getByRole("heading", { level: 3 }).first();
+    const productName = (await productHeading.innerText()).trim();
+    await productHeading.click();
     await expect(page).toHaveURL(/\/shop\/[^/]+\/products\/[^/]+$/);
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+    await expect(breadcrumb).toBeVisible();
+    await expect(breadcrumb).toContainText(productName);
     await expect(page.getByRole("link", { name: /on WhatsApp$/ })).toBeVisible();
     await expect(page.getByRole("link", { name: /on WhatsApp$/ }).locator("svg")).toBeVisible();
     await expect(page.getByRole("tab", { name: "Description", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Specifications", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: /Reviews/ })).toBeVisible();
+    const productInformation = page.locator('aside[aria-label="Product information"]');
+    await expect(productInformation.getByRole("heading", { name: "Product details" })).toBeVisible();
+    await expect(productInformation.getByRole("heading", { name: "Secure checkout" })).toBeVisible();
+    await expect(productInformation.getByRole("heading", { name: "Fulfilment" })).toBeVisible();
+    const relatedProducts = page.getByRole("region", { name: "Related products" });
+    await expect(relatedProducts.getByRole("heading", { name: "You may also like" })).toBeVisible();
+    await expect(relatedProducts.locator("article")).not.toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: testInfo.outputPath("product-details-mobile.png"), fullPage: false });
+    await page.getByTestId("product-detail-hero").screenshot({
+      path: testInfo.outputPath("product-details-mobile-full.png")
+    });
+    await relatedProducts.screenshot({ path: testInfo.outputPath("related-products-mobile.png") });
+
+    const galleryThumbnails = page.getByRole("button", { name: /^View product image / });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    if (await galleryThumbnails.count()) {
+      const thumbnailBox = await galleryThumbnails.first().boundingBox();
+      const mainImageBox = await page.getByRole("button", { name: `Open image viewer for ${productName}` }).boundingBox();
+      expect(thumbnailBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThan(mainImageBox?.x ?? 0);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    await page.getByTestId("product-detail-hero").screenshot({ path: testInfo.outputPath("product-details-desktop.png") });
+    await relatedProducts.screenshot({ path: testInfo.outputPath("related-products-desktop.png") });
   });
 
   test("keeps alternate selling UOM price and base conversion through the storefront cart", async ({

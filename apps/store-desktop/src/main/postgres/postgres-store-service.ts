@@ -47,6 +47,7 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
   EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseInventoryLocationPublishedPayload,
   EnterpriseProductCategoryPublishedPayload,
@@ -22687,6 +22688,74 @@ export class PostgresStoreService {
           taskPayload.operatorName,
           taskPayload.note,
           taskPayload.requestedAt,
+          appliedAt,
+        ],
+      );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "supplier" &&
+      event.eventType === "supplier.published"
+    ) {
+      const supplierPayload =
+        payload as Partial<EnterpriseSupplierPublishedPayload>;
+
+      if (
+        typeof supplierPayload.storeCode !== "string" ||
+        supplierPayload.storeCode !== storeCode ||
+        typeof supplierPayload.supplierId !== "string" ||
+        typeof supplierPayload.supplierNo !== "string" ||
+        typeof supplierPayload.supplierName !== "string" ||
+        typeof supplierPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid supplier publication payload.",
+        );
+      }
+
+      await runner.query(
+        `INSERT INTO supplier_snapshot (
+          supplier_no,
+          supplier_name,
+          phone,
+          email,
+          tax_number,
+          address_line1,
+          city,
+          country_code,
+          status,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9)
+        ON CONFLICT (supplier_no) DO UPDATE SET
+          supplier_name = excluded.supplier_name,
+          phone = excluded.phone,
+          email = excluded.email,
+          address_line1 = excluded.address_line1,
+          city = excluded.city,
+          country_code = excluded.country_code,
+          status = excluded.status,
+          updated_at = excluded.updated_at`,
+        [
+          supplierPayload.supplierNo,
+          supplierPayload.supplierName,
+          typeof supplierPayload.phone === "string"
+            ? supplierPayload.phone
+            : null,
+          typeof supplierPayload.email === "string"
+            ? supplierPayload.email
+            : null,
+          typeof supplierPayload.addressLine1 === "string"
+            ? supplierPayload.addressLine1
+            : null,
+          typeof supplierPayload.city === "string"
+            ? supplierPayload.city
+            : null,
+          typeof supplierPayload.countryCode === "string"
+            ? supplierPayload.countryCode
+            : null,
+          supplierPayload.status,
           appliedAt,
         ],
       );
