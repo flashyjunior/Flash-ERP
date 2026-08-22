@@ -10,12 +10,9 @@ import {
   Inbox,
   RefreshCcw,
   Save,
-  Send,
   Store
 } from "lucide-react";
 import type {
-  StoreMasterDataPublicationResponse,
-  StoreMasterDataPublicationScope,
   StoreNodeReplayRequest,
   StoreNodeReplayResponse
 } from "@flash-erp/sync-core";
@@ -43,26 +40,6 @@ type SyncPolicyDraft = {
   backoffBaseSeconds: string;
   backoffMaxSeconds: string;
 };
-
-const masterDataPublicationOptions: Array<{
-  value: StoreMasterDataPublicationScope;
-  label: string;
-}> = [
-  { value: "STORE_SETUP", label: "Store setup and locations" },
-  { value: "SECURITY", label: "Users, roles and permissions" },
-  { value: "CUSTOMERS", label: "Customers" },
-  { value: "SUPPLIERS", label: "Suppliers" },
-  { value: "PRODUCTS", label: "Products, categories, units and barcodes" },
-  { value: "PRICING", label: "Product pricing" },
-  { value: "TAX_AND_TENDERS", label: "Taxes and tender methods" },
-  { value: "PROMOTIONS", label: "Promotions" },
-  { value: "BANKING", label: "Bank accounts" },
-  { value: "GIFT_CERTIFICATES", label: "Gift certificates" }
-];
-
-const allMasterDataPublicationScopes = masterDataPublicationOptions.map(
-  (option) => option.value
-);
 
 function statusTone(value: string) {
   if (value === "ACKNOWLEDGED" || value === "APPLIED") {
@@ -244,20 +221,6 @@ export function EnterpriseSyncNodeDetail({
   detail: EnterpriseSyncNodeDetailData;
 }) {
   const router = useRouter();
-  const [isPublicationOpen, setIsPublicationOpen] = useState(false);
-  const [publicationScopes, setPublicationScopes] = useState<StoreMasterDataPublicationScope[]>(
-    allMasterDataPublicationScopes
-  );
-  const [publicationNote, setPublicationNote] = useState(
-    `Manually publishing selected enterprise master data to ${detail.node.storeName}.`
-  );
-  const [publicationState, setPublicationState] = useState<{
-    status: "idle" | "submitting" | "success" | "error";
-    message: string | null;
-  }>({
-    status: "idle",
-    message: null
-  });
   const [isReplayOpen, setIsReplayOpen] = useState(false);
   const [replayNote, setReplayNote] = useState(
     `Requeueing escalated downstream packets for ${detail.node.storeName} after operator review.`
@@ -592,76 +555,6 @@ export function EnterpriseSyncNodeDetail({
     }
   }
 
-  function togglePublicationScope(scope: StoreMasterDataPublicationScope) {
-    setPublicationScopes((current) =>
-      current.includes(scope)
-        ? current.filter((candidate) => candidate !== scope)
-        : [...current, scope]
-    );
-  }
-
-  async function handleMasterDataPublication() {
-    if (publicationScopes.length === 0) {
-      setPublicationState({
-        status: "error",
-        message: "Select at least one master-data group."
-      });
-      return;
-    }
-
-    setPublicationState({
-      status: "submitting",
-      message: "Flash ERP is building the selected downstream publication batch."
-    });
-
-    try {
-      const response = await fetch(
-        `/api/sync/store-nodes/${encodeURIComponent(detail.node.code)}/publish-master-data`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            scopes: publicationScopes,
-            note: publicationNote
-          })
-        }
-      );
-      const payload = (await response.json()) as
-        | StoreMasterDataPublicationResponse
-        | { error?: string };
-
-      if (!response.ok) {
-        throw new Error(
-          "error" in payload && payload.error
-            ? payload.error
-            : "Flash ERP could not queue the selected master data."
-        );
-      }
-
-      const publication = payload as StoreMasterDataPublicationResponse;
-      setPublicationState({
-        status: "success",
-        message:
-          publication.queuedCount > 0
-            ? `Queued ${publication.queuedCount} master-data packet(s). They are ready for the shop's next pull.`
-            : "No new packets were added because an active full-publication batch is already waiting for this shop."
-      });
-      startTransition(() => {
-        window.setTimeout(() => router.refresh(), 700);
-      });
-    } catch (error) {
-      setPublicationState({
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Flash ERP could not queue the selected master data."
-      });
-    }
-  }
-
   function openEventReplay(row: EscalatedRow) {
     setSelectedEscalatedEvent(row);
     setEventReplayOperatorName("Flash ERP operator");
@@ -690,98 +583,6 @@ export function EnterpriseSyncNodeDetail({
           Back to sync command center
         </Link>
         <div className="flex flex-wrap items-center gap-2">
-          <ActionDialog
-            description={`Queue a fresh enterprise master-data batch for ${detail.node.storeName}.`}
-            onOpenChange={setIsPublicationOpen}
-            open={isPublicationOpen}
-            title="Queue master data"
-            triggerLabel="Queue master data"
-            widthClassName="max-w-2xl"
-          >
-            <div className="space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-stone-900">
-                  <Send className="h-4 w-4 text-[var(--brand)]" />
-                  Select data groups
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    className="text-sm font-semibold text-[var(--brand)] hover:text-[var(--brand-deep)]"
-                    onClick={() => setPublicationScopes(allMasterDataPublicationScopes)}
-                    type="button"
-                  >
-                    Select all
-                  </button>
-                  <button
-                    className="text-sm font-semibold text-stone-600 hover:text-stone-950"
-                    onClick={() => setPublicationScopes([])}
-                    type="button"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {masterDataPublicationOptions.map((option) => (
-                  <label
-                    className="flex min-h-12 items-center gap-3 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800"
-                    key={option.value}
-                  >
-                    <input
-                      checked={publicationScopes.includes(option.value)}
-                      className="h-4 w-4 accent-[var(--brand)]"
-                      onChange={() => togglePublicationScope(option.value)}
-                      type="checkbox"
-                    />
-                    <span>{option.label}</span>
-                  </label>
-                ))}
-              </div>
-              <div>
-                <label className="space-y-2 text-sm text-stone-700">
-                  <span className="block font-semibold text-stone-900">Audit note</span>
-                  <textarea
-                    className="min-h-24 w-full rounded-xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)]"
-                    onChange={(event) => setPublicationNote(event.target.value)}
-                    value={publicationNote}
-                  />
-                </label>
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  className="inline-flex items-center gap-2 rounded-xl bg-[var(--brand)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--brand-deep)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={
-                    publicationState.status === "submitting" || publicationScopes.length === 0
-                  }
-                  onClick={() => void handleMasterDataPublication()}
-                  type="button"
-                >
-                  <Send className="h-4 w-4" />
-                  {publicationState.status === "submitting" ? "Queueing..." : "Queue selected data"}
-                </button>
-                <button
-                  className="rounded-xl border border-stone-300 bg-white px-5 py-3 text-sm font-semibold text-stone-700 transition hover:border-stone-400 hover:text-stone-950"
-                  onClick={() => setIsPublicationOpen(false)}
-                  type="button"
-                >
-                  Close
-                </button>
-              </div>
-              {publicationState.message ? (
-                <div
-                  className={`rounded-xl border px-4 py-3 text-sm ${
-                    publicationState.status === "error"
-                      ? "border-rose-200 bg-rose-50 text-rose-800"
-                      : publicationState.status === "success"
-                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                        : "border-sky-200 bg-sky-50 text-sky-800"
-                  }`}
-                >
-                  {publicationState.message}
-                </div>
-              ) : null}
-            </div>
-          </ActionDialog>
           {canReplay ? (
             <ActionDialog
               description="Move failed and dead-letter downstream packets back into the active enterprise outbox so the store can pull them again."

@@ -94,6 +94,7 @@ import type {
   StoreMasterDataPublicationRequest,
   StoreMasterDataPublicationResponse,
   StoreMasterDataPublicationScope,
+  StoreMasterDataDistributionResponse,
   StoreBankingDepositRecordedPayload,
   StoreCustomerAccountEntryRecordedPayload,
   StoreEodReconciliationRecordedPayload,
@@ -2004,6 +2005,26 @@ function normalizeMasterDataPublicationScopes(
 
   if (normalized.length === 0) {
     throw new Error("Select at least one master-data group to publish.");
+  }
+
+  return normalized;
+}
+
+function normalizeMasterDataPublicationNodeCodes(nodeCodes: readonly string[]) {
+  const normalized = [
+    ...new Set(
+      nodeCodes
+        .map((nodeCode) => nodeCode.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+
+  if (normalized.length === 0) {
+    throw new Error("Select at least one shop to receive the master data.");
+  }
+
+  if (normalized.length > 50) {
+    throw new Error("Flash ERP can publish master data to at most 50 shops at once.");
   }
 
   return normalized;
@@ -4595,42 +4616,105 @@ export async function publishStoreMasterData(
   nodeCode: string,
   input: StoreMasterDataPublicationRequest,
 ): Promise<StoreMasterDataPublicationResponse> {
+  const distribution = await publishStoreMasterDataToNodes([nodeCode], input);
+  const target = distribution.targets[0];
+
+  if (!target) {
+    throw new Error(`Flash ERP could not publish master data to "${nodeCode}".`);
+  }
+
+  return {
+    nodeCode: target.nodeCode,
+    scopes: distribution.scopes,
+    queuedCount: target.queuedCount,
+    note: distribution.note,
+    operatorName: distribution.operatorName,
+    serverProcessedAt: distribution.serverProcessedAt,
+  };
+}
+
+export async function publishStoreMasterDataToNodes(
+  nodeCodes: readonly string[],
+  input: StoreMasterDataPublicationRequest,
+): Promise<StoreMasterDataDistributionResponse> {
+  const normalizedNodeCodes = normalizeMasterDataPublicationNodeCodes(nodeCodes);
   const scopes = normalizeMasterDataPublicationScopes(input.scopes ?? []);
   const eventTypes = masterDataEventTypesForScopes(scopes);
 
   return prisma.$transaction(
     async (tx) => {
-      const target = await getStoreSyncTarget(tx, nodeCode);
       const now = new Date();
+      const targets: StoreSyncTarget[] = [];
+      const selectedStoreIds = new Set<string>();
+      let enterpriseNodeId: string | null = null;
+
+      for (const nodeCode of normalizedNodeCodes) {
+        const target = await getStoreSyncTarget(tx, nodeCode);
+        const targetStore = target.storeNode.store;
+
+        if (!targetStore) {
+          throw new Error(`Store node "${nodeCode}" is not assigned to a shop.`);
+        }
+
+        if (enterpriseNodeId && target.enterpriseNode.id !== enterpriseNodeId) {
+          throw new Error("Selected shops do not belong to the same Flash ERP enterprise.");
+        }
+
+        if (selectedStoreIds.has(targetStore.id)) {
+          throw new Error(`Select only one desktop node for ${targetStore.name}.`);
+        }
+
+        enterpriseNodeId = target.enterpriseNode.id;
+        selectedStoreIds.add(targetStore.id);
+        targets.push(target);
+      }
+
       const audit = toOperatorAuditInput(
         input,
-        `Manually queueing ${scopes.join(", ").toLowerCase().replaceAll("_", " ")} master data for ${target.storeNode.name}.`,
+        `Manually queueing ${scopes.join(", ").toLowerCase().replaceAll("_", " ")} master data for ${targets.length} selected shop(s).`,
       );
-      const queuedCount = await queueAutomaticStoreMasterDataPublications(
-        tx,
-        target,
-        now,
-        {
-          mode: "bootstrap",
-          eventTypes,
-        },
-      );
+      const results: StoreMasterDataDistributionResponse["targets"] = [];
 
-      await createOperatorAuditAction(tx, {
-        syncNodeId: target.storeNode.id,
-        syncOutboxEventId: null,
-        syncInboundEventId: null,
-        actionType: "PUBLISH_MASTER_DATA",
-        operatorName: audit.operatorName,
-        note: `${audit.note} Queued ${queuedCount} packet(s).`,
-        aggregateType: "masterData",
-        eventType: [...eventTypes].join(","),
-      });
+      for (const target of targets) {
+        const targetStore = target.storeNode.store;
+
+        if (!targetStore) {
+          continue;
+        }
+
+        const queuedCount = await queueAutomaticStoreMasterDataPublications(
+          tx,
+          target,
+          now,
+          {
+            mode: "bootstrap",
+            eventTypes,
+          },
+        );
+
+        await createOperatorAuditAction(tx, {
+          syncNodeId: target.storeNode.id,
+          syncOutboxEventId: null,
+          syncInboundEventId: null,
+          actionType: "PUBLISH_MASTER_DATA",
+          operatorName: audit.operatorName,
+          note: `${audit.note} Target: ${targetStore.name}. Queued ${queuedCount} packet(s).`,
+          aggregateType: "masterData",
+          eventType: [...eventTypes].join(","),
+        });
+
+        results.push({
+          storeCode: targetStore.code,
+          storeName: targetStore.name,
+          nodeCode: target.storeNode.code,
+          queuedCount,
+        });
+      }
 
       return {
-        nodeCode: target.storeNode.code,
+        targets: results,
         scopes,
-        queuedCount,
+        queuedCount: results.reduce((total, result) => total + result.queuedCount, 0),
         note: audit.note,
         operatorName: audit.operatorName,
         serverProcessedAt: now.toISOString(),
@@ -4638,7 +4722,7 @@ export async function publishStoreMasterData(
     },
     {
       maxWait: 5_000,
-      timeout: 120_000,
+      timeout: 300_000,
     },
   );
 }

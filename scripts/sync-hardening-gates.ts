@@ -45,8 +45,11 @@ const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.
 const syncNodeDetail = requireFile(
   "apps/enterprise-web/src/components/enterprise/enterprise-sync-node-detail.tsx"
 );
+const syncDashboard = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-sync-dashboard.tsx"
+);
 const masterDataPublicationRoute = requireFile(
-  "apps/enterprise-web/src/app/api/sync/store-nodes/[nodeCode]/publish-master-data/route.ts"
+  "apps/enterprise-web/src/app/api/sync/master-data-publications/route.ts"
 );
 const deployBuild = requireFile("scripts/build-enterprise-web-deploy.mjs");
 const syncDocs = requireFile("docs/09-sync-hardening-and-observability.md");
@@ -73,6 +76,16 @@ requireIncludes(
   contracts,
   "StoreMasterDataPublicationScope",
   "sync contracts must define selectable master-data publication groups."
+);
+requireIncludes(
+  contracts,
+  "StoreMasterDataDistributionRequest",
+  "sync contracts must define the multi-shop master-data request."
+);
+requireIncludes(
+  contracts,
+  "StoreMasterDataDistributionResponse",
+  "sync contracts must define the multi-shop master-data response."
 );
 requireIncludes(
   contracts,
@@ -136,8 +149,8 @@ requireIncludes(
 );
 requireIncludes(
   enterpriseSync,
-  "publishStoreMasterData",
-  "enterprise must expose governed manual master-data publication."
+  "publishStoreMasterDataToNodes",
+  "enterprise must expose governed multi-shop master-data publication."
 );
 requireIncludes(
   enterpriseSync,
@@ -164,9 +177,39 @@ requireIncludes(
   'actionType: "PUBLISH_MASTER_DATA"',
   "manual publication must persist its required action type without a runtime enum lookup."
 );
+requireIncludes(
+  enterpriseSync,
+  "return prisma.$transaction(",
+  "multi-shop publication must be queued within one governed database transaction."
+);
+requireIncludes(
+  enterpriseSync,
+  "const selectedStoreIds = new Set<string>()",
+  "multi-shop publication must prevent duplicate desktop targets for one shop."
+);
 requireExcludes(
   syncNodeDetail,
-  "publicationOperatorName",
+  "publish-master-data",
+  "manual master-data publication must not remain attached to an individual shop node."
+);
+requireIncludes(
+  syncDashboard,
+  "/api/sync/master-data-publications",
+  "the HQ command center must use the multi-shop publication route."
+);
+requireIncludes(
+  syncDashboard,
+  "Select shops",
+  "the HQ command center must let the operator select destination shops."
+);
+requireIncludes(
+  syncDashboard,
+  "Select data groups",
+  "the HQ command center must let the operator select data groups."
+);
+requireExcludes(
+  syncDashboard,
+  "operatorName",
   "HQ manual publication must not ask the signed-in operator to type their identity."
 );
 requireIncludes(
@@ -175,9 +218,9 @@ requireIncludes(
   "deployment builds must discard stale Next chunks before compiling."
 );
 requireIncludes(
-  syncNodeDetail,
+  syncDashboard,
   "Queue master data",
-  "HQ node detail must expose the manual publication workspace."
+  "HQ command center must expose the multi-shop manual publication workspace."
 );
 
 for (const [source, label] of [

@@ -1118,6 +1118,29 @@ export type StoreMasterDataPublicationResponse = {
   serverProcessedAt: string;
 };
 
+export type StoreMasterDataDistributionRequest = {
+  nodeCodes: string[];
+  scopes: StoreMasterDataPublicationScope[];
+  note?: string;
+  operatorName?: string;
+};
+
+export type StoreMasterDataDistributionTarget = {
+  storeCode: string;
+  storeName: string;
+  nodeCode: string;
+  queuedCount: number;
+};
+
+export type StoreMasterDataDistributionResponse = {
+  targets: StoreMasterDataDistributionTarget[];
+  scopes: StoreMasterDataPublicationScope[];
+  queuedCount: number;
+  note: string;
+  operatorName: string;
+  serverProcessedAt: string;
+};
+
 export type StoreNodeInboundActionRequest = {
   note?: string;
   operatorName?: string;
