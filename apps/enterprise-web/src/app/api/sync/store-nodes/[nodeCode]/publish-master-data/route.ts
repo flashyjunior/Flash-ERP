@@ -37,8 +37,6 @@ function parseRequest(value: unknown): StoreMasterDataPublicationRequest {
 
   return {
     scopes,
-    operatorName:
-      typeof body.operatorName === "string" ? body.operatorName : undefined,
     note: typeof body.note === "string" ? body.note : undefined,
   };
 }
@@ -48,11 +46,15 @@ export async function POST(
   { params }: { params: Promise<{ nodeCode: string }> },
 ) {
   try {
-    await assertEnterprisePermission(["sync.admin.reseed"]);
+    const session = await assertEnterprisePermission(["sync.admin.reseed"]);
     const { nodeCode } = await params;
+    const input = parseRequest(await request.json());
     const result = await publishStoreMasterData(
       decodeURIComponent(nodeCode),
-      parseRequest(await request.json()),
+      {
+        ...input,
+        operatorName: session.displayName || session.loginId,
+      },
     );
 
     return NextResponse.json(result);

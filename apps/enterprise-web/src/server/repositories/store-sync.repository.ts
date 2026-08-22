@@ -4620,7 +4620,7 @@ export async function publishStoreMasterData(
         syncNodeId: target.storeNode.id,
         syncOutboxEventId: null,
         syncInboundEventId: null,
-        actionType: SyncOperatorActionType.PUBLISH_MASTER_DATA,
+        actionType: "PUBLISH_MASTER_DATA",
         operatorName: audit.operatorName,
         note: `${audit.note} Queued ${queuedCount} packet(s).`,
         aggregateType: "masterData",

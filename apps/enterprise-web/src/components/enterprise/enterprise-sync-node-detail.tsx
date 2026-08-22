@@ -248,7 +248,6 @@ export function EnterpriseSyncNodeDetail({
   const [publicationScopes, setPublicationScopes] = useState<StoreMasterDataPublicationScope[]>(
     allMasterDataPublicationScopes
   );
-  const [publicationOperatorName, setPublicationOperatorName] = useState("Flash ERP operator");
   const [publicationNote, setPublicationNote] = useState(
     `Manually publishing selected enterprise master data to ${detail.node.storeName}.`
   );
@@ -625,7 +624,6 @@ export function EnterpriseSyncNodeDetail({
           },
           body: JSON.stringify({
             scopes: publicationScopes,
-            operatorName: publicationOperatorName,
             note: publicationNote
           })
         }
@@ -739,16 +737,8 @@ export function EnterpriseSyncNodeDetail({
                   </label>
                 ))}
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
+              <div>
                 <label className="space-y-2 text-sm text-stone-700">
-                  <span className="block font-semibold text-stone-900">Operator name</span>
-                  <input
-                    className="w-full rounded-xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)]"
-                    onChange={(event) => setPublicationOperatorName(event.target.value)}
-                    value={publicationOperatorName}
-                  />
-                </label>
-                <label className="space-y-2 text-sm text-stone-700 md:col-span-2">
                   <span className="block font-semibold text-stone-900">Audit note</span>
                   <textarea
                     className="min-h-24 w-full rounded-xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)]"

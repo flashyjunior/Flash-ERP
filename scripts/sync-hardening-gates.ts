@@ -19,6 +19,12 @@ function requireIncludes(source: string, needle: string, label: string) {
   }
 }
 
+function requireExcludes(source: string, needle: string, label: string) {
+  if (source.includes(needle)) {
+    throw new Error(`Sync hardening gate failed: ${label}`);
+  }
+}
+
 const contracts = requireFile("packages/sync-core/src/contracts.ts");
 const policies = requireFile("packages/sync-core/src/policies.ts");
 const httpParser = requireFile("apps/enterprise-web/src/server/sync/store-sync-http.ts");
@@ -42,6 +48,7 @@ const syncNodeDetail = requireFile(
 const masterDataPublicationRoute = requireFile(
   "apps/enterprise-web/src/app/api/sync/store-nodes/[nodeCode]/publish-master-data/route.ts"
 );
+const deployBuild = requireFile("scripts/build-enterprise-web-deploy.mjs");
 const syncDocs = requireFile("docs/09-sync-hardening-and-observability.md");
 
 requireIncludes(policies, "MAX_SYNC_RETRY_ATTEMPTS", "shared retry attempt limit must exist.");
@@ -139,8 +146,33 @@ requireIncludes(
 );
 requireIncludes(
   masterDataPublicationRoute,
-  'assertEnterprisePermission(["sync.admin.reseed"])',
+  'const session = await assertEnterprisePermission(["sync.admin.reseed"])',
   "manual publication must require the sync reseed permission."
+);
+requireIncludes(
+  masterDataPublicationRoute,
+  "operatorName: session.displayName || session.loginId",
+  "manual publication must attribute the authenticated HQ operator."
+);
+requireExcludes(
+  masterDataPublicationRoute,
+  "body.operatorName",
+  "manual publication must not trust a browser-supplied operator name."
+);
+requireIncludes(
+  enterpriseSync,
+  'actionType: "PUBLISH_MASTER_DATA"',
+  "manual publication must persist its required action type without a runtime enum lookup."
+);
+requireExcludes(
+  syncNodeDetail,
+  "publicationOperatorName",
+  "HQ manual publication must not ask the signed-in operator to type their identity."
+);
+requireIncludes(
+  deployBuild,
+  "rmSync(nextBuildDirectory, { recursive: true, force: true })",
+  "deployment builds must discard stale Next chunks before compiling."
 );
 requireIncludes(
   syncNodeDetail,
