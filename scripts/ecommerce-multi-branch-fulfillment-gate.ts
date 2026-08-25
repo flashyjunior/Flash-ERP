@@ -16,6 +16,9 @@ const migration = read(
 const networkAllocationMigration = read(
   "prisma/migrations-sqlserver/20260820020000_ecommerce_network_allocation/migration.sql",
 );
+const storePaymentMigration = read(
+  "prisma/migrations-sqlserver/20260825010000_ecommerce_store_payment_reconciliation/migration.sql",
+);
 const compatibility = read(
   "apps/enterprise-web/src/server/repositories/schema-compatibility.repository.ts",
 );
@@ -134,6 +137,22 @@ for (const expected of [
   requireIncludes(storeSyncRepository, expected, `Ecommerce POS projection is missing ${expected}.`);
 }
 
+for (const expected of [
+  "deriveEcommercePaymentProjection",
+  "tx.ecommerceOrder.updateMany",
+  "paymentStatus: projectedPayment.paymentStatus",
+]) {
+  requireIncludes(storeSyncRepository, expected, `Ecommerce payment projection is missing ${expected}.`);
+}
+for (const expected of [
+  "INNER JOIN [dbo].[SalesOrder]",
+  "[sales].[status] IN (N'OPEN', N'FULFILLED')",
+  "N'PARTIALLY_PAID'",
+  "N'PAID'",
+]) {
+  requireIncludes(storePaymentMigration, expected, `Ecommerce payment backfill is missing ${expected}.`);
+}
+
 requireIncludes(
   posTransactionNumber,
   "isEcommercePosTransactionNumber",
@@ -166,6 +185,9 @@ for (const expected of [
   "consumedReservationCount",
   "ecommerceFulfillment.updateMany",
   "ecommerceFulfillmentLine.updateMany",
+  "deriveEcommercePaymentProjection",
+  "tx.ecommerceOrder.updateMany",
+  "paymentStatus: ecommercePaymentProjection.paymentStatus",
 ]) {
   requireIncludes(onlineStoreRepository, expected, `POS fulfilment is missing ${expected}.`);
 }

@@ -32,6 +32,8 @@ import {
   SyncOperatorActionType
 } from "@flash-erp/domain";
 
+import { deriveEcommercePaymentProjection } from "../ecommerce/ecommerce-payment-state";
+
 import type {
   CustomerAccountPostingCustomer,
   LoyaltyPolicy,
@@ -9605,6 +9607,11 @@ async function projectStoreSalesOrder(
     },
   });
   const nextRecordVersion = Math.max(1, event.recordVersion);
+  const projectedPayment = deriveEcommercePaymentProjection({
+    totalAmount: payload.totalAmount,
+    paidAmount: payload.paidAmount ?? payload.depositAmount ?? 0,
+    balanceAmount: payload.balanceAmount,
+  });
   const data = {
     retailOrgId: target.storeNode.retailOrgId,
     storeId: target.storeNode.store.id,
@@ -9619,8 +9626,8 @@ async function projectStoreSalesOrder(
     status: payload.status,
     totalAmount: toMoneyString(payload.totalAmount),
     depositAmount: toMoneyString(payload.depositAmount ?? 0),
-    paidAmount: toMoneyString(payload.paidAmount ?? payload.depositAmount ?? 0),
-    balanceAmount: toMoneyString(payload.balanceAmount ?? 0),
+    paidAmount: toMoneyString(projectedPayment.paidAmount),
+    balanceAmount: toMoneyString(projectedPayment.balanceAmount),
     depositTenderMethodCodeSnapshot: payload.depositTenderMethodCode ?? null,
     depositTenderMethodNameSnapshot: payload.depositTenderMethodName ?? null,
     depositPaymentMethodSnapshot: payload.depositPaymentMethod ?? null,
@@ -9684,6 +9691,23 @@ async function projectStoreSalesOrder(
       data: {
         id: payload.orderId,
         ...data,
+      },
+    });
+  }
+
+  if (
+    payload.status === SalesOrderStatus.OPEN ||
+    payload.status === SalesOrderStatus.FULFILLED
+  ) {
+    await tx.ecommerceOrder.updateMany({
+      where: {
+        retailOrgId: target.storeNode.retailOrgId,
+        salesOrderId: payload.orderId,
+      },
+      data: {
+        paidAmount: toMoneyString(projectedPayment.paidAmount),
+        balanceAmount: toMoneyString(projectedPayment.balanceAmount),
+        paymentStatus: projectedPayment.paymentStatus,
       },
     });
   }

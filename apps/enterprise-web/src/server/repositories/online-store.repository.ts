@@ -54,6 +54,7 @@ import { parseJsonField, readJsonObject as parseJsonObject, readJsonStringArray,
 import { prisma } from "@/lib/db/prisma";
 import { defaultAccountPaymentReceiptTemplateHtml } from "@/lib/templates/thermal-receipt-templates";
 import { getEnterpriseSession, requireEnterpriseSession } from "@/server/auth/enterprise-session";
+import { deriveEcommercePaymentProjection } from "@/server/ecommerce/ecommerce-payment-state";
 import { resolveStoreReceiptTemplateSelection } from "@/server/repositories/receipt-template-support";
 import {
   ensureAlternateUomSellingSchemaCompatibility,
@@ -8825,6 +8826,11 @@ async function completeOnlineStoreParkedTransaction(
 
   if (openSalesOrder) {
     const reservationConsumedAt = transaction.completedAt ?? completedAt;
+    const ecommercePaymentProjection = deriveEcommercePaymentProjection({
+      totalAmount: sourceTotals.totalAmount,
+      paidAmount,
+      balanceAmount: 0,
+    });
     const consumedReservationCount = await tx.salesOrderInventoryReservation.updateMany({
       where: {
         salesOrderId: openSalesOrder.id,
@@ -8854,8 +8860,8 @@ async function completeOnlineStoreParkedTransaction(
       data: {
         status: SalesOrderStatus.FULFILLED,
         totalAmount: sourceTotals.totalAmount,
-        paidAmount,
-        balanceAmount: 0,
+        paidAmount: ecommercePaymentProjection.paidAmount,
+        balanceAmount: ecommercePaymentProjection.balanceAmount,
         ...(openSalesOrder.orderType === "LAYAWAY" || consumedReservationCount.count > 0
           ? {
               reservationStatus: "CONSUMED",
@@ -8869,6 +8875,17 @@ async function completeOnlineStoreParkedTransaction(
           increment: 1
         }
       }
+    });
+    await tx.ecommerceOrder.updateMany({
+      where: {
+        retailOrgId: session.retailOrgId,
+        salesOrderId: openSalesOrder.id,
+      },
+      data: {
+        paidAmount: ecommercePaymentProjection.paidAmount,
+        balanceAmount: ecommercePaymentProjection.balanceAmount,
+        paymentStatus: ecommercePaymentProjection.paymentStatus,
+      },
     });
   }
 
