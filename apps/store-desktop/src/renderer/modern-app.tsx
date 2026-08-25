@@ -22235,6 +22235,10 @@ function InventoryWorkspace(props: {
       (transfer) =>
         transfer.role === "SOURCE" && transfer.outstandingIssueQuantity > 0,
     );
+    const selectedTransferOutstandingQuantity = getTransferRoleOutstandingQuantity(
+      selectedTransferDocument,
+      transferDirectionFilter,
+    );
 
     return (
       <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
@@ -22300,14 +22304,8 @@ function InventoryWorkspace(props: {
             />
             <Stat
               label="Outstanding"
-              value={formatNumber(
-                selectedTransferDocument.outstandingReceiptQuantity,
-              )}
-              tone={
-                selectedTransferDocument.outstandingReceiptQuantity > 0
-                  ? "warn"
-                  : "good"
-              }
+              value={formatNumber(selectedTransferOutstandingQuantity)}
+              tone={selectedTransferOutstandingQuantity > 0 ? "warn" : "good"}
             />
           </div>
           {hasIssuableLines ? (

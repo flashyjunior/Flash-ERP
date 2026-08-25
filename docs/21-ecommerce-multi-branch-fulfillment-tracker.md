@@ -1,6 +1,6 @@
 # Ecommerce Multi-Branch Fulfilment Tracker
 
-Updated: 2026-08-22
+Updated: 2026-08-25
 
 This tracker governs the evolution of the Flash ERP public ecommerce storefront from a single-shop sales path into a centrally managed, multi-branch fulfilment operation. It is deliberately phased: a customer must never be promised stock by adding inventory from several branches unless the order has a real, auditable fulfilment plan.
 
@@ -30,7 +30,7 @@ This tracker governs the evolution of the Flash ERP public ecommerce storefront 
 - Branch: `master`.
 - Baseline implementation commit: `31a1a27` (`Rework ecommerce fulfilment across branches`).
 - Merged implementation commit: `1fcd33f` (`Add ecommerce storefront order handoff`), PR #20.
-- Current delivery position: central network allocation, internal-transfer routing, customer and staff visibility, configurable storefront slides, and Store Desktop order handoff are merged and covered by focused acceptance plus a deploy build. The `225c682-r9` deployment window was interrupted by an abrupt VPS restart. Post-restart public health is ready, and the three remotely served storefront page/CSS assets that differ from `r9` match the archived `r7` payload, confirming that the `r7` storefront runtime recovered; the VPS-local task action still requires preflight confirmation. Neither `r8` nor `r9` may be reused. The storefront UX revision is repackaged as fresh release `225c682-r10`, but that package predates the locally completed Google/Facebook customer-authentication revision and must not be used to deploy this newer source. Fulfilment-location configuration and production-like operational UAT remain before Phase 1 is marked Done.
+- Current delivery position: central network allocation, internal-transfer routing, customer and staff visibility, configurable storefront slides, and Store Desktop order handoff are merged. VPS release `c183953-r1` was confirmed running with database readiness on 2026-08-24. Production-like UAT then exposed a same-shop ecommerce receipt projection conflict and premature Store Desktop handoff before staff acceptance. The correction is locally code complete and validated, but it has not been packaged or deployed; the affected dead letter and Enterprise posted-sale/report projection still require recovery verification after a fresh release. Phase 1 remains in progress.
 - This tracker distinguishes code completion from rollout acceptance. Do not mark a phase Done merely because its branch compiles.
 
 ## Phase 1: Central Delivery Allocation And Reservation
@@ -83,7 +83,7 @@ Evidence:
 Status: Code complete
 
 - Reserve normal ecommerce stock at every allocated source location and create one internal transfer request per external-source line into the dispatch location.
-- Publish the customer order as a high-priority `sales-order.published` packet to an assigned Store Desktop node. The packet creates a parked local sales order, preserving the actual balance for payment-on-delivery. Source shops receive only their corresponding high-priority transfer packets.
+- After ecommerce staff acceptance, publish the customer order as a high-priority `sales-order.published` packet to the assigned Store Desktop node and publish any required source-transfer packets. The customer order packet creates a parked local sales order, preserving the actual balance for payment-on-delivery; an unaccepted order must not enter a shop's POS fulfilment queue.
 - Create layaway reservations and network transfers only after the verified opening deposit required by the selected store's policy.
 - Consume every active source reservation during POS fulfilment after transfer stock has reached the dispatch location.
 - Release active reservations and cancel unissued network transfers on cancellation and the relevant terminal lifecycle paths.
@@ -110,7 +110,7 @@ Status: Code complete
 - Configure fulfilment locations with priority plus pickup/delivery eligibility in the ecommerce staff console.
 - Display the selected pickup or dispatching delivery branch and network-allocation status to the customer and staff.
 - Display allocation and stock context in the staff order view without changing the separate online-store POS workflow.
-- Prevent staff from marking an order ready, out for delivery, or delivered until all required internal stock transfers have been received at the dispatch location.
+- Prevent staff from advancing an order until all required internal stock transfers have been received at the dispatch location. Use delivery-specific actions for delivery and pickup-specific actions such as `Ready for pickup` and `Picked up` for pickup orders.
 - Offer Google and Facebook as additional customer sign-in and signup options when provider credentials and an HTTPS storefront origin are configured; preserve the existing ecommerce customer session and resume checkout after authentication.
 
 Acceptance:
@@ -149,6 +149,14 @@ Local verification evidence (2026-08-21):
 - A checksum-verified VPS release package was assembled with all three ecommerce migrations and with runtime uploads excluded.
 - Public ecommerce browser suite: 6 passed; 3 authentication-dependent flows were skipped because this local runtime intentionally does not expose development OTP/MFA codes.
 
+Fulfilment UAT correction evidence (2026-08-25):
+
+- East Legon pickup UAT exposed a partial sync projection: the inventory-ledger event landed, while `pos.transaction.completed` for `WEB-ECOM-EAST-LEGON-MARKET-1787654125681-977` dead-lettered because Enterprise mistook its pre-created ecommerce parked transaction for another store event.
+- The projection now permits replacement only when the existing transaction is the same-store ecommerce handoff linked by sales-order source identity. Store Desktop requeues this specific `WEB-ECOM-*` stale-conflict class while retaining unrelated `STALE_VERSION` conflicts for investigation.
+- Ecommerce sales-order and network-transfer packets now remain unpublished while an order is `PLACED`; staff acceptance publishes the governed shop work. Pickup status labels and actions no longer use delivery wording.
+- `npm run build:deploy`, Enterprise Web and Store Desktop TypeScript validation, `npm run acceptance:desktop-sync-recovery`, and `npm run acceptance:ecommerce-multi-branch` passed.
+- Focused production Playwright acceptance passed against `http://127.0.0.1:3001` for partial-name typeahead, selected-product search results, conditional out-of-stock ribbon, white card media, pointer-position image zoom, product-card navigation, and mobile/tablet/desktop layout. The correction remains pending a fresh VPS/Store Desktop release and live dead-letter recovery verification.
+
 Storefront UX package evidence (2026-08-22):
 
 - The `225c682-r8` deployment attempt completed migration and Prisma generation but failed before changing `FlashRMSHQ`: the same validator used for the pristine ZIP was incorrectly rerun after the deployer intentionally restored `.env`, root dependencies, and shared uploads. It rejected the approved `apps\enterprise-web\public\uploads` junction. The failed release directory is retained and `r8` must not be reused.
@@ -158,6 +166,7 @@ Storefront UX package evidence (2026-08-22):
 - The finished payload contains physical `@prisma/client-2c3a283f134fdcb6` runtime alias files, all three ecommerce migrations, and the direct Node service host. An executable alias smoke loaded `PrismaClient` through the same reused-root-`node_modules` model used on the VPS.
 - The `r9` deployment window was interrupted by an abrupt VPS restart and must not be resumed or reused. Post-restart external checks returned HTTP 200 for live health, database readiness with `ready: true`, catalog, and storefront. The three remotely served page/CSS assets absent from `r9` are all present in the archived `r7` payload, confirming recovery of the `r7` storefront runtime pending VPS-local task-action confirmation.
 - `FlashERP-HQ-225C682-R10-VPS-Deploy-Resolved.zip` was assembled as the clean retry with outer SHA-256 `FCA37F9AEDAF66EFDFB6AC5495E5FE789F7BFC3BC677710A9BA7D2992907956E`. The hydrated-layout regression gate, both archive audits, no-write guard, PowerShell 5.1 parse, physical Prisma alias audit, and executable alias smoke passed; deployment remains pending.
+- `FlashERP-HQ-24AC473-R1-VPS-Deploy-Resolved.zip` was assembled from clean commit `24ac473` with outer SHA-256 `9CBEA0B1E5A27BF9AC5A2AD3BFAABFAE978BE901F89A33D5A3D1684DF31A645F`. The production deploy build, ecommerce OAuth and multi-branch gates, OAuth and manual-master-data route-manifest checks, hydrated-layout regression gate, both archive audits, no-write guard, Windows PowerShell 5.1 parse, physical Prisma alias audit, and executable alias smoke passed; deployment remains pending.
 
 Deployment evidence (2026-08-21):
 

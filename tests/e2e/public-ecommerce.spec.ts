@@ -256,6 +256,44 @@ test.describe("public ecommerce extension", () => {
     );
     expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
     const catalog = (await catalogResponse.json()) as PublicCatalogSnapshot;
+    const partialNameSearch = catalog.products
+      ?.flatMap((product) => product.name.split(/\s+/).map((token) => ({ product, token })))
+      .find(({ token }) => {
+        if (token.length < 5) return false;
+        const fragment = token.slice(1, Math.min(token.length, 5)).toLowerCase();
+        return catalog.products?.filter((product) => product.name.toLowerCase().includes(fragment)).length === 1;
+      });
+    if (partialNameSearch) {
+      const fragment = partialNameSearch.token
+        .slice(1, Math.min(partialNameSearch.token.length, 5))
+        .toLowerCase();
+      await searchInput.fill(fragment[0] ?? fragment);
+      await expect(page.locator('[aria-label="Search suggestions"]')).toBeVisible();
+      await searchInput.fill(fragment);
+      const productSuggestion = page
+        .locator('[aria-label="Search suggestions"]')
+        .getByRole("button", { name: `${partialNameSearch.product.name} Product`, exact: true });
+      await expect(productSuggestion).toBeVisible();
+      await productSuggestion.click();
+      await expect(page).toHaveURL(/\/shop\/[^/]+\/search\?q=/, { timeout: 60_000 });
+      await expect(page.getByTestId("storefront-search-results")).toContainText(
+        partialNameSearch.product.name
+      );
+      await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+    }
+
+    const unavailableProduct = catalog.products?.find((product) => product.availableQuantity === 0);
+    if (unavailableProduct) {
+      await page.goto(
+        `/shop/${encodeURIComponent(storeCode ?? "")}/search?q=${encodeURIComponent(unavailableProduct.name)}`
+      );
+      const unavailableCard = page.locator("article").filter({
+        has: page.getByRole("heading", { level: 3, name: unavailableProduct.name, exact: true })
+      });
+      await expect(unavailableCard.getByTestId("out-of-stock-ribbon")).toHaveText("Out of stock");
+      await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+    }
+
     const departmentName = catalog.products
       ?.map((product) => product.department?.trim())
       .find((value): value is string => Boolean(value));
@@ -429,6 +467,28 @@ test.describe("public ecommerce extension", () => {
       const thumbnailBox = await galleryThumbnails.first().boundingBox();
       const mainImageBox = await page.getByRole("button", { name: `Open image viewer for ${productName}` }).boundingBox();
       expect(thumbnailBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThan(mainImageBox?.x ?? 0);
+    }
+    const zoomTarget = page.getByRole("button", { name: `Open image viewer for ${productName}` });
+    await zoomTarget.scrollIntoViewIfNeeded();
+    const zoomTargetBox = await zoomTarget.boundingBox();
+    const zoomImage = zoomTarget.locator("img");
+    if (zoomTargetBox) {
+      await page.mouse.move(
+        zoomTargetBox.x + zoomTargetBox.width * 0.25,
+        zoomTargetBox.y + zoomTargetBox.height * 0.35
+      );
+      const leftTransformOrigin = await zoomImage.evaluate(
+        (element) => getComputedStyle(element).transformOrigin
+      );
+      expect(await zoomImage.evaluate((element) => getComputedStyle(element).transform)).not.toBe("none");
+      await page.mouse.move(
+        zoomTargetBox.x + zoomTargetBox.width * 0.75,
+        zoomTargetBox.y + zoomTargetBox.height * 0.65
+      );
+      const rightTransformOrigin = await zoomImage.evaluate(
+        (element) => getComputedStyle(element).transformOrigin
+      );
+      expect(rightTransformOrigin).not.toBe(leftTransformOrigin);
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
     await page.getByTestId("product-detail-hero").screenshot({ path: testInfo.outputPath("product-details-desktop.png") });

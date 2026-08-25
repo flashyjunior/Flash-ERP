@@ -114,6 +114,53 @@ export function calculateEcommerceSellableBaseQuantity(input: {
   return toQuantity(Math.max(0, afterReservations - toQuantity(input.safetyStockBaseQuantity)));
 }
 
+export type EcommerceNetworkAvailabilityPosition = {
+  inventoryLocationId: string;
+  onHandBaseQuantity: number;
+  activeReservedBaseQuantity: number;
+  safetyStockBaseQuantity?: number | null;
+};
+
+export function calculateEcommerceNetworkSellableBaseQuantity(
+  positions: EcommerceNetworkAvailabilityPosition[],
+) {
+  const usableBeforeReservations = positions.reduce(
+    (sum, position) =>
+      sum + Math.max(
+        0,
+        toQuantity(position.onHandBaseQuantity) - toQuantity(position.safetyStockBaseQuantity),
+      ),
+    0,
+  );
+  const activeReservations = positions.reduce(
+    (sum, position) => sum + Math.max(0, toQuantity(position.activeReservedBaseQuantity)),
+    0,
+  );
+
+  // A received ecommerce transfer moves physical stock while its active reservation
+  // deliberately remains at the source until POS fulfilment. Reconcile the whole
+  // eligible network so that transferred reserved stock cannot become sellable again.
+  return toQuantity(Math.max(0, usableBeforeReservations - activeReservations));
+}
+
+export function calculateEcommerceNetworkAvailabilityByLocation(
+  positions: EcommerceNetworkAvailabilityPosition[],
+) {
+  const availabilityByLocation = new Map<string, number>();
+  let remainingNetworkAvailability = calculateEcommerceNetworkSellableBaseQuantity(positions);
+
+  for (const position of positions) {
+    const localAvailability = calculateEcommerceSellableBaseQuantity(position);
+    const availableQuantity = toQuantity(Math.min(localAvailability, remainingNetworkAvailability));
+    availabilityByLocation.set(position.inventoryLocationId, availableQuantity);
+    remainingNetworkAvailability = toQuantity(
+      Math.max(0, remainingNetworkAvailability - availableQuantity),
+    );
+  }
+
+  return availabilityByLocation;
+}
+
 export async function getEcommerceFulfillmentCandidates(
   client: EcommerceInventoryClient,
   storefrontStore: EcommerceStorefrontContext,
@@ -209,6 +256,8 @@ async function getCandidateAvailability(
   client: EcommerceInventoryClient,
   candidates: EcommerceFulfillmentCandidate[],
   lines: EcommerceStockLine[],
+  fulfilmentMethod: EcommerceFulfilmentMethod,
+  reservationScopeCandidates: EcommerceFulfillmentCandidate[] = candidates,
 ) {
   const inventoryLines = lines.filter((line) => isStockManagedProduct(line.product));
   const availableByCandidatePosition = new Map<string, number>();
@@ -217,7 +266,9 @@ async function getCandidateAvailability(
   }
 
   const productIds = [...new Set(inventoryLines.map((line) => line.product.id))];
-  const inventoryLocationIds = candidates.map((candidate) => candidate.inventoryLocation.id);
+  const inventoryLocationIds = [
+    ...new Set(reservationScopeCandidates.map((candidate) => candidate.inventoryLocation.id)),
+  ];
   const stockPositions = await client.inventoryLedgerEntry.groupBy({
     by: ["inventoryLocationId", "productId", "productVariantId"],
     where: {
@@ -266,19 +317,42 @@ async function getCandidateAvailability(
     if (seenPositions.has(itemPositionKey)) continue;
     seenPositions.add(itemPositionKey);
 
+    const networkPositions = reservationScopeCandidates.map((candidate) => {
+      const locationPrefix = `${candidate.inventoryLocation.id}:`;
+      return {
+        inventoryLocationId: candidate.inventoryLocation.id,
+        onHandBaseQuantity:
+          onHandByLocationPosition.get(`${locationPrefix}${itemPositionKey}`) ?? 0,
+        activeReservedBaseQuantity:
+          reservedByLocationSnapshot.get(
+            `${locationPrefix}${reservationKey(line.product.code, line.variant?.code)}`,
+          ) ?? 0,
+        safetyStockBaseQuantity: Number(line.product.safetyStockLevel ?? 0),
+      };
+    });
+    const networkAvailability = calculateEcommerceNetworkSellableBaseQuantity(networkPositions);
+    const deliveryAvailabilityByLocation = calculateEcommerceNetworkAvailabilityByLocation(
+      networkPositions.filter((position) =>
+        candidates.some((candidate) => candidate.inventoryLocation.id === position.inventoryLocationId),
+      ),
+    );
+
     for (const candidate of candidates) {
       const locationPrefix = `${candidate.inventoryLocation.id}:`;
+      const localAvailability = calculateEcommerceSellableBaseQuantity({
+        onHandBaseQuantity:
+          onHandByLocationPosition.get(`${locationPrefix}${itemPositionKey}`) ?? 0,
+        activeReservedBaseQuantity:
+          reservedByLocationSnapshot.get(
+            `${locationPrefix}${reservationKey(line.product.code, line.variant?.code)}`,
+          ) ?? 0,
+        safetyStockBaseQuantity: Number(line.product.safetyStockLevel ?? 0),
+      });
       availableByCandidatePosition.set(
         `${locationPrefix}${itemPositionKey}`,
-        calculateEcommerceSellableBaseQuantity({
-          onHandBaseQuantity:
-            onHandByLocationPosition.get(`${locationPrefix}${itemPositionKey}`) ?? 0,
-          activeReservedBaseQuantity:
-            reservedByLocationSnapshot.get(
-              `${locationPrefix}${reservationKey(line.product.code, line.variant?.code)}`,
-            ) ?? 0,
-          safetyStockBaseQuantity: Number(line.product.safetyStockLevel ?? 0),
-        }),
+        fulfilmentMethod === "PICKUP"
+          ? toQuantity(Math.min(localAvailability, networkAvailability))
+          : deliveryAvailabilityByLocation.get(candidate.inventoryLocation.id) ?? 0,
       );
     }
   }
@@ -328,7 +402,16 @@ export async function resolveEcommerceFulfillmentPlan(
   const inventoryLines = lines
     .map((line, lineIndex) => ({ line, lineIndex }))
     .filter(({ line }) => isStockManagedProduct(line.product));
-  const availableByCandidatePosition = await getCandidateAvailability(client, candidates, lines);
+  const reservationScopeCandidates = input.fulfilmentMethod === "PICKUP"
+    ? await getEcommerceFulfillmentCandidates(client, storefrontStore)
+    : candidates;
+  const availableByCandidatePosition = await getCandidateAvailability(
+    client,
+    candidates,
+    lines,
+    input.fulfilmentMethod,
+    reservationScopeCandidates,
+  );
   const availableFor = (candidate: EcommerceFulfillmentCandidate, line: EcommerceStockLine) =>
     availableByCandidatePosition.get(
       `${candidate.inventoryLocation.id}:${positionKey(line.product.id, line.variant?.id)}`,

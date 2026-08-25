@@ -106,6 +106,12 @@ const nextStatuses: Record<string, string[]> = {
   OUT_FOR_DELIVERY: ["DELIVERED"]
 };
 
+function nextStatusesForOrder(order: Order) {
+  return (nextStatuses[order.status] ?? []).filter(
+    (status) => order.fulfilmentMethod !== "PICKUP" || status !== "OUT_FOR_DELIVERY",
+  );
+}
+
 function formatStatus(value: string) {
   return value
     .replace(/_/g, " ")
@@ -134,6 +140,23 @@ function toneForStatus(status: string) {
   if (["CANCELLED", "REFUNDED", "FAILED"].includes(status)) return styles.bad;
   if (["REFUND_REQUESTED", "PARTIALLY_PAID"].includes(status)) return styles.warning;
   return styles.neutral;
+}
+
+function formatOrderStatus(order: Pick<Order, "fulfilmentMethod" | "status">) {
+  if (order.fulfilmentMethod === "PICKUP") {
+    if (order.status === "READY") return "Awaiting Pickup";
+    if (order.status === "DELIVERED") return "Picked Up";
+  }
+  return formatStatus(order.status);
+}
+
+function orderStatusActionLabel(order: Order, status: string) {
+  if (status === "CONFIRMED") return "Accept order";
+  if (order.fulfilmentMethod === "PICKUP") {
+    if (status === "READY") return "Ready for pickup";
+    if (status === "DELIVERED") return "Picked up";
+  }
+  return formatStatus(status);
 }
 
 function formatDuration(milliseconds: number | undefined) {
@@ -532,7 +555,7 @@ export function OnlineStoreEcommerceWorkspace({
                 <tbody>
                   {workspace.orders.map((order) => (
                     <tr key={order.id}>
-                      <td><strong>{order.orderNo}</strong><small>{order.orderType === "LAYAWAY" ? "Layaway" : "Customer order"}</small><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatStatus(order.status)}</span></td>
+                      <td><strong>{order.orderNo}</strong><small>{order.orderType === "LAYAWAY" ? "Layaway" : "Customer order"}</small><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatOrderStatus(order)}</span></td>
                       <td><strong>{order.customer.fullName}</strong><small>{order.customer.phone ?? order.customer.email ?? order.customer.customerNo}</small></td>
                       <td>{new Date(order.placedAt).toLocaleString()}</td>
                       <td><strong>{formatStatus(order.fulfilmentMethod)}</strong><small>{order.fulfillment?.storeName ?? workspace.store.name}{order.fulfillment?.inventoryLocationName ? ` · ${order.fulfillment.inventoryLocationName}` : ""}</small></td>
@@ -815,7 +838,7 @@ export function OnlineStoreEcommerceWorkspace({
           <section aria-label={`Order ${selectedOrder.orderNo}`} aria-modal="true" className={styles.orderDialog} role="dialog">
             <header><div><span>Customer order</span><h2>{selectedOrder.orderNo}</h2></div><button aria-label="Close order" onClick={() => setSelectedOrderId(null)} title="Close" type="button"><X size={21} /></button></header>
             <div className={styles.orderSummary}>
-              <div><small>Status</small><strong>{formatStatus(selectedOrder.status)}</strong></div>
+              <div><small>Status</small><strong>{formatOrderStatus(selectedOrder)}</strong></div>
               <div><small>Payment</small><strong>{formatStatus(selectedOrder.paymentStatus)}</strong></div>
               <div><small>Order total</small><strong>{money(selectedOrder.currencyCode, selectedOrder.totalAmount)}</strong></div>
               <div><small>Balance</small><strong>{money(selectedOrder.currencyCode, selectedOrder.balanceAmount)}</strong></div>
@@ -832,7 +855,7 @@ export function OnlineStoreEcommerceWorkspace({
                 <div className={styles.lineItems}>{selectedOrder.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant || line.productCode}</small></span><span>{line.quantity} x {money(selectedOrder.currencyCode, line.unitPrice)}</span><strong>{money(selectedOrder.currencyCode, line.lineTotal)}</strong></div>)}</div>
               </section>
               <aside>
-                <h3>Delivery</h3>
+                <h3>{selectedOrder.fulfilmentMethod === "PICKUP" ? "Pickup" : "Delivery"}</h3>
                 <p><strong>{selectedOrder.recipientName}</strong><br />{selectedOrder.deliveryPhone}<br />{selectedOrder.fulfilmentMethod === "DELIVERY" ? selectedOrder.deliveryAddress : "Store pickup"}</p>
                 {selectedOrder.deliveryNote ? <p><small>Customer note</small><br />{selectedOrder.deliveryNote}</p> : null}
                 {selectedOrder.fulfillment ? <><h3>{selectedOrder.fulfilmentMethod === "PICKUP" ? "Pickup location" : "Delivery fulfilment"}</h3><p><strong>{selectedOrder.fulfillment.storeName}</strong><br />{selectedOrder.fulfillment.inventoryLocationName ?? "Store sales location"}<br /><small>{selectedOrder.fulfillment.routingMethod === "NETWORK_TRANSFER" ? "Network allocation - source transfer(s) may be pending" : formatStatus(selectedOrder.fulfillment.status)}</small></p></> : null}
@@ -870,12 +893,12 @@ export function OnlineStoreEcommerceWorkspace({
               </aside>
             </div>
             <footer>
-              <div><span className={`${styles.pill} ${toneForStatus(selectedOrder.status)}`}>{formatStatus(selectedOrder.status)}</span><small>{new Date(selectedOrder.placedAt).toLocaleString()}</small></div>
-              <div className={styles.statusActions}>{(nextStatuses[selectedOrder.status] ?? []).map((status) => {
+              <div><span className={`${styles.pill} ${toneForStatus(selectedOrder.status)}`}>{formatOrderStatus(selectedOrder)}</span><small>{new Date(selectedOrder.placedAt).toLocaleString()}</small></div>
+              <div className={styles.statusActions}>{nextStatusesForOrder(selectedOrder).map((status) => {
                 const paymentBlocksAcceptance = status === "CONFIRMED" && selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID";
                 const transferBlocksProgress = ["READY", "OUT_FOR_DELIVERY", "DELIVERED"].includes(status) && selectedOrder.networkTransferSummary.outstanding > 0;
                 const blockedTitle = paymentBlocksAcceptance ? "Online payment must be confirmed first" : transferBlocksProgress ? "Receive all network transfer stock at the dispatch shop first" : undefined;
-                return <button className={status === "CANCELLED" ? styles.cancelAction : undefined} disabled={busyKey === `order:${selectedOrder.id}` || paymentBlocksAcceptance || transferBlocksProgress} key={status} onClick={() => void updateOrderStatus(selectedOrder, status)} title={blockedTitle} type="button">{status === "CONFIRMED" ? "Accept order" : formatStatus(status)}</button>;
+                return <button className={status === "CANCELLED" ? styles.cancelAction : undefined} disabled={busyKey === `order:${selectedOrder.id}` || paymentBlocksAcceptance || transferBlocksProgress} key={status} onClick={() => void updateOrderStatus(selectedOrder, status)} title={blockedTitle} type="button">{orderStatusActionLabel(selectedOrder, status)}</button>;
               })}</div>
             </footer>
           </section>

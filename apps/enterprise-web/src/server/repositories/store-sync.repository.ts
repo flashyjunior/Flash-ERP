@@ -10719,15 +10719,28 @@ async function projectStorePosTransaction(
       id: true,
       storeId: true,
       originNodeCode: true,
+      transactionNo: true,
       status: true,
     },
   });
   let parkedTransactionId: string | null = null;
 
   if (existingTransactionById) {
+    const ecommerceHandoff = existingTransactionById.status === PosTransactionStatus.PARKED
+      ? await tx.salesOrder.findFirst({
+          where: {
+            retailOrgId: target.storeNode.retailOrgId,
+            storeId: target.storeNode.store.id,
+            sourceTransactionId: existingTransactionById.id,
+            sourceTransactionNo: existingTransactionById.transactionNo,
+            ecommerceOrder: { isNot: null },
+          },
+          select: { id: true },
+        })
+      : null;
     if (
       existingTransactionById.storeId === target.storeNode.store.id &&
-      existingTransactionById.originNodeCode === target.storeNode.code
+      (existingTransactionById.originNodeCode === target.storeNode.code || ecommerceHandoff)
     ) {
       if (existingTransactionById.status === PosTransactionStatus.COMPLETED) {
         return true;
@@ -10767,7 +10780,9 @@ async function projectStorePosTransaction(
   });
 
   if (existingTransaction) {
-    if (
+    if (existingTransaction.id === parkedTransactionId) {
+      // The ID lookup already verified this same-store ecommerce handoff.
+    } else if (
       existingTransaction.storeId === target.storeNode.store.id &&
       existingTransaction.originNodeCode === target.storeNode.code
     ) {

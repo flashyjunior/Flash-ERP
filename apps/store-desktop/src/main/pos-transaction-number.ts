@@ -9,6 +9,7 @@ const POS_RECEIPT_SERIES_TOKEN_LENGTH = 7;
 const POS_RECEIPT_SERIES_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const POS_RECEIPT_SERIES_TOKEN_PATTERN = /^[A-Z0-9]{7}$/;
 const LEGACY_POS_TRANSACTION_NUMBER_PATTERN = /^POS-ACC-\d{4}$/;
+const ECOMMERCE_POS_TRANSACTION_NUMBER_PATTERN = /^WEB-ECOM-/;
 
 export function createPosReceiptSeriesToken() {
   return Array.from(
@@ -50,5 +51,12 @@ export function isLegacyPosTransactionNumber(value: unknown) {
   return (
     typeof value === "string" &&
     LEGACY_POS_TRANSACTION_NUMBER_PATTERN.test(value.trim().toUpperCase())
+  );
+}
+
+export function isEcommercePosTransactionNumber(value: unknown) {
+  return (
+    typeof value === "string" &&
+    ECOMMERCE_POS_TRANSACTION_NUMBER_PATTERN.test(value.trim().toUpperCase())
   );
 }

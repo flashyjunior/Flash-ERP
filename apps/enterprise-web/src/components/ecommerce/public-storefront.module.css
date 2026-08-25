@@ -1246,6 +1246,25 @@
   cursor: pointer;
 }
 
+.outOfStockRibbon {
+  position: absolute;
+  z-index: 4;
+  top: 18px;
+  right: -43px;
+  width: 150px;
+  padding: 7px 8px;
+  background: #c92333;
+  color: white;
+  font-size: 0.625em;
+  font-weight: 850;
+  line-height: 1;
+  text-align: center;
+  text-transform: uppercase;
+  transform: rotate(45deg);
+  box-shadow: 0 3px 10px rgba(91, 10, 22, 0.24);
+  pointer-events: none;
+}
+
 .productImageZoomCue,
 .productZoomButton > span {
   position: absolute;
@@ -1869,12 +1888,13 @@
 }
 
 .drawerHeader h2 {
-  overflow: hidden;
   margin: 0;
-  font-size: 1.0625em;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 0.9375em;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .drawerHeader button {
@@ -2213,11 +2233,14 @@
 
 .productZoomButton .productVisual img {
   object-fit: contain;
-  transition: transform 280ms ease;
+  transform-origin: var(--product-zoom-x, 50%) var(--product-zoom-y, 50%);
+  transition: transform 220ms ease, transform-origin 80ms linear;
 }
 
-.productZoomButton:hover .productVisual img {
-  transform: scale(1.045);
+@media (hover: hover) and (pointer: fine) {
+  .productZoomButton:hover .productVisual img {
+    transform: scale(1.85);
+  }
 }
 
 .imageViewer {
@@ -3498,6 +3521,10 @@
   text-align: left;
 }
 
+.orderList > button > span:nth-child(2) {
+  min-width: 0;
+}
+
 .orderIcon {
   display: grid;
   width: 42px;
@@ -3514,10 +3541,9 @@
 }
 
 .orderList strong {
-  overflow: hidden;
   font-size: 0.75em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .orderList small {

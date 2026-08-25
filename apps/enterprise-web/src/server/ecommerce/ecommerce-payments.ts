@@ -25,7 +25,6 @@ import {
 } from "@/server/repositories/schema-compatibility.repository";
 import {
   queueEcommerceSalesOrderPublication,
-  queueInterStoreTransferPublication,
 } from "@/server/repositories/store-sync.repository";
 
 type SupportedGateway = "PAYSTACK" | "FLUTTERWAVE";
@@ -237,7 +236,6 @@ async function activateEcommerceLayawayReservation(
       },
       select: { id: true },
     });
-    await queueInterStoreTransferPublication(tx, { transferId: transfer.id });
   }
   await tx.ecommerceFulfillment.update({
     where: { id: assignedFulfillment.id },
@@ -825,10 +823,12 @@ export async function verifyEcommercePayment(input: {
         recordVersion: { increment: 1 }
       }
     });
-    await queueEcommerceSalesOrderPublication(tx, {
-      salesOrderId: payment.ecommerceOrder.salesOrderId,
-      publishedAt: now,
-    });
+    if (payment.ecommerceOrder.status !== "PLACED") {
+      await queueEcommerceSalesOrderPublication(tx, {
+        salesOrderId: payment.ecommerceOrder.salesOrderId,
+        publishedAt: now,
+      });
+    }
     await tx.ecommerceOrderStatusEvent.create({
       data: {
         ecommerceOrderId: payment.ecommerceOrder.id,

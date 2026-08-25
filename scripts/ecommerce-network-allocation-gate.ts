@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 
 import {
+  calculateEcommerceNetworkAvailabilityByLocation,
+  calculateEcommerceNetworkSellableBaseQuantity,
   calculateEcommerceSellableBaseQuantity,
   resolveEcommerceFulfillmentPlan,
 } from "../apps/enterprise-web/src/server/ecommerce/ecommerce-fulfillment";
@@ -107,6 +109,31 @@ async function main() {
     "Sellable ecommerce stock must exclude active reservations and the product safety stock.",
   );
 
+  const receivedTransferPositions = [
+    {
+      inventoryLocationId: "location-alpha",
+      onHandBaseQuantity: 53,
+      activeReservedBaseQuantity: 23,
+      safetyStockBaseQuantity: 5,
+    },
+    {
+      inventoryLocationId: "location-beta",
+      onHandBaseQuantity: 5,
+      activeReservedBaseQuantity: 25,
+      safetyStockBaseQuantity: 5,
+    },
+  ];
+  assert.equal(
+    calculateEcommerceNetworkSellableBaseQuantity(receivedTransferPositions),
+    0,
+    "Receiving reserved transfer stock must not make the same quantity sellable again at dispatch.",
+  );
+  assert.deepEqual(
+    [...calculateEcommerceNetworkAvailabilityByLocation(receivedTransferPositions).values()],
+    [0, 0],
+    "A source reservation deficit must cap delivery availability across the eligible network.",
+  );
+
   const deliveryPlan = await resolveEcommerceFulfillmentPlan(
     inventoryClient as never,
     storefront,
@@ -133,7 +160,62 @@ async function main() {
     "Pickup must not combine availability from multiple shops.",
   );
 
-  console.log("Ecommerce network allocation gate passed: safety stock, reservations, delivery transfers, and pickup isolation are enforced.");
+  const receivedTransferInventoryClient = {
+    ...inventoryClient,
+    inventoryLedgerEntry: {
+      groupBy: async () => [
+        { inventoryLocationId: "location-alpha", productId: "product-1", productVariantId: null, _sum: { quantity: 53 } },
+        { inventoryLocationId: "location-beta", productId: "product-1", productVariantId: null, _sum: { quantity: 5 } },
+      ],
+    },
+    salesOrderInventoryReservation: {
+      findMany: async () => [
+        {
+          inventoryLocationId: "location-alpha",
+          productCodeSnapshot: "WIDGET",
+          productVariantCodeSnapshot: null,
+          baseQuantity: 23,
+        },
+        {
+          inventoryLocationId: "location-beta",
+          productCodeSnapshot: "WIDGET",
+          productVariantCodeSnapshot: null,
+          baseQuantity: 25,
+        },
+      ],
+    },
+  };
+  const oneUnitLine = [{
+    ...lines[0],
+    product: { ...lines[0].product, safetyStockLevel: 5 },
+    baseQuantity: 1,
+  }];
+  await assert.rejects(
+    () => resolveEcommerceFulfillmentPlan(
+      receivedTransferInventoryClient as never,
+      storefront,
+      oneUnitLine,
+      { fulfilmentMethod: "DELIVERY", actionLabel: "placing this order" },
+    ),
+    /Only 0\.000 base unit\(s\)/,
+    "Checkout must reject stock that is physically received but still reserved for another ecommerce order.",
+  );
+  await assert.rejects(
+    () => resolveEcommerceFulfillmentPlan(
+      receivedTransferInventoryClient as never,
+      storefront,
+      oneUnitLine,
+      {
+        fulfilmentMethod: "PICKUP",
+        pickupStoreCode: "alpha",
+        actionLabel: "checking out",
+      },
+    ),
+    /not available for collection at Alpha shop/,
+    "Pickup must not claim transferred stock that remains reserved by a delivery order.",
+  );
+
+  console.log("Ecommerce network allocation gate passed: safety stock, transferred reservations, delivery routing, and pickup isolation are enforced.");
 }
 
 void main().catch((error) => {

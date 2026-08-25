@@ -87,6 +87,7 @@ import {
 import {
   createPosReceiptSeriesToken,
   formatPosTransactionNumber,
+  isEcommercePosTransactionNumber,
   isLegacyPosTransactionNumber,
   isPosReceiptSeriesToken,
   POS_RECEIPT_MAX_SEQUENCE,
@@ -22594,6 +22595,19 @@ export class MssqlStoreService {
             row.payload_json,
           ) as StorePosTransactionCompletedPayload;
         } catch {
+          continue;
+        }
+
+        if (isEcommercePosTransactionNumber(payload.transactionNo)) {
+          await this.query(
+            `UPDATE [dbo].[sync_outbox]
+             SET [failure_kind] = NULL,
+                 [error_message] = NULL,
+                 [updated_at] = @repairedAt
+             WHERE [id] = @eventId`,
+            { eventId: row.id, repairedAt },
+            transaction,
+          );
           continue;
         }
 

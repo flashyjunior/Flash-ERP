@@ -231,6 +231,7 @@ import { localStoreSchemaSql } from "./local-store-schema.js";
 import {
   createPosReceiptSeriesToken,
   formatPosTransactionNumber,
+  isEcommercePosTransactionNumber,
   isLegacyPosTransactionNumber,
   isPosReceiptSeriesToken,
   POS_RECEIPT_MAX_SEQUENCE,
@@ -29416,6 +29417,15 @@ export class LocalStoreService {
           row.payload_json,
         ) as StorePosTransactionCompletedPayload;
       } catch {
+        continue;
+      }
+
+      if (isEcommercePosTransactionNumber(payload.transactionNo)) {
+        this.db
+          .prepare(
+            "UPDATE sync_outbox SET failure_kind = NULL, error_message = NULL, updated_at = ? WHERE id = ?",
+          )
+          .run(repairedAt, row.id);
         continue;
       }
 

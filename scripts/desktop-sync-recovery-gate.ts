@@ -13,6 +13,7 @@ const loginId = "sync.recovery.admin";
 const password = "SyncRecovery123!";
 const retryableEventId = "sync-retryable-network";
 const permanentEventId = "sync-permanent-stale-version";
+const ecommerceHandoffEventId = "sync-ecommerce-handoff-stale-version";
 const supplierEventId = "sync-supplier-publication";
 let activeService: LocalStoreService | null = null;
 
@@ -66,6 +67,28 @@ try {
     null,
     timestamp,
     "sync-run-network",
+    timestamp,
+    timestamp,
+  );
+  database.prepare(
+    `INSERT INTO sync_outbox (
+      id, target_node_code, aggregate_type, aggregate_id, event_type,
+      idempotency_key, payload_json, status, attempt_count, error_message,
+      failure_kind, last_http_status, last_attempt_at, next_retry_at,
+      sync_run_id, record_version, created_at, updated_at
+    ) VALUES (?, 'enterprise-primary', 'posTransaction', ?, 'pos.transaction.completed', ?, ?,
+      'DEAD_LETTER', 1, ?, 'STALE_VERSION', 409, ?, NULL, ?, 1, ?, ?)`,
+  ).run(
+    ecommerceHandoffEventId,
+    "ecommerce-handoff-transaction",
+    "sync-ecommerce-handoff-key",
+    JSON.stringify({
+      transactionId: "ecommerce-handoff-transaction",
+      transactionNo: "WEB-ECOM-EAST-LEGON-MARKET-1000-101",
+    }),
+    'STALE_VERSION: Flash ERP already has transaction id "ecommerce-handoff-transaction" from another store event.',
+    timestamp,
+    "sync-run-ecommerce-handoff",
     timestamp,
     timestamp,
   );
@@ -155,6 +178,9 @@ try {
   const permanentRow = verificationDatabase
     .prepare("SELECT status, failure_kind FROM sync_outbox WHERE id = ?")
     .get(permanentEventId) as { status: string; failure_kind: string | null };
+  const ecommerceHandoffRow = verificationDatabase
+    .prepare("SELECT status, failure_kind FROM sync_outbox WHERE id = ?")
+    .get(ecommerceHandoffEventId) as { status: string; failure_kind: string | null };
   const supplierRow = verificationDatabase
     .prepare(
       "SELECT supplier_name, phone, status FROM supplier_snapshot WHERE supplier_no = ?",
@@ -168,6 +194,8 @@ try {
   assert(retryableRow.failure_kind === null, "Eligible failure metadata was not reset for retry.");
   assert(permanentRow.status === "DEAD_LETTER", "Permanent stale-version conflict was incorrectly requeued.");
   assert(permanentRow.failure_kind === "STALE_VERSION", "Permanent conflict diagnostics were erased.");
+  assert(ecommerceHandoffRow.status === "PENDING", "The recognised ecommerce handoff was not requeued.");
+  assert(ecommerceHandoffRow.failure_kind === null, "The ecommerce handoff retry metadata was not reset.");
   assert(supplierRow?.supplier_name === "Sync Supplier", "Supplier publication was not applied locally.");
   assert(supplierRow.phone === "+233000000001", "Supplier contact data was not applied locally.");
   assert(supplierRow.status === "ACTIVE", "Supplier status was not applied locally.");

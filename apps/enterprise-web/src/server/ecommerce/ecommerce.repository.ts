@@ -24,7 +24,7 @@ import {
   getEcommerceCustomerSession
 } from "@/server/ecommerce/ecommerce-customer-auth";
 import {
-  calculateEcommerceSellableBaseQuantity,
+  calculateEcommerceNetworkSellableBaseQuantity,
   getEcommerceFulfillmentCandidates,
   resolveEcommerceFulfillmentPlan,
 } from "@/server/ecommerce/ecommerce-fulfillment";
@@ -491,6 +491,109 @@ export type PublicStorefrontProductDetail = PublicStorefrontProduct & {
   }>;
 };
 
+type PublicAvailabilityProduct = {
+  id: string;
+  code: string;
+  productType: string;
+  trackInventory: boolean;
+  safetyStockLevel: Prisma.Decimal | number | null;
+  matrixVariants: Array<{ id: string; code: string }>;
+};
+
+async function loadPublicAvailabilityByPosition(
+  retailOrgId: string,
+  fulfillmentCandidates: Awaited<ReturnType<typeof getEcommerceFulfillmentCandidates>>,
+  products: PublicAvailabilityProduct[],
+) {
+  const deliveryCandidates = fulfillmentCandidates.filter((candidate) => candidate.supportsDelivery);
+  const pickupCandidates = fulfillmentCandidates.filter((candidate) => candidate.supportsPickup);
+  const availabilityCandidates = deliveryCandidates.length > 0
+    ? deliveryCandidates
+    : pickupCandidates.length > 0
+      ? pickupCandidates
+      : fulfillmentCandidates;
+  const fulfillmentLocationIds = availabilityCandidates.map(
+    (candidate) => candidate.inventoryLocation.id,
+  );
+  const stockRows = fulfillmentLocationIds.length > 0 && products.length > 0
+    ? await prisma.inventoryLedgerEntry.groupBy({
+        by: ["inventoryLocationId", "productId", "productVariantId"],
+        where: {
+          retailOrgId,
+          inventoryLocationId: { in: fulfillmentLocationIds },
+          productId: { in: products.map((product) => product.id) },
+        },
+        _sum: { quantity: true },
+      })
+    : [];
+  const onHandByPosition = new Map<string, number>(
+    stockRows.map((row) => [
+      `${row.inventoryLocationId}:${ecommerceInventoryPositionKey(row.productId, row.productVariantId)}`,
+      toQuantity(row._sum.quantity),
+    ] as const),
+  );
+  const activeReservations = fulfillmentLocationIds.length > 0 && products.length > 0
+    ? await prisma.salesOrderInventoryReservation.findMany({
+        where: {
+          inventoryLocationId: { in: fulfillmentLocationIds },
+          status: "ACTIVE",
+          productCodeSnapshot: { in: products.map((product) => product.code) },
+        },
+        select: {
+          inventoryLocationId: true,
+          productCodeSnapshot: true,
+          productVariantCodeSnapshot: true,
+          baseQuantity: true,
+        },
+      })
+    : [];
+  const reservedBySnapshot = new Map<string, number>();
+  for (const reservation of activeReservations) {
+    const key = ecommerceReservationSnapshotKey(
+      reservation.productCodeSnapshot,
+      reservation.productVariantCodeSnapshot,
+    );
+    const locationKey = `${reservation.inventoryLocationId ?? ""}:${key}`;
+    reservedBySnapshot.set(
+      locationKey,
+      toQuantity((reservedBySnapshot.get(locationKey) ?? 0) + Number(reservation.baseQuantity)),
+    );
+  }
+
+  const availabilityByPosition = new Map<string, number | null>();
+  for (const product of products) {
+    const variants = [null, ...product.matrixVariants];
+    for (const variant of variants) {
+      const key = ecommerceInventoryPositionKey(product.id, variant?.id);
+      if (!isEcommerceStockManagedProduct(product)) {
+        availabilityByPosition.set(key, null);
+        continue;
+      }
+
+      availabilityByPosition.set(
+        key,
+        calculateEcommerceNetworkSellableBaseQuantity(
+          availabilityCandidates.map((candidate) => {
+            const locationPrefix = `${candidate.inventoryLocation.id}:`;
+            return {
+              inventoryLocationId: candidate.inventoryLocation.id,
+              onHandBaseQuantity:
+                onHandByPosition.get(`${locationPrefix}${key}`) ?? 0,
+              activeReservedBaseQuantity:
+                reservedBySnapshot.get(
+                  `${locationPrefix}${ecommerceReservationSnapshotKey(product.code, variant?.code)}`,
+                ) ?? 0,
+              safetyStockBaseQuantity: Number(product.safetyStockLevel ?? 0),
+            };
+          }),
+        ),
+      );
+    }
+  }
+
+  return availabilityByPosition;
+}
+
 async function loadPublicStorefront(storeCodeOrSlug: string) {
   await Promise.all([
     ensureAlternateUomSellingSchemaCompatibility(),
@@ -584,53 +687,11 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
       }
     }
   });
-  const fulfillmentLocationIds = fulfillmentCandidates.map((candidate) => candidate.inventoryLocation.id);
-  const stockRows = fulfillmentLocationIds.length > 0
-    ? await prisma.inventoryLedgerEntry.groupBy({
-        by: ["inventoryLocationId", "productId", "productVariantId"],
-        where: {
-          retailOrgId: store.retailOrgId,
-          inventoryLocationId: { in: fulfillmentLocationIds },
-          productId: { in: products.map((product) => product.id) }
-        },
-        _sum: { quantity: true }
-    })
-    : [];
-  const onHandByPosition = new Map(
-    stockRows.map((row) => [
-      `${row.inventoryLocationId}:${ecommerceInventoryPositionKey(row.productId, row.productVariantId)}`,
-      toQuantity(row._sum.quantity),
-    ] as const)
+  const availabilityByPosition = await loadPublicAvailabilityByPosition(
+    store.retailOrgId,
+    fulfillmentCandidates,
+    products,
   );
-  const activeReservations = fulfillmentLocationIds.length > 0
-    ? await prisma.salesOrderInventoryReservation.findMany({
-        where: {
-          inventoryLocationId: { in: fulfillmentLocationIds },
-          status: "ACTIVE",
-          productCodeSnapshot: { in: products.map((product) => product.code) },
-        },
-        select: {
-          inventoryLocationId: true,
-          productCodeSnapshot: true,
-          productVariantCodeSnapshot: true,
-          baseQuantity: true,
-        },
-      })
-    : [];
-  const reservedBySnapshot = new Map<string, number>();
-  for (const reservation of activeReservations) {
-    const key = ecommerceReservationSnapshotKey(
-      reservation.productCodeSnapshot,
-      reservation.productVariantCodeSnapshot,
-    );
-    reservedBySnapshot.set(
-      `${reservation.inventoryLocationId ?? ""}:${key}`,
-      toQuantity(
-        (reservedBySnapshot.get(`${reservation.inventoryLocationId ?? ""}:${key}`) ?? 0) +
-          Number(reservation.baseQuantity),
-      ),
-    );
-  }
   const availableCatalogQuantity = (
     product: {
       id: string;
@@ -644,24 +705,9 @@ async function loadPublicStorefront(storeCodeOrSlug: string) {
     if (!isEcommerceStockManagedProduct(product)) {
       return null;
     }
-    return toQuantity(
-      fulfillmentCandidates.reduce(
-        (sum, candidate) =>
-          sum +
-          calculateEcommerceSellableBaseQuantity({
-            onHandBaseQuantity:
-              onHandByPosition.get(
-                `${candidate.inventoryLocation.id}:${ecommerceInventoryPositionKey(product.id, variant?.id)}`,
-              ) ?? 0,
-            activeReservedBaseQuantity:
-              reservedBySnapshot.get(
-                `${candidate.inventoryLocation.id}:${ecommerceReservationSnapshotKey(product.code, variant?.code)}`,
-              ) ?? 0,
-            safetyStockBaseQuantity: Number(product.safetyStockLevel ?? 0),
-          }),
-        0,
-      ),
-    );
+    return availabilityByPosition.get(
+      ecommerceInventoryPositionKey(product.id, variant?.id),
+    ) ?? 0;
   };
   const reviewSummaryRows = products.length > 0
     ? await prisma.ecommerceProductReview.groupBy({
@@ -925,6 +971,61 @@ export async function getPublicStorefront(storeCodeOrSlug: string) {
     { ttlMs: 15_000, staleWhileRevalidateMs: 60_000 }
   );
 }
+
+export async function getPublicStorefrontAvailability(storeCodeOrSlug: string) {
+  await ensureMultiBranchEcommerceSchemaCompatibility();
+  const store = await getPublicStore(storeCodeOrSlug);
+  const [fulfillmentCandidates, products] = await Promise.all([
+    getEcommerceFulfillmentCandidates(prisma, store),
+    prisma.product.findMany({
+      where: {
+        retailOrgId: store.retailOrgId,
+        ecommercePublished: true,
+        status: "ACTIVE",
+        deletedAt: null,
+        mustEnterPriceAtPos: false,
+      },
+      orderBy: [{ ecommerceSortOrder: "asc" }, { name: "asc" }],
+      select: {
+        id: true,
+        code: true,
+        productType: true,
+        trackInventory: true,
+        safetyStockLevel: true,
+        matrixVariants: {
+          where: { status: "ACTIVE" },
+          orderBy: { code: "asc" },
+          select: { id: true, code: true },
+        },
+      },
+    }),
+  ]);
+  const availabilityByPosition = await loadPublicAvailabilityByPosition(
+    store.retailOrgId,
+    fulfillmentCandidates,
+    products,
+  );
+
+  return {
+    checkedAt: new Date().toISOString(),
+    products: products.map((product) => ({
+      id: product.id,
+      code: product.code,
+      availableQuantity:
+        availabilityByPosition.get(ecommerceInventoryPositionKey(product.id)) ?? null,
+      variants: product.matrixVariants.map((variant) => ({
+        id: variant.id,
+        code: variant.code,
+        availableQuantity:
+          availabilityByPosition.get(ecommerceInventoryPositionKey(product.id, variant.id)) ?? null,
+      })),
+    })),
+  };
+}
+
+export type PublicStorefrontAvailability = Awaited<
+  ReturnType<typeof getPublicStorefrontAvailability>
+>;
 
 async function loadPublicStorefrontProductDetail(
   storeCodeOrSlug: string,
@@ -1875,14 +1976,8 @@ export async function createEcommerceOrder(input: {
         },
         select: { id: true, transferNo: true },
       });
-      await queueInterStoreTransferPublication(tx, { transferId: transfer.id, publishedAt: now });
       transferReferences.push(transfer.transferNo);
     }
-
-    await queueEcommerceSalesOrderPublication(tx, {
-      salesOrderId: salesOrder.id,
-      publishedAt: now,
-    });
 
     if (fulfilmentMethod === "DELIVERY" && input.delivery?.saveAddress && deliveryAddressLine1 && deliveryCity) {
       const hasAddress = await tx.ecommerceCustomerAddress.count({
@@ -3210,6 +3305,7 @@ export async function updateEcommerceOrderStatus(input: {
       salesOrderId: true,
       paymentStatus: true,
       paymentTiming: true,
+      fulfilmentMethod: true,
       salesOrder: {
         select: {
           orderType: true,
@@ -3224,7 +3320,10 @@ export async function updateEcommerceOrderStatus(input: {
   if (!order) {
     throw new EcommerceAuthError("That ecommerce order was not found.", 404);
   }
-  if (!(ecommerceStatusTransitions[order.status] ?? []).includes(status)) {
+  const allowedStatuses = (ecommerceStatusTransitions[order.status] ?? []).filter(
+    (candidate) => order.fulfilmentMethod !== "PICKUP" || candidate !== "OUT_FOR_DELIVERY",
+  );
+  if (!allowedStatuses.includes(status)) {
     throw new EcommerceAuthError(`Order ${order.orderNo} cannot move from ${order.status} to ${status}.`, 409);
   }
   const openingLayawayDepositSatisfied =
@@ -3288,6 +3387,13 @@ export async function updateEcommerceOrderStatus(input: {
   }
 
   const now = new Date();
+  const statusLabel = order.fulfilmentMethod === "PICKUP"
+    ? status === "READY"
+      ? "Awaiting Pickup"
+      : status === "DELIVERED"
+        ? "Picked Up"
+        : status.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase())
+    : status.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
   const deliveryStatus =
     status === "READY"
       ? "READY"
@@ -3318,12 +3424,33 @@ export async function updateEcommerceOrderStatus(input: {
       data: {
         ecommerceOrderId: order.id,
         status,
-        label: status.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+        label: statusLabel,
         note: optionalText(input.note),
         actorType: "STAFF",
         actorLabel: session.displayName
       }
     });
+    if (status === "CONFIRMED") {
+      const transfers = await tx.interStoreTransfer.findMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          externalReference: order.orderNo,
+          workflowType: "ECOMMERCE_NETWORK_ALLOCATION",
+          status: { in: [InterStoreTransferStatus.DRAFT, InterStoreTransferStatus.REQUESTED] },
+        },
+        select: { id: true },
+      });
+      for (const transfer of transfers) {
+        await queueInterStoreTransferPublication(tx, {
+          transferId: transfer.id,
+          publishedAt: now,
+        });
+      }
+      await queueEcommerceSalesOrderPublication(tx, {
+        salesOrderId: order.salesOrderId,
+        publishedAt: now,
+      });
+    }
     if (status === "CANCELLED") {
       const salesOrder = await tx.salesOrder.findUnique({
         where: { id: order.salesOrderId },
@@ -3380,16 +3507,20 @@ export async function updateEcommerceOrderStatus(input: {
             closedAt: now,
           },
         });
-        for (const transfer of cancelableTransfers) {
-          await queueInterStoreTransferPublication(tx, { transferId: transfer.id, publishedAt: now });
+        if (order.status !== "PLACED") {
+          for (const transfer of cancelableTransfers) {
+            await queueInterStoreTransferPublication(tx, { transferId: transfer.id, publishedAt: now });
+          }
         }
       }
-      await queueEcommerceSalesOrderPublication(tx, {
-        salesOrderId: order.salesOrderId,
-        publishedAt: now,
-      });
+      if (order.status !== "PLACED") {
+        await queueEcommerceSalesOrderPublication(tx, {
+          salesOrderId: order.salesOrderId,
+          publishedAt: now,
+        });
+      }
     }
   });
 
-  return { message: `${order.orderNo} moved to ${status.replace(/_/g, " ").toLowerCase()}.` };
+  return { message: `${order.orderNo} moved to ${statusLabel.toLowerCase()}.` };
 }

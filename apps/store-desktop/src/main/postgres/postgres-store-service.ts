@@ -36,6 +36,7 @@ import {
 import {
   createPosReceiptSeriesToken,
   formatPosTransactionNumber,
+  isEcommercePosTransactionNumber,
   isLegacyPosTransactionNumber,
   isPosReceiptSeriesToken,
   POS_RECEIPT_MAX_SEQUENCE,
@@ -24718,6 +24719,18 @@ export class PostgresStoreService {
             row.payload_json,
           ) as StorePosTransactionCompletedPayload;
         } catch {
+          continue;
+        }
+
+        if (isEcommercePosTransactionNumber(payload.transactionNo)) {
+          await client.query(
+            `UPDATE sync_outbox
+             SET failure_kind = NULL,
+                 error_message = NULL,
+                 updated_at = $1
+             WHERE id = $2`,
+            [repairedAt, row.id],
+          );
           continue;
         }
 
