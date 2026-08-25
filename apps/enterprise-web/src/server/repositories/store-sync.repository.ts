@@ -2262,6 +2262,36 @@ async function queueAutomaticStoreMasterDataPublications(
               },
             },
           },
+          ecommerceFulfillmentLocations: {
+            orderBy: [
+              { inventoryLocation: { name: "asc" } },
+              { routingPriority: "asc" },
+              { storefrontStore: { name: "asc" } },
+            ],
+            select: {
+              status: true,
+              supportsPickup: true,
+              supportsDelivery: true,
+              routingPriority: true,
+              updatedAt: true,
+              inventoryLocation: {
+                select: {
+                  code: true,
+                  status: true,
+                  updatedAt: true,
+                },
+              },
+              storefrontStore: {
+                select: {
+                  code: true,
+                  name: true,
+                  status: true,
+                  ecommerceEnabled: true,
+                  updatedAt: true,
+                },
+              },
+            },
+          },
           timezone: true,
           currencyCode: true,
           phone: true,
@@ -3272,6 +3302,7 @@ async function queueAutomaticStoreMasterDataPublications(
         salesReceiptTemplate: storeSettings.salesReceiptTemplate,
       })
     : null;
+  const storeSettingsContractGeneration = 2;
   const storeSettingsVersionStamp = storeSettings
     ? Math.max(
         storeSettings.updatedAt.getTime(),
@@ -3290,7 +3321,12 @@ async function queueAutomaticStoreMasterDataPublications(
             ),
           ),
         ]),
-      )
+        ...storeSettings.ecommerceFulfillmentLocations.flatMap((location) => [
+          location.updatedAt.getTime(),
+          location.inventoryLocation.updatedAt.getTime(),
+          location.storefrontStore.updatedAt.getTime(),
+        ]),
+      ) * 10 + storeSettingsContractGeneration
     : 0;
 
   if (
@@ -3346,6 +3382,22 @@ async function queueAutomaticStoreMasterDataPublications(
         target.storeNode.terminal?.licensedUntil?.toISOString() ?? null,
       touchModeEnabled: storeSettings.touchModeEnabled,
       catalogPolicy: storeCatalogPolicy,
+      ecommerceFulfillmentLocations: storeSettings.ecommerceFulfillmentLocations
+        .filter(
+          (location) =>
+            location.status === RecordStatus.ACTIVE &&
+            location.inventoryLocation.status === RecordStatus.ACTIVE &&
+            location.storefrontStore.status === RecordStatus.ACTIVE &&
+            location.storefrontStore.ecommerceEnabled,
+        )
+        .map((location) => ({
+          inventoryLocationCode: location.inventoryLocation.code,
+          storefrontStoreCode: location.storefrontStore.code,
+          storefrontStoreName: location.storefrontStore.name,
+          supportsPickup: location.supportsPickup,
+          supportsDelivery: location.supportsDelivery,
+          routingPriority: location.routingPriority,
+        })),
       timezone: storeSettings.timezone,
       currencyCode: storeSettings.currencyCode,
       salesEnabled: storeSettings.salesEnabled,
@@ -9590,6 +9642,38 @@ async function projectStoreSalesOrder(
     );
   }
 
+  const terminalReservationTransition =
+    payload.status === SalesOrderStatus.FULFILLED
+      ? {
+          status: "CONSUMED" as const,
+          reason: `Consumed when ${payload.orderNo} was fulfilled.`,
+          occurredAt: payload.fulfilledAt,
+        }
+      : payload.status === SalesOrderStatus.CANCELLED
+        ? {
+            status: "RELEASED" as const,
+            reason: `Released when ${payload.orderNo} was cancelled.`,
+            occurredAt: payload.cancelledAt,
+          }
+        : payload.status === SalesOrderStatus.EXPIRED
+          ? {
+              status: "EXPIRED" as const,
+              reason: `Expired with ${payload.orderNo}.`,
+              occurredAt: payload.expiredAt,
+            }
+          : null;
+  const projectedReservations = payload.reservations?.map((reservation) =>
+    terminalReservationTransition && reservation.status === "ACTIVE"
+      ? {
+          ...reservation,
+          status: terminalReservationTransition.status,
+          releaseReason:
+            reservation.releaseReason ?? terminalReservationTransition.reason,
+          releasedAt:
+            reservation.releasedAt ?? terminalReservationTransition.occurredAt,
+        }
+      : reservation,
+  );
   const customer = await resolveEnterpriseCustomerForSalesOrder(
     tx,
     target.storeNode.retailOrgId,
@@ -9604,8 +9688,38 @@ async function projectStoreSalesOrder(
       storeId: true,
       originNodeCode: true,
       recordVersion: true,
+      reservationStatus: true,
+      reservationReleasedAt: true,
     },
   });
+  const existingActiveReservation = terminalReservationTransition
+    ? await tx.salesOrderInventoryReservation.findFirst({
+        where: {
+          salesOrderId: payload.orderId,
+          status: "ACTIVE",
+        },
+        select: {
+          id: true,
+        },
+      })
+    : null;
+  const hasActiveReservation = Boolean(
+    payload.reservationStatus === "ACTIVE" ||
+      payload.reservations?.some((reservation) => reservation.status === "ACTIVE") ||
+      existingOrder?.reservationStatus === "ACTIVE" ||
+      existingActiveReservation,
+  );
+  const projectedReservationStatus =
+    terminalReservationTransition && hasActiveReservation
+      ? terminalReservationTransition.status
+      : payload.reservationStatus ??
+        existingOrder?.reservationStatus ??
+        "NOT_APPLICABLE";
+  const projectedReservationReleasedAt =
+    payload.reservationReleasedAt ??
+    (terminalReservationTransition && hasActiveReservation
+      ? terminalReservationTransition.occurredAt
+      : existingOrder?.reservationReleasedAt?.toISOString() ?? null);
   const nextRecordVersion = Math.max(1, event.recordVersion);
   const projectedPayment = deriveEcommercePaymentProjection({
     totalAmount: payload.totalAmount,
@@ -9635,12 +9749,12 @@ async function projectStoreSalesOrder(
     depositPaidAt: payload.depositPaidAt ? new Date(payload.depositPaidAt) : null,
     layawayPolicySnapshotJson: payload.layawayPolicySnapshotJson ?? null,
     minimumDepositAmount: toMoneyString(payload.minimumDepositAmount ?? 0),
-    reservationStatus: payload.reservationStatus ?? "NOT_APPLICABLE",
+    reservationStatus: projectedReservationStatus,
     reservationCreatedAt: payload.reservationCreatedAt
       ? new Date(payload.reservationCreatedAt)
       : null,
-    reservationReleasedAt: payload.reservationReleasedAt
-      ? new Date(payload.reservationReleasedAt)
+    reservationReleasedAt: projectedReservationReleasedAt
+      ? new Date(projectedReservationReleasedAt)
       : null,
     layawayExpiresAt: payload.layawayExpiresAt
       ? new Date(payload.layawayExpiresAt)
@@ -9712,9 +9826,23 @@ async function projectStoreSalesOrder(
     });
   }
 
-  if (payload.reservations !== undefined) {
+  if (projectedReservations !== undefined) {
     await tx.salesOrderInventoryReservation.deleteMany({
       where: { salesOrderId: payload.orderId },
+    });
+  } else if (terminalReservationTransition) {
+    await tx.salesOrderInventoryReservation.updateMany({
+      where: {
+        salesOrderId: payload.orderId,
+        status: "ACTIVE",
+      },
+      data: {
+        status: terminalReservationTransition.status,
+        releaseReason: terminalReservationTransition.reason,
+        releasedAt: terminalReservationTransition.occurredAt
+          ? new Date(terminalReservationTransition.occurredAt)
+          : new Date(),
+      },
     });
   }
 
@@ -9753,10 +9881,10 @@ async function projectStoreSalesOrder(
     }
   }
 
-  if (payload.reservations !== undefined) {
+  if (projectedReservations !== undefined) {
     const reservationLocationCodes = [
       ...new Set(
-        payload.reservations
+        projectedReservations
           .map((reservation) => reservation.inventoryLocationCode)
           .filter((code): code is string => Boolean(code)),
       ),
@@ -9775,9 +9903,9 @@ async function projectStoreSalesOrder(
       reservationLocations.map((location) => [location.code, location.id]),
     );
 
-    if (payload.reservations.length > 0) {
+    if (projectedReservations.length > 0) {
       await tx.salesOrderInventoryReservation.createMany({
-        data: payload.reservations.map((reservation) => ({
+        data: projectedReservations.map((reservation) => ({
           id: reservation.reservationId,
           salesOrderId: payload.orderId,
           salesOrderLineId: reservation.salesOrderLineId,
@@ -18124,6 +18252,7 @@ export async function lookupStoreNodeRemoteInventory(
   const query = input.query?.trim();
   const productCode = input.productCode?.trim();
   const storeCode = input.storeCode?.trim();
+  const locationCode = input.locationCode?.trim();
   const requestedLimit = Number(input.limit ?? 25);
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(50, Math.max(1, Math.trunc(requestedLimit)))
@@ -18154,6 +18283,7 @@ export async function lookupStoreNodeRemoteInventory(
         department: true,
         category: true,
         subcategory: true,
+        safetyStockLevel: true,
         baseUnitPrice: true,
         priceListEntries: {
           where: {
@@ -18184,6 +18314,7 @@ export async function lookupStoreNodeRemoteInventory(
           ...(storeCode ? { code: storeCode } : {}),
           status: RecordStatus.ACTIVE,
         },
+        ...(locationCode ? { code: locationCode } : {}),
       },
       select: {
         id: true,
@@ -18208,7 +18339,7 @@ export async function lookupStoreNodeRemoteInventory(
     };
   }
 
-  const [balances] = await Promise.all([
+  const [balances, activeReservationGroups, ecommerceFulfillmentLocations] = await Promise.all([
     prisma.inventoryLedgerEntry.groupBy({
       by: ["inventoryLocationId", "productId"],
       where: {
@@ -18227,6 +18358,53 @@ export async function lookupStoreNodeRemoteInventory(
         occurredAt: true,
       },
     }),
+    prisma.salesOrderInventoryReservation.groupBy({
+      by: ["inventoryLocationId", "productCodeSnapshot"],
+      where: {
+        inventoryLocationId: {
+          in: locationIds,
+        },
+        productCodeSnapshot: {
+          in: products.map((product) => product.code),
+        },
+        status: "ACTIVE",
+        salesOrder: {
+          retailOrgId: requester.retailOrgId,
+        },
+      },
+      _sum: {
+        baseQuantity: true,
+      },
+    }),
+    prisma.ecommerceFulfillmentLocation.findMany({
+      where: {
+        retailOrgId: requester.retailOrgId,
+        inventoryLocationId: {
+          in: locationIds,
+        },
+        status: RecordStatus.ACTIVE,
+        storefrontStore: {
+          status: RecordStatus.ACTIVE,
+          ecommerceEnabled: true,
+        },
+      },
+      orderBy: [
+        { inventoryLocationId: "asc" },
+        { routingPriority: "asc" },
+        { storefrontStore: { name: "asc" } },
+      ],
+      select: {
+        inventoryLocationId: true,
+        supportsPickup: true,
+        supportsDelivery: true,
+        routingPriority: true,
+        storefrontStore: {
+          select: {
+            name: true,
+          },
+        },
+      },
+    }),
     prisma.syncNode.update({
       where: {
         id: requester.id,
@@ -18242,6 +18420,43 @@ export async function lookupStoreNodeRemoteInventory(
   const locationsById = new Map(
     locations.map((location) => [location.id, location]),
   );
+  const activeReservedByLocationProduct = new Map(
+    activeReservationGroups.map((group) => [
+      `${group.inventoryLocationId}:${group.productCodeSnapshot.trim().toUpperCase()}`,
+      Number(Number(group._sum.baseQuantity ?? 0).toFixed(3)),
+    ] as const),
+  );
+  const ecommerceEligibilityByLocation = new Map<
+    string,
+    {
+      supportsPickup: boolean;
+      supportsDelivery: boolean;
+      labels: string[];
+    }
+  >();
+
+  for (const fulfillmentLocation of ecommerceFulfillmentLocations) {
+    const current = ecommerceEligibilityByLocation.get(
+      fulfillmentLocation.inventoryLocationId,
+    );
+    const modes = [
+      fulfillmentLocation.supportsPickup ? "pickup" : null,
+      fulfillmentLocation.supportsDelivery ? "delivery" : null,
+    ].filter((value): value is string => Boolean(value));
+    const label = `${fulfillmentLocation.storefrontStore.name}: ${modes.length ? modes.join(" + ") : "disabled"} (priority ${fulfillmentLocation.routingPriority})`;
+
+    if (current) {
+      current.supportsPickup ||= fulfillmentLocation.supportsPickup;
+      current.supportsDelivery ||= fulfillmentLocation.supportsDelivery;
+      current.labels.push(label);
+    } else {
+      ecommerceEligibilityByLocation.set(fulfillmentLocation.inventoryLocationId, {
+        supportsPickup: fulfillmentLocation.supportsPickup,
+        supportsDelivery: fulfillmentLocation.supportsDelivery,
+        labels: [label],
+      });
+    }
+  }
   const rowsByStoreAndProduct = new Map<
     string,
     StoreRemoteInventoryLookupResponse["rows"][number]
@@ -18262,6 +18477,41 @@ export async function lookupStoreNodeRemoteInventory(
       const existing = rowsByStoreAndProduct.get(key);
       const updatedAt =
         balance._max.occurredAt?.toISOString() ?? new Date().toISOString();
+      const activeReservedQuantity =
+        activeReservedByLocationProduct.get(
+          `${balance.inventoryLocationId}:${product.code.trim().toUpperCase()}`,
+        ) ?? 0;
+      const safetyStockLevel = Number(
+        Number(product.safetyStockLevel ?? 0).toFixed(3),
+      );
+      const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+        balance.inventoryLocationId,
+      );
+      const ecommerceEligible = Boolean(
+        ecommerceEligibility?.supportsPickup || ecommerceEligibility?.supportsDelivery,
+      );
+      const ecommerceSellableQuantity = ecommerceEligible
+        ? Number(
+            Math.max(
+              0,
+              quantityOnHand - activeReservedQuantity - safetyStockLevel,
+            ).toFixed(3),
+          )
+        : 0;
+      const locationBreakdown = {
+        locationCode: location.code,
+        locationName: location.name,
+        quantityOnHand,
+        activeReservedQuantity,
+        safetyStockLevel,
+        ecommerceSellableQuantity,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.labels.join("; ") ??
+          "Not configured for ecommerce fulfilment",
+      };
       rowsByStoreAndProduct.set(key, {
         storeCode: location.store.code,
         storeName: location.store.name,
@@ -18275,6 +18525,31 @@ export async function lookupStoreNodeRemoteInventory(
         quantityOnHand: Number(
           ((existing?.quantityOnHand ?? 0) + quantityOnHand).toFixed(3),
         ),
+        activeReservedQuantity: Number(
+          ((existing?.activeReservedQuantity ?? 0) + activeReservedQuantity).toFixed(3),
+        ),
+        safetyStockQuantity: Number(
+          (
+            (existing?.safetyStockQuantity ?? 0) +
+            (ecommerceEligible ? safetyStockLevel : 0)
+          ).toFixed(3),
+        ),
+        ecommerceSellableQuantity: Number(
+          (
+            (existing?.ecommerceSellableQuantity ?? 0) +
+            ecommerceSellableQuantity
+          ).toFixed(3),
+        ),
+        ecommercePickupEligible:
+          (existing?.ecommercePickupEligible ?? false) ||
+          (ecommerceEligibility?.supportsPickup ?? false),
+        ecommerceDeliveryEligible:
+          (existing?.ecommerceDeliveryEligible ?? false) ||
+          (ecommerceEligibility?.supportsDelivery ?? false),
+        locationBreakdown: [
+          ...(existing?.locationBreakdown ?? []),
+          locationBreakdown,
+        ],
         unitPrice: Number(
           Number(
             product.priceListEntries[0]?.unitPrice ?? product.baseUnitPrice,

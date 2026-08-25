@@ -2728,7 +2728,37 @@ option {
 
 .rms-online-desktop .rms-remote-inventory-table .rms-table-head,
 .rms-online-desktop .rms-remote-inventory-table .rms-table-row {
-  grid-template-columns: 48px minmax(180px, 1.15fr) minmax(140px, 0.8fr) 82px 104px minmax(180px, 1fr);
+  grid-template-columns: 48px minmax(180px, 1.15fr) minmax(140px, 0.8fr) 82px minmax(180px, 0.9fr) 104px minmax(180px, 1fr);
+  min-width: 1080px;
+}
+
+.rms-online-desktop .rms-ecommerce-stock-breakdown {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rms-online-desktop .rms-ecommerce-stock-breakdown details {
+  margin-top: 3px;
+}
+
+.rms-online-desktop .rms-ecommerce-stock-breakdown summary {
+  color: #24583d;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.rms-online-desktop .rms-ecommerce-stock-breakdown-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 7px;
+  min-width: 250px;
+}
+
+.rms-online-desktop .rms-ecommerce-stock-breakdown-list > div {
+  display: grid;
+  gap: 1px;
 }
 
 .rms-online-desktop .rms-remote-inventory-dialog .rms-dialog-toolbar {
@@ -3254,7 +3284,17 @@ option {
 
 .rms-online-desktop .rms-inventory-table .rms-table-head,
 .rms-online-desktop .rms-inventory-table .rms-table-row {
-  grid-template-columns: minmax(180px, 1.35fr) minmax(140px, 0.75fr) minmax(84px, 0.35fr) minmax(150px, 0.65fr) minmax(92px, 0.42fr);
+  grid-template-columns:
+    minmax(210px, 1.2fr)
+    minmax(130px, 0.65fr)
+    76px
+    76px
+    72px
+    86px
+    minmax(110px, 0.7fr)
+    minmax(150px, 0.7fr)
+    90px;
+  min-width: 1160px;
 }
 
 .rms-online-desktop .rms-inventory-batch-table .rms-table-head,

@@ -2172,6 +2172,11 @@ export type OnlineStoreWorkspaceData = {
     locationCode: string;
     locationName: string;
     quantityOnHand: number;
+    activeReservedQuantity: number;
+    ecommerceSellableQuantity: number;
+    ecommercePickupEligible: boolean;
+    ecommerceDeliveryEligible: boolean;
+    ecommerceEligibilityLabel: string;
     price: number;
   }>;
   inventoryBatches: Array<{
@@ -4963,9 +4968,10 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   const locationIds = inventoryLocations.map((location) => location.id);
   const inventoryManagedProducts = products.filter(isOnlineStoreStockManagedProduct);
   const productIds = [...new Set([...productsForCatalog, ...inventoryManagedProducts].map((product) => product.id))];
-  const ledgerPositions =
+  const [ledgerPositions, activeReservationGroups, ecommerceFulfillmentLocations] =
     locationIds.length && productIds.length
-      ? await prisma.inventoryLedgerEntry.groupBy({
+      ? await Promise.all([
+          prisma.inventoryLedgerEntry.groupBy({
           by: ["productId", "inventoryLocationId"],
           where: {
             retailOrgId: assignment.session.retailOrgId,
@@ -4980,8 +4986,56 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           _sum: {
             quantity: true
           }
-        })
-      : [];
+          }),
+          prisma.salesOrderInventoryReservation.groupBy({
+            by: ["inventoryLocationId", "productCodeSnapshot"],
+            where: {
+              inventoryLocationId: {
+                in: locationIds
+              },
+              productCodeSnapshot: {
+                in: products.map((product) => product.code)
+              },
+              status: "ACTIVE",
+              salesOrder: {
+                retailOrgId: assignment.session.retailOrgId
+              }
+            },
+            _sum: {
+              baseQuantity: true
+            }
+          }),
+          prisma.ecommerceFulfillmentLocation.findMany({
+            where: {
+              retailOrgId: assignment.session.retailOrgId,
+              inventoryLocationId: {
+                in: locationIds
+              },
+              status: RecordStatus.ACTIVE,
+              storefrontStore: {
+                status: RecordStatus.ACTIVE,
+                ecommerceEnabled: true
+              }
+            },
+            orderBy: [
+              { inventoryLocationId: "asc" },
+              { routingPriority: "asc" },
+              { storefrontStore: { name: "asc" } }
+            ],
+            select: {
+              inventoryLocationId: true,
+              supportsPickup: true,
+              supportsDelivery: true,
+              routingPriority: true,
+              storefrontStore: {
+                select: {
+                  name: true
+                }
+              }
+            }
+          })
+        ])
+      : [[], [], []] as const;
   const salesOrderSourceTransactionIds = salesOrders.map((order) => order.sourceTransactionId);
   const salesOrderLineRows =
     salesOrderSourceTransactionIds.length > 0
@@ -5152,6 +5206,43 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   const quantityBySalesProduct = new Map<string, number>();
   const productById = new Map(products.map((product) => [product.id, product] as const));
   const locationById = new Map(inventoryLocations.map((location) => [location.id, location] as const));
+  const activeReservedByLocationProduct = new Map(
+    activeReservationGroups.map((group) => [
+      `${group.inventoryLocationId}:${group.productCodeSnapshot.trim().toUpperCase()}`,
+      toQuantity(group._sum.baseQuantity)
+    ] as const)
+  );
+  const ecommerceEligibilityByLocation = new Map<
+    string,
+    {
+      supportsPickup: boolean;
+      supportsDelivery: boolean;
+      labels: string[];
+    }
+  >();
+
+  for (const fulfillmentLocation of ecommerceFulfillmentLocations) {
+    const current = ecommerceEligibilityByLocation.get(
+      fulfillmentLocation.inventoryLocationId
+    );
+    const modes = [
+      fulfillmentLocation.supportsPickup ? "pickup" : null,
+      fulfillmentLocation.supportsDelivery ? "delivery" : null
+    ].filter((value): value is string => Boolean(value));
+    const label = `${fulfillmentLocation.storefrontStore.name}: ${modes.length ? modes.join(" + ") : "disabled"} (priority ${fulfillmentLocation.routingPriority})`;
+
+    if (current) {
+      current.supportsPickup ||= fulfillmentLocation.supportsPickup;
+      current.supportsDelivery ||= fulfillmentLocation.supportsDelivery;
+      current.labels.push(label);
+    } else {
+      ecommerceEligibilityByLocation.set(fulfillmentLocation.inventoryLocationId, {
+        supportsPickup: fulfillmentLocation.supportsPickup,
+        supportsDelivery: fulfillmentLocation.supportsDelivery,
+        labels: [label]
+      });
+    }
+  }
 
   for (const position of ledgerPositions) {
     const quantity = toQuantity(position._sum.quantity);
@@ -6034,6 +6125,18 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           return null;
         }
 
+        const activeReservedQuantity =
+          activeReservedByLocationProduct.get(
+            `${position.inventoryLocationId}:${product.code.trim().toUpperCase()}`
+          ) ?? 0;
+        const safetyStockLevel = toQuantity(product.safetyStockLevel);
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+          position.inventoryLocationId
+        );
+        const ecommerceEligible = Boolean(
+          ecommerceEligibility?.supportsPickup || ecommerceEligibility?.supportsDelivery
+        );
+
         return {
           productId: product.id,
           productCode: product.code,
@@ -6044,6 +6147,17 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           locationCode: location.code,
           locationName: location.name,
           quantityOnHand,
+          activeReservedQuantity,
+          ecommerceSellableQuantity: ecommerceEligible
+            ? toQuantity(
+                Math.max(0, quantityOnHand - activeReservedQuantity - safetyStockLevel)
+              )
+            : 0,
+          ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+          ecommerceDeliveryEligible: ecommerceEligibility?.supportsDelivery ?? false,
+          ecommerceEligibilityLabel:
+            ecommerceEligibility?.labels.join("; ") ??
+            "Not configured for ecommerce fulfilment",
           price: Number(product.baseUnitPrice)
         };
       })
@@ -7335,6 +7449,22 @@ export type OnlineStoreRemoteInventoryLookupResponse = {
     categoryCode: string | null;
     subcategory: string | null;
     quantityOnHand: number;
+    activeReservedQuantity: number;
+    safetyStockQuantity: number;
+    ecommerceSellableQuantity: number;
+    ecommercePickupEligible: boolean;
+    ecommerceDeliveryEligible: boolean;
+    locationBreakdown: Array<{
+      locationCode: string;
+      locationName: string;
+      quantityOnHand: number;
+      activeReservedQuantity: number;
+      safetyStockLevel: number;
+      ecommerceSellableQuantity: number;
+      ecommercePickupEligible: boolean;
+      ecommerceDeliveryEligible: boolean;
+      ecommerceEligibilityLabel: string;
+    }>;
     unitPrice: number;
     updatedAt: string;
   }>;
@@ -11865,6 +11995,7 @@ export async function lookupOnlineStoreRemoteInventory(
   const query = optionalText(input.query);
   const productCode = optionalText(input.productCode);
   const storeCode = optionalText(input.storeCode);
+  const locationCode = optionalText(input.locationCode);
   const requestedLimit = Number(input.limit ?? 30);
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(50, Math.max(1, Math.trunc(requestedLimit)))
@@ -11896,6 +12027,7 @@ export async function lookupOnlineStoreRemoteInventory(
         department: true,
         category: true,
         subcategory: true,
+        safetyStockLevel: true,
         baseUnitPrice: true,
         priceListEntries: {
           where: {
@@ -11925,7 +12057,8 @@ export async function lookupOnlineStoreRemoteInventory(
         store: {
           ...(storeCode ? { code: storeCode } : {}),
           status: RecordStatus.ACTIVE
-        }
+        },
+        ...(locationCode ? { code: locationCode } : {})
       },
       select: {
         id: true,
@@ -11950,26 +12083,113 @@ export async function lookupOnlineStoreRemoteInventory(
     };
   }
 
-  const balances = await prisma.inventoryLedgerEntry.groupBy({
-    by: ["inventoryLocationId", "productId"],
-    where: {
-      retailOrgId: session.retailOrgId,
-      inventoryLocationId: {
-        in: locationIds
-      },
-      productId: {
-        in: productIds
-      }
-    },
-    _sum: {
-      quantity: true
-    },
-    _max: {
-      occurredAt: true
-    }
-  });
+  const [balances, activeReservationGroups, ecommerceFulfillmentLocations] =
+    await Promise.all([
+      prisma.inventoryLedgerEntry.groupBy({
+        by: ["inventoryLocationId", "productId"],
+        where: {
+          retailOrgId: session.retailOrgId,
+          inventoryLocationId: {
+            in: locationIds
+          },
+          productId: {
+            in: productIds
+          }
+        },
+        _sum: {
+          quantity: true
+        },
+        _max: {
+          occurredAt: true
+        }
+      }),
+      prisma.salesOrderInventoryReservation.groupBy({
+        by: ["inventoryLocationId", "productCodeSnapshot"],
+        where: {
+          inventoryLocationId: {
+            in: locationIds
+          },
+          productCodeSnapshot: {
+            in: products.map((product) => product.code)
+          },
+          status: "ACTIVE",
+          salesOrder: {
+            retailOrgId: session.retailOrgId
+          }
+        },
+        _sum: {
+          baseQuantity: true
+        }
+      }),
+      prisma.ecommerceFulfillmentLocation.findMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          inventoryLocationId: {
+            in: locationIds
+          },
+          status: RecordStatus.ACTIVE,
+          storefrontStore: {
+            status: RecordStatus.ACTIVE,
+            ecommerceEnabled: true
+          }
+        },
+        orderBy: [
+          { inventoryLocationId: "asc" },
+          { routingPriority: "asc" },
+          { storefrontStore: { name: "asc" } }
+        ],
+        select: {
+          inventoryLocationId: true,
+          supportsPickup: true,
+          supportsDelivery: true,
+          routingPriority: true,
+          storefrontStore: {
+            select: {
+              name: true
+            }
+          }
+        }
+      })
+    ]);
   const productsById = new Map(products.map((product) => [product.id, product] as const));
   const locationsById = new Map(locations.map((location) => [location.id, location] as const));
+  const activeReservedByLocationProduct = new Map(
+    activeReservationGroups.map((group) => [
+      `${group.inventoryLocationId}:${group.productCodeSnapshot.trim().toUpperCase()}`,
+      toQuantity(group._sum.baseQuantity)
+    ] as const)
+  );
+  const ecommerceEligibilityByLocation = new Map<
+    string,
+    {
+      supportsPickup: boolean;
+      supportsDelivery: boolean;
+      labels: string[];
+    }
+  >();
+
+  for (const fulfillmentLocation of ecommerceFulfillmentLocations) {
+    const current = ecommerceEligibilityByLocation.get(
+      fulfillmentLocation.inventoryLocationId
+    );
+    const modes = [
+      fulfillmentLocation.supportsPickup ? "pickup" : null,
+      fulfillmentLocation.supportsDelivery ? "delivery" : null
+    ].filter((value): value is string => Boolean(value));
+    const label = `${fulfillmentLocation.storefrontStore.name}: ${modes.length ? modes.join(" + ") : "disabled"} (priority ${fulfillmentLocation.routingPriority})`;
+
+    if (current) {
+      current.supportsPickup ||= fulfillmentLocation.supportsPickup;
+      current.supportsDelivery ||= fulfillmentLocation.supportsDelivery;
+      current.labels.push(label);
+    } else {
+      ecommerceEligibilityByLocation.set(fulfillmentLocation.inventoryLocationId, {
+        supportsPickup: fulfillmentLocation.supportsPickup,
+        supportsDelivery: fulfillmentLocation.supportsDelivery,
+        labels: [label]
+      });
+    }
+  }
   const rowsByStoreAndProduct = new Map<
     string,
     OnlineStoreRemoteInventoryLookupResponse["rows"][number]
@@ -11988,6 +12208,35 @@ export async function lookupOnlineStoreRemoteInventory(
       const existing = rowsByStoreAndProduct.get(key);
       const updatedAt =
         balance._max.occurredAt?.toISOString() ?? new Date().toISOString();
+      const activeReservedQuantity =
+        activeReservedByLocationProduct.get(
+          `${balance.inventoryLocationId}:${product.code.trim().toUpperCase()}`
+        ) ?? 0;
+      const safetyStockLevel = toQuantity(product.safetyStockLevel);
+      const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+        balance.inventoryLocationId
+      );
+      const ecommerceEligible = Boolean(
+        ecommerceEligibility?.supportsPickup || ecommerceEligibility?.supportsDelivery
+      );
+      const ecommerceSellableQuantity = ecommerceEligible
+        ? toQuantity(
+            Math.max(0, quantityOnHand - activeReservedQuantity - safetyStockLevel)
+          )
+        : 0;
+      const locationBreakdown = {
+        locationCode: location.code,
+        locationName: location.name,
+        quantityOnHand,
+        activeReservedQuantity,
+        safetyStockLevel,
+        ecommerceSellableQuantity,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible: ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.labels.join("; ") ??
+          "Not configured for ecommerce fulfilment"
+      };
       rowsByStoreAndProduct.set(key, {
         storeCode: location.store.code,
         storeName: location.store.name,
@@ -12001,6 +12250,27 @@ export async function lookupOnlineStoreRemoteInventory(
         quantityOnHand: toQuantity(
           (existing?.quantityOnHand ?? 0) + quantityOnHand
         ),
+        activeReservedQuantity: toQuantity(
+          (existing?.activeReservedQuantity ?? 0) + activeReservedQuantity
+        ),
+        safetyStockQuantity: toQuantity(
+          (existing?.safetyStockQuantity ?? 0) +
+            (ecommerceEligible ? safetyStockLevel : 0)
+        ),
+        ecommerceSellableQuantity: toQuantity(
+          (existing?.ecommerceSellableQuantity ?? 0) +
+            ecommerceSellableQuantity
+        ),
+        ecommercePickupEligible:
+          (existing?.ecommercePickupEligible ?? false) ||
+          (ecommerceEligibility?.supportsPickup ?? false),
+        ecommerceDeliveryEligible:
+          (existing?.ecommerceDeliveryEligible ?? false) ||
+          (ecommerceEligibility?.supportsDelivery ?? false),
+        locationBreakdown: [
+          ...(existing?.locationBreakdown ?? []),
+          locationBreakdown
+        ],
         unitPrice: toMoney(Number(product.priceListEntries[0]?.unitPrice ?? product.baseUnitPrice)),
         updatedAt:
           !existing || new Date(updatedAt) > new Date(existing.updatedAt)

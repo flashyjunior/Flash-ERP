@@ -575,6 +575,14 @@ export type EnterpriseStoreSettingsPublishedPayload = {
     productCodes: string[] | null;
     productSortOrders?: Record<string, number> | null;
   } | null;
+  ecommerceFulfillmentLocations?: Array<{
+    inventoryLocationCode: string;
+    storefrontStoreCode: string;
+    storefrontStoreName: string;
+    supportsPickup: boolean;
+    supportsDelivery: boolean;
+    routingPriority: number;
+  }>;
   publishedAt: string;
 };
 
@@ -1597,6 +1605,22 @@ export type StoreRemoteInventoryLookupRow = {
   categoryCode: string | null;
   subcategory: string | null;
   quantityOnHand: number;
+  activeReservedQuantity?: number;
+  safetyStockQuantity?: number;
+  ecommerceSellableQuantity?: number;
+  ecommercePickupEligible?: boolean;
+  ecommerceDeliveryEligible?: boolean;
+  locationBreakdown?: Array<{
+    locationCode: string;
+    locationName: string;
+    quantityOnHand: number;
+    activeReservedQuantity: number;
+    safetyStockLevel: number;
+    ecommerceSellableQuantity: number;
+    ecommercePickupEligible: boolean;
+    ecommerceDeliveryEligible: boolean;
+    ecommerceEligibilityLabel: string;
+  }>;
   unitPrice: number;
   updatedAt: string;
 };

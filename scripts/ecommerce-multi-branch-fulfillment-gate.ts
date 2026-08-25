@@ -19,6 +19,9 @@ const networkAllocationMigration = read(
 const storePaymentMigration = read(
   "prisma/migrations-sqlserver/20260825010000_ecommerce_store_payment_reconciliation/migration.sql",
 );
+const terminalReservationMigration = read(
+  "prisma/migrations-sqlserver/20260825020000_ecommerce_terminal_reservation_reconciliation/migration.sql",
+);
 const compatibility = read(
   "apps/enterprise-web/src/server/repositories/schema-compatibility.repository.ts",
 );
@@ -56,6 +59,11 @@ const desktopSyncProviders = [
   read("apps/store-desktop/src/main/offline/local-store-service.ts"),
   read("apps/store-desktop/src/main/postgres/postgres-store-service.ts"),
   read("apps/store-desktop/src/main/mssql/mssql-store-service.ts"),
+];
+const desktopReservationBackfills = [
+  desktopSyncProviders[0],
+  read("apps/store-desktop/src/main/postgres/store-postgres-schema.sql"),
+  read("apps/store-desktop/src/main/mssql/store-mssql-schema.sql"),
 ];
 
 for (const source of [schema, migration, compatibility]) {
@@ -141,8 +149,26 @@ for (const expected of [
   "deriveEcommercePaymentProjection",
   "tx.ecommerceOrder.updateMany",
   "paymentStatus: projectedPayment.paymentStatus",
+  "terminalReservationTransition",
+  "projectedReservations",
+  "tx.salesOrderInventoryReservation.updateMany",
 ]) {
   requireIncludes(storeSyncRepository, expected, `Ecommerce payment projection is missing ${expected}.`);
+}
+for (const expected of [
+  "SalesOrderInventoryReservation",
+  "INNER JOIN [dbo].[EcommerceOrder]",
+  "[reservation].[status] = N'ACTIVE'",
+  "[sales].[status] IN (N'FULFILLED', N'CANCELLED', N'EXPIRED')",
+  "N'CONSUMED'",
+  "N'RELEASED'",
+  "N'EXPIRED'",
+]) {
+  requireIncludes(
+    terminalReservationMigration,
+    expected,
+    `Ecommerce terminal reservation backfill is missing ${expected}.`,
+  );
 }
 for (const expected of [
   "INNER JOIN [dbo].[SalesOrder]",
@@ -164,6 +190,34 @@ for (const provider of desktopSyncProviders) {
     "isEcommercePosTransactionNumber(payload.transactionNo)",
     "A Store Desktop provider is missing targeted ecommerce receipt retry handling.",
   );
+}
+for (const expected of [
+  "const fulfilledReservations",
+  'fulfilledSalesOrder.reservation_status === "ACTIVE"',
+  "reservations: fulfilledReservations",
+]) {
+  requireIncludes(
+    desktopSyncProviders[0],
+    expected,
+    `Standalone Store Desktop reservation consumption is missing ${expected}.`,
+  );
+}
+for (const backfill of desktopReservationBackfills) {
+  for (const expected of [
+    "Reconciled from terminal sales order state.",
+    "FULFILLED",
+    "CANCELLED",
+    "EXPIRED",
+    "CONSUMED",
+    "RELEASED",
+    "ACTIVE",
+  ]) {
+    requireIncludes(
+      backfill,
+      expected,
+      `A Store Desktop database provider is missing terminal reservation reconciliation for ${expected}.`,
+    );
+  }
 }
 
 for (const expected of [

@@ -558,8 +558,48 @@ export function EnterpriseInventoryWorkspace({
       },
       {
         accessorKey: "onHandQuantity",
-        header: "Current qty",
+        header: "On hand",
         cell: ({ row }) => quantityFormatter.format(row.original.onHandQuantity)
+      },
+      {
+        accessorKey: "activeReservedQuantity",
+        header: "Active reserved",
+        cell: ({ row }) => quantityFormatter.format(row.original.activeReservedQuantity)
+      },
+      {
+        accessorKey: "safetyStockLevel",
+        header: "Safety stock",
+        cell: ({ row }) => quantityFormatter.format(row.original.safetyStockLevel)
+      },
+      {
+        accessorKey: "ecommerceSellableQuantity",
+        header: "Web sellable",
+        cell: ({ row }) =>
+          row.original.ecommercePickupEligible || row.original.ecommerceDeliveryEligible
+            ? quantityFormatter.format(row.original.ecommerceSellableQuantity)
+            : "-"
+      },
+      {
+        accessorKey: "ecommerceEligibilityLabel",
+        header: "Ecommerce eligibility",
+        cell: ({ row }) => {
+          const modes = [
+            row.original.ecommercePickupEligible ? "Pickup" : null,
+            row.original.ecommerceDeliveryEligible ? "Delivery" : null
+          ].filter((value): value is string => Boolean(value));
+
+          return (
+            <div className="min-w-0" title={row.original.ecommerceEligibilityLabel}>
+              <p className="font-medium text-stone-900">
+                {modes.length ? modes.join(" + ") : "Not eligible"}
+              </p>
+              <p className="max-w-72 truncate text-xs text-stone-500">
+                {row.original.ecommerceEligibilityLabel}
+              </p>
+            </div>
+          );
+        },
+        meta: { disableTruncate: true }
       },
       {
         accessorKey: "estimatedRetailValue",

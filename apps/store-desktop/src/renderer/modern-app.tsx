@@ -22541,6 +22541,10 @@ function InventoryWorkspace(props: {
             <span>Product</span>
             <span>Location</span>
             <span>On hand</span>
+            <span>Reserved</span>
+            <span>Safety</span>
+            <span>Web sellable</span>
+            <span>Ecommerce</span>
             <span>Expiry</span>
             <span>Price</span>
           </div>
@@ -22556,6 +22560,21 @@ function InventoryWorkspace(props: {
                 </div>
                 <span>{item.locationName}</span>
                 <strong>{formatNumber(item.quantityOnHand)}</strong>
+                <strong>{formatNumber(item.activeReservedQuantity)}</strong>
+                <span>{formatNumber(item.safetyStockLevel ?? 0)}</span>
+                <strong>
+                  {item.ecommercePickupEligible || item.ecommerceDeliveryEligible
+                    ? formatNumber(item.ecommerceSellableQuantity)
+                    : "-"}
+                </strong>
+                <span title={item.ecommerceEligibilityLabel}>
+                  {[
+                    item.ecommercePickupEligible ? "Pickup" : null,
+                    item.ecommerceDeliveryEligible ? "Delivery" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" + ") || "Not eligible"}
+                </span>
                 <span>
                   {item.trackExpiry
                     ? item.earliestExpiryDate
@@ -24272,6 +24291,7 @@ function InventoryWorkspace(props: {
                 <span>Product</span>
                 <span>Shop</span>
                 <span>Total on hand</span>
+                <span>Web stock</span>
                 <span>Updated</span>
                 <span>Request eligibility</span>
               </div>
@@ -24304,6 +24324,37 @@ function InventoryWorkspace(props: {
                         <small>{row.storeCode}</small>
                       </div>
                       <strong>{formatNumber(row.quantityOnHand)}</strong>
+                      <div className="rms-ecommerce-stock-breakdown">
+                        <strong>
+                          {row.ecommercePickupEligible || row.ecommerceDeliveryEligible
+                            ? formatNumber(row.ecommerceSellableQuantity ?? 0)
+                            : "-"}
+                        </strong>
+                        <small>
+                          {formatNumber(row.activeReservedQuantity ?? 0)} reserved · {formatNumber(row.safetyStockQuantity ?? 0)} safety
+                        </small>
+                        <details>
+                          <summary>Location breakdown</summary>
+                          <div className="rms-ecommerce-stock-breakdown-list">
+                            {(row.locationBreakdown ?? []).map((location) => (
+                              <div key={location.locationCode}>
+                                <strong>{location.locationName}</strong>
+                                <small>
+                                  {formatNumber(location.quantityOnHand)} on hand · {formatNumber(location.activeReservedQuantity)} reserved · {formatNumber(location.safetyStockLevel)} safety · {location.ecommercePickupEligible || location.ecommerceDeliveryEligible ? `${formatNumber(location.ecommerceSellableQuantity)} sellable` : "not eligible"}
+                                </small>
+                                <small title={location.ecommerceEligibilityLabel}>
+                                  {[
+                                    location.ecommercePickupEligible ? "Pickup" : null,
+                                    location.ecommerceDeliveryEligible ? "Delivery" : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" + ") || "Not configured"}
+                                </small>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      </div>
                       <span>{formatRelative(row.updatedAt)}</span>
                       <small title={eligibility.reason}>
                         {eligibility.eligible ? "Eligible" : eligibility.reason}

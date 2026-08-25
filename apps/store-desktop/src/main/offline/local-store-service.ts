@@ -90,6 +90,7 @@ import {
 
 import {
   computeNextStoreSyncAt,
+  readStoreEcommerceFulfillmentEligibility,
   readStoreSyncPolicyFromMetadata,
   resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
@@ -6349,12 +6350,33 @@ export class LocalStoreService {
       });
     }
 
+    const ecommerceEligibilityByLocation =
+      readStoreEcommerceFulfillmentEligibility(
+        this.metadata("ecommerce_fulfillment_locations_json"),
+      );
+
     return filteredRows
       .slice(0, limit)
       .map<StoreInventoryBrowseItem>((row) => {
         const batches = asBooleanFlag(row.track_expiry)
           ? this.getInventoryBatchRows(row.location_code, row.product_code)
           : [];
+        const activeReservedQuantity = this.getActiveReservedProductBaseQuantity({
+          inventoryLocationCode: row.location_code,
+          productCode: row.product_code,
+        });
+        const safetyStockLevel =
+          row.safety_stock_level === null
+            ? 0
+            : Number(asNumber(row.safety_stock_level).toFixed(3));
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+          row.location_code.trim().toUpperCase(),
+        );
+        const ecommerceEligible = Boolean(
+          ecommerceEligibility?.supportsPickup ||
+            ecommerceEligibility?.supportsDelivery,
+        );
+        const quantityOnHand = Number(asNumber(row.quantity_on_hand).toFixed(3));
 
         return {
         locationCode: row.location_code,
@@ -6369,7 +6391,22 @@ export class LocalStoreService {
         subcategory: row.subcategory,
         barcode:
           this.getRepresentativeBarcode(row.product_code)?.barcode_code ?? null,
-        quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+        quantityOnHand,
+        activeReservedQuantity,
+        ecommerceSellableQuantity: ecommerceEligible
+          ? Number(
+              Math.max(
+                0,
+                quantityOnHand - activeReservedQuantity - safetyStockLevel,
+              ).toFixed(3),
+            )
+          : 0,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.label ??
+          "Not configured for ecommerce fulfilment",
         minStockLevel:
           row.min_stock_level === null
             ? null
@@ -17594,6 +17631,18 @@ export class LocalStoreService {
           1,
           asNumber(fulfilledSalesOrder.record_version) + 1,
         );
+        const fulfilledReservations = this.getSalesOrderReservationPayloads(
+          fulfilledSalesOrder.id,
+        ).map((reservation) =>
+          reservation.status === "ACTIVE"
+            ? {
+                ...reservation,
+                status: "CONSUMED" as const,
+                releaseReason: `Consumed by fulfilment ${transactionNo}.`,
+                releasedAt: timestamp,
+              }
+            : reservation,
+        );
         const salesOrderPayload: StoreSalesOrderRecordedPayload = {
           orderId: fulfilledSalesOrder.id,
           orderNo: fulfilledSalesOrder.order_no,
@@ -17626,12 +17675,12 @@ export class LocalStoreService {
             asNumber(fulfilledSalesOrder.minimum_deposit_amount).toFixed(2),
           ),
           reservationStatus:
-            fulfilledSalesOrder.order_type === "LAYAWAY"
+            fulfilledSalesOrder.reservation_status === "ACTIVE"
               ? "CONSUMED"
               : fulfilledSalesOrder.reservation_status,
           reservationCreatedAt: fulfilledSalesOrder.reservation_created_at,
           reservationReleasedAt:
-            fulfilledSalesOrder.order_type === "LAYAWAY"
+            fulfilledSalesOrder.reservation_status === "ACTIVE"
               ? timestamp
               : fulfilledSalesOrder.reservation_released_at,
           layawayExpiresAt: fulfilledSalesOrder.layaway_expires_at,
@@ -17650,24 +17699,12 @@ export class LocalStoreService {
           fulfilledTransactionNo: transactionNo,
           fulfilledAt: timestamp,
           cancelledAt: null,
-          reservations: this.getSalesOrderReservationPayloads(
-            fulfilledSalesOrder.id,
-          ).map((reservation) =>
-            fulfilledSalesOrder.order_type === "LAYAWAY" &&
-            reservation.status === "ACTIVE"
-              ? {
-                  ...reservation,
-                  status: "CONSUMED" as const,
-                  releaseReason: `Consumed by fulfilment ${transactionNo}.`,
-                  releasedAt: timestamp,
-                }
-              : reservation,
-          ),
+          reservations: fulfilledReservations,
         };
 
         this.db
           .prepare(
-            "UPDATE sales_order SET status = 'FULFILLED', paid_amount = ?, balance_amount = 0, reservation_status = CASE WHEN order_type = 'LAYAWAY' THEN 'CONSUMED' ELSE reservation_status END, reservation_released_at = CASE WHEN order_type = 'LAYAWAY' THEN ? ELSE reservation_released_at END, fulfilled_transaction_id = ?, fulfilled_transaction_no = ?, fulfilled_at = ?, record_version = ?, updated_at = ? WHERE id = ?",
+            "UPDATE sales_order SET status = 'FULFILLED', paid_amount = ?, balance_amount = 0, reservation_status = CASE WHEN reservation_status = 'ACTIVE' THEN 'CONSUMED' ELSE reservation_status END, reservation_released_at = CASE WHEN reservation_status = 'ACTIVE' THEN ? ELSE reservation_released_at END, fulfilled_transaction_id = ?, fulfilled_transaction_no = ?, fulfilled_at = ?, record_version = ?, updated_at = ? WHERE id = ?",
           )
           .run(
             paidAmount,
@@ -17679,7 +17716,7 @@ export class LocalStoreService {
             timestamp,
             fulfilledSalesOrder.id,
           );
-        if (fulfilledSalesOrder.order_type === "LAYAWAY") {
+        if (fulfilledSalesOrder.reservation_status === "ACTIVE") {
           this.transitionLayawayReservations({
             salesOrderId: fulfilledSalesOrder.id,
             status: "CONSUMED",
@@ -22390,6 +22427,13 @@ export class LocalStoreService {
         );
       }
 
+      if (Array.isArray(storePayload.ecommerceFulfillmentLocations)) {
+        this.setMetadata(
+          "ecommerce_fulfillment_locations_json",
+          JSON.stringify(storePayload.ecommerceFulfillmentLocations),
+        );
+      }
+
       if (Array.isArray(storePayload.productSizes)) {
         this.setMetadata(
           "product_sizes_json",
@@ -26084,6 +26128,37 @@ export class LocalStoreService {
       "CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_stock ON sales_order_inventory_reservation(inventory_location_code, product_code, product_variant_code, status)",
     );
     this.db.exec(
+      `UPDATE sales_order_inventory_reservation
+       SET status = CASE (
+             SELECT sales_order.status
+             FROM sales_order
+             WHERE sales_order.id = sales_order_inventory_reservation.sales_order_id
+           )
+             WHEN 'FULFILLED' THEN 'CONSUMED'
+             WHEN 'CANCELLED' THEN 'RELEASED'
+             WHEN 'EXPIRED' THEN 'EXPIRED'
+           END,
+           release_reason = COALESCE(
+             NULLIF(release_reason, ''),
+             'Reconciled from terminal sales order state.'
+           ),
+           released_at = COALESCE(
+             released_at,
+             (SELECT COALESCE(fulfilled_at, cancelled_at, expired_at, updated_at)
+              FROM sales_order
+              WHERE sales_order.id = sales_order_inventory_reservation.sales_order_id),
+             CURRENT_TIMESTAMP
+           ),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE status = 'ACTIVE'
+         AND EXISTS (
+           SELECT 1
+           FROM sales_order
+           WHERE sales_order.id = sales_order_inventory_reservation.sales_order_id
+             AND sales_order.status IN ('FULFILLED', 'CANCELLED', 'EXPIRED')
+         )`,
+    );
+    this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC)",
     );
     this.db.exec(
@@ -28816,6 +28891,25 @@ export class LocalStoreService {
         input.excludeSalesOrderId ?? null,
         input.excludeSalesOrderId ?? null,
       ) as NumericRow | undefined;
+
+    return Number(asNumber(row?.value).toFixed(3));
+  }
+
+  private getActiveReservedProductBaseQuantity(input: {
+    inventoryLocationCode: string | null;
+    productCode: string;
+  }) {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(base_quantity), 0) AS value
+         FROM sales_order_inventory_reservation
+         WHERE status = 'ACTIVE'
+           AND COALESCE(inventory_location_code, '') = COALESCE(?, '')
+           AND product_code = ?`,
+      )
+      .get(input.inventoryLocationCode, input.productCode) as
+      | NumericRow
+      | undefined;
 
     return Number(asNumber(row?.value).toFixed(3));
   }

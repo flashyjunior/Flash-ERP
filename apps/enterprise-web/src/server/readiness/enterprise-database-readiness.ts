@@ -20,6 +20,7 @@ const requiredMigrationNames = [
   "20260820010000_multi_branch_ecommerce_fulfillment",
   "20260820020000_ecommerce_network_allocation",
   "20260825010000_ecommerce_store_payment_reconciliation",
+  "20260825020000_ecommerce_terminal_reservation_reconciliation",
 ];
 
 const requiredTables = [

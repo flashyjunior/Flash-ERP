@@ -76,6 +76,7 @@ import type {
 
 import {
   computeNextStoreSyncAt,
+  readStoreEcommerceFulfillmentEligibility,
   readStoreSyncPolicyFromMetadata,
   resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
@@ -407,6 +408,7 @@ type InventoryBrowseRow = {
   category_name: string | null;
   subcategory: string | null;
   quantity_on_hand: string | number;
+  active_reserved_quantity: string | number;
   min_stock_level: string | number | null;
   reorder_point: string | number | null;
   safety_stock_level: string | number | null;
@@ -7067,6 +7069,13 @@ export class MssqlStoreService {
         category.[category_name],
         product.[subcategory],
         ISNULL(balance.[quantity_on_hand], CASE WHEN @locationCode IS NULL THEN product.[quantity_on_hand] ELSE 0 END) AS [quantity_on_hand],
+        ISNULL((
+          SELECT SUM(reservation.[base_quantity])
+          FROM [dbo].[sales_order_inventory_reservation] AS reservation
+          WHERE reservation.[status] = N'ACTIVE'
+            AND UPPER(ISNULL(reservation.[inventory_location_code], N'')) = UPPER(ISNULL(location.[location_code], ISNULL(fallbackLocation.[location_code], N'UNASSIGNED')))
+            AND UPPER(reservation.[product_code]) = UPPER(product.[product_code])
+        ), 0) AS [active_reserved_quantity],
         product.[min_stock_level],
         product.[reorder_point],
         product.[safety_stock_level],
@@ -7141,6 +7150,11 @@ export class MssqlStoreService {
     const barcodeByProduct = await this.getRepresentativeBarcodeMap(
       result.recordset.map((row) => row.product_code),
     );
+    const metadata = await this.metadata();
+    const ecommerceEligibilityByLocation =
+      readStoreEcommerceFulfillmentEligibility(
+        metadata.ecommerce_fulfillment_locations_json,
+      );
     const getCriticalStockFloor = (row: InventoryBrowseRow) => {
       const thresholds = [
         row.min_stock_level,
@@ -7241,7 +7255,24 @@ export class MssqlStoreService {
 
     return filteredRows
       .slice(0, limit)
-      .map((row) => ({
+      .map((row) => {
+        const quantityOnHand = Number(asNumber(row.quantity_on_hand).toFixed(3));
+        const activeReservedQuantity = Number(
+          asNumber(row.active_reserved_quantity).toFixed(3),
+        );
+        const safetyStockLevel =
+          row.safety_stock_level === null
+            ? 0
+            : Number(asNumber(row.safety_stock_level).toFixed(3));
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+          row.location_code.trim().toUpperCase(),
+        );
+        const ecommerceEligible = Boolean(
+          ecommerceEligibility?.supportsPickup ||
+            ecommerceEligibility?.supportsDelivery,
+        );
+
+        return {
         locationCode: row.location_code,
         locationName: row.location_name,
         productCode: row.product_code,
@@ -7253,7 +7284,22 @@ export class MssqlStoreService {
         categoryName: row.category_name,
         subcategory: row.subcategory,
         barcode: barcodeByProduct.get(row.product_code) ?? null,
-        quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+        quantityOnHand,
+        activeReservedQuantity,
+        ecommerceSellableQuantity: ecommerceEligible
+          ? Number(
+              Math.max(
+                0,
+                quantityOnHand - activeReservedQuantity - safetyStockLevel,
+              ).toFixed(3),
+            )
+          : 0,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.label ??
+          "Not configured for ecommerce fulfilment",
         minStockLevel:
           row.min_stock_level === null
             ? null
@@ -7275,7 +7321,8 @@ export class MssqlStoreService {
           row.batch_quantities_json,
         ),
         updatedAt: row.updated_at,
-      }));
+        };
+      });
   }
 
   async lookupRemoteStoreInventory(
@@ -20774,6 +20821,14 @@ export class MssqlStoreService {
 
       for (const [key, value] of layawayEntries) {
         await this.setMetadata(key, value, runner);
+      }
+
+      if (Array.isArray(storePayload.ecommerceFulfillmentLocations)) {
+        await this.setMetadata(
+          "ecommerce_fulfillment_locations_json",
+          JSON.stringify(storePayload.ecommerceFulfillmentLocations),
+          runner,
+        );
       }
 
       return;

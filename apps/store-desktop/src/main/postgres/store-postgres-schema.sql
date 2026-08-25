@@ -1021,6 +1021,21 @@ CREATE INDEX IF NOT EXISTS idx_pos_shift_status ON pos_shift(status, opened_at D
 CREATE INDEX IF NOT EXISTS idx_sales_order_status ON sales_order(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_order_status ON sales_order_inventory_reservation(sales_order_id, status);
 CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_stock ON sales_order_inventory_reservation(inventory_location_code, product_code, product_variant_code, status);
+
+UPDATE sales_order_inventory_reservation AS reservation
+SET
+  status = CASE sales.status
+    WHEN 'FULFILLED' THEN 'CONSUMED'
+    WHEN 'CANCELLED' THEN 'RELEASED'
+    WHEN 'EXPIRED' THEN 'EXPIRED'
+  END,
+  release_reason = COALESCE(NULLIF(reservation.release_reason, ''), 'Reconciled from terminal sales order state.'),
+  released_at = COALESCE(reservation.released_at, sales.fulfilled_at, sales.cancelled_at, sales.expired_at, CURRENT_TIMESTAMP::text),
+  updated_at = CURRENT_TIMESTAMP::text
+FROM sales_order AS sales
+WHERE sales.id = reservation.sales_order_id
+  AND reservation.status = 'ACTIVE'
+  AND sales.status IN ('FULFILLED', 'CANCELLED', 'EXPIRED');
 CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_banking_deposit_reconciliation ON banking_deposit(reconciliation_id, deposited_at DESC);
 CREATE INDEX IF NOT EXISTS idx_local_store_expense_status ON local_store_expense(status, expense_date DESC);
