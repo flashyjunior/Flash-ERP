@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { Prisma } from "@prisma/client";
 import nodemailer from "nodemailer";
 import { readJsonObject, serializeJsonField } from "../repositories/json-field";
@@ -39,6 +41,12 @@ export type EnterpriseMfaDeliveryResult = {
   message: string;
 };
 
+export type EnterprisePasswordResetDeliveryResult = {
+  status: "DELIVERED" | "SKIPPED" | "FAILED";
+  deliveryHint: string;
+  message: string;
+};
+
 type EnterpriseMfaDeliveryInput = {
   retailOrgId: string;
   sourceNodeCode: string;
@@ -49,6 +57,17 @@ type EnterpriseMfaDeliveryInput = {
   code: string;
   expiresAt: Date;
   experience?: "ENTERPRISE" | "ECOMMERCE";
+};
+
+type EnterprisePasswordResetDeliveryInput = {
+  retailOrgId: string;
+  sourceNodeCode: string;
+  userId: string;
+  loginId: string;
+  displayName: string;
+  email: string | null;
+  resetLink: string;
+  expiresAt: Date;
 };
 
 const defaultSmtpSettings: SmtpSettings = {
@@ -280,6 +299,220 @@ async function sendEmailMfaCode(
     deliveryHint: maskEmail(input.email),
     message: `MFA code was delivered by SMTP to ${maskEmail(input.email)} for ${input.loginId}.`
   };
+}
+
+async function deliverTrialPasswordResetLink(
+  input: EnterprisePasswordResetDeliveryInput
+): Promise<EnterprisePasswordResetDeliveryResult> {
+  const requestId = process.env.FLASH_ERP_TRIAL_CONTROL_PLANE_REQUEST_ID?.trim();
+  const workspaceSecret = process.env.FLASH_ERP_TRIAL_WORKSPACE_SECRET?.trim();
+  const controlPlaneUrl =
+    process.env.FLASH_ERP_TRIAL_CONTROL_PLANE_URL?.trim() || "http://127.0.0.1:3000";
+  if (!requestId || !workspaceSecret) {
+    throw new Error("The trial workspace password-reset relay is not configured.");
+  }
+
+  const body = JSON.stringify({
+    version: 1,
+    requestId,
+    userId: input.userId,
+    loginId: input.loginId,
+    email: input.email,
+    resetLink: input.resetLink,
+    expiresAt: input.expiresAt.toISOString()
+  });
+  const timestamp = Date.now().toString();
+  const signature = crypto
+    .createHmac("sha256", workspaceSecret)
+    .update(`${timestamp}.${body}`)
+    .digest("hex");
+  const response = await fetch(new URL("/api/trials/password-reset-delivery", controlPlaneUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-flash-timestamp": timestamp,
+      "x-flash-signature": signature
+    },
+    body,
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000)
+  });
+  if (!response.ok) {
+    const result = (await response.json().catch(() => null)) as { message?: string } | null;
+    throw new Error(result?.message || `The trial password-reset relay returned HTTP ${response.status}.`);
+  }
+
+  return {
+    status: "DELIVERED",
+    deliveryHint: maskEmail(input.email),
+    message: `Password reset instructions were delivered by the trial control plane to ${maskEmail(input.email)} for ${input.loginId}.`
+  };
+}
+
+async function writePasswordResetDeliveryLog(
+  input: EnterprisePasswordResetDeliveryInput,
+  result: EnterprisePasswordResetDeliveryResult,
+  provider?: string
+) {
+  await prisma.securityLog.create({
+    data: {
+      retailOrgId: input.retailOrgId,
+      kind: SecurityLogKind.SECURITY,
+      severity:
+        result.status === "DELIVERED"
+          ? SecurityLogSeverity.INFO
+          : result.status === "SKIPPED"
+            ? SecurityLogSeverity.WARNING
+            : SecurityLogSeverity.ERROR,
+      category: "Authentication",
+      action:
+        result.status === "DELIVERED"
+          ? "auth.password-reset.delivery.succeeded"
+          : result.status === "SKIPPED"
+            ? "auth.password-reset.delivery.skipped"
+            : "auth.password-reset.delivery.failed",
+      actorLabel: "Self-service recovery",
+      targetType: "Retail user",
+      targetRef: input.loginId,
+      sourceNodeCode: input.sourceNodeCode,
+      message: result.message,
+      detailsJson: serializeJsonField({
+        channel: "SMTP",
+        deliveryHint: result.deliveryHint,
+        expiresAt: input.expiresAt.toISOString(),
+        ...(provider ? { provider } : {})
+      })
+    }
+  });
+}
+
+export async function deliverEnterprisePasswordResetLink(
+  input: EnterprisePasswordResetDeliveryInput
+): Promise<EnterprisePasswordResetDeliveryResult> {
+  if (process.env.FLASH_ERP_TRIAL_WORKSPACE_MODE === "true") {
+    try {
+      const result = await deliverTrialPasswordResetLink(input);
+      await writePasswordResetDeliveryLog(input, result, "trial-control-plane");
+      return result;
+    } catch (error) {
+      const result: EnterprisePasswordResetDeliveryResult = {
+        status: "FAILED",
+        deliveryHint: maskEmail(input.email),
+        message:
+          error instanceof Error
+            ? `Password reset email delivery failed for ${input.loginId}: ${error.message}`
+            : `Password reset email delivery failed for ${input.loginId}.`
+      };
+      await writePasswordResetDeliveryLog(input, result, "trial-control-plane");
+      return result;
+    }
+  }
+
+  if (!shouldSendExternally()) {
+    return {
+      status: "SKIPPED",
+      deliveryHint: "development recovery page",
+      message: `Password reset email delivery was skipped for ${input.loginId} outside production.`
+    };
+  }
+
+  const retailOrg = await prisma.retailOrg.findUnique({
+    where: { id: input.retailOrgId },
+    select: { smtpSettingsJson: true }
+  });
+  const settings = readSmtpSettings(retailOrg?.smtpSettingsJson);
+  const deliveryHint = maskEmail(input.email);
+
+  if (!settings.enabled || !settings.host || !settings.fromAddress || !input.email) {
+    const result: EnterprisePasswordResetDeliveryResult = {
+      status: "SKIPPED",
+      deliveryHint,
+      message: `Password reset email delivery was skipped for ${input.loginId}; SMTP or the account email is not configured.`
+    };
+    await writePasswordResetDeliveryLog(input, result);
+    return result;
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: settings.host,
+      port: settings.port,
+      secure: settings.secureConnection,
+      auth:
+        settings.username && settings.passwordMask
+          ? {
+              user: settings.username,
+              pass: settings.passwordMask
+            }
+          : undefined
+    });
+    const fromName = settings.fromName || "Flash ERP";
+    const expiryLabel = input.expiresAt.toISOString();
+
+    await transporter.sendMail({
+      from: `"${fromName.replace(/"/g, "'")}" <${settings.fromAddress}>`,
+      to: input.email,
+      replyTo: settings.replyToAddress || undefined,
+      subject: `Reset your Flash ERP password for ${input.loginId}`,
+      text: [
+        `Hello ${input.displayName || input.loginId},`,
+        "",
+        "A password reset was requested for your Flash ERP Enterprise account.",
+        `Login ID: ${input.loginId}`,
+        "",
+        `Reset your password: ${input.resetLink}`,
+        "",
+        `This link expires at ${expiryLabel} and becomes invalid after your password changes.`,
+        "If you did not request this reset, you can safely ignore this email."
+      ].join("\n"),
+      html: `<!doctype html>
+<html lang="en">
+  <body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f5f9;padding:28px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border:1px solid #dbe4ee;border-radius:8px;overflow:hidden;">
+            <tr><td style="background:#0f766e;padding:22px 28px;color:#ffffff;font-size:22px;font-weight:700;">Flash ERP</td></tr>
+            <tr>
+              <td style="padding:30px 28px;">
+                <h1 style="margin:0 0 14px;font-size:24px;line-height:1.3;">Reset your password</h1>
+                <p style="margin:0 0 18px;font-size:15px;line-height:1.6;color:#475569;">Hello ${escapeHtml(input.displayName || input.loginId)}, a password reset was requested for your Enterprise account.</p>
+                <div style="margin:0 0 22px;padding:14px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
+                  <div style="font-size:12px;color:#64748b;text-transform:uppercase;">Login ID</div>
+                  <div style="margin-top:5px;font-size:16px;font-weight:700;">${escapeHtml(input.loginId)}</div>
+                </div>
+                <table role="presentation" cellspacing="0" cellpadding="0"><tr><td style="border-radius:6px;background:#0f766e;"><a href="${escapeHtml(input.resetLink)}" style="display:inline-block;padding:13px 22px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;">Reset password</a></td></tr></table>
+                <p style="margin:22px 0 0;font-size:13px;line-height:1.6;color:#64748b;">This secure link expires at ${escapeHtml(expiryLabel)} and becomes invalid after your password changes.</p>
+                <p style="margin:12px 0 0;font-size:13px;line-height:1.6;color:#64748b;">If you did not request this reset, you can safely ignore this email.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`
+    });
+
+    const result: EnterprisePasswordResetDeliveryResult = {
+      status: "DELIVERED",
+      deliveryHint,
+      message: `Password reset instructions were delivered by SMTP to ${deliveryHint} for ${input.loginId}.`
+    };
+    await writePasswordResetDeliveryLog(input, result, settings.host);
+    return result;
+  } catch (error) {
+    const result: EnterprisePasswordResetDeliveryResult = {
+      status: "FAILED",
+      deliveryHint,
+      message:
+        error instanceof Error
+          ? `Password reset email delivery failed for ${input.loginId}: ${error.message}`
+          : `Password reset email delivery failed for ${input.loginId}.`
+    };
+    await writePasswordResetDeliveryLog(input, result, settings.host);
+    return result;
+  }
 }
 
 async function sendSmsMfaCode(

@@ -87,6 +87,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
         detailView={detailView}
         operationsDashboard={operationsDashboard}
         salesDetail={salesDetail}
+        trialSampleDataEnabled={process.env.FLASH_ERP_TRIAL_WORKSPACE_MODE === "true"}
       />
     </EnterpriseClientWorkspaceBoundary>
   );

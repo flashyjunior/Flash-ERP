@@ -22,7 +22,7 @@ function SignInForm() {
     !requestedNext.startsWith("/sign-in?")
       ? requestedNext
       : "/";
-  const [loginId, setLoginId] = useState("");
+  const [loginId, setLoginId] = useState(() => searchParams.get("loginId")?.trim().slice(0, 254) ?? "");
   const [password, setPassword] = useState("");
   const [mfaCode, setMfaCode] = useState("");
   const [mfaChallengeToken, setMfaChallengeToken] = useState<string | null>(null);

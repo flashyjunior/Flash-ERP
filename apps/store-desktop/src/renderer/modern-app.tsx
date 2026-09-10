@@ -15319,7 +15319,7 @@ function DashboardWorkspace({
                       {tender.name}
                     </span>
                     <strong>{formatMoney(tender.amount)}</strong>
-                    <small>{formatNumber(tender.count)} txn</small>
+                    <small>{formatNumber(tender.count)} payment(s)</small>
                   </div>
                 ))
               ) : (

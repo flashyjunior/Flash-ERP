@@ -20,6 +20,7 @@ export default async function OnlineStorePage({ searchParams }: OnlineStorePageP
   return (
     <OnlineStoreWorkspace
       initialWorkspace={requestedWorkspace === "ecommerce" ? "ecommerce" : "dashboard"}
+      trialSampleDataEnabled={process.env.FLASH_ERP_TRIAL_WORKSPACE_MODE === "true"}
       workspace={workspace}
     />
   );

@@ -1773,7 +1773,6 @@ export async function getEnterpriseSalesDashboardDetail(
   if (input.view === "collections") {
     const whereClauses: Prisma.Sql[] = [
       Prisma.sql`t.[retailOrgId] = ${enterpriseNode.retailOrgId}`,
-      Prisma.sql`t.[status] = ${PosTransactionStatus.COMPLETED}`,
       Prisma.sql`t.[deletedAt] IS NULL`
     ];
 
@@ -1784,11 +1783,11 @@ export async function getEnterpriseSalesDashboardDetail(
     }
 
     if (dateFrom) {
-      whereClauses.push(Prisma.sql`COALESCE(t.[completedAt], t.[createdAt]) >= ${dateFrom}`);
+      whereClauses.push(Prisma.sql`p.[receivedAt] >= ${dateFrom}`);
     }
 
     if (dateTo) {
-      whereClauses.push(Prisma.sql`COALESCE(t.[completedAt], t.[createdAt]) <= ${dateTo}`);
+      whereClauses.push(Prisma.sql`p.[receivedAt] <= ${dateTo}`);
     }
 
     const groupedRows = await prisma.$queryRaw<TenderDashboardSqlRow[]>(Prisma.sql`

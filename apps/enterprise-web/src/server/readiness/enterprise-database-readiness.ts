@@ -21,6 +21,8 @@ const requiredMigrationNames = [
   "20260820020000_ecommerce_network_allocation",
   "20260825010000_ecommerce_store_payment_reconciliation",
   "20260825020000_ecommerce_terminal_reservation_reconciliation",
+  "20260826010000_public_trial_signup",
+  "20260827010000_trial_workspace_lifecycle",
 ];
 
 const requiredTables = [
@@ -50,6 +52,9 @@ const requiredTables = [
   "EcommerceFulfillmentLocation",
   "EcommerceFulfillment",
   "EcommerceFulfillmentLine",
+  "trial_signup_request",
+  "trial_lifecycle_event",
+  "trial_workspace_runtime",
   "StoreProductSellingUnit",
   "SalesOrderInventoryReservation",
 ];

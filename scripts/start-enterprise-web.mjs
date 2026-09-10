@@ -3,6 +3,10 @@ import http from "node:http";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: path.join(repositoryRoot, ".env"), quiet: true });
 
 function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -19,7 +23,6 @@ const queueTimeoutMs = positiveInteger(process.env.FLASH_ERP_HTTP_WRITE_QUEUE_TI
 const startupWarmupEnabled = process.env.FLASH_ERP_STARTUP_WARMUP_ENABLED === "true";
 const require = createRequire(import.meta.url);
 const next = require("next");
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const appDirectory = path.join(repositoryRoot, "apps", "enterprise-web");
 const app = next({ dev: false, hostname, port, dir: appDirectory });
 const handle = app.getRequestHandler();

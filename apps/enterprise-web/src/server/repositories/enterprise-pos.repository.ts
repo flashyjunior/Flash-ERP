@@ -417,6 +417,8 @@ export type EnterprisePosWorkspaceData = {
     customerName: string | null;
     status: string;
     totalAmount: number;
+    depositAmount: number;
+    balanceAmount: number;
     operatorName: string | null;
     fulfilledTransactionNo: string | null;
     createdAt: string;
@@ -630,6 +632,8 @@ export async function getEnterprisePosWorkspace(
         sourceTransactionNo: true,
         status: true,
         totalAmount: true,
+        depositAmount: true,
+        balanceAmount: true,
         operatorName: true,
         fulfilledTransactionNo: true,
         createdAt: true,
@@ -854,6 +858,8 @@ export async function getEnterprisePosWorkspace(
       customerName: order.customer?.fullName ?? order.customerNameSnapshot ?? null,
       status: order.status,
       totalAmount: Number(order.totalAmount),
+      depositAmount: Number(order.depositAmount),
+      balanceAmount: Number(order.balanceAmount),
       operatorName: order.operatorName,
       fulfilledTransactionNo: order.fulfilledTransactionNo,
       createdAt: order.createdAt.toISOString(),

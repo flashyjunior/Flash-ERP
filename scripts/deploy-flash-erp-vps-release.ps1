@@ -363,6 +363,89 @@ function Stop-ManagedListener {
   throw "Managed Flash ERP processes did not release port $Port within 45 seconds."
 }
 
+function Stop-ManagedProcessByScript {
+  param(
+    [string]$InstallRoot,
+    [string]$ScriptName
+  )
+
+  $deadline = (Get-Date).AddSeconds(45)
+  do {
+    $processes = @(
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+          $commandLine = [string]$_.CommandLine
+          $commandLine -like "*$InstallRoot*" -and $commandLine -like "*$ScriptName*"
+        }
+    )
+    if ($processes.Count -eq 0) {
+      return
+    }
+    foreach ($process in $processes) {
+      Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+  } while ((Get-Date) -lt $deadline)
+
+  throw "Managed Flash ERP processes using $ScriptName did not stop within 45 seconds."
+}
+
+function Get-DotEnvValue {
+  param(
+    [string]$Path,
+    [string]$Name
+  )
+
+  foreach ($line in Get-Content -LiteralPath $Path) {
+    if ($line -notmatch '^\s*([^#][^=]*)=(.*)$') {
+      continue
+    }
+    if ($Matches[1].Trim() -ne $Name) {
+      continue
+    }
+    $value = $Matches[2].Trim()
+    if (
+      $value.Length -ge 2 -and
+      (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))
+    ) {
+      return $value.Substring(1, $value.Length - 2)
+    }
+    return $value
+  }
+  return $null
+}
+
+function Wait-ForTrialProvisioner {
+  param(
+    [int]$Port,
+    [string]$ExpectedRelease,
+    [int]$TimeoutSeconds = 90
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    try {
+      $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1
+      $process = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$listener.OwningProcess)" -ErrorAction Stop
+      $commandLine = [string]$process.CommandLine
+      if ($commandLine -notlike "*$ExpectedRelease*" -or $commandLine -notlike "*run-trial-provisioner-service.mjs*") {
+        throw "Port $Port is not owned by the expected trial provisioner release."
+      }
+      $response = Invoke-CheckedGet -Uri "http://127.0.0.1:$Port/health" -Label "Trial provisioner health"
+      $health = $response.Content | ConvertFrom-Json
+      if ($health.ok -ne $true) {
+        throw "The trial provisioner health response did not report ok=true."
+      }
+      Write-Host "Trial provisioner is owned by the new release and reports ok=true." -ForegroundColor Green
+      return
+    } catch {
+      Start-Sleep -Seconds 3
+    }
+  } while ((Get-Date) -lt $deadline)
+
+  throw "The trial provisioner did not become healthy under $ExpectedRelease within $TimeoutSeconds seconds."
+}
+
 $packageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $manifestPath = Join-Path $packageRoot "release-manifest.json"
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -418,6 +501,18 @@ $envCandidates = @(
 $environmentSource = $envCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (-not $environmentSource) {
   throw "No current VPS environment file was found in the shared, active-release, or install-root locations. The scheduled task was not changed."
+}
+$trialProvisionerEnabled = (Get-DotEnvValue -Path $environmentSource -Name "FLASH_ERP_TRIAL_PROVISIONER_ENABLED") -eq "true"
+$trialProvisionerPort = 3099
+$configuredTrialProvisionerPort = Get-DotEnvValue -Path $environmentSource -Name "FLASH_ERP_TRIAL_PROVISIONER_PORT"
+$parsedTrialProvisionerPort = 0
+if (
+  $configuredTrialProvisionerPort -and
+  [int]::TryParse($configuredTrialProvisionerPort, [ref]$parsedTrialProvisionerPort) -and
+  $parsedTrialProvisionerPort -ge 1024 -and
+  $parsedTrialProvisionerPort -le 65535
+) {
+  $trialProvisionerPort = $parsedTrialProvisionerPort
 }
 
 Write-Step "Preflight complete for release $releaseId"
@@ -494,6 +589,7 @@ try {
   Write-Step "Switching $TaskName to the direct Node service host"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Stop-ManagedListener -Port 3000 -InstallRoot $installRoot
+  Stop-ManagedProcessByScript -InstallRoot $installRoot -ScriptName "run-trial-provisioner-service.mjs"
   $serviceScript = Join-Path $targetRelease "scripts\run-enterprise-web-service.mjs"
   $newAction = New-ScheduledTaskAction -Execute $nodeExe -Argument ('"{0}"' -f $serviceScript) -WorkingDirectory $targetRelease
   Set-ScheduledTask -TaskName $TaskName -Action $newAction | Out-Null
@@ -503,6 +599,9 @@ try {
   $localBaseUri = "http://127.0.0.1:3000"
   $publicBaseUri = [string]$manifest.publicBaseUrl
   Wait-ForLocalLive -BaseUri $localBaseUri
+  if ($trialProvisionerEnabled) {
+    Wait-ForTrialProvisioner -Port $trialProvisionerPort -ExpectedRelease $targetRelease
+  }
   Assert-HealthSuite -BaseUri $localBaseUri -StoreCode ([string]$manifest.storeCode) -Label "Local"
   Assert-HealthSuite -BaseUri $publicBaseUri -StoreCode ([string]$manifest.storeCode) -Label "Public"
 
@@ -538,6 +637,7 @@ try {
     try {
       Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
       Stop-ManagedListener -Port 3000 -InstallRoot $installRoot
+      Stop-ManagedProcessByScript -InstallRoot $installRoot -ScriptName "run-trial-provisioner-service.mjs"
       Set-ScheduledTask -TaskName $TaskName -Action $previousActions | Out-Null
       Start-ScheduledTask -TaskName $TaskName
       Wait-ForLocalLive -BaseUri "http://127.0.0.1:3000" -TimeoutSeconds 180
