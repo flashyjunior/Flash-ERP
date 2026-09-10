@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -26,6 +26,20 @@ type ShiftSummary = {
   nonCashTenderedAmount: number;
 };
 
+type ReportResult = {
+  summary: {
+    netSalesAmount: number;
+    tenderedAmount: number;
+  };
+  salesRows: Array<{
+    paidAmount: number;
+  }>;
+  tenderRows: Array<{
+    netAmount: number;
+    transactionCount: number;
+  }>;
+};
+
 const temporaryDirectory = mkdtempSync(
   path.join(tmpdir(), "flash-erp-sales-order-payments-"),
 );
@@ -37,6 +51,15 @@ const service = new LocalStoreService(temporaryDirectory, {
 });
 const internals = service as unknown as {
   db: DatabaseSync;
+  requireActiveOperatorSession(): {
+    loginId: string;
+    capabilities: { supervisorEligible: boolean };
+  };
+  browseStoreReports(input: {
+    scope: "STORE";
+    dateFrom: string;
+    dateTo: string;
+  }): ReportResult;
   toShiftSummary(shift: ShiftRow): ShiftSummary;
 };
 
@@ -135,8 +158,63 @@ try {
   assert.equal(friday.cashTenderedAmount, 3000);
   assert.equal(friday.nonCashTenderedAmount, 0);
 
+  internals.requireActiveOperatorSession = () => ({
+    loginId: "gate-supervisor",
+    capabilities: { supervisorEligible: true },
+  });
+  const mondayReport = internals.browseStoreReports({
+    scope: "STORE",
+    dateFrom: "2026-08-03",
+    dateTo: "2026-08-03",
+  });
+  const fridayReport = internals.browseStoreReports({
+    scope: "STORE",
+    dateFrom: "2026-08-07",
+    dateTo: "2026-08-07",
+  });
+
+  assert.equal(mondayReport.summary.tenderedAmount, 2000);
+  assert.equal(mondayReport.summary.netSalesAmount, 0);
+  assert.deepEqual(
+    mondayReport.tenderRows.map((row) => [row.netAmount, row.transactionCount]),
+    [[2000, 1]],
+  );
+  assert.equal(fridayReport.summary.tenderedAmount, 3000);
+  assert.equal(fridayReport.summary.netSalesAmount, 5000);
+  assert.equal(fridayReport.salesRows[0]?.paidAmount, 5000);
+  assert.deepEqual(
+    fridayReport.tenderRows.map((row) => [row.netAmount, row.transactionCount]),
+    [[3000, 1]],
+  );
+
+  const enterpriseOperationsSource = readFileSync(
+    path.resolve(
+      "apps/enterprise-web/src/server/repositories/enterprise-operations.repository.ts",
+    ),
+    "utf8",
+  );
+  const collectionsStart = enterpriseOperationsSource.indexOf(
+    'if (input.view === "collections")',
+  );
+  const collectionsEnd = enterpriseOperationsSource.indexOf(
+    "const viewWhere:",
+    collectionsStart,
+  );
+  const collectionsSource = enterpriseOperationsSource.slice(
+    collectionsStart,
+    collectionsEnd,
+  );
+
+  assert.ok(collectionsStart >= 0 && collectionsEnd > collectionsStart);
+  assert.match(collectionsSource, /p\.\[receivedAt\] >= \$\{dateFrom\}/);
+  assert.match(collectionsSource, /p\.\[receivedAt\] <= \$\{dateTo\}/);
+  assert.doesNotMatch(
+    collectionsSource,
+    /t\.\[status\].*PosTransactionStatus\.COMPLETED/,
+  );
+
   process.stdout.write(
-    "FLASH-ERP sales-order payment attribution passed: deposit 2000 Monday, balance 3000 and sale 5000 Friday.\n",
+    "FLASH-ERP sales-order payment attribution passed: deposit 2000 Monday, balance 3000 and sale 5000 Friday across shift and date reports.\n",
   );
 } finally {
   service.close();

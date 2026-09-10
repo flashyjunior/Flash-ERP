@@ -75,8 +75,9 @@ export default function ForgotPasswordPage() {
           </div>
 
           <p className="mt-4 text-sm leading-6 text-slate-600">
-            Enter your login ID or registered email address and Flash ERP will prepare a recovery
-            link for your account.
+            Enter your login ID or registered email address and Flash ERP will email a recovery
+            link for your account. When several staff accounts share one email address, use the
+            Login ID for the account you want to recover.
           </p>
 
           <form className="mt-8 space-y-4" onSubmit={onSubmit}>

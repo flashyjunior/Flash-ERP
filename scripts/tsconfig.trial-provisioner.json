@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": "..",
+    "paths": {
+      "@flash-erp/domain": ["packages/domain/src/index.ts"],
+      "@flash-erp/domain/*": ["packages/domain/src/*"],
+      "@/*": ["apps/enterprise-web/src/*"]
+    },
+    "types": ["node"]
+  },
+  "include": [
+    "trial-sqlserver-url.ts",
+    "trial-workspace-provisioner-worker.ts",
+    "trial-workspace-disposable-test.ts",
+    "trial-owner-activation-test-worker.ts",
+    "trial-sample-data-test-worker.ts",
+    "../apps/enterprise-web/src/server/trials/trial-owner-token.ts"
+  ]
+}

@@ -2,14 +2,16 @@ import { mkdirSync, createWriteStream } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: path.join(repositoryRoot, ".env") });
 const logDirectory = path.join(repositoryRoot, "logs");
-const logPath = path.join(logDirectory, "enterprise-web.log");
+const logPath = process.env.FLASH_ERP_SERVICE_LOG_PATH?.trim() || path.join(logDirectory, "enterprise-web.log");
 const serverScript = path.join(repositoryRoot, "scripts", "start-enterprise-web.mjs");
 const restartDelayMs = 5_000;
 
-mkdirSync(logDirectory, { recursive: true });
+mkdirSync(path.dirname(logPath), { recursive: true });
 const log = createWriteStream(logPath, { flags: "a" });
 
 function writeLog(message) {
@@ -18,6 +20,7 @@ function writeLog(message) {
 
 let stopping = false;
 let activeChild = null;
+let activeProvisioner = null;
 
 function startServer() {
   writeLog(`Starting enterprise web process with ${process.execPath}.`);
@@ -52,20 +55,53 @@ function startServer() {
   });
 }
 
+function startProvisioner() {
+  if (process.env.FLASH_ERP_TRIAL_PROVISIONER_ENABLED !== "true") return;
+  const provisionerScript = path.join(repositoryRoot, "scripts", "run-trial-provisioner-service.mjs");
+  writeLog(`Starting trial provisioner with ${process.execPath}.`);
+  const child = spawn(process.execPath, [provisionerScript], {
+    cwd: repositoryRoot,
+    env: { ...process.env, NODE_ENV: "production" },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  activeProvisioner = child;
+  child.stdout.pipe(log, { end: false });
+  child.stderr.pipe(log, { end: false });
+  child.on("error", (error) => {
+    writeLog(`Could not start trial provisioner: ${error.stack ?? error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    activeProvisioner = null;
+    writeLog(`Trial provisioner exited with code ${code ?? "none"}, signal ${signal ?? "none"}.`);
+    if (!stopping) {
+      writeLog(`Restarting trial provisioner in ${restartDelayMs}ms.`);
+      setTimeout(startProvisioner, restartDelayMs);
+    }
+  });
+}
+
 function stopService(reason, childSignal = "SIGTERM") {
   if (stopping) return;
   stopping = true;
   writeLog(`${reason} received; stopping enterprise service host.`);
-  if (!activeChild) {
+  const children = [activeChild, activeProvisioner].filter(Boolean);
+  if (children.length === 0) {
     log.end(() => process.exit(0));
     return;
   }
-
-  const child = activeChild;
-  child.once("exit", () => log.end(() => process.exit(0)));
-  child.kill(childSignal);
+  let remaining = children.length;
+  const complete = () => {
+    remaining -= 1;
+    if (remaining === 0) log.end(() => process.exit(0));
+  };
+  for (const child of children) {
+    child.once("exit", complete);
+    child.kill(childSignal);
+  }
   setTimeout(() => {
-    if (activeChild === child) child.kill("SIGKILL");
+    if (activeChild) activeChild.kill("SIGKILL");
+    if (activeProvisioner) activeProvisioner.kill("SIGKILL");
   }, 30_000).unref();
 }
 
@@ -81,3 +117,4 @@ process.on("unhandledRejection", (reason) => {
 
 writeLog(`Service host started with PID ${process.pid}.`);
 startServer();
+startProvisioner();

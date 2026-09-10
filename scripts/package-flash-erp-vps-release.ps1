@@ -90,8 +90,16 @@ function Assert-RuntimePayload {
     "apps\enterprise-web\.next\node_modules",
     "apps\enterprise-web\public",
     "apps\enterprise-web\next.config.mjs",
+    "apps\enterprise-web\src\server\trials\trial-owner-token.ts",
+    "packages\domain\src\prisma-enums.ts",
+    "packages\domain\src\security-permissions.ts",
     "scripts\run-enterprise-web-service.mjs",
     "scripts\start-enterprise-web.mjs",
+    "scripts\run-trial-provisioner-service.mjs",
+    "scripts\run-trial-workspace-service.mjs",
+    "scripts\trial-sqlserver-url.ts",
+    "scripts\trial-workspace-provisioner-worker.ts",
+    "scripts\manage-flash-erp-trial-workspace.ps1",
     "prisma\schema.prisma",
     "prisma\migrations-sqlserver",
     "prisma.config.ts",
@@ -248,8 +256,27 @@ try {
 
   $scriptsDestination = Join-Path $payloadRoot "scripts"
   New-Item -ItemType Directory -Path $scriptsDestination -Force | Out-Null
-  Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\run-enterprise-web-service.mjs") -Destination $scriptsDestination
-  Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\start-enterprise-web.mjs") -Destination $scriptsDestination
+  foreach ($scriptName in @(
+    "run-enterprise-web-service.mjs",
+    "start-enterprise-web.mjs",
+    "run-trial-provisioner-service.mjs",
+    "run-trial-workspace-service.mjs",
+    "trial-sqlserver-url.ts",
+    "trial-workspace-provisioner-worker.ts",
+    "manage-flash-erp-trial-workspace.ps1"
+  )) {
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$scriptName") -Destination $scriptsDestination
+  }
+
+  $trialServerDestination = Join-Path $payloadRoot "apps\enterprise-web\src\server\trials"
+  New-Item -ItemType Directory -Path $trialServerDestination -Force | Out-Null
+  Copy-Item -LiteralPath (Join-Path $repositoryRoot "apps\enterprise-web\src\server\trials\trial-owner-token.ts") -Destination $trialServerDestination
+
+  $domainSourceDestination = Join-Path $payloadRoot "packages\domain\src"
+  New-Item -ItemType Directory -Path $domainSourceDestination -Force | Out-Null
+  foreach ($domainSourceName in @("prisma-enums.ts", "security-permissions.ts")) {
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot "packages\domain\src\$domainSourceName") -Destination $domainSourceDestination
+  }
 
   $prismaDestination = Join-Path $payloadRoot "prisma"
   New-Item -ItemType Directory -Path $prismaDestination -Force | Out-Null
@@ -274,6 +301,7 @@ try {
   }
   $runtimeManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payloadRoot "release-runtime-manifest.json") -Encoding UTF8
   Assert-RuntimePayload -Root $payloadRoot -Aliases $aliasArray -BuildId $buildId
+  Assert-PowerShell51Parse -ScriptPath (Join-Path $payloadRoot "scripts\manage-flash-erp-trial-workspace.ps1")
 
   Write-Step "Creating and re-extracting the inner runtime ZIP"
   $payloadZip = Join-Path $packageRoot $payloadName
@@ -282,6 +310,7 @@ try {
   New-Item -ItemType Directory -Path $payloadVerificationRoot -Force | Out-Null
   Expand-Archive -LiteralPath $payloadZip -DestinationPath $payloadVerificationRoot
   Assert-RuntimePayload -Root $payloadVerificationRoot -Aliases $aliasArray -BuildId $buildId
+  Assert-PowerShell51Parse -ScriptPath (Join-Path $payloadVerificationRoot "scripts\manage-flash-erp-trial-workspace.ps1")
 
   Write-Step "Generating the flat operator-facing package"
   $deploymentScriptSource = Join-Path $repositoryRoot "scripts\deploy-flash-erp-vps-release.ps1"
@@ -345,6 +374,21 @@ Release directory: C:\FlashRMS\releases\FlashRMS-$ReleaseId
 The deployer verifies the payload checksum, refuses release-directory reuse, reuses the active dependency tree, restores the current VPS .env, preserves uploads, applies SQL Server migrations, regenerates Prisma Client with the managed VPS Node runtime, materializes and checks hashed Next dependency aliases, switches FlashRMSHQ to scripts\run-enterprise-web-service.mjs, and automatically restores the prior task action if sustained health fails.
 
 Success requires FlashRMSHQ to remain Running, port 3000 to remain listening for 60 seconds, database readiness ready=true, and HTTP 200 from local and public live/readiness/catalog/storefront plus configured hero images.
+
+TRIAL WORKSPACE PREREQUISITES
+-----------------------------
+
+Before deployment, add the trial provisioner settings from .env.example to the active VPS .env. The deployer deliberately preserves that existing environment file; secrets are never included in this ZIP.
+
+Required settings include FLASH_ERP_TRIAL_PROVISIONER_ENABLED=true, a strong FLASH_ERP_TRIAL_PROVISIONER_SECRET, FLASH_ERP_TRIAL_SQL_ADMIN_URL with controlled CREATE DATABASE rights, the runtime/task/port settings, FLASH_ERP_TRIAL_CONTROL_PLANE_URL, and FLASH_ERP_TRIAL_PUBLIC_URL_TEMPLATE. Keep FLASH_ERP_TRIAL_EXPOSE_OTP and FLASH_ERP_TRIAL_EXPOSE_ACTIVATION false outside disposable local testing. Configure SMTP so OTP and owner activation links are delivered by email.
+
+Preferred public access uses HTTPS plus a governed proxy and keeps FLASH_ERP_TRIAL_RUNTIME_HOST=127.0.0.1. Temporary direct-port UAT may use a template such as http://SERVER:{port}, FLASH_ERP_TRIAL_RUNTIME_HOST=0.0.0.0, and FLASH_ERP_TRIAL_ALLOW_INSECURE_URLS=true only when the selected trial port range is explicitly allowed through the VPS firewall. Do not use that HTTP posture for production trials.
+
+After deployment, confirm the local provisioner before registering a trial:
+
+   Invoke-RestMethod -Uri 'http://127.0.0.1:3099/health'
+
+It must return ok=true. Persisted verified requests that were waiting while the provisioner was unavailable are replayed automatically on startup. A verified signup then creates its own SQL Server database, app directory, scheduled task, port, owner invitation, full owner role, and 14-day expiry. Expiry retains the database for audit but stops access; an authorised extension restarts the same workspace without restoring revoked sessions.
 
 Do not delete or reuse a failed C:\FlashRMS\releases\FlashRMS-$ReleaseId directory. Build a package with a new release ID for any retry.
 "@

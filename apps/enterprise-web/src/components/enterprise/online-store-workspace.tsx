@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, 
 import { useRouter } from "next/navigation";
 import { calculatePosBaseQuantity } from "@flash-erp/domain";
 import { applyAutomaticPromotions, calculateLoyaltyRedemption } from "@flash-erp/sync-core";
-import { FileSpreadsheet, Trash2 } from "lucide-react";
+import { Database, FileSpreadsheet, Trash2 } from "lucide-react";
 import type { SheetData } from "write-excel-file/browser";
 
 import {
@@ -2343,10 +2343,12 @@ function OnlineInventoryStartupAlertsDialog({
 
 export function OnlineStoreWorkspace({
   workspace,
-  initialWorkspace = "dashboard"
+  initialWorkspace = "dashboard",
+  trialSampleDataEnabled = false
 }: {
   workspace: OnlineStoreWorkspaceData;
   initialWorkspace?: "dashboard" | "ecommerce";
+  trialSampleDataEnabled?: boolean;
 }) {
   const router = useRouter();
   const currencyCode = workspace.store?.currencyCode ?? "GHS";
@@ -2375,6 +2377,8 @@ export function OnlineStoreWorkspace({
   const [ecommerceLoadError, setEcommerceLoadError] = useState("");
   const [isLoadingEcommerce, setIsLoadingEcommerce] = useState(false);
   const [ecommerceLoadAttempt, setEcommerceLoadAttempt] = useState(0);
+  const [isCreatingSampleData, setIsCreatingSampleData] = useState(false);
+  const [sampleDataMessage, setSampleDataMessage] = useState("");
   const [managerTab, setManagerTab] = useState<ManagerTab>("shift");
   const [activeReport, setActiveReport] = useState<ReportId>("sales");
   const [inventoryTab, setInventoryTab] = useState<InventoryTab>("stock");
@@ -5196,7 +5200,7 @@ export function OnlineStoreWorkspace({
 
     if (activeReport === "tenders") {
       downloadCsv(baseName, [
-        ["Tender", "Code", "Method", "Transactions", "Net"],
+        ["Tender", "Code", "Method", "Payment entries", "Net"],
         ...reportTenderRows.map((row) => [
           row.tenderMethodName ?? row.paymentMethod,
           row.tenderMethodCode,
@@ -5331,7 +5335,7 @@ export function OnlineStoreWorkspace({
                     }
                   : activeReport === "tenders"
                     ? {
-                        headers: ["Tender", "Method", "Txn", "Net"],
+                        headers: ["Tender", "Method", "Payments", "Net"],
                         rows: reportTenderRows.map((row) => [
                           row.tenderMethodName ?? row.paymentMethod,
                           row.paymentMethod,
@@ -8540,6 +8544,26 @@ export function OnlineStoreWorkspace({
     );
   }
 
+  async function createSampleData() {
+    setIsCreatingSampleData(true);
+    setSampleDataMessage("Creating sample products and opening stock...");
+    try {
+      const response = await fetch("/api/trials/sample-data", { method: "POST" });
+      const payload = (await response.json()) as { message?: string };
+      if (!response.ok) {
+        throw new Error(payload.message || "Flash ERP could not create sample data.");
+      }
+      setSampleDataMessage(payload.message || "Sample data is ready.");
+      router.refresh();
+    } catch (error) {
+      setSampleDataMessage(
+        error instanceof Error ? error.message : "Flash ERP could not create sample data."
+      );
+    } finally {
+      setIsCreatingSampleData(false);
+    }
+  }
+
   return (
     <div
       className={`rms-desktop rms-online-desktop is-touch-optimized${sidebarCollapsed ? " is-sidebar-collapsed" : ""}`}
@@ -8649,6 +8673,17 @@ export function OnlineStoreWorkspace({
             <StatusPill tone="good">Online Store</StatusPill>
             <StatusPill>{workspace.store?.code ?? "online-store"}</StatusPill>
             <StatusPill>{localClock}</StatusPill>
+            {trialSampleDataEnabled && workspace.products.length === 0 ? (
+              <button
+                className="rms-button is-compact is-primary"
+                disabled={isCreatingSampleData}
+                onClick={() => void createSampleData()}
+                type="button"
+              >
+                <Database aria-hidden="true" size={16} />
+                {isCreatingSampleData ? "Creating..." : "Create sample data"}
+              </button>
+            ) : null}
             <button className="rms-button is-compact is-warning" onClick={lockScreen} type="button">
               Lock
             </button>
@@ -8664,6 +8699,7 @@ export function OnlineStoreWorkspace({
                 <p>
                   {workspace.store?.name} · online-web · {currentShift ? `${currentShift.shiftNo} open` : "no shift open"} on this terminal · {dashboardScopeLabel}
                 </p>
+                {sampleDataMessage ? <p className="rms-inline-message" role="status">{sampleDataMessage}</p> : null}
               </div>
               <div className="rms-dashboard-actions">
                 <label className="rms-dashboard-date-field">
@@ -8723,8 +8759,8 @@ export function OnlineStoreWorkspace({
                   </div>
                   <div className="rms-dashboard-tender-list">
                     {dashboardTenderRows.length ? dashboardTenderRows.slice(0, 6).map((row, index) => (
-                      <div key={`${row.paymentMethod}:${row.tenderMethodCode}`}><span><i style={{ background: tenderPalette[index % tenderPalette.length] }} />{row.tenderMethodName ?? row.paymentMethod}</span><strong>{formatMoney(row.netAmount, currencyCode)}</strong><small>{row.transactionCount} txn</small></div>
-                    )) : <div><span><i style={{ background: "#147ad6" }} />No tender posted</span><strong>{formatMoney(0, currencyCode)}</strong><small>0 txn</small></div>}
+                      <div key={`${row.paymentMethod}:${row.tenderMethodCode}`}><span><i style={{ background: tenderPalette[index % tenderPalette.length] }} />{row.tenderMethodName ?? row.paymentMethod}</span><strong>{formatMoney(row.netAmount, currencyCode)}</strong><small>{row.transactionCount} payment(s)</small></div>
+                    )) : <div><span><i style={{ background: "#147ad6" }} />No tender posted</span><strong>{formatMoney(0, currencyCode)}</strong><small>0 payments</small></div>}
                   </div>
                 </div>
               </article>
@@ -9723,7 +9759,7 @@ export function OnlineStoreWorkspace({
                 ) : null}
                 {activeReport === "tenders" ? (
                   <div className="rms-table rms-report-table">
-                    <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Txn</span><span>Net</span></div>
+                    <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Payments</span><span>Net</span></div>
                     {(currentShift?.tenderTotals ?? workspace.reports.tenderRows).map((row) => (
                       <div className="rms-table-row" key={`${row.paymentMethod}:${row.tenderMethodCode}`}><strong>{row.tenderMethodName ?? row.paymentMethod}<small>{row.tenderMethodCode ?? "unmapped"}</small></strong><span>{row.paymentMethod}</span><span>{row.transactionCount}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
                     ))}
@@ -10681,7 +10717,7 @@ export function OnlineStoreWorkspace({
                     <div><span>Transactions</span><strong>{currentShift?.transactionCount ?? workspace.metrics.todayTransactions}</strong></div>
                   </div>
                   <div className="rms-table rms-report-table">
-                    <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Txn</span><span>Net</span></div>
+                    <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Payments</span><span>Net</span></div>
                     {(currentShift?.tenderTotals ?? []).map((row) => (
                       <div className="rms-table-row" key={`${row.paymentMethod}:${row.tenderMethodCode}`}><strong>{row.tenderMethodName ?? row.paymentMethod}<small>{row.tenderMethodCode ?? "unmapped"}</small></strong><span>{row.paymentMethod}</span><span>{row.transactionCount}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
                     ))}
@@ -10939,7 +10975,7 @@ export function OnlineStoreWorkspace({
               ) : null}
               {activeReport === "tenders" ? (
                 <div className="rms-table rms-report-table">
-                  <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Txn</span><span>Net</span></div>
+                  <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Payments</span><span>Net</span></div>
                   {reportTenderRows.map((row) => (
                     <div className="rms-table-row" key={`${row.paymentMethod}:${row.tenderMethodCode}`}><strong>{row.tenderMethodName ?? row.paymentMethod}<small>{row.tenderMethodCode ?? "unmapped"}</small></strong><span>{row.paymentMethod}</span><span>{row.transactionCount}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
                   ))}
