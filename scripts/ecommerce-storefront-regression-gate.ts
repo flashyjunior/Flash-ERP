@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { productCardRequiresSelection } from "../apps/enterprise-web/src/components/ecommerce/storefront-card-action";
@@ -11,6 +12,24 @@ import {
 import { resolveEnterpriseWebRoot } from "../apps/enterprise-web/src/server/files/fuel-evidence-storage";
 
 const expectedWebRoot = path.resolve(process.cwd(), "apps", "enterprise-web");
+const storefrontStyles = readFileSync(
+  path.join(expectedWebRoot, "src", "components", "ecommerce", "public-storefront.module.css"),
+  "utf8",
+);
+
+function readStandaloneZIndex(selector: string) {
+  const matches = [
+    ...storefrontStyles.matchAll(new RegExp(`\\.${selector}\\s*\\{([^}]*)\\}`, "gs")),
+  ];
+  assert(matches.length > 0, `The ${selector} style rule must exist.`);
+  const zIndex = matches
+    .slice()
+    .reverse()
+    .map((match) => match[1]?.match(/z-index:\s*(\d+)/)?.[1])
+    .find(Boolean);
+  assert(zIndex, `The ${selector} style rule must declare a numeric z-index.`);
+  return Number(zIndex);
+}
 
 assert.equal(
   path.resolve(resolveEnterpriseWebRoot()),
@@ -20,6 +39,10 @@ assert.equal(
 assert.equal(productCardRequiresSelection(0), false, "A base product must add directly from its card.");
 assert.equal(productCardRequiresSelection(1), false, "A product with one variant must add directly from its card.");
 assert.equal(productCardRequiresSelection(2), true, "A product with multiple variants must open selection.");
+assert(
+  readStandaloneZIndex("modalBackdrop") > readStandaloneZIndex("drawer"),
+  "The customer authentication modal must remain above the cart and checkout drawer.",
+);
 
 const hierarchyProducts = [
   { department: "ELECTRONICS", category: "COMPUTERS", subcategory: "LAPTOPS" },
@@ -85,4 +108,4 @@ assert.equal(
   "The selected hierarchy label must identify the active catalogue level.",
 );
 
-console.log("Ecommerce storefront regression gate passed: uploads, product-card actions, proper-case taxonomy, and category hierarchy are deterministic.");
+console.log("Ecommerce storefront regression gate passed: uploads, overlay stacking, product-card actions, proper-case taxonomy, and category hierarchy are deterministic.");

@@ -110,6 +110,39 @@ async function waitForPublicCatalog(
     .toBe(true);
 }
 
+test("keeps checkout-triggered customer sign-in above the mobile cart", async ({ page }, testInfo) => {
+  test.skip(!storeCode, "Set FLASH_ERP_E2E_ECOMMERCE_STORE to an enabled public storefront.");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+
+  const addToCartButton = page.getByRole("button", { name: /^Add .+ to cart$/ }).first();
+  test.skip(
+    await addToCartButton.count() === 0,
+    "The storefront has no available simple product for checkout overlay acceptance.",
+  );
+  await addToCartButton.click();
+  await page.getByRole("button", { name: "Open cart" }).click();
+  const storefrontDrawer = page.getByTestId("storefront-drawer");
+  await storefrontDrawer.getByRole("button", { name: "Checkout", exact: true }).click();
+
+  const authDialog = page.getByRole("dialog");
+  await expect(authDialog.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+  const overlayStacking = await page.evaluate(() => ({
+    auth: Number.parseInt(getComputedStyle(document.querySelector('[data-testid="storefront-auth-backdrop"]')!).zIndex, 10),
+    drawer: Number.parseInt(getComputedStyle(document.querySelector('[data-testid="storefront-drawer"]')!).zIndex, 10),
+  }));
+  expect(overlayStacking.auth).toBeGreaterThan(overlayStacking.drawer);
+  expect(await authDialog.evaluate((dialog) => {
+    const bounds = dialog.getBoundingClientRect();
+    const topmostElement = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return topmostElement !== null && dialog.contains(topmostElement);
+  })).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("checkout-auth-mobile.png"), fullPage: false });
+});
+
 test.describe("public ecommerce extension", () => {
   test.skip(!storeCode, "Set FLASH_ERP_E2E_ECOMMERCE_STORE to an enabled public storefront.");
 

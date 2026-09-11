@@ -2119,6 +2119,7 @@
 }
 
 .modalBackdrop {
+  z-index: 70;
   display: grid;
   padding: 12px;
   place-items: center;
