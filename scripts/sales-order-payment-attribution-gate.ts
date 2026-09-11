@@ -213,6 +213,24 @@ try {
     /t\.\[status\].*PosTransactionStatus\.COMPLETED/,
   );
 
+  const dashboardSource = readFileSync(
+    path.resolve(
+      "apps/enterprise-web/src/components/enterprise/enterprise-overview-dashboard.tsx",
+    ),
+    "utf8",
+  );
+  const shopCardsIndex = dashboardSource.indexOf(
+    "operationsDashboard.storeSummaries.map",
+  );
+  const collectionsCardIndex = dashboardSource.indexOf(
+    'label="Amount collected"',
+  );
+  const masterCardsIndex = dashboardSource.indexOf("masterSummaryCards.map");
+
+  assert.ok(shopCardsIndex >= 0);
+  assert.ok(collectionsCardIndex > shopCardsIndex);
+  assert.ok(masterCardsIndex > collectionsCardIndex);
+
   process.stdout.write(
     "FLASH-ERP sales-order payment attribution passed: deposit 2000 Monday, balance 3000 and sale 5000 Friday across shift and date reports.\n",
   );

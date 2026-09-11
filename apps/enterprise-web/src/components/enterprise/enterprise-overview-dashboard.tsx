@@ -762,6 +762,32 @@ export function EnterpriseOverviewDashboard({
         </form>
       </section>
 
+      <section id="shop-performance">
+        <div className="mb-3 flex items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase text-stone-500">Shop performance</p>
+            <h2 className="mt-1 text-lg font-semibold text-stone-950">Active shops ranked by net sales</h2>
+          </div>
+          <span className="text-xs font-medium text-stone-500">Select a shop for its sales detail</span>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {operationsDashboard.storeSummaries.map((row, index) => (
+            <StoreSalesCard
+              currencyCode={currencyCode}
+              href={dashboardHref("net-sales", row.storeCode)}
+              index={index}
+              key={row.storeCode}
+              row={row}
+            />
+          ))}
+          {operationsDashboard.storeSummaries.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-sm font-medium text-stone-500 md:col-span-2 xl:col-span-4">
+              No active shop sales are available for this dashboard scope.
+            </div>
+          ) : null}
+        </div>
+      </section>
+
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <DashboardMetricCard
           detail="Open the completed receipt breakdown"
@@ -811,32 +837,6 @@ export function EnterpriseOverviewDashboard({
           </strong>
           <span className="mt-2 block text-xs font-semibold text-blue-700">View ranked shops</span>
         </a>
-      </section>
-
-      <section id="shop-performance">
-        <div className="mb-3 flex items-end justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold uppercase text-stone-500">Shop performance</p>
-            <h2 className="mt-1 text-lg font-semibold text-stone-950">Active shops ranked by net sales</h2>
-          </div>
-          <span className="text-xs font-medium text-stone-500">Select a shop for its sales detail</span>
-        </div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {operationsDashboard.storeSummaries.map((row, index) => (
-            <StoreSalesCard
-              currencyCode={currencyCode}
-              href={dashboardHref("net-sales", row.storeCode)}
-              index={index}
-              key={row.storeCode}
-              row={row}
-            />
-          ))}
-          {operationsDashboard.storeSummaries.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-sm font-medium text-stone-500 md:col-span-2 xl:col-span-4">
-              No active shop sales are available for this dashboard scope.
-            </div>
-          ) : null}
-        </div>
       </section>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
