@@ -2817,7 +2817,7 @@ export function PublicStorefront({
       ) : null}
 
       <div className={classNames(styles.drawerBackdrop, drawerView && styles.drawerBackdropOpen)} onClick={() => setDrawerView(null)} />
-      <aside className={classNames(styles.drawer, drawerView && styles.drawerOpen)} aria-hidden={!drawerView}>
+      <aside className={classNames(styles.drawer, drawerView && styles.drawerOpen)} aria-hidden={!drawerView || authOpen} data-testid="storefront-drawer">
         {drawerView === "cart" ? (
           <CartPanel
             cart={cart}
@@ -2928,7 +2928,7 @@ export function PublicStorefront({
       </aside>
 
       {authOpen ? (
-        <div className={styles.modalBackdrop} role="presentation" onMouseDown={() => setAuthOpen(false)}>
+        <div className={styles.modalBackdrop} data-testid="storefront-auth-backdrop" role="presentation" onMouseDown={() => setAuthOpen(false)}>
           <section className={styles.authModal} role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
             <button className={styles.modalClose} onClick={() => setAuthOpen(false)} title="Close" type="button"><X size={20} /></button>
             <div className={styles.authMark}><CircleUserRound size={26} /></div>
