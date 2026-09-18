@@ -23,6 +23,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       message: session.message,
+      token: session.token,
+      sessionId: session.sessionId,
       expiresAt: session.expiresAt.toISOString()
     });
   } catch (error) {

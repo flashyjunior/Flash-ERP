@@ -670,6 +670,7 @@ try {
 
   service.issueInterStoreTransfer({
     transferId: "uom-gate-transfer",
+    sourceLocationCode: "WAREHOUSE",
     quantity: 24,
     operatorName: "UOM Gate Admin",
   });
