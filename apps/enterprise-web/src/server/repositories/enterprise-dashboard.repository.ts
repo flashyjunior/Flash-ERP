@@ -59,6 +59,11 @@ export type EnterpriseSyncDashboardData = {
     lastSync: string;
     posture: SyncPosture;
   }>;
+  publicationTargets: Array<{
+    storeCode: string;
+    storeName: string;
+    nodeCode: string;
+  }>;
   priorities: string[];
   downstreamOwnership: Array<{
     title: string;
@@ -180,6 +185,7 @@ export function buildUnavailableEnterpriseSyncDashboard(
     },
     storeOptions: [],
     storeRows: [],
+    publicationTargets: [],
     priorities: [
       "Start the configured SQL Server service and apply the enterprise schema.",
       "Run the Flash ERP seed script to provision the sample stores, terminals, and sync queues.",
@@ -411,14 +417,15 @@ export async function getEnterpriseSyncDashboard(): Promise<EnterpriseSyncDashbo
         nodeType: SyncNodeType.STORE_DESKTOP,
         status: RecordStatus.ACTIVE
       },
-      orderBy: {
-        store: {
-          name: "asc"
-        }
-      },
+      orderBy: [
+        { store: { name: "asc" } },
+        { isPrimary: "desc" },
+        { code: "asc" }
+      ],
       select: {
         code: true,
         name: true,
+        isPrimary: true,
         lastHeartbeatAt: true,
         lastTelemetryAt: true,
         lastReportedHealth: true,
@@ -540,6 +547,22 @@ export async function getEnterpriseSyncDashboard(): Promise<EnterpriseSyncDashbo
       .map((event) => event.targetNodeCode)
       .filter((value): value is string => Boolean(value))
   ).size;
+  const publicationTargetByStoreCode = new Map<
+    string,
+    { storeCode: string; storeName: string; nodeCode: string }
+  >();
+
+  for (const node of storeNodes) {
+    if (!node.store || publicationTargetByStoreCode.has(node.store.code)) {
+      continue;
+    }
+
+    publicationTargetByStoreCode.set(node.store.code, {
+      storeCode: node.store.code,
+      storeName: node.store.name,
+      nodeCode: node.code
+    });
+  }
 
   const priorities = enrichedRows
     .slice()
@@ -596,6 +619,7 @@ export async function getEnterpriseSyncDashboard(): Promise<EnterpriseSyncDashbo
       lastSync: row.lastSync,
       posture: row.posture
     })),
+    publicationTargets: [...publicationTargetByStoreCode.values()],
     priorities,
     downstreamOwnership: downstreamOwnershipBlueprints.map((item) => ({
       title: item.title,

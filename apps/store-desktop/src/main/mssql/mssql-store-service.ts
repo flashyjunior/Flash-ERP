@@ -26,6 +26,8 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseGiftCertificatePublishedPayload,
   EnterpriseInventoryLocationPublishedPayload,
   EnterpriseInventorySerialSnapshotPublishedPayload,
@@ -74,6 +76,7 @@ import type {
 
 import {
   computeNextStoreSyncAt,
+  readStoreEcommerceFulfillmentEligibility,
   readStoreSyncPolicyFromMetadata,
   resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
@@ -85,6 +88,7 @@ import {
 import {
   createPosReceiptSeriesToken,
   formatPosTransactionNumber,
+  isEcommercePosTransactionNumber,
   isLegacyPosTransactionNumber,
   isPosReceiptSeriesToken,
   POS_RECEIPT_MAX_SEQUENCE,
@@ -404,6 +408,7 @@ type InventoryBrowseRow = {
   category_name: string | null;
   subcategory: string | null;
   quantity_on_hand: string | number;
+  active_reserved_quantity: string | number;
   min_stock_level: string | number | null;
   reorder_point: string | number | null;
   safety_stock_level: string | number | null;
@@ -7064,6 +7069,13 @@ export class MssqlStoreService {
         category.[category_name],
         product.[subcategory],
         ISNULL(balance.[quantity_on_hand], CASE WHEN @locationCode IS NULL THEN product.[quantity_on_hand] ELSE 0 END) AS [quantity_on_hand],
+        ISNULL((
+          SELECT SUM(reservation.[base_quantity])
+          FROM [dbo].[sales_order_inventory_reservation] AS reservation
+          WHERE reservation.[status] = N'ACTIVE'
+            AND UPPER(ISNULL(reservation.[inventory_location_code], N'')) = UPPER(ISNULL(location.[location_code], ISNULL(fallbackLocation.[location_code], N'UNASSIGNED')))
+            AND UPPER(reservation.[product_code]) = UPPER(product.[product_code])
+        ), 0) AS [active_reserved_quantity],
         product.[min_stock_level],
         product.[reorder_point],
         product.[safety_stock_level],
@@ -7138,6 +7150,11 @@ export class MssqlStoreService {
     const barcodeByProduct = await this.getRepresentativeBarcodeMap(
       result.recordset.map((row) => row.product_code),
     );
+    const metadata = await this.metadata();
+    const ecommerceEligibilityByLocation =
+      readStoreEcommerceFulfillmentEligibility(
+        metadata.ecommerce_fulfillment_locations_json,
+      );
     const getCriticalStockFloor = (row: InventoryBrowseRow) => {
       const thresholds = [
         row.min_stock_level,
@@ -7238,7 +7255,24 @@ export class MssqlStoreService {
 
     return filteredRows
       .slice(0, limit)
-      .map((row) => ({
+      .map((row) => {
+        const quantityOnHand = Number(asNumber(row.quantity_on_hand).toFixed(3));
+        const activeReservedQuantity = Number(
+          asNumber(row.active_reserved_quantity).toFixed(3),
+        );
+        const safetyStockLevel =
+          row.safety_stock_level === null
+            ? 0
+            : Number(asNumber(row.safety_stock_level).toFixed(3));
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+          row.location_code.trim().toUpperCase(),
+        );
+        const ecommerceEligible = Boolean(
+          ecommerceEligibility?.supportsPickup ||
+            ecommerceEligibility?.supportsDelivery,
+        );
+
+        return {
         locationCode: row.location_code,
         locationName: row.location_name,
         productCode: row.product_code,
@@ -7250,7 +7284,22 @@ export class MssqlStoreService {
         categoryName: row.category_name,
         subcategory: row.subcategory,
         barcode: barcodeByProduct.get(row.product_code) ?? null,
-        quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+        quantityOnHand,
+        activeReservedQuantity,
+        ecommerceSellableQuantity: ecommerceEligible
+          ? Number(
+              Math.max(
+                0,
+                quantityOnHand - activeReservedQuantity - safetyStockLevel,
+              ).toFixed(3),
+            )
+          : 0,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.label ??
+          "Not configured for ecommerce fulfilment",
         minStockLevel:
           row.min_stock_level === null
             ? null
@@ -7272,7 +7321,8 @@ export class MssqlStoreService {
           row.batch_quantities_json,
         ),
         updatedAt: row.updated_at,
-      }));
+        };
+      });
   }
 
   async lookupRemoteStoreInventory(
@@ -20773,6 +20823,14 @@ export class MssqlStoreService {
         await this.setMetadata(key, value, runner);
       }
 
+      if (Array.isArray(storePayload.ecommerceFulfillmentLocations)) {
+        await this.setMetadata(
+          "ecommerce_fulfillment_locations_json",
+          JSON.stringify(storePayload.ecommerceFulfillmentLocations),
+          runner,
+        );
+      }
+
       return;
     }
 
@@ -20991,6 +21049,47 @@ export class MssqlStoreService {
           status: customerPayload.status,
           record_version: 1,
           deleted_at: null,
+          updated_at: appliedAt,
+        },
+        runner,
+      );
+
+      return;
+    }
+
+    if (
+      event.aggregateType === "supplier" &&
+      event.eventType === "supplier.published"
+    ) {
+      const supplierPayload =
+        payload as Partial<EnterpriseSupplierPublishedPayload>;
+
+      if (
+        typeof supplierPayload.storeCode !== "string" ||
+        supplierPayload.storeCode !== storeCode ||
+        typeof supplierPayload.supplierId !== "string" ||
+        typeof supplierPayload.supplierNo !== "string" ||
+        typeof supplierPayload.supplierName !== "string" ||
+        typeof supplierPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid supplier publication payload.",
+        );
+      }
+
+      await this.mergeRow(
+        "supplier_snapshot",
+        ["supplier_no"],
+        {
+          supplier_no: supplierPayload.supplierNo,
+          supplier_name: supplierPayload.supplierName,
+          phone: supplierPayload.phone ?? null,
+          email: supplierPayload.email ?? null,
+          tax_number: null,
+          address_line1: supplierPayload.addressLine1 ?? null,
+          city: supplierPayload.city ?? null,
+          country_code: supplierPayload.countryCode ?? null,
+          status: supplierPayload.status,
           updated_at: appliedAt,
         },
         runner,
@@ -21959,6 +22058,116 @@ export class MssqlStoreService {
     }
 
     if (
+      event.aggregateType === "salesOrder" &&
+      event.eventType === "sales-order.published"
+    ) {
+      const order = payload as Partial<EnterpriseEcommerceSalesOrderPublishedPayload>;
+      const expectedStoreCode = expectedInboundStoreCode(order.storeCode);
+      if (
+        order.source !== "ECOMMERCE" ||
+        order.storeCode !== expectedStoreCode ||
+        typeof order.orderId !== "string" ||
+        typeof order.orderNo !== "string" ||
+        typeof order.sourceTransactionId !== "string" ||
+        typeof order.sourceTransactionNo !== "string" ||
+        typeof order.totalAmount !== "number" ||
+        typeof order.paidAmount !== "number" ||
+        typeof order.balanceAmount !== "number" ||
+        typeof order.salesOrderRecordVersion !== "number" ||
+        !Array.isArray(order.lines) ||
+        !Array.isArray(order.reservations) ||
+        (order.fulfilmentMethod !== "PICKUP" && order.fulfilmentMethod !== "DELIVERY") ||
+        (order.paymentTiming !== "PREPAY" && order.paymentTiming !== "ON_DELIVERY") ||
+        (order.status !== "OPEN" && order.status !== "CANCELLED" && order.status !== "EXPIRED")
+      ) {
+        throw new Error("Flash ERP received an invalid ecommerce sales-order publication payload.");
+      }
+      await rememberInboundStoreCode(order.storeCode);
+      const existingRows = await this.query<{ record_version: number }>(
+        "SELECT [record_version] FROM [dbo].[sales_order] WHERE [id] = @orderId",
+        { orderId: order.orderId }, runner,
+      );
+      if (
+        existingRows.recordset[0] &&
+        existingRows.recordset[0].record_version > order.salesOrderRecordVersion
+      ) return;
+
+      await this.mergeRow("pos_transaction", ["id"], {
+        id: order.sourceTransactionId,
+        transaction_no: order.sourceTransactionNo,
+        shift_id: null,
+        cashier_code: "ECOMMERCE",
+        customer_id: order.customerId ?? null,
+        source_transaction_id: order.sourceTransactionId,
+        source_transaction_no: order.sourceTransactionNo,
+        transaction_type: "SALE",
+        status: order.status === "OPEN" ? "PARKED" : "VOIDED",
+        subtotal_amount: order.subtotalAmount ?? order.totalAmount,
+        discount_amount: order.discountAmount ?? 0,
+        loyalty_redemption_points: 0,
+        loyalty_redemption_amount: 0,
+        tax_amount: order.taxAmount ?? 0,
+        total_amount: order.totalAmount,
+        paid_amount: order.paidAmount,
+        change_amount: 0,
+        notes: order.note ?? null,
+        header_reference: order.orderNo,
+        additional_details: JSON.stringify({ source: "ECOMMERCE", fulfilmentMethod: order.fulfilmentMethod, paymentTiming: order.paymentTiming, recipientName: order.recipientName ?? null, deliveryPhone: order.deliveryPhone ?? null, deliveryAddress: order.deliveryAddress ?? null, networkAllocation: order.networkAllocation === true }),
+        completed_at: null,
+        record_version: order.salesOrderRecordVersion,
+        deleted_at: null,
+        updated_at: appliedAt,
+      }, runner);
+      await this.query("DELETE FROM [dbo].[pos_transaction_line] WHERE [pos_transaction_id] = @transactionId", { transactionId: order.sourceTransactionId }, runner);
+      for (const line of order.lines) {
+        if (typeof line !== "object" || line === null || typeof line.lineId !== "string" || typeof line.productCode !== "string" || typeof line.productName !== "string" || typeof line.quantity !== "number" || typeof line.unitPrice !== "number" || typeof line.lineTotal !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order line.");
+        const products = await this.query<{ id: string }>("SELECT [id] FROM [dbo].[product_snapshot] WHERE [product_code] = @productCode", { productCode: line.productCode }, runner);
+        if (!products.recordset[0]) throw new Error(`Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`);
+        await this.mergeRow("pos_transaction_line", ["id"], {
+          id: line.lineId, pos_transaction_id: order.sourceTransactionId, product_id: products.recordset[0].id,
+          line_intent: "SALE", source_line_id: line.lineId, inventory_location_code: order.dispatchInventoryLocationCode ?? null,
+          applied_promotion_code: line.appliedPromotionCode ?? null, applied_promotion_name: line.appliedPromotionName ?? null,
+          product_code_snapshot: line.productCode, product_variant_code_snapshot: line.productVariantCode ?? null,
+          product_name_snapshot: line.productName, variant_size: line.variantSize ?? null, variant_color: line.variantColor ?? null,
+          variant_attributes_snapshot: line.variantAttributesSnapshot ?? null, line_note: line.lineNote ?? null,
+          serial_numbers_json: "[]", batch_allocations_json: "[]", quantity: line.quantity,
+          selling_unit_of_measure: line.sellingUnitOfMeasure ?? "EA", base_unit_of_measure: line.baseUnitOfMeasure ?? "EA",
+          uom_conversion_factor: line.uomConversionFactor ?? 1, base_quantity: line.baseQuantity ?? line.quantity,
+          unit_price: line.unitPrice, discount_amount: line.discountAmount ?? 0, tax_amount: line.taxAmount ?? 0,
+          line_total: line.lineTotal, manual_price_override: 0, manual_discount_override: 0,
+        }, runner);
+      }
+      await this.mergeRow("sales_order", ["id"], {
+        id: order.orderId, order_no: order.orderNo, source_transaction_id: order.sourceTransactionId, source_transaction_no: order.sourceTransactionNo,
+        customer_id: order.customerId ?? null, customer_no: order.customerNo ?? null, customer_name: order.customerName ?? null,
+        order_type: order.orderType ?? "SALES_ORDER", status: order.status, total_amount: order.totalAmount,
+        deposit_amount: order.depositAmount ?? 0, paid_amount: order.paidAmount, balance_amount: order.balanceAmount,
+        deposit_tender_method_code: order.depositTenderMethodCode ?? null, deposit_tender_method_name: order.depositTenderMethodName ?? null,
+        deposit_payment_method: order.depositPaymentMethod ?? null, deposit_reference: order.depositReference ?? null, deposit_paid_at: order.depositPaidAt ?? null,
+        layaway_policy_snapshot_json: order.layawayPolicySnapshotJson ?? null, minimum_deposit_amount: order.minimumDepositAmount ?? 0,
+        reservation_status: order.reservationStatus ?? "NOT_APPLICABLE", reservation_created_at: order.reservationCreatedAt ?? null,
+        reservation_released_at: order.reservationReleasedAt ?? null, layaway_expires_at: order.layawayExpiresAt ?? null, expired_at: order.expiredAt ?? null,
+        cancellation_fee_amount: order.cancellationFeeAmount ?? 0, refunded_amount: order.refundedAmount ?? 0,
+        record_version: order.salesOrderRecordVersion, operator_name: order.operatorName ?? "Customer web order", note: order.note ?? null,
+        fulfilled_transaction_id: order.fulfilledTransactionId ?? null, fulfilled_transaction_no: order.fulfilledTransactionNo ?? null,
+        synced_at: null, created_at: order.createdAt ?? appliedAt, fulfilled_at: order.fulfilledAt ?? null,
+        cancelled_at: order.cancelledAt ?? null, updated_at: appliedAt,
+      }, runner);
+      await this.query("DELETE FROM [dbo].[sales_order_inventory_reservation] WHERE [sales_order_id] = @orderId", { orderId: order.orderId }, runner);
+      for (const reservation of order.reservations) {
+        if (typeof reservation !== "object" || reservation === null || typeof reservation.reservationId !== "string" || typeof reservation.salesOrderLineId !== "string" || typeof reservation.productCode !== "string" || typeof reservation.baseQuantity !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order reservation.");
+        await this.mergeRow("sales_order_inventory_reservation", ["id"], {
+          id: reservation.reservationId, sales_order_id: order.orderId, sales_order_line_id: reservation.salesOrderLineId,
+          inventory_location_code: reservation.inventoryLocationCode ?? null, product_code: reservation.productCode,
+          product_variant_code: reservation.productVariantCode ?? null, base_unit_of_measure: reservation.baseUnitOfMeasure,
+          base_quantity: reservation.baseQuantity, status: reservation.status, release_reason: reservation.releaseReason ?? null,
+          created_at: reservation.createdAt, released_at: reservation.releasedAt ?? null, updated_at: appliedAt,
+        }, runner);
+      }
+      return;
+    }
+
+    if (
       event.aggregateType === "interStoreTransfer" &&
       event.eventType === "inter-store-transfer.published"
     ) {
@@ -22441,6 +22650,19 @@ export class MssqlStoreService {
             row.payload_json,
           ) as StorePosTransactionCompletedPayload;
         } catch {
+          continue;
+        }
+
+        if (isEcommercePosTransactionNumber(payload.transactionNo)) {
+          await this.query(
+            `UPDATE [dbo].[sync_outbox]
+             SET [failure_kind] = NULL,
+                 [error_message] = NULL,
+                 [updated_at] = @repairedAt
+             WHERE [id] = @eventId`,
+            { eventId: row.id, repairedAt },
+            transaction,
+          );
           continue;
         }
 

@@ -702,6 +702,8 @@ export type EnterpriseReportingDashboardData = {
     customerName: string | null;
     status: string;
     totalAmount: number;
+    depositAmount: number;
+    balanceAmount: number;
     operatorName: string | null;
     fulfilledTransactionNo: string | null;
     updatedAt: string;
@@ -2706,6 +2708,8 @@ export async function getEnterpriseReportingDashboard(
       customerName: row.customerName,
       status: row.status,
       totalAmount: row.totalAmount,
+      depositAmount: row.depositAmount,
+      balanceAmount: row.balanceAmount,
       operatorName: row.operatorName,
       fulfilledTransactionNo: row.fulfilledTransactionNo,
       updatedAt: row.updatedAt,

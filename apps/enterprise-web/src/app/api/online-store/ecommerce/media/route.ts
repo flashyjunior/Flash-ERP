@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { NextResponse } from "next/server";
 
 import { requireOnlineStoreStaff } from "@/server/ecommerce/ecommerce.repository";
+import { resolveEnterpriseWebRoot } from "@/server/files/fuel-evidence-storage";
 
 export const runtime = "nodejs";
 
@@ -16,11 +17,6 @@ const supportedMimeTypes = new Map<string, string>([
   ["image/webp", ".webp"],
   ["image/avif", ".avif"]
 ]);
-
-function resolveEnterpriseWebRoot() {
-  const candidates = [process.cwd(), path.join(process.cwd(), "apps", "enterprise-web")];
-  return candidates.find((candidate) => existsSync(path.join(candidate, "next.config.ts"))) ?? candidates[0];
-}
 
 export async function POST(request: Request) {
   try {

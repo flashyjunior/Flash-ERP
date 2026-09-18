@@ -9,6 +9,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   CreditCard,
+  Database,
   Package,
   ReceiptText,
   ShieldCheck,
@@ -20,6 +21,7 @@ import {
   X
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Bar,
@@ -49,6 +51,7 @@ type EnterpriseOverviewDashboardProps = {
   detailStoreCode: string;
   detailView: EnterpriseSalesDashboardDetailView | null;
   salesDetail: EnterpriseSalesDashboardDetailData | null;
+  trialSampleDataEnabled: boolean;
 };
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -575,12 +578,36 @@ export function EnterpriseOverviewDashboard({
   detailStoreCode,
   detailView,
   operationsDashboard,
-  salesDetail
+  salesDetail,
+  trialSampleDataEnabled
 }: EnterpriseOverviewDashboardProps) {
+  const router = useRouter();
   const currencyCode = operationsDashboard.currencyCode;
   const [salesTrendPeriod, setSalesTrendPeriod] = useState<TrendPeriod>("daily");
   const [totalSalesPeriod, setTotalSalesPeriod] = useState<TrendPeriod>("monthly");
   const [chartsReady, setChartsReady] = useState(false);
+  const [isCreatingSampleData, setIsCreatingSampleData] = useState(false);
+  const [sampleDataMessage, setSampleDataMessage] = useState("");
+
+  async function createSampleData() {
+    setIsCreatingSampleData(true);
+    setSampleDataMessage("Creating sample products and opening stock...");
+    try {
+      const response = await fetch("/api/trials/sample-data", { method: "POST" });
+      const payload = (await response.json()) as { message?: string };
+      if (!response.ok) {
+        throw new Error(payload.message || "Flash ERP could not create sample data.");
+      }
+      setSampleDataMessage(payload.message || "Sample data is ready.");
+      router.refresh();
+    } catch (error) {
+      setSampleDataMessage(
+        error instanceof Error ? error.message : "Flash ERP could not create sample data."
+      );
+    } finally {
+      setIsCreatingSampleData(false);
+    }
+  }
 
   useEffect(() => setChartsReady(true), []);
   const salesTrendRows =
@@ -664,6 +691,26 @@ export function EnterpriseOverviewDashboard({
       activeSection="overview"
       heading="Dashboard"
     >
+      {trialSampleDataEnabled && operationsDashboard.masterCounts.products === 0 ? (
+        <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-emerald-950">Start with a sample catalogue</p>
+            <p className="mt-1 text-sm text-emerald-800" role="status">
+              {sampleDataMessage || "Add 20 products, prices, barcodes, branch stock, and online-store availability for your business type."}
+            </p>
+          </div>
+          <button
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-60"
+            disabled={isCreatingSampleData}
+            onClick={() => void createSampleData()}
+            type="button"
+          >
+            <Database className="h-4 w-4" />
+            {isCreatingSampleData ? "Creating..." : "Create sample data"}
+          </button>
+        </section>
+      ) : null}
+
       <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
         <form action="/" className="grid gap-3 md:grid-cols-[minmax(12rem,1fr)_10rem_10rem_auto_auto]" method="get">
           <label className="grid gap-1 text-sm font-semibold text-stone-700">
@@ -715,6 +762,32 @@ export function EnterpriseOverviewDashboard({
         </form>
       </section>
 
+      <section id="shop-performance">
+        <div className="mb-3 flex items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase text-stone-500">Shop performance</p>
+            <h2 className="mt-1 text-lg font-semibold text-stone-950">Active shops ranked by net sales</h2>
+          </div>
+          <span className="text-xs font-medium text-stone-500">Select a shop for its sales detail</span>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {operationsDashboard.storeSummaries.map((row, index) => (
+            <StoreSalesCard
+              currencyCode={currencyCode}
+              href={dashboardHref("net-sales", row.storeCode)}
+              index={index}
+              key={row.storeCode}
+              row={row}
+            />
+          ))}
+          {operationsDashboard.storeSummaries.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-sm font-medium text-stone-500 md:col-span-2 xl:col-span-4">
+              No active shop sales are available for this dashboard scope.
+            </div>
+          ) : null}
+        </div>
+      </section>
+
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <DashboardMetricCard
           detail="Open the completed receipt breakdown"
@@ -764,32 +837,6 @@ export function EnterpriseOverviewDashboard({
           </strong>
           <span className="mt-2 block text-xs font-semibold text-blue-700">View ranked shops</span>
         </a>
-      </section>
-
-      <section id="shop-performance">
-        <div className="mb-3 flex items-end justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold uppercase text-stone-500">Shop performance</p>
-            <h2 className="mt-1 text-lg font-semibold text-stone-950">Active shops ranked by net sales</h2>
-          </div>
-          <span className="text-xs font-medium text-stone-500">Select a shop for its sales detail</span>
-        </div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {operationsDashboard.storeSummaries.map((row, index) => (
-            <StoreSalesCard
-              currencyCode={currencyCode}
-              href={dashboardHref("net-sales", row.storeCode)}
-              index={index}
-              key={row.storeCode}
-              row={row}
-            />
-          ))}
-          {operationsDashboard.storeSummaries.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-sm font-medium text-stone-500 md:col-span-2 xl:col-span-4">
-              No active shop sales are available for this dashboard scope.
-            </div>
-          ) : null}
-        </div>
       </section>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">

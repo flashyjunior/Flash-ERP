@@ -12,7 +12,10 @@ import {
   Save,
   Store
 } from "lucide-react";
-import type { StoreNodeReplayRequest, StoreNodeReplayResponse } from "@flash-erp/sync-core";
+import type {
+  StoreNodeReplayRequest,
+  StoreNodeReplayResponse
+} from "@flash-erp/sync-core";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { startTransition, useMemo, useState } from "react";

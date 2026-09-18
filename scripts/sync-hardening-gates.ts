@@ -19,6 +19,12 @@ function requireIncludes(source: string, needle: string, label: string) {
   }
 }
 
+function requireExcludes(source: string, needle: string, label: string) {
+  if (source.includes(needle)) {
+    throw new Error(`Sync hardening gate failed: ${label}`);
+  }
+}
+
 const contracts = requireFile("packages/sync-core/src/contracts.ts");
 const policies = requireFile("packages/sync-core/src/policies.ts");
 const httpParser = requireFile("apps/enterprise-web/src/server/sync/store-sync-http.ts");
@@ -36,6 +42,16 @@ const desktopSyncWorker = requireFile(
   "apps/store-desktop/src/main/store-sync-worker-runtime.ts"
 );
 const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.tsx");
+const syncNodeDetail = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-sync-node-detail.tsx"
+);
+const syncDashboard = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-sync-dashboard.tsx"
+);
+const masterDataPublicationRoute = requireFile(
+  "apps/enterprise-web/src/app/api/sync/master-data-publications/route.ts"
+);
+const deployBuild = requireFile("scripts/build-enterprise-web-deploy.mjs");
 const syncDocs = requireFile("docs/09-sync-hardening-and-observability.md");
 
 requireIncludes(policies, "MAX_SYNC_RETRY_ATTEMPTS", "shared retry attempt limit must exist.");
@@ -56,6 +72,26 @@ requireIncludes(
   "push responses must report rejected downstream acknowledgements."
 );
 requireIncludes(contracts, "retryAfterSeconds", "pull responses must expose downstream retry wait.");
+requireIncludes(
+  contracts,
+  "StoreMasterDataPublicationScope",
+  "sync contracts must define selectable master-data publication groups."
+);
+requireIncludes(
+  contracts,
+  "StoreMasterDataDistributionRequest",
+  "sync contracts must define the multi-shop master-data request."
+);
+requireIncludes(
+  contracts,
+  "StoreMasterDataDistributionResponse",
+  "sync contracts must define the multi-shop master-data response."
+);
+requireIncludes(
+  contracts,
+  "EnterpriseSupplierPublishedPayload",
+  "sync contracts must define the supplier publication payload."
+);
 requireIncludes(
   enterpriseSync,
   "sync.downstream-acknowledgement.rejected",
@@ -108,8 +144,83 @@ requireIncludes(
 );
 requireIncludes(
   enterpriseSync,
-  '"inter-store-transfer.target.published",\n                  "security.permission.published"',
+  '"inter-store-transfer.target.published"',
   "automatic master publication deduplication must include transfer-target directory packets."
+);
+requireIncludes(
+  enterpriseSync,
+  "publishStoreMasterDataToNodes",
+  "enterprise must expose governed multi-shop master-data publication."
+);
+requireIncludes(
+  enterpriseSync,
+  'SUPPLIERS: ["supplier.published"]',
+  "manual publication must include suppliers."
+);
+requireIncludes(
+  masterDataPublicationRoute,
+  'const session = await assertEnterprisePermission(["sync.admin.reseed"])',
+  "manual publication must require the sync reseed permission."
+);
+requireIncludes(
+  masterDataPublicationRoute,
+  "operatorName: session.displayName || session.loginId",
+  "manual publication must attribute the authenticated HQ operator."
+);
+requireExcludes(
+  masterDataPublicationRoute,
+  "body.operatorName",
+  "manual publication must not trust a browser-supplied operator name."
+);
+requireIncludes(
+  enterpriseSync,
+  'actionType: "PUBLISH_MASTER_DATA"',
+  "manual publication must persist its required action type without a runtime enum lookup."
+);
+requireIncludes(
+  enterpriseSync,
+  "return prisma.$transaction(",
+  "multi-shop publication must be queued within one governed database transaction."
+);
+requireIncludes(
+  enterpriseSync,
+  "const selectedStoreIds = new Set<string>()",
+  "multi-shop publication must prevent duplicate desktop targets for one shop."
+);
+requireExcludes(
+  syncNodeDetail,
+  "publish-master-data",
+  "manual master-data publication must not remain attached to an individual shop node."
+);
+requireIncludes(
+  syncDashboard,
+  "/api/sync/master-data-publications",
+  "the HQ command center must use the multi-shop publication route."
+);
+requireIncludes(
+  syncDashboard,
+  "Select shops",
+  "the HQ command center must let the operator select destination shops."
+);
+requireIncludes(
+  syncDashboard,
+  "Select data groups",
+  "the HQ command center must let the operator select data groups."
+);
+requireExcludes(
+  syncDashboard,
+  "operatorName",
+  "HQ manual publication must not ask the signed-in operator to type their identity."
+);
+requireIncludes(
+  deployBuild,
+  "rmSync(nextBuildDirectory, { recursive: true, force: true })",
+  "deployment builds must discard stale Next chunks before compiling."
+);
+requireIncludes(
+  syncDashboard,
+  "Queue master data",
+  "HQ command center must expose the multi-shop manual publication workspace."
 );
 
 for (const [source, label] of [
@@ -127,6 +238,7 @@ for (const [source, label] of [
   requireIncludes(source, "last_http_status", `${label} must persist HTTP failure status.`);
   requireIncludes(source, "syncRunId", `${label} must send sync run ids to enterprise.`);
   requireIncludes(source, "POLICY_REJECTED", `${label} must leave permanent policy conflicts out of operator retry.`);
+  requireIncludes(source, 'event.eventType === "supplier.published"', `${label} must apply supplier publications.`);
 }
 
 for (const [source, label] of [
@@ -160,5 +272,10 @@ requireIncludes(
 requireIncludes(syncDocs, "retry window", "sync docs must describe retry windows.");
 requireIncludes(syncDocs, "sync run id", "sync docs must describe sync run correlation.");
 requireIncludes(syncDocs, "rejected acknowledgement", "sync docs must describe rejected ACK handling.");
+requireIncludes(
+  syncDocs,
+  "Manual Master-Data Publication",
+  "sync docs must explain when automatic and manual master publication occurs."
+);
 
 console.log("Sync hardening gate passed.");

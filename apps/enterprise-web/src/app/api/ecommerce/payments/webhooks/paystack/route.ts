@@ -2,14 +2,31 @@ import { NextResponse } from "next/server";
 
 import { ecommerceErrorResponse } from "@/server/ecommerce/ecommerce-api";
 import { processPaystackWebhook } from "@/server/ecommerce/ecommerce-payments";
+import {
+  attachEcommerceServerTiming,
+  recordEcommerceOperation,
+} from "@/server/ecommerce/ecommerce-performance";
 
 export async function POST(request: Request) {
+  const startedAt = performance.now();
   try {
     const rawBody = await request.text();
-    return NextResponse.json(
-      await processPaystackWebhook(rawBody, request.headers.get("x-paystack-signature"))
+    const value = await processPaystackWebhook(
+      rawBody,
+      request.headers.get("x-paystack-signature"),
+    );
+    recordEcommerceOperation("PAYMENT_WEBHOOK", value.storeCode, performance.now() - startedAt, true);
+    return attachEcommerceServerTiming(
+      NextResponse.json({ received: value.received }),
+      "PAYMENT_WEBHOOK",
+      startedAt,
     );
   } catch (error) {
-    return ecommerceErrorResponse(error, "Paystack webhook could not be processed.");
+    recordEcommerceOperation("PAYMENT_WEBHOOK", "GATEWAY", performance.now() - startedAt, false);
+    return attachEcommerceServerTiming(
+      ecommerceErrorResponse(error, "Paystack webhook could not be processed."),
+      "PAYMENT_WEBHOOK",
+      startedAt,
+    );
   }
 }

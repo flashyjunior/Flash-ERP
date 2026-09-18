@@ -18,7 +18,11 @@ import {
   invalidateEnterpriseReadCache
 } from "@/server/performance/enterprise-read-cache";
 import { readPasswordPolicy } from "@/server/repositories/enterprise-security.repository";
-import { deliverEnterpriseMfaCode } from "@/server/services/enterprise-mfa-delivery";
+import {
+  deliverEnterpriseMfaCode,
+  deliverEnterprisePasswordResetLink
+} from "@/server/services/enterprise-mfa-delivery";
+import { enforceTrialWorkspaceAccess } from "@/server/trials/trial-workspace-access";
 
 const sessionCookieName = "flash_rms_session";
 const sessionTokenBytes = 48;
@@ -193,6 +197,18 @@ export class EnterpriseAuthError extends Error {
   }
 }
 
+async function assertTrialWorkspaceAvailable() {
+  const access = await enforceTrialWorkspaceAccess();
+  if (!access?.blocked) return;
+
+  throw new EnterpriseAuthError(
+    access.status === "EXPIRED"
+      ? "This Flash ERP trial has expired. Contact Flash Code Solutions to extend access."
+      : "This Flash ERP trial workspace is not active yet.",
+    403
+  );
+}
+
 function hashSessionToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
@@ -226,6 +242,27 @@ function buildPermissions(roles: Array<{ code: string; permissions: string[] }>)
 
 function normalizeResetIdentifier(value: string) {
   return value.trim();
+}
+
+function isInvitedTrialPasswordRecoveryAccount(user: {
+  accountStatus: string;
+  passwordHash: string | null;
+}) {
+  return (
+    process.env.FLASH_ERP_TRIAL_WORKSPACE_MODE === "true" &&
+    user.accountStatus === "INVITED" &&
+    !user.passwordHash
+  );
+}
+
+function canRecoverEnterprisePassword(user: {
+  accountStatus: string;
+  passwordHash: string | null;
+}) {
+  return (
+    (user.accountStatus === "ACTIVE" && Boolean(user.passwordHash)) ||
+    isInvitedTrialPasswordRecoveryAccount(user)
+  );
 }
 
 function validatePasswordAgainstPolicy(
@@ -571,7 +608,7 @@ export async function requestEnterprisePasswordReset(
     throw new EnterpriseAuthError("Flash ERP enterprise node is not configured yet.", 503);
   }
 
-  const user = await prisma.retailUser.findFirst({
+  const users = await prisma.retailUser.findMany({
     where: {
       retailOrgId: enterpriseContext.retailOrgId,
       deletedAt: null,
@@ -597,7 +634,8 @@ export async function requestEnterprisePasswordReset(
       passwordHash: true,
       passwordUpdatedAt: true,
       accountStatus: true
-    }
+    },
+    orderBy: { loginId: "asc" }
   });
 
   const baseResponse: ForgotPasswordResult = {
@@ -605,45 +643,75 @@ export async function requestEnterprisePasswordReset(
       "If Flash ERP recognizes that account, password recovery instructions are now available."
   };
 
-  if (!user || !user.passwordHash || user.accountStatus !== "ACTIVE") {
+  const recoverableUsers = users.filter(canRecoverEnterprisePassword);
+  const normalizedComparison = normalizedIdentifier.toLowerCase();
+  const loginMatch = recoverableUsers.find(
+    (user) => user.loginId.toLowerCase() === normalizedComparison
+  );
+  const targets = loginMatch
+    ? [loginMatch]
+    : recoverableUsers.filter(
+        (user) => user.email?.toLowerCase() === normalizedComparison
+      );
+
+  if (targets.length === 0) {
     return baseResponse;
   }
-
-  const payload = encodePasswordResetToken({
-    retailOrgId: user.retailOrgId,
-    userId: user.id,
-    loginId: user.loginId,
-    exp: Date.now() + passwordResetTokenLifetimeMinutes * 60_000
-  });
-  const signature = signPasswordResetPayload(payload, buildPasswordResetUserSecret(user));
-  const token = `${payload}.${signature}`;
   const appBaseUrl = (process.env.FLASH_ERP_ENTERPRISE_APP_URL?.trim() || origin).replace(
     /\/$/,
     ""
   );
-  const resetLink = `${appBaseUrl}/reset-password?token=${encodeURIComponent(token)}`;
+  let developmentResetLink: string | null = null;
 
-  await writeSecurityLog({
-    retailOrgId: user.retailOrgId,
-    kind: SecurityLogKind.SECURITY,
-    severity: SecurityLogSeverity.INFO,
-    category: "AUTH",
-    action: "PASSWORD_RESET_REQUESTED",
-    actorLabel: "Self-service recovery",
-    targetType: "Retail user",
-    targetRef: user.loginId,
-    sourceNodeCode: enterpriseContext.code,
-    message: `Password reset was requested for ${user.loginId}.`,
-    details: {
-      identifier: normalizedIdentifier
+  for (const user of targets) {
+    const expiresAt = new Date(Date.now() + passwordResetTokenLifetimeMinutes * 60_000);
+    const payload = encodePasswordResetToken({
+      retailOrgId: user.retailOrgId,
+      userId: user.id,
+      loginId: user.loginId,
+      exp: expiresAt.getTime()
+    });
+    const signature = signPasswordResetPayload(payload, buildPasswordResetUserSecret(user));
+    const token = `${payload}.${signature}`;
+    const resetLink = `${appBaseUrl}/reset-password?token=${encodeURIComponent(token)}`;
+
+    await writeSecurityLog({
+      retailOrgId: user.retailOrgId,
+      kind: SecurityLogKind.SECURITY,
+      severity: SecurityLogSeverity.INFO,
+      category: "AUTH",
+      action: "PASSWORD_RESET_REQUESTED",
+      actorLabel: "Self-service recovery",
+      targetType: "Retail user",
+      targetRef: user.loginId,
+      sourceNodeCode: enterpriseContext.code,
+      message: `Password reset was requested for ${user.loginId}.`,
+      details: {
+        identifier: normalizedIdentifier
+      }
+    });
+
+    if (process.env.NODE_ENV === "production") {
+      await deliverEnterprisePasswordResetLink({
+        retailOrgId: user.retailOrgId,
+        sourceNodeCode: enterpriseContext.code,
+        userId: user.id,
+        loginId: user.loginId,
+        displayName: user.displayName,
+        email: user.email,
+        resetLink,
+        expiresAt
+      });
+    } else if (!developmentResetLink) {
+      developmentResetLink = resetLink;
     }
-  });
+  }
 
-  if (process.env.NODE_ENV !== "production") {
+  if (developmentResetLink) {
     return {
       message:
         "If Flash ERP recognizes that account, a recovery link is available below for this development environment.",
-      resetLink
+      resetLink: developmentResetLink
     };
   }
 
@@ -702,7 +770,7 @@ async function verifyEnterprisePasswordResetToken(token: string) {
     }
   });
 
-  if (!user || !user.passwordHash || user.accountStatus !== "ACTIVE") {
+  if (!user || !canRecoverEnterprisePassword(user)) {
     throw new EnterpriseAuthError("This password reset link is no longer valid.", 400);
   }
 
@@ -736,6 +804,8 @@ export async function resetEnterprisePassword(token: string, nextPassword: strin
 
   const user = await verifyEnterprisePasswordResetToken(token);
   const passwordHash = await bcrypt.hash(normalizedPassword, 12);
+  const now = new Date();
+  const activatesInvitedTrialAccount = isInvitedTrialPasswordRecoveryAccount(user);
 
   await prisma.$transaction(async (tx) => {
     await tx.retailUser.update({
@@ -744,7 +814,8 @@ export async function resetEnterprisePassword(token: string, nextPassword: strin
       },
       data: {
         passwordHash,
-        passwordUpdatedAt: new Date(),
+        passwordUpdatedAt: now,
+        accountStatus: activatesInvitedTrialAccount ? "ACTIVE" : user.accountStatus,
         failedLoginAttempts: 0,
         lockedUntil: null,
         lastModifiedByNodeCode: enterpriseContext.code,
@@ -760,9 +831,25 @@ export async function resetEnterprisePassword(token: string, nextPassword: strin
         revokedAt: null
       },
       data: {
-        revokedAt: new Date()
+        revokedAt: now
       }
     });
+
+    if (activatesInvitedTrialAccount) {
+      await tx.trialWorkspaceRuntime.updateMany({
+        where: {
+          ownerUserId: user.id,
+          status: "ACTIVE",
+          trialExpiresAt: {
+            gt: now
+          }
+        },
+        data: {
+          activatedAt: now,
+          lastLifecycleAt: now
+        }
+      });
+    }
 
     await tx.securityLog.create({
       data: {
@@ -792,7 +879,8 @@ export async function resetEnterprisePassword(token: string, nextPassword: strin
         sourceNodeCode: enterpriseContext.code,
         message: `Password credentials were rotated for ${user.loginId}.`,
         detailsJson: serializeJsonField({
-          revokedSessions: true
+          revokedSessions: true,
+          activatedInvitedTrialAccount: activatesInvitedTrialAccount
         })
       }
     });
@@ -909,6 +997,7 @@ export async function createEnterpriseSession(
   loginId: string,
   password: string
 ): Promise<EnterpriseSignInResult> {
+  await assertTrialWorkspaceAvailable();
   const enterpriseContext = await getEnterpriseContext();
 
   if (!enterpriseContext) {
@@ -1182,6 +1271,7 @@ export async function verifyEnterpriseMfaChallenge(
   challengeToken: string,
   code: string
 ): Promise<EnterpriseMfaVerifyResult> {
+  await assertTrialWorkspaceAvailable();
   const [encodedPayload, signature] = challengeToken.trim().split(".");
 
   if (!encodedPayload || !signature) {
@@ -1738,6 +1828,12 @@ export async function getEnterpriseSession(
   const token = await readSessionTokenFromRequest();
 
   if (!token) {
+    return null;
+  }
+
+  const trialAccess = await enforceTrialWorkspaceAccess();
+  if (trialAccess?.blocked) {
+    cookieStore.delete(sessionCookieName);
     return null;
   }
 

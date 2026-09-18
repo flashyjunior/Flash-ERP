@@ -32,6 +32,8 @@ import {
   SyncOperatorActionType
 } from "@flash-erp/domain";
 
+import { deriveEcommercePaymentProjection } from "../ecommerce/ecommerce-payment-state";
+
 import type {
   CustomerAccountPostingCustomer,
   LoyaltyPolicy,
@@ -48,6 +50,7 @@ import type {
   EnterpriseRolePublishedPayload,
   EnterpriseStoreSettingsPublishedPayload,
   EnterpriseInventorySerialSnapshotPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
   EnterpriseSupplierReturnPublishedPayload,
   EnterpriseInterStoreTransferRequestTargetPublishedPayload,
   EnterpriseProductCategoryPublishedPayload,
@@ -58,6 +61,7 @@ import type {
   EnterpriseTenderMethodPublishedPayload,
   EnterpriseUnitOfMeasurePublishedPayload,
   EnterpriseInventoryTransferTaskPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseInterStoreTransferPublishedPayload,
   EnterprisePurchaseOrderPublishedPayload,
   EnterpriseSyncRecoveryTaskPayload,
@@ -89,6 +93,10 @@ import type {
   StoreNodePushRequest,
   StoreNodePushResponse,
   StoreNodeSyncPolicy,
+  StoreMasterDataPublicationRequest,
+  StoreMasterDataPublicationResponse,
+  StoreMasterDataPublicationScope,
+  StoreMasterDataDistributionResponse,
   StoreBankingDepositRecordedPayload,
   StoreCustomerAccountEntryRecordedPayload,
   StoreEodReconciliationRecordedPayload,
@@ -98,6 +106,7 @@ import type {
   StorePosPaymentPayload,
   StorePosTransactionCompletedPayload,
   StoreSalesOrderRecordedPayload,
+  StoreSalesOrderReservationStatus,
   StoreSyncRecoveryTaskCompletedPayload,
   StoreSyncTaskCompletedPayload,
   StoreRemoteInterStoreRequestInput,
@@ -430,6 +439,7 @@ const priorityStoreTopologyEventTypes = [
   "inventory.location.published",
 ] as const;
 const priorityStoreOperationsEventTypes = [
+  "sales-order.published",
   "security.user.published",
   "security.role.published",
   "setup.unit-of-measure.published",
@@ -1947,12 +1957,96 @@ export async function recordStoreSyncRequestFailure(
   });
 }
 
+const storeMasterDataEventTypesByScope: Record<
+  StoreMasterDataPublicationScope,
+  readonly string[]
+> = {
+  STORE_SETUP: [
+    "store.settings.published",
+    "inventory.location.published",
+    "inter-store-transfer.target.published",
+  ],
+  SECURITY: [
+    "security.permission.published",
+    "security.role.published",
+    "security.user.published",
+  ],
+  CUSTOMERS: ["customer.published"],
+  SUPPLIERS: ["supplier.published"],
+  PRODUCTS: [
+    "setup.product-department.published",
+    "setup.product-category.published",
+    "setup.unit-of-measure.published",
+    "catalog.product.published",
+    "catalog.barcode.published",
+    "inventory.serial-snapshot.published",
+  ],
+  PRICING: ["pricing.price-list.published"],
+  TAX_AND_TENDERS: [
+    "setup.tax-profile.published",
+    "setup.tender-method.published",
+  ],
+  PROMOTIONS: ["setup.promotion.published"],
+  BANKING: ["setup.bank-account.published"],
+  GIFT_CERTIFICATES: ["gift-certificate.published"],
+};
+
+const storeMasterDataPublicationScopes = Object.freeze(
+  Object.keys(
+    storeMasterDataEventTypesByScope,
+  ) as StoreMasterDataPublicationScope[],
+);
+
+function normalizeMasterDataPublicationScopes(
+  scopes: readonly StoreMasterDataPublicationScope[],
+) {
+  const allowedScopes = new Set(storeMasterDataPublicationScopes);
+  const normalized = [...new Set(scopes)].filter((scope) =>
+    allowedScopes.has(scope),
+  );
+
+  if (normalized.length === 0) {
+    throw new Error("Select at least one master-data group to publish.");
+  }
+
+  return normalized;
+}
+
+function normalizeMasterDataPublicationNodeCodes(nodeCodes: readonly string[]) {
+  const normalized = [
+    ...new Set(
+      nodeCodes
+        .map((nodeCode) => nodeCode.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+
+  if (normalized.length === 0) {
+    throw new Error("Select at least one shop to receive the master data.");
+  }
+
+  if (normalized.length > 50) {
+    throw new Error("Flash ERP can publish master data to at most 50 shops at once.");
+  }
+
+  return normalized;
+}
+
+function masterDataEventTypesForScopes(
+  scopes: readonly StoreMasterDataPublicationScope[],
+) {
+  return new Set(
+    scopes.flatMap((scope) => [...storeMasterDataEventTypesByScope[scope]]),
+  );
+}
+
 async function queueAutomaticStoreMasterDataPublications(
   tx: Prisma.TransactionClient | PrismaClient,
   target: StoreSyncTarget,
   now: Date,
   options?: {
     mode?: "bootstrap" | "delta";
+    eventTypes?: ReadonlySet<string>;
   },
 ) {
   if (!target.storeNode.store) {
@@ -1961,6 +2055,10 @@ async function queueAutomaticStoreMasterDataPublications(
 
   const targetStore = target.storeNode.store;
   const mode = options?.mode ?? "delta";
+  const shouldPublish = (eventType: string) =>
+    options?.eventTypes ? options.eventTypes.has(eventType) : true;
+  const shouldPublishAny = (...eventTypes: string[]) =>
+    eventTypes.some((eventType) => shouldPublish(eventType));
   const bootstrapToken =
     mode === "bootstrap" ? `${target.storeNode.code}:${now.getTime()}` : null;
   const existingMasterPublications =
@@ -1979,6 +2077,7 @@ async function queueAutomaticStoreMasterDataPublications(
                   "security.role.published",
                   "security.user.published",
                   "customer.published",
+                  "supplier.published",
                   "setup.product-department.published",
                   "setup.product-category.published",
                   "setup.unit-of-measure.published",
@@ -2055,6 +2154,7 @@ async function queueAutomaticStoreMasterDataPublications(
       | "role"
       | "retailUser"
       | "customer"
+      | "supplier"
       | "promotion"
       | "productDepartment"
       | "productCategory"
@@ -2085,6 +2185,7 @@ async function queueAutomaticStoreMasterDataPublications(
     roles,
     retailUsers,
     customers,
+    suppliers,
     departments,
     categories,
     unitOfMeasures,
@@ -2157,6 +2258,36 @@ async function queueAutomaticStoreMasterDataPublications(
                       },
                     },
                   },
+                },
+              },
+            },
+          },
+          ecommerceFulfillmentLocations: {
+            orderBy: [
+              { inventoryLocation: { name: "asc" } },
+              { routingPriority: "asc" },
+              { storefrontStore: { name: "asc" } },
+            ],
+            select: {
+              status: true,
+              supportsPickup: true,
+              supportsDelivery: true,
+              routingPriority: true,
+              updatedAt: true,
+              inventoryLocation: {
+                select: {
+                  code: true,
+                  status: true,
+                  updatedAt: true,
+                },
+              },
+              storefrontStore: {
+                select: {
+                  code: true,
+                  name: true,
+                  status: true,
+                  ecommerceEnabled: true,
+                  updatedAt: true,
                 },
               },
             },
@@ -2400,6 +2531,28 @@ async function queueAutomaticStoreMasterDataPublications(
               name: true,
             },
           },
+        },
+      }),
+    () =>
+      tx.supplier.findMany({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          deletedAt: null,
+        },
+        orderBy: [{ name: "asc" }, { supplierNo: "asc" }],
+        select: {
+          id: true,
+          supplierNo: true,
+          name: true,
+          contactName: true,
+          phone: true,
+          email: true,
+          addressLine1: true,
+          city: true,
+          countryCode: true,
+          leadTimeDays: true,
+          status: true,
+          updatedAt: true,
         },
       }),
     () =>
@@ -3004,7 +3157,11 @@ async function queueAutomaticStoreMasterDataPublications(
     (entry) => entry.status === RecordStatus.ACTIVE,
   );
 
-  if (mode === "bootstrap" && defaultPriceList) {
+  if (
+    mode === "bootstrap" &&
+    defaultPriceList &&
+    shouldPublishAny("catalog.product.published", "pricing.price-list.published")
+  ) {
     const baseStorePriceByProductId = new Map(
       storeProductPrices
         .filter((entry) => !entry.productVariantId)
@@ -3127,13 +3284,13 @@ async function queueAutomaticStoreMasterDataPublications(
     serialUnitsByProductId.set(serialUnit.product.id, [serialUnit]);
   }
   const outboxRows: Prisma.SyncOutboxEventCreateManyInput[] = [];
-  const accountPaymentReceiptTemplate = target.storeNode.store
+  const accountPaymentReceiptTemplate = shouldPublish("store.settings.published")
     ? await ensureEnterpriseAccountPaymentReceiptTemplate(
         tx,
         target.storeNode.retailOrgId,
       )
     : null;
-  const goodsReceiptTemplate = target.storeNode.store
+  const goodsReceiptTemplate = shouldPublish("store.settings.published")
     ? await ensureEnterpriseGoodsReceiptTemplate(
         tx,
         target.storeNode.retailOrgId,
@@ -3145,6 +3302,7 @@ async function queueAutomaticStoreMasterDataPublications(
         salesReceiptTemplate: storeSettings.salesReceiptTemplate,
       })
     : null;
+  const storeSettingsContractGeneration = 2;
   const storeSettingsVersionStamp = storeSettings
     ? Math.max(
         storeSettings.updatedAt.getTime(),
@@ -3163,11 +3321,17 @@ async function queueAutomaticStoreMasterDataPublications(
             ),
           ),
         ]),
-      )
+        ...storeSettings.ecommerceFulfillmentLocations.flatMap((location) => [
+          location.updatedAt.getTime(),
+          location.inventoryLocation.updatedAt.getTime(),
+          location.storefrontStore.updatedAt.getTime(),
+        ]),
+      ) * 10 + storeSettingsContractGeneration
     : 0;
 
   if (
     storeSettings &&
+    shouldPublish("store.settings.published") &&
     !(
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3218,6 +3382,22 @@ async function queueAutomaticStoreMasterDataPublications(
         target.storeNode.terminal?.licensedUntil?.toISOString() ?? null,
       touchModeEnabled: storeSettings.touchModeEnabled,
       catalogPolicy: storeCatalogPolicy,
+      ecommerceFulfillmentLocations: storeSettings.ecommerceFulfillmentLocations
+        .filter(
+          (location) =>
+            location.status === RecordStatus.ACTIVE &&
+            location.inventoryLocation.status === RecordStatus.ACTIVE &&
+            location.storefrontStore.status === RecordStatus.ACTIVE &&
+            location.storefrontStore.ecommerceEnabled,
+        )
+        .map((location) => ({
+          inventoryLocationCode: location.inventoryLocation.code,
+          storefrontStoreCode: location.storefrontStore.code,
+          storefrontStoreName: location.storefrontStore.name,
+          supportsPickup: location.supportsPickup,
+          supportsDelivery: location.supportsDelivery,
+          routingPriority: location.routingPriority,
+        })),
       timezone: storeSettings.timezone,
       currencyCode: storeSettings.currencyCode,
       salesEnabled: storeSettings.salesEnabled,
@@ -3288,7 +3468,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const location of locations) {
+  for (const location of shouldPublish("inventory.location.published") ? locations : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3330,7 +3510,9 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const location of transferRequestSourceLocations) {
+  for (const location of shouldPublish("inter-store-transfer.target.published")
+    ? transferRequestSourceLocations
+    : []) {
     if (!location.store) {
       continue;
     }
@@ -3379,7 +3561,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const permission of permissions) {
+  for (const permission of shouldPublish("security.permission.published") ? permissions : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3414,7 +3596,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const role of roles) {
+  for (const role of shouldPublish("security.role.published") ? roles : []) {
     const roleVersionStamp = Math.max(
       role.updatedAt.getTime(),
       ...role.rolePermissions.map((rolePermission) =>
@@ -3460,7 +3642,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const retailUser of retailUsers) {
+  for (const retailUser of shouldPublish("security.user.published") ? retailUsers : []) {
     const userPermissionCodes = new Set<string>();
     const userRoleCodes = new Set<string>();
     const userRoleNames = new Set<string>();
@@ -3532,7 +3714,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const customer of customers) {
+  for (const customer of shouldPublish("customer.published") ? customers : []) {
     const customerVersionStamp = customer.updatedAt.getTime();
 
     if (
@@ -3588,7 +3770,52 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const department of departments) {
+  for (const supplier of shouldPublish("supplier.published") ? suppliers : []) {
+    const supplierVersionStamp = supplier.updatedAt.getTime();
+
+    if (
+      mode === "delta" &&
+      hasExistingMasterPublication(
+        "supplier",
+        supplier.supplierNo,
+        supplierVersionStamp,
+      )
+    ) {
+      continue;
+    }
+
+    const payload: EnterpriseSupplierPublishedPayload = {
+      storeCode: target.storeNode.store.code,
+      supplierId: supplier.id,
+      supplierNo: supplier.supplierNo,
+      supplierName: supplier.name,
+      contactName: supplier.contactName,
+      phone: supplier.phone,
+      email: supplier.email,
+      addressLine1: supplier.addressLine1,
+      city: supplier.city,
+      countryCode: supplier.countryCode,
+      leadTimeDays: supplier.leadTimeDays,
+      status: supplier.status,
+      publishedAt: now.toISOString(),
+    };
+
+    outboxRows.push({
+      id: randomUUID(),
+      syncNodeId: target.enterpriseNode.id,
+      targetNodeCode: target.storeNode.code,
+      aggregateType: "supplier",
+      aggregateId: supplier.id,
+      eventType: "supplier.published",
+      idempotencyKey: bootstrapToken
+        ? `${target.enterpriseNode.code}:supplier:bootstrap:${bootstrapToken}:${supplier.supplierNo}:${supplierVersionStamp}`
+        : `${target.enterpriseNode.code}:supplier:auto:${target.storeNode.code}:${supplier.supplierNo}:${supplierVersionStamp}`,
+      payload: serializeRequiredJsonField(payload),
+      status: SyncEventStatus.PENDING,
+    });
+  }
+
+  for (const department of shouldPublish("setup.product-department.published") ? departments : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3625,7 +3852,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const category of categories) {
+  for (const category of shouldPublish("setup.product-category.published") ? categories : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3664,7 +3891,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const unitOfMeasure of unitOfMeasures) {
+  for (const unitOfMeasure of shouldPublish("setup.unit-of-measure.published") ? unitOfMeasures : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -3702,7 +3929,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const promotion of promotions) {
+  for (const promotion of shouldPublish("setup.promotion.published") ? promotions : []) {
     const eligibleStoreCodes = toOptionalStringArraySnapshot(
       promotion.eligibleStoreCodes,
     );
@@ -3793,7 +4020,12 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const product of productsForStore) {
+  for (const product of shouldPublishAny(
+    "catalog.product.published",
+    "inventory.serial-snapshot.published",
+  )
+    ? productsForStore
+    : []) {
     const storeProductPrice = storePriceByProductId.get(product.id);
     const productSellingUnits = sellingUnitsByProductId.get(product.id) ?? [];
     const storeVariantVersionStamps = product.matrixVariants
@@ -3997,7 +4229,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const barcode of barcodes) {
+  for (const barcode of shouldPublish("catalog.barcode.published") ? barcodes : []) {
     const productForBarcode = productsForStore.find(
       (product) => product.code === barcode.product.code,
     );
@@ -4040,7 +4272,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const taxProfile of taxProfiles) {
+  for (const taxProfile of shouldPublish("setup.tax-profile.published") ? taxProfiles : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4079,7 +4311,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const tenderMethod of tenderMethods) {
+  for (const tenderMethod of shouldPublish("setup.tender-method.published") ? tenderMethods : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4128,7 +4360,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const bankAccount of bankAccounts) {
+  for (const bankAccount of shouldPublish("setup.bank-account.published") ? bankAccounts : []) {
     const versionStamp = Math.max(
       bankAccount.updatedAt.getTime(),
       bankAccount.branch.updatedAt.getTime(),
@@ -4176,7 +4408,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const giftCertificate of giftCertificates) {
+  for (const giftCertificate of shouldPublish("gift-certificate.published") ? giftCertificates : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4218,7 +4450,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const purchaseOrder of purchaseOrders) {
+  for (const purchaseOrder of shouldPublish("purchase-order.published") ? purchaseOrders : []) {
     if (
       mode === "delta" &&
       hasExistingMasterPublication(
@@ -4334,7 +4566,7 @@ async function queueAutomaticStoreMasterDataPublications(
     });
   }
 
-  for (const priceList of priceLists) {
+  for (const priceList of shouldPublish("pricing.price-list.published") ? priceLists : []) {
     for (const entry of priceList.entries) {
       if (!activeProductIds.has(entry.product.id)) {
         continue;
@@ -4386,12 +4618,16 @@ async function queueAutomaticStoreMasterDataPublications(
     }
   }
 
-  if (outboxRows.length === 0) {
+  const scopedOutboxRows = options?.eventTypes
+    ? outboxRows.filter((row) => options.eventTypes?.has(row.eventType))
+    : outboxRows;
+
+  if (scopedOutboxRows.length === 0) {
     return 0;
   }
 
   const dedupedOutboxRows = Array.from(
-    new Map(outboxRows.map((row) => [row.idempotencyKey, row])).values(),
+    new Map(scopedOutboxRows.map((row) => [row.idempotencyKey, row])).values(),
   );
   const alreadyQueuedKeys = new Set(
     (
@@ -4428,6 +4664,121 @@ async function queueAutomaticStoreMasterDataPublications(
     });
 
   return result.count;
+}
+
+export async function publishStoreMasterData(
+  nodeCode: string,
+  input: StoreMasterDataPublicationRequest,
+): Promise<StoreMasterDataPublicationResponse> {
+  const distribution = await publishStoreMasterDataToNodes([nodeCode], input);
+  const target = distribution.targets[0];
+
+  if (!target) {
+    throw new Error(`Flash ERP could not publish master data to "${nodeCode}".`);
+  }
+
+  return {
+    nodeCode: target.nodeCode,
+    scopes: distribution.scopes,
+    queuedCount: target.queuedCount,
+    note: distribution.note,
+    operatorName: distribution.operatorName,
+    serverProcessedAt: distribution.serverProcessedAt,
+  };
+}
+
+export async function publishStoreMasterDataToNodes(
+  nodeCodes: readonly string[],
+  input: StoreMasterDataPublicationRequest,
+): Promise<StoreMasterDataDistributionResponse> {
+  const normalizedNodeCodes = normalizeMasterDataPublicationNodeCodes(nodeCodes);
+  const scopes = normalizeMasterDataPublicationScopes(input.scopes ?? []);
+  const eventTypes = masterDataEventTypesForScopes(scopes);
+
+  return prisma.$transaction(
+    async (tx) => {
+      const now = new Date();
+      const targets: StoreSyncTarget[] = [];
+      const selectedStoreIds = new Set<string>();
+      let enterpriseNodeId: string | null = null;
+
+      for (const nodeCode of normalizedNodeCodes) {
+        const target = await getStoreSyncTarget(tx, nodeCode);
+        const targetStore = target.storeNode.store;
+
+        if (!targetStore) {
+          throw new Error(`Store node "${nodeCode}" is not assigned to a shop.`);
+        }
+
+        if (enterpriseNodeId && target.enterpriseNode.id !== enterpriseNodeId) {
+          throw new Error("Selected shops do not belong to the same Flash ERP enterprise.");
+        }
+
+        if (selectedStoreIds.has(targetStore.id)) {
+          throw new Error(`Select only one desktop node for ${targetStore.name}.`);
+        }
+
+        enterpriseNodeId = target.enterpriseNode.id;
+        selectedStoreIds.add(targetStore.id);
+        targets.push(target);
+      }
+
+      const audit = toOperatorAuditInput(
+        input,
+        `Manually queueing ${scopes.join(", ").toLowerCase().replaceAll("_", " ")} master data for ${targets.length} selected shop(s).`,
+      );
+      const results: StoreMasterDataDistributionResponse["targets"] = [];
+
+      for (const target of targets) {
+        const targetStore = target.storeNode.store;
+
+        if (!targetStore) {
+          continue;
+        }
+
+        const queuedCount = await queueAutomaticStoreMasterDataPublications(
+          tx,
+          target,
+          now,
+          {
+            mode: "bootstrap",
+            eventTypes,
+          },
+        );
+
+        await createOperatorAuditAction(tx, {
+          syncNodeId: target.storeNode.id,
+          syncOutboxEventId: null,
+          syncInboundEventId: null,
+          actionType: "PUBLISH_MASTER_DATA",
+          operatorName: audit.operatorName,
+          note: `${audit.note} Target: ${targetStore.name}. Queued ${queuedCount} packet(s).`,
+          aggregateType: "masterData",
+          eventType: [...eventTypes].join(","),
+        });
+
+        results.push({
+          storeCode: targetStore.code,
+          storeName: targetStore.name,
+          nodeCode: target.storeNode.code,
+          queuedCount,
+        });
+      }
+
+      return {
+        targets: results,
+        scopes,
+        queuedCount: results.reduce((total, result) => total + result.queuedCount, 0),
+        note: audit.note,
+        operatorName: audit.operatorName,
+        serverProcessedAt: now.toISOString(),
+      };
+    },
+    {
+      maxWait: 5_000,
+      timeout: 300_000,
+    },
+  );
 }
 
 async function createOperatorAuditAction(
@@ -7225,6 +7576,300 @@ async function getInventoryLocationOnHandQuantity(
   return Number(Number(aggregate._sum.quantity ?? 0).toFixed(3));
 }
 
+export async function queueEcommerceSalesOrderPublication(
+  tx: Prisma.TransactionClient | PrismaClient,
+  input: {
+    salesOrderId: string;
+    publishedAt?: Date;
+  },
+) {
+  const salesOrder = await tx.salesOrder.findUnique({
+    where: { id: input.salesOrderId },
+    select: {
+      id: true,
+      retailOrgId: true,
+      storeId: true,
+      orderNo: true,
+      sourceTransactionId: true,
+      sourceTransactionNo: true,
+      customerId: true,
+      customerNoSnapshot: true,
+      customerNameSnapshot: true,
+      orderType: true,
+      status: true,
+      totalAmount: true,
+      depositAmount: true,
+      paidAmount: true,
+      balanceAmount: true,
+      depositTenderMethodCodeSnapshot: true,
+      depositTenderMethodNameSnapshot: true,
+      depositPaymentMethodSnapshot: true,
+      depositReference: true,
+      depositPaidAt: true,
+      layawayPolicySnapshotJson: true,
+      minimumDepositAmount: true,
+      reservationStatus: true,
+      reservationCreatedAt: true,
+      reservationReleasedAt: true,
+      layawayExpiresAt: true,
+      expiredAt: true,
+      cancellationFeeAmount: true,
+      refundedAmount: true,
+      operatorName: true,
+      note: true,
+      fulfilledTransactionId: true,
+      fulfilledTransactionNo: true,
+      fulfilledAt: true,
+      cancelledAt: true,
+      recordVersion: true,
+      createdAt: true,
+      store: { select: { code: true, name: true } },
+      lines: {
+        select: {
+          id: true,
+          productCodeSnapshot: true,
+          productVariantCodeSnapshot: true,
+          productNameSnapshot: true,
+          variantSizeSnapshot: true,
+          variantColorSnapshot: true,
+          variantAttributesSnapshot: true,
+          lineNote: true,
+          quantity: true,
+          sellingUnitOfMeasure: true,
+          baseUnitOfMeasure: true,
+          uomConversionFactor: true,
+          baseQuantity: true,
+          unitPrice: true,
+          discountAmount: true,
+          taxAmount: true,
+          lineTotal: true,
+          appliedPromotionCode: true,
+          appliedPromotionName: true,
+        },
+      },
+      inventoryReservations: {
+        select: {
+          id: true,
+          salesOrderLineId: true,
+          inventoryLocationCodeSnapshot: true,
+          productCodeSnapshot: true,
+          productVariantCodeSnapshot: true,
+          baseUnitOfMeasure: true,
+          baseQuantity: true,
+          status: true,
+          releaseReason: true,
+          createdAt: true,
+          releasedAt: true,
+        },
+      },
+      ecommerceOrder: {
+        select: {
+          fulfilmentMethod: true,
+          paymentTiming: true,
+          selectedPaymentMethodCode: true,
+          selectedPaymentMethodName: true,
+          recipientName: true,
+          deliveryPhone: true,
+          deliveryAddressLine1: true,
+          deliveryAddressLine2: true,
+          deliveryCity: true,
+          deliveryRegion: true,
+          deliveryCountryCode: true,
+          deliveryPostalCode: true,
+          deliveryNote: true,
+        },
+      },
+      ecommerceFulfillment: {
+        select: {
+          inventoryLocationCodeSnapshot: true,
+          inventoryLocationNameSnapshot: true,
+          routingMethod: true,
+        },
+      },
+    },
+  });
+
+  if (!salesOrder?.ecommerceOrder) {
+    return null;
+  }
+
+  const sourceTransaction = await tx.posTransaction.findUnique({
+    where: { id: salesOrder.sourceTransactionId },
+    select: {
+      subtotalAmount: true,
+      discountAmount: true,
+      taxAmount: true,
+    },
+  });
+
+  if (!sourceTransaction) {
+    return null;
+  }
+
+  const [enterpriseNode, targetStoreNode] = await runPrismaQueriesSequentially([
+    () =>
+      tx.syncNode.findFirst({
+        where: {
+          retailOrgId: salesOrder.retailOrgId,
+          nodeType: SyncNodeType.ENTERPRISE,
+          isPrimary: true,
+          status: RecordStatus.ACTIVE,
+        },
+        select: { id: true, code: true },
+      }),
+    () =>
+      findStoreExecutionNode(
+        tx,
+        salesOrder.retailOrgId,
+        salesOrder.storeId,
+      ),
+  ]);
+
+  if (!enterpriseNode || !targetStoreNode) {
+    return null;
+  }
+
+  const ecommerceOrder = salesOrder.ecommerceOrder;
+  const fulfillment = salesOrder.ecommerceFulfillment;
+  const dispatchInventoryLocationCode =
+    fulfillment?.inventoryLocationCodeSnapshot ?? null;
+  const deliveryAddress = [
+    ecommerceOrder.deliveryAddressLine1,
+    ecommerceOrder.deliveryAddressLine2,
+    ecommerceOrder.deliveryCity,
+    ecommerceOrder.deliveryRegion,
+    ecommerceOrder.deliveryPostalCode,
+    ecommerceOrder.deliveryCountryCode,
+  ]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join(", ") || null;
+  const networkAllocation = salesOrder.inventoryReservations.some(
+    (reservation) =>
+      reservation.inventoryLocationCodeSnapshot !== dispatchInventoryLocationCode,
+  );
+  const paymentTiming =
+    ecommerceOrder.paymentTiming === "PREPAY" ? "PREPAY" : "ON_DELIVERY";
+  const fulfillmentMethod =
+    ecommerceOrder.fulfilmentMethod === "PICKUP" ? "PICKUP" : "DELIVERY";
+  const payload: EnterpriseEcommerceSalesOrderPublishedPayload = {
+    source: "ECOMMERCE",
+    salesOrderRecordVersion: Math.max(1, salesOrder.recordVersion),
+    orderId: salesOrder.id,
+    orderNo: salesOrder.orderNo,
+    storeCode: salesOrder.store.code,
+    terminalCode: targetStoreNode.terminal?.code ?? "ecommerce-web",
+    sourceTransactionId: salesOrder.sourceTransactionId,
+    sourceTransactionNo: salesOrder.sourceTransactionNo,
+    customerId: salesOrder.customerId,
+    customerNo: salesOrder.customerNoSnapshot,
+    customerName: salesOrder.customerNameSnapshot,
+    orderType: salesOrder.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER",
+    subtotalAmount: Number(sourceTransaction.subtotalAmount),
+    discountAmount: Number(sourceTransaction.discountAmount),
+    taxAmount: Number(sourceTransaction.taxAmount),
+    totalAmount: Number(salesOrder.totalAmount),
+    depositAmount: Number(salesOrder.depositAmount),
+    paidAmount: Number(salesOrder.paidAmount),
+    balanceAmount: Number(salesOrder.balanceAmount),
+    depositTenderMethodCode: salesOrder.depositTenderMethodCodeSnapshot,
+    depositTenderMethodName: salesOrder.depositTenderMethodNameSnapshot,
+    depositPaymentMethod: salesOrder.depositPaymentMethodSnapshot as SyncPaymentMethod | null,
+    depositReference: salesOrder.depositReference,
+    depositPaidAt: salesOrder.depositPaidAt?.toISOString() ?? null,
+    layawayPolicySnapshotJson: salesOrder.layawayPolicySnapshotJson,
+    minimumDepositAmount: Number(salesOrder.minimumDepositAmount),
+    reservationStatus: salesOrder.reservationStatus as StoreSalesOrderReservationStatus,
+    reservationCreatedAt: salesOrder.reservationCreatedAt?.toISOString() ?? null,
+    reservationReleasedAt: salesOrder.reservationReleasedAt?.toISOString() ?? null,
+    layawayExpiresAt: salesOrder.layawayExpiresAt?.toISOString() ?? null,
+    expiredAt: salesOrder.expiredAt?.toISOString() ?? null,
+    cancellationFeeAmount: Number(salesOrder.cancellationFeeAmount),
+    refundedAmount: Number(salesOrder.refundedAmount),
+    status: salesOrder.status as StoreSalesOrderStatus,
+    operatorName: salesOrder.operatorName,
+    note: [
+      salesOrder.note,
+      fulfillmentMethod === "DELIVERY"
+        ? `Delivery to ${ecommerceOrder.recipientName}: ${deliveryAddress ?? "address pending"}.`
+        : `Pickup customer: ${ecommerceOrder.recipientName}.`,
+      ecommerceOrder.deliveryNote,
+    ]
+      .filter((part): part is string => Boolean(part?.trim()))
+      .join(" | "),
+    createdAt: salesOrder.createdAt.toISOString(),
+    fulfilledTransactionId: salesOrder.fulfilledTransactionId,
+    fulfilledTransactionNo: salesOrder.fulfilledTransactionNo,
+    fulfilledAt: salesOrder.fulfilledAt?.toISOString() ?? null,
+    cancelledAt: salesOrder.cancelledAt?.toISOString() ?? null,
+    lines: salesOrder.lines.map((line) => ({
+      lineId: line.id,
+      productCode: line.productCodeSnapshot,
+      productVariantCode: line.productVariantCodeSnapshot,
+      productName: line.productNameSnapshot,
+      variantSize: line.variantSizeSnapshot,
+      variantColor: line.variantColorSnapshot,
+      variantAttributesSnapshot: line.variantAttributesSnapshot,
+      lineNote: line.lineNote,
+      quantity: Number(line.quantity),
+      sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+      baseUnitOfMeasure: line.baseUnitOfMeasure,
+      uomConversionFactor: Number(line.uomConversionFactor),
+      baseQuantity: Number(line.baseQuantity),
+      unitPrice: Number(line.unitPrice),
+      discountAmount: Number(line.discountAmount),
+      taxAmount: Number(line.taxAmount),
+      lineTotal: Number(line.lineTotal),
+      appliedPromotionCode: line.appliedPromotionCode,
+      appliedPromotionName: line.appliedPromotionName,
+    })),
+    reservations: salesOrder.inventoryReservations
+      .filter(
+        (reservation) =>
+          reservation.inventoryLocationCodeSnapshot === dispatchInventoryLocationCode,
+      )
+      .map((reservation) => ({
+        reservationId: reservation.id,
+        salesOrderLineId: reservation.salesOrderLineId,
+        inventoryLocationCode: reservation.inventoryLocationCodeSnapshot,
+        productCode: reservation.productCodeSnapshot,
+        productVariantCode: reservation.productVariantCodeSnapshot,
+        baseUnitOfMeasure: reservation.baseUnitOfMeasure,
+        baseQuantity: Number(reservation.baseQuantity),
+        status: reservation.status as StoreSalesOrderReservationStatus,
+        releaseReason: reservation.releaseReason,
+        createdAt: reservation.createdAt.toISOString(),
+        releasedAt: reservation.releasedAt?.toISOString() ?? null,
+      })),
+    fulfilmentMethod: fulfillmentMethod,
+    paymentTiming,
+    selectedPaymentMethodCode: ecommerceOrder.selectedPaymentMethodCode,
+    selectedPaymentMethodName: ecommerceOrder.selectedPaymentMethodName,
+    recipientName: ecommerceOrder.recipientName,
+    deliveryPhone: ecommerceOrder.deliveryPhone,
+    deliveryAddress,
+    dispatchInventoryLocationCode,
+    dispatchInventoryLocationName:
+      fulfillment?.inventoryLocationNameSnapshot ?? null,
+    networkAllocation,
+  };
+
+  await tx.syncOutboxEvent.create({
+    data: {
+      id: randomUUID(),
+      syncNodeId: enterpriseNode.id,
+      targetNodeCode: targetStoreNode.code,
+      aggregateType: "salesOrder",
+      aggregateId: salesOrder.id,
+      eventType: "sales-order.published",
+      idempotencyKey: `${enterpriseNode.code}:ecommerceSalesOrder:${targetStoreNode.code}:${salesOrder.id}:${salesOrder.recordVersion}`,
+      payload: serializeRequiredJsonField(payload),
+      status: SyncEventStatus.PENDING,
+    },
+  });
+
+  return { nodeCode: targetStoreNode.code };
+}
+
 async function findStoreExecutionNode(
   tx: Prisma.TransactionClient | PrismaClient,
   retailOrgId: string,
@@ -7995,7 +8640,7 @@ export async function queueInterStoreTransferPublication(
     },
   });
 
-  if (!transfer || transfer.status === InterStoreTransferStatus.CANCELLED) {
+  if (!transfer) {
     return null;
   }
 
@@ -8997,6 +9642,38 @@ async function projectStoreSalesOrder(
     );
   }
 
+  const terminalReservationTransition =
+    payload.status === SalesOrderStatus.FULFILLED
+      ? {
+          status: "CONSUMED" as const,
+          reason: `Consumed when ${payload.orderNo} was fulfilled.`,
+          occurredAt: payload.fulfilledAt,
+        }
+      : payload.status === SalesOrderStatus.CANCELLED
+        ? {
+            status: "RELEASED" as const,
+            reason: `Released when ${payload.orderNo} was cancelled.`,
+            occurredAt: payload.cancelledAt,
+          }
+        : payload.status === SalesOrderStatus.EXPIRED
+          ? {
+              status: "EXPIRED" as const,
+              reason: `Expired with ${payload.orderNo}.`,
+              occurredAt: payload.expiredAt,
+            }
+          : null;
+  const projectedReservations = payload.reservations?.map((reservation) =>
+    terminalReservationTransition && reservation.status === "ACTIVE"
+      ? {
+          ...reservation,
+          status: terminalReservationTransition.status,
+          releaseReason:
+            reservation.releaseReason ?? terminalReservationTransition.reason,
+          releasedAt:
+            reservation.releasedAt ?? terminalReservationTransition.occurredAt,
+        }
+      : reservation,
+  );
   const customer = await resolveEnterpriseCustomerForSalesOrder(
     tx,
     target.storeNode.retailOrgId,
@@ -9011,9 +9688,44 @@ async function projectStoreSalesOrder(
       storeId: true,
       originNodeCode: true,
       recordVersion: true,
+      reservationStatus: true,
+      reservationReleasedAt: true,
     },
   });
+  const existingActiveReservation = terminalReservationTransition
+    ? await tx.salesOrderInventoryReservation.findFirst({
+        where: {
+          salesOrderId: payload.orderId,
+          status: "ACTIVE",
+        },
+        select: {
+          id: true,
+        },
+      })
+    : null;
+  const hasActiveReservation = Boolean(
+    payload.reservationStatus === "ACTIVE" ||
+      payload.reservations?.some((reservation) => reservation.status === "ACTIVE") ||
+      existingOrder?.reservationStatus === "ACTIVE" ||
+      existingActiveReservation,
+  );
+  const projectedReservationStatus =
+    terminalReservationTransition && hasActiveReservation
+      ? terminalReservationTransition.status
+      : payload.reservationStatus ??
+        existingOrder?.reservationStatus ??
+        "NOT_APPLICABLE";
+  const projectedReservationReleasedAt =
+    payload.reservationReleasedAt ??
+    (terminalReservationTransition && hasActiveReservation
+      ? terminalReservationTransition.occurredAt
+      : existingOrder?.reservationReleasedAt?.toISOString() ?? null);
   const nextRecordVersion = Math.max(1, event.recordVersion);
+  const projectedPayment = deriveEcommercePaymentProjection({
+    totalAmount: payload.totalAmount,
+    paidAmount: payload.paidAmount ?? payload.depositAmount ?? 0,
+    balanceAmount: payload.balanceAmount,
+  });
   const data = {
     retailOrgId: target.storeNode.retailOrgId,
     storeId: target.storeNode.store.id,
@@ -9028,8 +9740,8 @@ async function projectStoreSalesOrder(
     status: payload.status,
     totalAmount: toMoneyString(payload.totalAmount),
     depositAmount: toMoneyString(payload.depositAmount ?? 0),
-    paidAmount: toMoneyString(payload.paidAmount ?? payload.depositAmount ?? 0),
-    balanceAmount: toMoneyString(payload.balanceAmount ?? 0),
+    paidAmount: toMoneyString(projectedPayment.paidAmount),
+    balanceAmount: toMoneyString(projectedPayment.balanceAmount),
     depositTenderMethodCodeSnapshot: payload.depositTenderMethodCode ?? null,
     depositTenderMethodNameSnapshot: payload.depositTenderMethodName ?? null,
     depositPaymentMethodSnapshot: payload.depositPaymentMethod ?? null,
@@ -9037,12 +9749,12 @@ async function projectStoreSalesOrder(
     depositPaidAt: payload.depositPaidAt ? new Date(payload.depositPaidAt) : null,
     layawayPolicySnapshotJson: payload.layawayPolicySnapshotJson ?? null,
     minimumDepositAmount: toMoneyString(payload.minimumDepositAmount ?? 0),
-    reservationStatus: payload.reservationStatus ?? "NOT_APPLICABLE",
+    reservationStatus: projectedReservationStatus,
     reservationCreatedAt: payload.reservationCreatedAt
       ? new Date(payload.reservationCreatedAt)
       : null,
-    reservationReleasedAt: payload.reservationReleasedAt
-      ? new Date(payload.reservationReleasedAt)
+    reservationReleasedAt: projectedReservationReleasedAt
+      ? new Date(projectedReservationReleasedAt)
       : null,
     layawayExpiresAt: payload.layawayExpiresAt
       ? new Date(payload.layawayExpiresAt)
@@ -9062,9 +9774,13 @@ async function projectStoreSalesOrder(
   } satisfies Prisma.SalesOrderUncheckedCreateInput;
 
   if (existingOrder) {
+    const isEcommerceRoutedOrder =
+      existingOrder.storeId === target.storeNode.store.id &&
+      existingOrder.originNodeCode === "ECOMMERCE";
     if (
-      existingOrder.storeId !== target.storeNode.store.id ||
-      existingOrder.originNodeCode !== target.storeNode.code
+      !isEcommerceRoutedOrder &&
+      (existingOrder.storeId !== target.storeNode.store.id ||
+        existingOrder.originNodeCode !== target.storeNode.code)
     ) {
       throw new StoreProjectionError(
         "STALE_VERSION",
@@ -9093,9 +9809,40 @@ async function projectStoreSalesOrder(
     });
   }
 
-  if (payload.reservations !== undefined) {
+  if (
+    payload.status === SalesOrderStatus.OPEN ||
+    payload.status === SalesOrderStatus.FULFILLED
+  ) {
+    await tx.ecommerceOrder.updateMany({
+      where: {
+        retailOrgId: target.storeNode.retailOrgId,
+        salesOrderId: payload.orderId,
+      },
+      data: {
+        paidAmount: toMoneyString(projectedPayment.paidAmount),
+        balanceAmount: toMoneyString(projectedPayment.balanceAmount),
+        paymentStatus: projectedPayment.paymentStatus,
+      },
+    });
+  }
+
+  if (projectedReservations !== undefined) {
     await tx.salesOrderInventoryReservation.deleteMany({
       where: { salesOrderId: payload.orderId },
+    });
+  } else if (terminalReservationTransition) {
+    await tx.salesOrderInventoryReservation.updateMany({
+      where: {
+        salesOrderId: payload.orderId,
+        status: "ACTIVE",
+      },
+      data: {
+        status: terminalReservationTransition.status,
+        releaseReason: terminalReservationTransition.reason,
+        releasedAt: terminalReservationTransition.occurredAt
+          ? new Date(terminalReservationTransition.occurredAt)
+          : new Date(),
+      },
     });
   }
 
@@ -9134,10 +9881,10 @@ async function projectStoreSalesOrder(
     }
   }
 
-  if (payload.reservations !== undefined) {
+  if (projectedReservations !== undefined) {
     const reservationLocationCodes = [
       ...new Set(
-        payload.reservations
+        projectedReservations
           .map((reservation) => reservation.inventoryLocationCode)
           .filter((code): code is string => Boolean(code)),
       ),
@@ -9156,9 +9903,9 @@ async function projectStoreSalesOrder(
       reservationLocations.map((location) => [location.code, location.id]),
     );
 
-    if (payload.reservations.length > 0) {
+    if (projectedReservations.length > 0) {
       await tx.salesOrderInventoryReservation.createMany({
-        data: payload.reservations.map((reservation) => ({
+        data: projectedReservations.map((reservation) => ({
           id: reservation.reservationId,
           salesOrderId: payload.orderId,
           salesOrderLineId: reservation.salesOrderLineId,
@@ -10124,15 +10871,28 @@ async function projectStorePosTransaction(
       id: true,
       storeId: true,
       originNodeCode: true,
+      transactionNo: true,
       status: true,
     },
   });
   let parkedTransactionId: string | null = null;
 
   if (existingTransactionById) {
+    const ecommerceHandoff = existingTransactionById.status === PosTransactionStatus.PARKED
+      ? await tx.salesOrder.findFirst({
+          where: {
+            retailOrgId: target.storeNode.retailOrgId,
+            storeId: target.storeNode.store.id,
+            sourceTransactionId: existingTransactionById.id,
+            sourceTransactionNo: existingTransactionById.transactionNo,
+            ecommerceOrder: { isNot: null },
+          },
+          select: { id: true },
+        })
+      : null;
     if (
       existingTransactionById.storeId === target.storeNode.store.id &&
-      existingTransactionById.originNodeCode === target.storeNode.code
+      (existingTransactionById.originNodeCode === target.storeNode.code || ecommerceHandoff)
     ) {
       if (existingTransactionById.status === PosTransactionStatus.COMPLETED) {
         return true;
@@ -10172,7 +10932,9 @@ async function projectStorePosTransaction(
   });
 
   if (existingTransaction) {
-    if (
+    if (existingTransaction.id === parkedTransactionId) {
+      // The ID lookup already verified this same-store ecommerce handoff.
+    } else if (
       existingTransaction.storeId === target.storeNode.store.id &&
       existingTransaction.originNodeCode === target.storeNode.code
     ) {
@@ -17490,6 +18252,7 @@ export async function lookupStoreNodeRemoteInventory(
   const query = input.query?.trim();
   const productCode = input.productCode?.trim();
   const storeCode = input.storeCode?.trim();
+  const locationCode = input.locationCode?.trim();
   const requestedLimit = Number(input.limit ?? 25);
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(50, Math.max(1, Math.trunc(requestedLimit)))
@@ -17520,6 +18283,7 @@ export async function lookupStoreNodeRemoteInventory(
         department: true,
         category: true,
         subcategory: true,
+        safetyStockLevel: true,
         baseUnitPrice: true,
         priceListEntries: {
           where: {
@@ -17550,6 +18314,7 @@ export async function lookupStoreNodeRemoteInventory(
           ...(storeCode ? { code: storeCode } : {}),
           status: RecordStatus.ACTIVE,
         },
+        ...(locationCode ? { code: locationCode } : {}),
       },
       select: {
         id: true,
@@ -17574,7 +18339,7 @@ export async function lookupStoreNodeRemoteInventory(
     };
   }
 
-  const [balances] = await Promise.all([
+  const [balances, activeReservationGroups, ecommerceFulfillmentLocations] = await Promise.all([
     prisma.inventoryLedgerEntry.groupBy({
       by: ["inventoryLocationId", "productId"],
       where: {
@@ -17593,6 +18358,53 @@ export async function lookupStoreNodeRemoteInventory(
         occurredAt: true,
       },
     }),
+    prisma.salesOrderInventoryReservation.groupBy({
+      by: ["inventoryLocationId", "productCodeSnapshot"],
+      where: {
+        inventoryLocationId: {
+          in: locationIds,
+        },
+        productCodeSnapshot: {
+          in: products.map((product) => product.code),
+        },
+        status: "ACTIVE",
+        salesOrder: {
+          retailOrgId: requester.retailOrgId,
+        },
+      },
+      _sum: {
+        baseQuantity: true,
+      },
+    }),
+    prisma.ecommerceFulfillmentLocation.findMany({
+      where: {
+        retailOrgId: requester.retailOrgId,
+        inventoryLocationId: {
+          in: locationIds,
+        },
+        status: RecordStatus.ACTIVE,
+        storefrontStore: {
+          status: RecordStatus.ACTIVE,
+          ecommerceEnabled: true,
+        },
+      },
+      orderBy: [
+        { inventoryLocationId: "asc" },
+        { routingPriority: "asc" },
+        { storefrontStore: { name: "asc" } },
+      ],
+      select: {
+        inventoryLocationId: true,
+        supportsPickup: true,
+        supportsDelivery: true,
+        routingPriority: true,
+        storefrontStore: {
+          select: {
+            name: true,
+          },
+        },
+      },
+    }),
     prisma.syncNode.update({
       where: {
         id: requester.id,
@@ -17608,6 +18420,43 @@ export async function lookupStoreNodeRemoteInventory(
   const locationsById = new Map(
     locations.map((location) => [location.id, location]),
   );
+  const activeReservedByLocationProduct = new Map(
+    activeReservationGroups.map((group) => [
+      `${group.inventoryLocationId}:${group.productCodeSnapshot.trim().toUpperCase()}`,
+      Number(Number(group._sum.baseQuantity ?? 0).toFixed(3)),
+    ] as const),
+  );
+  const ecommerceEligibilityByLocation = new Map<
+    string,
+    {
+      supportsPickup: boolean;
+      supportsDelivery: boolean;
+      labels: string[];
+    }
+  >();
+
+  for (const fulfillmentLocation of ecommerceFulfillmentLocations) {
+    const current = ecommerceEligibilityByLocation.get(
+      fulfillmentLocation.inventoryLocationId,
+    );
+    const modes = [
+      fulfillmentLocation.supportsPickup ? "pickup" : null,
+      fulfillmentLocation.supportsDelivery ? "delivery" : null,
+    ].filter((value): value is string => Boolean(value));
+    const label = `${fulfillmentLocation.storefrontStore.name}: ${modes.length ? modes.join(" + ") : "disabled"} (priority ${fulfillmentLocation.routingPriority})`;
+
+    if (current) {
+      current.supportsPickup ||= fulfillmentLocation.supportsPickup;
+      current.supportsDelivery ||= fulfillmentLocation.supportsDelivery;
+      current.labels.push(label);
+    } else {
+      ecommerceEligibilityByLocation.set(fulfillmentLocation.inventoryLocationId, {
+        supportsPickup: fulfillmentLocation.supportsPickup,
+        supportsDelivery: fulfillmentLocation.supportsDelivery,
+        labels: [label],
+      });
+    }
+  }
   const rowsByStoreAndProduct = new Map<
     string,
     StoreRemoteInventoryLookupResponse["rows"][number]
@@ -17628,6 +18477,41 @@ export async function lookupStoreNodeRemoteInventory(
       const existing = rowsByStoreAndProduct.get(key);
       const updatedAt =
         balance._max.occurredAt?.toISOString() ?? new Date().toISOString();
+      const activeReservedQuantity =
+        activeReservedByLocationProduct.get(
+          `${balance.inventoryLocationId}:${product.code.trim().toUpperCase()}`,
+        ) ?? 0;
+      const safetyStockLevel = Number(
+        Number(product.safetyStockLevel ?? 0).toFixed(3),
+      );
+      const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+        balance.inventoryLocationId,
+      );
+      const ecommerceEligible = Boolean(
+        ecommerceEligibility?.supportsPickup || ecommerceEligibility?.supportsDelivery,
+      );
+      const ecommerceSellableQuantity = ecommerceEligible
+        ? Number(
+            Math.max(
+              0,
+              quantityOnHand - activeReservedQuantity - safetyStockLevel,
+            ).toFixed(3),
+          )
+        : 0;
+      const locationBreakdown = {
+        locationCode: location.code,
+        locationName: location.name,
+        quantityOnHand,
+        activeReservedQuantity,
+        safetyStockLevel,
+        ecommerceSellableQuantity,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.labels.join("; ") ??
+          "Not configured for ecommerce fulfilment",
+      };
       rowsByStoreAndProduct.set(key, {
         storeCode: location.store.code,
         storeName: location.store.name,
@@ -17641,6 +18525,31 @@ export async function lookupStoreNodeRemoteInventory(
         quantityOnHand: Number(
           ((existing?.quantityOnHand ?? 0) + quantityOnHand).toFixed(3),
         ),
+        activeReservedQuantity: Number(
+          ((existing?.activeReservedQuantity ?? 0) + activeReservedQuantity).toFixed(3),
+        ),
+        safetyStockQuantity: Number(
+          (
+            (existing?.safetyStockQuantity ?? 0) +
+            (ecommerceEligible ? safetyStockLevel : 0)
+          ).toFixed(3),
+        ),
+        ecommerceSellableQuantity: Number(
+          (
+            (existing?.ecommerceSellableQuantity ?? 0) +
+            ecommerceSellableQuantity
+          ).toFixed(3),
+        ),
+        ecommercePickupEligible:
+          (existing?.ecommercePickupEligible ?? false) ||
+          (ecommerceEligibility?.supportsPickup ?? false),
+        ecommerceDeliveryEligible:
+          (existing?.ecommerceDeliveryEligible ?? false) ||
+          (ecommerceEligibility?.supportsDelivery ?? false),
+        locationBreakdown: [
+          ...(existing?.locationBreakdown ?? []),
+          locationBreakdown,
+        ],
         unitPrice: Number(
           Number(
             product.priceListEntries[0]?.unitPrice ?? product.baseUnitPrice,

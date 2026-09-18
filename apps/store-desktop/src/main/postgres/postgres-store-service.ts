@@ -25,6 +25,7 @@ import pg from "pg";
 
 import {
   computeNextStoreSyncAt,
+  readStoreEcommerceFulfillmentEligibility,
   readStoreSyncPolicyFromMetadata,
   resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
@@ -36,6 +37,7 @@ import {
 import {
   createPosReceiptSeriesToken,
   formatPosTransactionNumber,
+  isEcommercePosTransactionNumber,
   isLegacyPosTransactionNumber,
   isPosReceiptSeriesToken,
   POS_RECEIPT_MAX_SEQUENCE,
@@ -47,6 +49,8 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseInventoryLocationPublishedPayload,
   EnterpriseProductCategoryPublishedPayload,
   EnterpriseProductDepartmentPublishedPayload,
@@ -675,6 +679,7 @@ type InventoryBrowseRow = {
   category_name: string | null;
   subcategory: string | null;
   quantity_on_hand: string | number;
+  active_reserved_quantity: string | number;
   min_stock_level: string | number | null;
   reorder_point: string | number | null;
   safety_stock_level: string | number | null;
@@ -7237,6 +7242,13 @@ export class PostgresStoreService {
           balance.quantity_on_hand,
           CASE WHEN $1::text IS NULL THEN product.quantity_on_hand ELSE 0 END
         ) AS quantity_on_hand,
+        COALESCE((
+          SELECT SUM(reservation.base_quantity)
+          FROM sales_order_inventory_reservation AS reservation
+          WHERE reservation.status = 'ACTIVE'
+            AND upper(COALESCE(reservation.inventory_location_code, '')) = upper(COALESCE(location.location_code, fallback_location.location_code, 'UNASSIGNED'))
+            AND upper(reservation.product_code) = upper(product.product_code)
+        ), 0) AS active_reserved_quantity,
         product.min_stock_level,
         product.reorder_point,
         product.safety_stock_level,
@@ -7315,6 +7327,11 @@ export class PostgresStoreService {
     const barcodeByProduct = await this.getRepresentativeBarcodeMap(
       result.rows.map((row) => row.product_code),
     );
+    const metadata = await this.metadata();
+    const ecommerceEligibilityByLocation =
+      readStoreEcommerceFulfillmentEligibility(
+        metadata.ecommerce_fulfillment_locations_json,
+      );
 
     const filteredRows = result.rows.filter((row) => {
       if (
@@ -7406,7 +7423,24 @@ export class PostgresStoreService {
 
     return filteredRows
       .slice(0, limit)
-      .map<StoreInventoryBrowseItem>((row) => ({
+      .map<StoreInventoryBrowseItem>((row) => {
+        const quantityOnHand = Number(asNumber(row.quantity_on_hand).toFixed(3));
+        const activeReservedQuantity = Number(
+          asNumber(row.active_reserved_quantity).toFixed(3),
+        );
+        const safetyStockLevel =
+          row.safety_stock_level === null
+            ? 0
+            : Number(asNumber(row.safety_stock_level).toFixed(3));
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+          row.location_code.trim().toUpperCase(),
+        );
+        const ecommerceEligible = Boolean(
+          ecommerceEligibility?.supportsPickup ||
+            ecommerceEligibility?.supportsDelivery,
+        );
+
+        return {
         locationCode: row.location_code,
         locationName: row.location_name,
         productCode: row.product_code,
@@ -7418,7 +7452,22 @@ export class PostgresStoreService {
         categoryName: row.category_name,
         subcategory: row.subcategory,
         barcode: barcodeByProduct.get(row.product_code) ?? null,
-        quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+        quantityOnHand,
+        activeReservedQuantity,
+        ecommerceSellableQuantity: ecommerceEligible
+          ? Number(
+              Math.max(
+                0,
+                quantityOnHand - activeReservedQuantity - safetyStockLevel,
+              ).toFixed(3),
+            )
+          : 0,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.label ??
+          "Not configured for ecommerce fulfilment",
         minStockLevel:
           row.min_stock_level === null
             ? null
@@ -7440,7 +7489,8 @@ export class PostgresStoreService {
           row.batch_quantities_json,
         ),
         updatedAt: row.updated_at,
-      }));
+        };
+      });
   }
 
   async lookupRemoteStoreInventory(
@@ -22031,6 +22081,14 @@ export class PostgresStoreService {
         );
       }
 
+      if (Array.isArray(storePayload.ecommerceFulfillmentLocations)) {
+        await this.setMetadata(
+          "ecommerce_fulfillment_locations_json",
+          JSON.stringify(storePayload.ecommerceFulfillmentLocations),
+          runner,
+        );
+      }
+
       if (Array.isArray(storePayload.productSizes)) {
         await this.setMetadata(
           "product_sizes_json",
@@ -22694,6 +22752,74 @@ export class PostgresStoreService {
     }
 
     if (
+      event.aggregateType === "supplier" &&
+      event.eventType === "supplier.published"
+    ) {
+      const supplierPayload =
+        payload as Partial<EnterpriseSupplierPublishedPayload>;
+
+      if (
+        typeof supplierPayload.storeCode !== "string" ||
+        supplierPayload.storeCode !== storeCode ||
+        typeof supplierPayload.supplierId !== "string" ||
+        typeof supplierPayload.supplierNo !== "string" ||
+        typeof supplierPayload.supplierName !== "string" ||
+        typeof supplierPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid supplier publication payload.",
+        );
+      }
+
+      await runner.query(
+        `INSERT INTO supplier_snapshot (
+          supplier_no,
+          supplier_name,
+          phone,
+          email,
+          tax_number,
+          address_line1,
+          city,
+          country_code,
+          status,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9)
+        ON CONFLICT (supplier_no) DO UPDATE SET
+          supplier_name = excluded.supplier_name,
+          phone = excluded.phone,
+          email = excluded.email,
+          address_line1 = excluded.address_line1,
+          city = excluded.city,
+          country_code = excluded.country_code,
+          status = excluded.status,
+          updated_at = excluded.updated_at`,
+        [
+          supplierPayload.supplierNo,
+          supplierPayload.supplierName,
+          typeof supplierPayload.phone === "string"
+            ? supplierPayload.phone
+            : null,
+          typeof supplierPayload.email === "string"
+            ? supplierPayload.email
+            : null,
+          typeof supplierPayload.addressLine1 === "string"
+            ? supplierPayload.addressLine1
+            : null,
+          typeof supplierPayload.city === "string"
+            ? supplierPayload.city
+            : null,
+          typeof supplierPayload.countryCode === "string"
+            ? supplierPayload.countryCode
+            : null,
+          supplierPayload.status,
+          appliedAt,
+        ],
+      );
+
+      return;
+    }
+
+    if (
       event.aggregateType === "purchaseOrder" &&
       event.eventType === "purchase-order.published"
     ) {
@@ -22940,6 +23066,58 @@ export class PostgresStoreService {
         ],
       );
 
+      return;
+    }
+
+    if (
+      event.aggregateType === "salesOrder" &&
+      event.eventType === "sales-order.published"
+    ) {
+      const order = payload as Partial<EnterpriseEcommerceSalesOrderPublishedPayload>;
+      const expectedStoreCode = expectedInboundStoreCode(order.storeCode);
+      if (
+        order.source !== "ECOMMERCE" || order.storeCode !== expectedStoreCode ||
+        typeof order.orderId !== "string" || typeof order.orderNo !== "string" ||
+        typeof order.sourceTransactionId !== "string" || typeof order.sourceTransactionNo !== "string" ||
+        typeof order.totalAmount !== "number" || typeof order.paidAmount !== "number" ||
+        typeof order.balanceAmount !== "number" || typeof order.salesOrderRecordVersion !== "number" ||
+        !Array.isArray(order.lines) || !Array.isArray(order.reservations) ||
+        (order.fulfilmentMethod !== "PICKUP" && order.fulfilmentMethod !== "DELIVERY") ||
+        (order.paymentTiming !== "PREPAY" && order.paymentTiming !== "ON_DELIVERY") ||
+        (order.status !== "OPEN" && order.status !== "CANCELLED" && order.status !== "EXPIRED")
+      ) throw new Error("Flash ERP received an invalid ecommerce sales-order publication payload.");
+      await rememberInboundStoreCode(order.storeCode);
+      const existing = await runner.query<{ record_version: number }>("SELECT record_version FROM sales_order WHERE id = $1", [order.orderId]);
+      if (existing.rows[0] && existing.rows[0].record_version > order.salesOrderRecordVersion) return;
+
+      await runner.query(
+        `INSERT INTO pos_transaction (id, transaction_no, shift_id, cashier_code, customer_id, source_transaction_id, source_transaction_no, transaction_type, status, subtotal_amount, discount_amount, loyalty_redemption_points, loyalty_redemption_amount, tax_amount, total_amount, paid_amount, change_amount, notes, header_reference, additional_details, completed_at, record_version, deleted_at, updated_at)
+         VALUES ($1,$2,NULL,'ECOMMERCE',$3,$1,$2,'SALE',$4,$5,$6,0,0,$7,$8,$9,0,$10,$11,$12,NULL,$13,NULL,$14)
+         ON CONFLICT (id) DO UPDATE SET status=excluded.status, customer_id=excluded.customer_id, subtotal_amount=excluded.subtotal_amount, discount_amount=excluded.discount_amount, tax_amount=excluded.tax_amount, total_amount=excluded.total_amount, paid_amount=excluded.paid_amount, notes=excluded.notes, header_reference=excluded.header_reference, additional_details=excluded.additional_details, record_version=excluded.record_version, updated_at=excluded.updated_at`,
+        [order.sourceTransactionId, order.sourceTransactionNo, order.customerId ?? null, order.status === "OPEN" ? "PARKED" : "VOIDED", order.subtotalAmount ?? order.totalAmount, order.discountAmount ?? 0, order.taxAmount ?? 0, order.totalAmount, order.paidAmount, order.note ?? null, order.orderNo, JSON.stringify({ source: "ECOMMERCE", fulfilmentMethod: order.fulfilmentMethod, paymentTiming: order.paymentTiming, recipientName: order.recipientName ?? null, deliveryPhone: order.deliveryPhone ?? null, deliveryAddress: order.deliveryAddress ?? null, networkAllocation: order.networkAllocation === true }), order.salesOrderRecordVersion, appliedAt],
+      );
+      await runner.query("DELETE FROM pos_transaction_line WHERE pos_transaction_id = $1", [order.sourceTransactionId]);
+      for (const line of order.lines) {
+        if (typeof line !== "object" || line === null || typeof line.lineId !== "string" || typeof line.productCode !== "string" || typeof line.productName !== "string" || typeof line.quantity !== "number" || typeof line.unitPrice !== "number" || typeof line.lineTotal !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order line.");
+        const product = await runner.query<{ id: string }>("SELECT id FROM product_snapshot WHERE product_code = $1 LIMIT 1", [line.productCode]);
+        if (!product.rows[0]) throw new Error(`Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`);
+        await runner.query(
+          `INSERT INTO pos_transaction_line (id,pos_transaction_id,product_id,line_intent,source_line_id,inventory_location_code,applied_promotion_code,applied_promotion_name,product_code_snapshot,product_variant_code_snapshot,product_name_snapshot,variant_size,variant_color,variant_attributes_snapshot,line_note,serial_numbers_json,batch_allocations_json,quantity,selling_unit_of_measure,base_unit_of_measure,uom_conversion_factor,base_quantity,unit_price,discount_amount,tax_amount,line_total,manual_price_override,manual_discount_override)
+           VALUES ($1,$2,$3,'SALE',$1,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'[]','[]',$14,$15,$16,$17,$18,$19,$20,$21,$22,0,0)`,
+          [line.lineId,order.sourceTransactionId,product.rows[0].id,order.dispatchInventoryLocationCode ?? null,line.appliedPromotionCode ?? null,line.appliedPromotionName ?? null,line.productCode,line.productVariantCode ?? null,line.productName,line.variantSize ?? null,line.variantColor ?? null,line.variantAttributesSnapshot ?? null,line.lineNote ?? null,line.quantity,line.sellingUnitOfMeasure ?? "EA",line.baseUnitOfMeasure ?? "EA",line.uomConversionFactor ?? 1,line.baseQuantity ?? line.quantity,line.unitPrice,line.discountAmount ?? 0,line.taxAmount ?? 0,line.lineTotal],
+        );
+      }
+      await runner.query(
+        `INSERT INTO sales_order (id,order_no,source_transaction_id,source_transaction_no,customer_id,customer_no,customer_name,order_type,status,total_amount,deposit_amount,paid_amount,balance_amount,deposit_tender_method_code,deposit_tender_method_name,deposit_payment_method,deposit_reference,deposit_paid_at,layaway_policy_snapshot_json,minimum_deposit_amount,reservation_status,reservation_created_at,reservation_released_at,layaway_expires_at,expired_at,cancellation_fee_amount,refunded_amount,record_version,operator_name,note,fulfilled_transaction_id,fulfilled_transaction_no,synced_at,created_at,fulfilled_at,cancelled_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,NULL,$33,$34,$35,$36)
+         ON CONFLICT (id) DO UPDATE SET status=excluded.status,total_amount=excluded.total_amount,deposit_amount=excluded.deposit_amount,paid_amount=excluded.paid_amount,balance_amount=excluded.balance_amount,deposit_tender_method_code=excluded.deposit_tender_method_code,deposit_tender_method_name=excluded.deposit_tender_method_name,deposit_payment_method=excluded.deposit_payment_method,deposit_reference=excluded.deposit_reference,deposit_paid_at=excluded.deposit_paid_at,reservation_status=excluded.reservation_status,reservation_created_at=excluded.reservation_created_at,reservation_released_at=excluded.reservation_released_at,layaway_expires_at=excluded.layaway_expires_at,expired_at=excluded.expired_at,cancellation_fee_amount=excluded.cancellation_fee_amount,refunded_amount=excluded.refunded_amount,record_version=excluded.record_version,note=excluded.note,fulfilled_transaction_id=excluded.fulfilled_transaction_id,fulfilled_transaction_no=excluded.fulfilled_transaction_no,fulfilled_at=excluded.fulfilled_at,cancelled_at=excluded.cancelled_at,updated_at=excluded.updated_at`,
+        [order.orderId,order.orderNo,order.sourceTransactionId,order.sourceTransactionNo,order.customerId ?? null,order.customerNo ?? null,order.customerName ?? null,order.orderType ?? "SALES_ORDER",order.status,order.totalAmount,order.depositAmount ?? 0,order.paidAmount,order.balanceAmount,order.depositTenderMethodCode ?? null,order.depositTenderMethodName ?? null,order.depositPaymentMethod ?? null,order.depositReference ?? null,order.depositPaidAt ?? null,order.layawayPolicySnapshotJson ?? null,order.minimumDepositAmount ?? 0,order.reservationStatus ?? "NOT_APPLICABLE",order.reservationCreatedAt ?? null,order.reservationReleasedAt ?? null,order.layawayExpiresAt ?? null,order.expiredAt ?? null,order.cancellationFeeAmount ?? 0,order.refundedAmount ?? 0,order.salesOrderRecordVersion,order.operatorName ?? "Customer web order",order.note ?? null,order.fulfilledTransactionId ?? null,order.fulfilledTransactionNo ?? null,order.createdAt ?? appliedAt,order.fulfilledAt ?? null,order.cancelledAt ?? null,appliedAt],
+      );
+      await runner.query("DELETE FROM sales_order_inventory_reservation WHERE sales_order_id = $1", [order.orderId]);
+      for (const reservation of order.reservations) {
+        if (typeof reservation !== "object" || reservation === null || typeof reservation.reservationId !== "string" || typeof reservation.salesOrderLineId !== "string" || typeof reservation.productCode !== "string" || typeof reservation.baseQuantity !== "number") throw new Error("Flash ERP received an invalid ecommerce sales-order reservation.");
+        await runner.query("INSERT INTO sales_order_inventory_reservation (id,sales_order_id,sales_order_line_id,inventory_location_code,product_code,product_variant_code,base_unit_of_measure,base_quantity,status,release_reason,created_at,released_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)", [reservation.reservationId,order.orderId,reservation.salesOrderLineId,reservation.inventoryLocationCode ?? null,reservation.productCode,reservation.productVariantCode ?? null,reservation.baseUnitOfMeasure,reservation.baseQuantity,reservation.status,reservation.releaseReason ?? null,reservation.createdAt,reservation.releasedAt ?? null,appliedAt]);
+      }
       return;
     }
 
@@ -24596,6 +24774,18 @@ export class PostgresStoreService {
             row.payload_json,
           ) as StorePosTransactionCompletedPayload;
         } catch {
+          continue;
+        }
+
+        if (isEcommercePosTransactionNumber(payload.transactionNo)) {
+          await client.query(
+            `UPDATE sync_outbox
+             SET failure_kind = NULL,
+                 error_message = NULL,
+                 updated_at = $1
+             WHERE id = $2`,
+            [repairedAt, row.id],
+          );
           continue;
         }
 

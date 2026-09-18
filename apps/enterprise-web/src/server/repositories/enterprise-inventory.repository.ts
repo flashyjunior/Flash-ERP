@@ -320,6 +320,12 @@ export type EnterpriseInventoryWorkspaceData = {
     productName: string;
     status: string;
     onHandQuantity: number;
+    activeReservedQuantity: number;
+    safetyStockLevel: number;
+    ecommerceSellableQuantity: number;
+    ecommercePickupEligible: boolean;
+    ecommerceDeliveryEligible: boolean;
+    ecommerceEligibilityLabel: string;
     estimatedRetailValue: number;
     lastMovementAt: string | null;
     lastMovementAtLabel: string;
@@ -617,6 +623,8 @@ export async function getEnterpriseInventoryWorkspace(
     locations,
     products,
     balanceGroups,
+    activeReservationGroups,
+    ecommerceFulfillmentLocations,
     recentEntries,
     serializedLines,
     serialTaskEvents,
@@ -674,6 +682,7 @@ export async function getEnterpriseInventoryWorkspace(
         status: true,
         trackInventory: true,
         isSerialized: true,
+        safetyStockLevel: true,
         baseUnitPrice: true,
         unitOfMeasure: true,
         baseUnitOfMeasure: { select: { code: true } },
@@ -701,6 +710,48 @@ export async function getEnterpriseInventoryWorkspace(
       },
       _max: {
         occurredAt: true
+      }
+    }),
+    prisma.salesOrderInventoryReservation.groupBy({
+      by: ["inventoryLocationId", "productCodeSnapshot"],
+      where: {
+        status: "ACTIVE",
+        inventoryLocationId: {
+          not: null
+        },
+        salesOrder: {
+          retailOrgId: enterpriseNode.retailOrgId
+        }
+      },
+      _sum: {
+        baseQuantity: true
+      }
+    }),
+    prisma.ecommerceFulfillmentLocation.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId,
+        status: RecordStatus.ACTIVE,
+        storefrontStore: {
+          status: RecordStatus.ACTIVE,
+          ecommerceEnabled: true
+        }
+      },
+      orderBy: [
+        { inventoryLocationId: "asc" },
+        { routingPriority: "asc" },
+        { storefrontStore: { name: "asc" } }
+      ],
+      select: {
+        inventoryLocationId: true,
+        supportsPickup: true,
+        supportsDelivery: true,
+        routingPriority: true,
+        storefrontStore: {
+          select: {
+            code: true,
+            name: true
+          }
+        }
       }
     }),
     prisma.inventoryLedgerEntry.findMany({
@@ -1261,11 +1312,61 @@ export async function getEnterpriseInventoryWorkspace(
       }
     ] as const)
   );
+  const activeReservedByLocationProduct = new Map(
+    activeReservationGroups.map((group) => [
+      `${group.inventoryLocationId}:${group.productCodeSnapshot.trim().toUpperCase()}`,
+      Number(group._sum.baseQuantity ?? 0)
+    ] as const)
+  );
+  const ecommerceEligibilityByLocation = new Map<
+    string,
+    {
+      supportsPickup: boolean;
+      supportsDelivery: boolean;
+      routingPriority: number;
+      labels: string[];
+    }
+  >();
+
+  for (const location of ecommerceFulfillmentLocations) {
+    const current = ecommerceEligibilityByLocation.get(location.inventoryLocationId);
+    const modes = [
+      location.supportsPickup ? "pickup" : null,
+      location.supportsDelivery ? "delivery" : null
+    ].filter((value): value is string => Boolean(value));
+    const label = `${location.storefrontStore.name}: ${modes.length ? modes.join(" + ") : "disabled"} (priority ${location.routingPriority})`;
+
+    if (current) {
+      current.supportsPickup ||= location.supportsPickup;
+      current.supportsDelivery ||= location.supportsDelivery;
+      current.routingPriority = Math.min(current.routingPriority, location.routingPriority);
+      current.labels.push(label);
+    } else {
+      ecommerceEligibilityByLocation.set(location.inventoryLocationId, {
+        supportsPickup: location.supportsPickup,
+        supportsDelivery: location.supportsDelivery,
+        routingPriority: location.routingPriority,
+        labels: [label]
+      });
+    }
+  }
   const stockPositionRows = locations
     .flatMap((location) =>
       products.map((product) => {
         const balance = balanceByLocationProduct.get(`${location.id}:${product.id}`);
         const onHandQuantity = Number((balance?.onHandQuantity ?? 0).toFixed(3));
+        const activeReservedQuantity = Number(
+          (activeReservedByLocationProduct.get(
+            `${location.id}:${product.code.trim().toUpperCase()}`
+          ) ?? 0).toFixed(3)
+        );
+        const safetyStockLevel = Number(Number(product.safetyStockLevel ?? 0).toFixed(3));
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(location.id);
+        const ecommerceSellableQuantity = ecommerceEligibility
+          ? Number(
+              Math.max(0, onHandQuantity - activeReservedQuantity - safetyStockLevel).toFixed(3)
+            )
+          : 0;
 
         return {
           locationCode: location.code,
@@ -1279,6 +1380,13 @@ export async function getEnterpriseInventoryWorkspace(
           productName: product.name,
           status: product.status,
           onHandQuantity,
+          activeReservedQuantity,
+          safetyStockLevel,
+          ecommerceSellableQuantity,
+          ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+          ecommerceDeliveryEligible: ecommerceEligibility?.supportsDelivery ?? false,
+          ecommerceEligibilityLabel:
+            ecommerceEligibility?.labels.join("; ") ?? "Not configured for ecommerce fulfilment",
           estimatedRetailValue: Number((onHandQuantity * Number(product.baseUnitPrice)).toFixed(2)),
           lastMovementAt: toIsoString(balance?.lastMovementAt ?? null),
           lastMovementAtLabel: formatRelativeTime(balance?.lastMovementAt ?? null)

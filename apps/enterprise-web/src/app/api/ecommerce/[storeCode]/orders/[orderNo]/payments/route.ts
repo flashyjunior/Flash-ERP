@@ -2,21 +2,28 @@ import { NextResponse } from "next/server";
 
 import { ecommerceErrorResponse } from "@/server/ecommerce/ecommerce-api";
 import { initializeEcommercePayment } from "@/server/ecommerce/ecommerce-payments";
+import {
+  attachEcommerceServerTiming,
+  measureEcommerceOperation,
+} from "@/server/ecommerce/ecommerce-performance";
 import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-capacity";
 
 export async function POST(
   request: Request,
   context: { params: Promise<{ storeCode: string; orderNo: string }> }
 ) {
+  const startedAt = performance.now();
+  let storeCode = "UNKNOWN";
   try {
-    const { storeCode, orderNo } = await context.params;
+    const { orderNo, storeCode: requestedStoreCode } = await context.params;
+    storeCode = requestedStoreCode;
     const body = (await request.json()) as {
       tenderMethodCode?: string;
       receiptEmail?: string;
       amount?: number;
     };
-    return NextResponse.json(
-      await runEnterpriseOperation("TRANSACTIONAL_WRITE", () =>
+    const { value } = await measureEcommerceOperation("PAYMENT_INITIALIZE", storeCode, () =>
+      runEnterpriseOperation("TRANSACTIONAL_WRITE", () =>
         initializeEcommercePayment({
           storeCode,
           orderNo,
@@ -26,9 +33,17 @@ export async function POST(
           idempotencyKey: request.headers.get("idempotency-key")
         })
       ),
-      { status: 201 }
+    );
+    return attachEcommerceServerTiming(
+      NextResponse.json(value, { status: 201 }),
+      "PAYMENT_INITIALIZE",
+      startedAt,
     );
   } catch (error) {
-    return ecommerceErrorResponse(error, "Payment could not be started.");
+    return attachEcommerceServerTiming(
+      ecommerceErrorResponse(error, "Payment could not be started."),
+      "PAYMENT_INITIALIZE",
+      startedAt,
+    );
   }
 }

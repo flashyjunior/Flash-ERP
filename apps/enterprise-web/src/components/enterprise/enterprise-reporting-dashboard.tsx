@@ -1795,6 +1795,16 @@ export function EnterpriseReportingDashboard({
         cell: ({ row }) => currencyFormatter.format(row.original.totalAmount)
       },
       {
+        accessorKey: "depositAmount",
+        header: "Deposit",
+        cell: ({ row }) => currencyFormatter.format(row.original.depositAmount)
+      },
+      {
+        accessorKey: "balanceAmount",
+        header: "Balance",
+        cell: ({ row }) => currencyFormatter.format(row.original.balanceAmount)
+      },
+      {
         accessorKey: "updatedAtLabel",
         header: "Latest",
         cell: ({ row }) => renderTimestamp(row.original.updatedAt, row.original.updatedAtLabel),
@@ -2042,7 +2052,7 @@ export function EnterpriseReportingDashboard({
       },
       {
         accessorKey: "transactionCount",
-        header: "Transactions",
+        header: "Payment entries",
         cell: ({ row }) => numberFormatter.format(row.original.transactionCount)
       },
       {
@@ -3031,7 +3041,7 @@ export function EnterpriseReportingDashboard({
           {
             id: "tenders",
             label: "Tender summary",
-            description: "Payment method value, transactions, and share.",
+            description: "Payment method value, payment entries, and share.",
             rowCount: dashboard.tenderReportRows.length,
           },
           {

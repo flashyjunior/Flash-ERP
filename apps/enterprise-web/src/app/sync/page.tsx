@@ -9,7 +9,7 @@ import { runEnterpriseOperation } from "@/server/performance/enterprise-runtime-
 export const dynamic = "force-dynamic";
 
 export default async function SyncPage() {
-  await requireEnterprisePermission(["sync.monitor"]);
+  const session = await requireEnterprisePermission(["sync.monitor"]);
   const dashboard = await runEnterpriseOperation(
     "AUTHENTICATED_READ",
     getEnterpriseSyncDashboard
@@ -21,5 +21,10 @@ export default async function SyncPage() {
     )
   );
 
-  return <EnterpriseSyncDashboard dashboard={dashboard} />;
+  return (
+    <EnterpriseSyncDashboard
+      canPublishMasterData={session.permissionCodes.includes("sync.admin.reseed")}
+      dashboard={dashboard}
+    />
+  );
 }

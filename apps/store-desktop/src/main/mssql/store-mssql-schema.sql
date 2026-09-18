@@ -1106,6 +1106,22 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'idx_sales_order_reserv
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [name] = N'idx_sales_order_reservation_stock' AND [object_id] = OBJECT_ID(N'[dbo].[sales_order_inventory_reservation]'))
   CREATE INDEX [idx_sales_order_reservation_stock] ON [dbo].[sales_order_inventory_reservation]([inventory_location_code], [product_code], [product_variant_code], [status]);
 
+UPDATE [reservation]
+SET
+  [status] = CASE [sales].[status]
+    WHEN N'FULFILLED' THEN N'CONSUMED'
+    WHEN N'CANCELLED' THEN N'RELEASED'
+    WHEN N'EXPIRED' THEN N'EXPIRED'
+  END,
+  [release_reason] = COALESCE(NULLIF([reservation].[release_reason], N''), N'Reconciled from terminal sales order state.'),
+  [released_at] = COALESCE([reservation].[released_at], [sales].[fulfilled_at], [sales].[cancelled_at], [sales].[expired_at], CONVERT(nvarchar(40), SYSUTCDATETIME(), 127)),
+  [updated_at] = CONVERT(nvarchar(40), SYSUTCDATETIME(), 127)
+FROM [dbo].[sales_order_inventory_reservation] AS [reservation]
+INNER JOIN [dbo].[sales_order] AS [sales]
+  ON [sales].[id] = [reservation].[sales_order_id]
+WHERE [reservation].[status] = N'ACTIVE'
+  AND [sales].[status] IN (N'FULFILLED', N'CANCELLED', N'EXPIRED');
+
 IF COL_LENGTH(N'[dbo].[sales_order]', N'deposit_amount') IS NULL
 BEGIN
   ALTER TABLE [dbo].[sales_order]

@@ -2,48 +2,222 @@
 
 import {
   ArrowLeft,
+  Baby,
   BadgeCheck,
   BadgePercent,
+  BookOpen,
+  Boxes,
+  Car,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleUserRound,
   Clock3,
   CreditCard,
+  Dumbbell,
+  Fuel,
   Heart,
+  HeartPulse,
+  House,
   KeyRound,
+  Laptop,
   LoaderCircle,
+  ListTree,
   LocateFixed,
   LogIn,
   MapPin,
   Minus,
+  Package,
   PackageCheck,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  Shirt,
   ShoppingBag,
   ShoppingCart,
+  SlidersHorizontal,
+  Sparkles,
   Star,
   Store,
+  Tags,
   Trash2,
   Truck,
+  Utensils,
   WalletCards,
   X,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  type LucideIcon,
 } from "lucide-react";
+import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import type { PublicStorefrontData } from "@/server/ecommerce/ecommerce.repository";
+import type {
+  PublicStorefrontData,
+  PublicStorefrontAvailability,
+  PublicStorefrontProductDetail,
+} from "@/server/ecommerce/ecommerce.repository";
 
 import styles from "./public-storefront.module.css";
+import { productCardRequiresSelection } from "./storefront-card-action";
+import {
+  buildStorefrontCategoryTree,
+  formatStorefrontTaxonomyLabel,
+  getStorefrontSelectionLabel,
+  productMatchesStorefrontSelection,
+  type StorefrontCatalogSelection,
+  type StorefrontDepartmentNode,
+} from "./storefront-category-tree";
 
 type Product = PublicStorefrontData["products"][number];
+type ProductDetail = PublicStorefrontProductDetail;
 type Variant = Product["variants"][number];
 type SellingUnit = Product["sellingUnits"][number];
 type ProductPromotion = NonNullable<Product["promotion"]>;
+type StorefrontTextSize = "SMALL" | "MEDIUM" | "LARGE";
+type SocialAuthProvider = "google" | "facebook";
+type SocialAuthProviderOption = { id: SocialAuthProvider; enabled: boolean };
+type SocialAuthResult = {
+  provider: SocialAuthProvider;
+  result: "success" | "cancelled" | "conflict" | "failed" | "unavailable";
+};
+type SearchSuggestion = {
+  key: string;
+  label: string;
+  query: string;
+  type: "Product" | "Department" | "Category" | "Subcategory" | "Brand";
+  imageUrl?: string | null;
+};
+type SearchSuggestionGroup = {
+  label: "Products" | "Categories" | "Brands";
+  suggestions: SearchSuggestion[];
+};
+type ProductAvailability = PublicStorefrontAvailability["products"][number];
+
+function applyProductAvailability<T extends Product>(
+  product: T,
+  availability: ProductAvailability | undefined,
+) {
+  if (!availability) return product;
+
+  const availabilityByVariantId = new Map(
+    availability.variants.map((variant) => [variant.id, variant.availableQuantity] as const),
+  );
+  return {
+    ...product,
+    availableQuantity: availability.availableQuantity,
+    variants: product.variants.map((variant) => ({
+      ...variant,
+      availableQuantity: availabilityByVariantId.get(variant.id) ?? variant.availableQuantity,
+    })),
+  } as T;
+}
+
+const storefrontTextSizeStorageKey = "flash-erp-storefront-text-size";
+const categoryIconRules: Array<{ pattern: RegExp; icon: LucideIcon }> = [
+  { pattern: /fuel|petrol|diesel|kerosene|gas|lpg/i, icon: Fuel },
+  { pattern: /computer|electronic|phone|technology|appliance/i, icon: Laptop },
+  { pattern: /fashion|cloth|apparel|shoe/i, icon: Shirt },
+  { pattern: /food|grocery|drink|restaurant|kitchen/i, icon: Utensils },
+  { pattern: /baby|child|kid|toy/i, icon: Baby },
+  { pattern: /vehicle|automotive|motor|car/i, icon: Car },
+  { pattern: /book|office|school|stationery/i, icon: BookOpen },
+  { pattern: /sport|fitness|exercise/i, icon: Dumbbell },
+  { pattern: /beauty|cosmetic|personal care/i, icon: Sparkles },
+  { pattern: /health|medical|pharmacy/i, icon: HeartPulse },
+  { pattern: /home|furniture|garden/i, icon: House },
+];
+
+function resolveCategoryIcon(label: string) {
+  return categoryIconRules.find(({ pattern }) => pattern.test(label))?.icon ?? Package;
+}
+
+function normalizeProductCode(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function normalizeCatalogLabel(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function productMatchesSearch(product: Product, query: string) {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+
+  const searchableText = [
+    product.name,
+    product.shortName,
+    product.code,
+    product.sku,
+    product.brand,
+    product.department,
+    product.category,
+    product.subcategory,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return terms.every((term) => searchableText.includes(term));
+}
+
+function getProductPriceBounds(products: Product[]) {
+  const prices = products.map((product) => getProductPrice(product));
+  if (prices.length === 0) return { minimum: 0, maximum: 0 };
+
+  return {
+    minimum: Math.max(0, Math.floor(Math.min(...prices))),
+    maximum: Math.max(0, Math.ceil(Math.max(...prices))),
+  };
+}
+
+function getRelatedProductScore(product: Product, candidate: Product) {
+  let score = 0;
+  const productDepartment = normalizeCatalogLabel(product.department);
+  const productCategory = normalizeCatalogLabel(product.category);
+  const productSubcategory = normalizeCatalogLabel(product.subcategory);
+  const productBrand = normalizeCatalogLabel(product.brand);
+
+  if (productDepartment && productDepartment === normalizeCatalogLabel(candidate.department)) score += 20;
+  if (productCategory && productCategory === normalizeCatalogLabel(candidate.category)) score += 40;
+  if (productSubcategory && productSubcategory === normalizeCatalogLabel(candidate.subcategory)) score += 80;
+  if (productBrand && productBrand === normalizeCatalogLabel(candidate.brand)) score += 10;
+
+  return score;
+}
+
+function isOptimizableStorefrontImage(src: string) {
+  return src.startsWith("/") && !src.startsWith("//");
+}
+
+function StorefrontImage({
+  alt,
+  priority = false,
+  sizes,
+  src,
+}: {
+  alt: string;
+  priority?: boolean;
+  sizes: string;
+  src: string;
+}) {
+  if (!isOptimizableStorefrontImage(src)) {
+    return (
+      <img
+        alt={alt}
+        decoding="async"
+        fetchPriority={priority ? "high" : "auto"}
+        loading={priority ? "eager" : "lazy"}
+        src={src}
+      />
+    );
+  }
+
+  return <Image alt={alt} fill priority={priority} sizes={sizes} src={src} />;
+}
 type DrawerView = "cart" | "checkout" | "orders" | "account" | null;
 type CheckoutPaymentOption = {
   code: string;
@@ -74,6 +248,15 @@ type EcommerceQuote = {
   discountAmount: number;
   taxAmount: number;
   totalAmount: number;
+  fulfillment: {
+    method: "DELIVERY" | "PICKUP";
+    storeCode: string;
+    storeName: string;
+    inventoryLocationCode: string;
+    inventoryLocationName: string;
+    routingMethod: string;
+    networkAllocation: boolean;
+  };
   lines: Array<{
     lineIndex: number;
     productId: string;
@@ -149,6 +332,15 @@ type CustomerOrder = {
   placedAt: string;
   deliveryAddress: string;
   trackingReference: string | null;
+  fulfillment: {
+    storeCode: string;
+    storeName: string;
+    inventoryLocationCode: string | null;
+    inventoryLocationName: string | null;
+    status: string;
+    fulfilmentMethod: string;
+    routingMethod: string;
+  } | null;
   lines: Array<{
     id: string;
     productName: string;
@@ -167,6 +359,18 @@ type CustomerOrder = {
     status: string;
   }>;
 };
+
+function formatCustomerOrderStatus(order: Pick<CustomerOrder, "fulfilmentMethod" | "status">) {
+  if (order.fulfilmentMethod === "PICKUP") {
+    if (order.status === "READY") return "Awaiting pickup";
+    if (order.status === "DELIVERED") return "Picked up";
+  }
+
+  return order.status
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
 
 async function readJson<T>(response: Response): Promise<T> {
   const body = (await response.json().catch(() => ({}))) as T & { message?: string };
@@ -280,6 +484,37 @@ function resolveProductSellingUnit(
         sellingUnit.unitOfMeasureCode.toUpperCase() === product.baseUnitOfMeasure.toUpperCase()
     ) ??
     null
+  );
+}
+
+function getAvailableBaseQuantity(product: Product, variant: Variant | null = null) {
+  const quantity = variant?.availableQuantity ?? product.availableQuantity;
+  return typeof quantity === "number" ? Math.max(0, quantity) : null;
+}
+
+function getMaximumOrderQuantity(
+  product: Product,
+  variant: Variant | null,
+  sellingUnit: SellingUnit | null,
+) {
+  const availableBaseQuantity = getAvailableBaseQuantity(product, variant);
+  if (availableBaseQuantity === null) {
+    return null;
+  }
+
+  const conversionFactor = Math.max(0.001, Number(sellingUnit?.conversionFactor ?? 1));
+  return Math.max(0, Math.floor((availableBaseQuantity + 0.0005) / conversionFactor));
+}
+
+function isProductOutOfStock(product: Product) {
+  if (product.availableQuantity === null) {
+    return false;
+  }
+  if (product.variants.length === 0) {
+    return product.availableQuantity <= 0;
+  }
+  return product.variants.length > 0 && product.variants.every(
+    (variant) => variant.availableQuantity !== null && variant.availableQuantity <= 0,
   );
 }
 
@@ -456,21 +691,39 @@ function getPromotionTerms(
 
 export function PublicStorefront({
   storefront,
-  initialProductCode = null
+  initialProductCode = null,
+  initialProduct = null,
+  initialSearchQuery = null,
 }: {
   storefront: PublicStorefrontData;
   initialProductCode?: string | null;
+  initialProduct?: ProductDetail | null;
+  initialSearchQuery?: string | null;
 }) {
   const router = useRouter();
   const storageKey = `flash-erp-cart:${storefront.store.code}`;
-  const [searchText, setSearchText] = useState("");
-  const [category, setCategory] = useState("ALL");
+  const socialAuthResumeKey = `flash-erp-social-auth-resume:${storefront.store.code}`;
+  const searchResultsMode = initialSearchQuery !== null;
+  const initialPriceBounds = getProductPriceBounds(storefront.products);
+  const priceSliderMaximum = Math.max(initialPriceBounds.minimum + 1, initialPriceBounds.maximum);
+  const [searchText, setSearchText] = useState(initialSearchQuery ?? "");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchFiltersOpen, setSearchFiltersOpen] = useState(false);
+  const [selectedSearchCategories, setSelectedSearchCategories] = useState<string[]>([]);
+  const [selectedSearchBrands, setSelectedSearchBrands] = useState<string[]>([]);
+  const [searchMinimumPrice, setSearchMinimumPrice] = useState(initialPriceBounds.minimum);
+  const [searchMaximumPrice, setSearchMaximumPrice] = useState(priceSliderMaximum);
+  const [catalogSelection, setCatalogSelection] = useState<StorefrontCatalogSelection>({ level: "ALL" });
+  const [textSize, setTextSize] = useState<StorefrontTextSize>("MEDIUM");
+  const [textSizeReady, setTextSizeReady] = useState(false);
   const [promotionStripDismissed, setPromotionStripDismissed] = useState(false);
   const [cart, setCart] = useState<CartLine[]>([]);
+  const [products, setProducts] = useState(storefront.products);
   const [cartReady, setCartReady] = useState(false);
   const [drawerView, setDrawerView] = useState<DrawerView>(null);
-  const [quickProduct, setQuickProduct] = useState<Product | null>(() =>
-    storefront.products.find((product) => product.code === initialProductCode) ?? null
+  const [quickProduct, setQuickProduct] = useState<ProductDetail | null>(initialProduct);
+  const [productDetailsBusy, setProductDetailsBusy] = useState(
+    Boolean(initialProductCode && !initialProduct),
   );
   const [quickVariant, setQuickVariant] = useState<Variant | null>(null);
   const [quickSellingUnitOfMeasure, setQuickSellingUnitOfMeasure] = useState("");
@@ -478,7 +731,7 @@ export function PublicStorefront({
   const [quickImageUrl, setQuickImageUrl] = useState<string | null>(null);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
   const [imageViewerZoomed, setImageViewerZoomed] = useState(false);
-  const [imageViewerProduct, setImageViewerProduct] = useState<Product | null>(null);
+  const [imageViewerProduct, setImageViewerProduct] = useState<ProductDetail | null>(null);
   const [imageViewerUrl, setImageViewerUrl] = useState<string | null>(null);
   const [productDetailTab, setProductDetailTab] = useState<"DESCRIPTION" | "SPECIFICATIONS" | "REVIEWS">("DESCRIPTION");
   const [reviewRating, setReviewRating] = useState(5);
@@ -497,6 +750,13 @@ export function PublicStorefront({
   const [developmentCode, setDevelopmentCode] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [socialAuthBusy, setSocialAuthBusy] = useState<SocialAuthProvider | null>(null);
+  const [socialAuthProviders, setSocialAuthProviders] = useState<SocialAuthProviderOption[]>([
+    { id: "google", enabled: false },
+    { id: "facebook", enabled: false },
+  ]);
+  const [socialAuthResult, setSocialAuthResult] = useState<SocialAuthResult | null>(null);
+  const [resumeCheckoutAfterAuth, setResumeCheckoutAfterAuth] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [ordersBusy, setOrdersBusy] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<CustomerOrder | null>(null);
@@ -505,6 +765,9 @@ export function PublicStorefront({
   const [accountSaving, setAccountSaving] = useState(false);
   const [deliveryMethod, setDeliveryMethod] = useState<"DELIVERY" | "PICKUP">(
     storefront.store.allowDelivery ? "DELIVERY" : "PICKUP"
+  );
+  const [pickupStoreCode, setPickupStoreCode] = useState(
+    storefront.store.pickupLocations[0]?.storeCode ?? "",
   );
   const [recipientName, setRecipientName] = useState("");
   const [deliveryPhone, setDeliveryPhone] = useState("");
@@ -516,6 +779,7 @@ export function PublicStorefront({
   const [saveAddress, setSaveAddress] = useState(true);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [cartStockError, setCartStockError] = useState<string | null>(null);
   const [createdOrder, setCreatedOrder] = useState<{
     orderNo: string;
     totalAmount: number;
@@ -525,6 +789,7 @@ export function PublicStorefront({
     paymentTiming: "ON_DELIVERY" | "PREPAY";
     orderType: "SALES_ORDER" | "LAYAWAY";
     paymentAmountDueNow: number;
+    fulfillment: EcommerceQuote["fulfillment"];
   } | null>(null);
   const [checkoutOrderType, setCheckoutOrderType] = useState<"SALES_ORDER" | "LAYAWAY">("SALES_ORDER");
   const [layawayDepositAmount, setLayawayDepositAmount] = useState(0);
@@ -537,6 +802,11 @@ export function PublicStorefront({
   const [paymentBusy, setPaymentBusy] = useState(false);
   const checkoutRequestKeyRef = useRef<string | null>(null);
   const paymentRequestKeyRef = useRef<string | null>(null);
+  const productDetailsRef = useRef(new Map<string, ProductDetail>(
+    initialProduct ? [[normalizeProductCode(initialProduct.code), initialProduct]] : [],
+  ));
+  const availabilityByProductIdRef = useRef(new Map<string, ProductAvailability>());
+  const productDetailRequestIdRef = useRef(0);
   const [toast, setToast] = useState<string | null>(null);
   const [quickQuote, setQuickQuote] = useState<{ key: string; value: EcommerceQuote } | null>(null);
   const [cartQuote, setCartQuote] = useState<{ key: string; value: EcommerceQuote } | null>(null);
@@ -590,6 +860,80 @@ export function PublicStorefront({
     : 0;
 
   useEffect(() => {
+    setProducts(storefront.products.map((product) =>
+      applyProductAvailability(product, availabilityByProductIdRef.current.get(product.id))
+    ));
+  }, [storefront.products]);
+
+  useEffect(() => {
+    let active = true;
+    let refreshBusy = false;
+
+    const refreshAvailability = async () => {
+      if (refreshBusy) return;
+      refreshBusy = true;
+      try {
+        const snapshot = await readJson<PublicStorefrontAvailability>(
+          await fetch(
+            `/api/ecommerce/${encodeURIComponent(publicStoreCode)}/availability`,
+            { cache: "no-store" },
+          ),
+        );
+        if (!active) return;
+
+        const availabilityByProductId = new Map(
+          snapshot.products.map((product) => [product.id, product] as const),
+        );
+        const availabilityByVariantId = new Map(
+          snapshot.products.flatMap((product) =>
+            product.variants.map((variant) => [variant.id, variant.availableQuantity] as const),
+          ),
+        );
+        availabilityByProductIdRef.current = availabilityByProductId;
+        setProducts((current) => current.map((product) =>
+          applyProductAvailability(product, availabilityByProductId.get(product.id))
+        ));
+        setQuickProduct((current) => current
+          ? applyProductAvailability(current, availabilityByProductId.get(current.id))
+          : current
+        );
+        setQuickVariant((current) => current
+          ? {
+              ...current,
+              availableQuantity:
+                availabilityByVariantId.get(current.id) ?? current.availableQuantity,
+            }
+          : current
+        );
+        for (const [key, detail] of productDetailsRef.current) {
+          productDetailsRef.current.set(
+            key,
+            applyProductAvailability(detail, availabilityByProductId.get(detail.id)),
+          );
+        }
+      } catch {
+        // The server-rendered snapshot remains usable when a transient refresh fails.
+      } finally {
+        refreshBusy = false;
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshAvailability();
+    };
+
+    void refreshAvailability();
+    const interval = window.setInterval(() => void refreshAvailability(), 15_000);
+    window.addEventListener("focus", refreshAvailability);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshAvailability);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [publicStoreCode]);
+
+  useEffect(() => {
     try {
       const stored = window.localStorage.getItem(storageKey);
       if (stored) {
@@ -630,6 +974,20 @@ export function PublicStorefront({
   }, [storageKey]);
 
   useEffect(() => {
+    const stored = window.localStorage.getItem(storefrontTextSizeStorageKey);
+    if (stored === "SMALL" || stored === "MEDIUM" || stored === "LARGE") {
+      setTextSize(stored);
+    }
+    setTextSizeReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (textSizeReady) {
+      window.localStorage.setItem(storefrontTextSizeStorageKey, textSize);
+    }
+  }, [textSize, textSizeReady]);
+
+  useEffect(() => {
     if (cartReady) {
       window.localStorage.setItem(storageKey, JSON.stringify(cart));
     }
@@ -638,6 +996,83 @@ export function PublicStorefront({
   useEffect(() => {
     void refreshSession();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/auth/oauth/providers`, {
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const payload = (await response.json()) as { providers?: SocialAuthProviderOption[] };
+        if (active && Array.isArray(payload.providers)) {
+          setSocialAuthProviders(payload.providers);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [storefront.store.code]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const provider = url.searchParams.get("socialProvider");
+    const result = url.searchParams.get("socialAuth");
+    if (
+      (provider === "google" || provider === "facebook") &&
+      (result === "success" ||
+        result === "cancelled" ||
+        result === "conflict" ||
+        result === "failed" ||
+        result === "unavailable")
+    ) {
+      setSocialAuthResult({ provider, result });
+    }
+    if (provider || result) {
+      url.searchParams.delete("socialProvider");
+      url.searchParams.delete("socialAuth");
+      const query = url.searchParams.toString();
+      window.history.replaceState({}, "", `${url.pathname}${query ? `?${query}` : ""}${url.hash}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!socialAuthResult || !cartReady) return;
+    const result = socialAuthResult;
+    setSocialAuthResult(null);
+    void (async () => {
+      try {
+        if (result.result !== "success") {
+          const messages: Record<Exclude<SocialAuthResult["result"], "success">, string> = {
+            cancelled: "Social sign-in was cancelled.",
+            conflict: "That social account is already linked to another customer account.",
+            failed: "Social sign-in could not be completed. Please try again.",
+            unavailable: "That social sign-in option is not available yet.",
+          };
+          setAuthError(messages[result.result]);
+          setAuthMode("SIGN_IN");
+          setAuthOpen(true);
+          return;
+        }
+
+        const nextSession = await refreshSession();
+        if (!nextSession?.authenticated) {
+          setAuthError("Your social sign-in completed, but the customer session could not be opened.");
+          setAuthOpen(true);
+          return;
+        }
+        setAuthOpen(false);
+        showToast(`Signed in with ${result.provider === "google" ? "Google" : "Facebook"}`);
+        if (window.sessionStorage.getItem(socialAuthResumeKey) === "checkout" && cart.length > 0) {
+          await beginCheckout(true);
+        }
+      } finally {
+        window.sessionStorage.removeItem(socialAuthResumeKey);
+        setSocialAuthBusy(null);
+      }
+    })();
+  }, [cartReady, socialAuthResult]);
 
   useEffect(() => {
     if (!toast) {
@@ -703,21 +1138,43 @@ export function PublicStorefront({
   }, [account]);
 
   useEffect(() => {
-    const product = storefront.products.find((entry) => entry.code === initialProductCode) ?? null;
-    const variant = product?.variants.length === 1 ? product.variants[0] : null;
-    setQuickProduct(product);
-    setQuickVariant(variant);
-    setQuickSellingUnitOfMeasure(
-      product ? resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? "" : ""
+    if (!initialProductCode) {
+      productDetailRequestIdRef.current += 1;
+      setQuickProduct(null);
+      setQuickVariant(null);
+      setQuickSellingUnitOfMeasure("");
+      setQuickQuantity(1);
+      setQuickImageUrl(null);
+      setProductDetailsBusy(false);
+      setImageViewerOpen(false);
+      setImageViewerZoomed(false);
+      setImageViewerProduct(null);
+      setImageViewerUrl(null);
+      setProductDetailTab("DESCRIPTION");
+      return;
+    }
+
+    if (initialProduct) {
+      productDetailRequestIdRef.current += 1;
+      productDetailsRef.current.set(
+        normalizeProductCode(initialProduct.code),
+        initialProduct,
+      );
+      applyQuickProduct(initialProduct);
+      return;
+    }
+
+    const product = products.find(
+      (entry) => normalizeProductCode(entry.code) === normalizeProductCode(initialProductCode),
     );
-    setQuickQuantity(1);
-    setQuickImageUrl(product ? product.galleryImageUrls[0] ?? product.imageUrl : null);
-    setImageViewerOpen(false);
-    setImageViewerZoomed(false);
-    setImageViewerProduct(null);
-    setImageViewerUrl(null);
-    setProductDetailTab("DESCRIPTION");
-  }, [initialProductCode, storefront.products]);
+    if (product) {
+      void loadProductDetails(product);
+      return;
+    }
+
+    setQuickProduct(null);
+    setProductDetailsBusy(false);
+  }, [initialProduct, initialProductCode, products]);
 
   useEffect(() => {
     if (!imageViewerOpen) return;
@@ -743,20 +1200,148 @@ export function PublicStorefront({
     };
   }, [imageViewerOpen, imageViewerProduct, imageViewerUrl]);
 
-  const visibleProducts = useMemo(() => {
-    const normalizedSearch = searchText.trim().toLowerCase();
-    return storefront.products.filter((product) => {
-      const categoryMatches = category === "ALL" || product.category === category;
-      const searchMatches =
-        !normalizedSearch ||
-        [product.name, product.code, product.brand, product.category, product.description]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(normalizedSearch));
-      return categoryMatches && searchMatches;
-    });
-  }, [category, searchText, storefront.products]);
+  const catalogTree = useMemo(
+    () => buildStorefrontCategoryTree(products),
+    [products],
+  );
+  const catalogSelectionLabel = getStorefrontSelectionLabel(catalogSelection);
+  const searchSuggestionGroups = useMemo<SearchSuggestionGroup[]>(() => {
+    const query = searchText.trim();
+    if (query.length < 1) return [];
 
-  const featuredProducts = storefront.products.filter((product) => product.featured).slice(0, 8);
+    const normalizedQuery = query.toLowerCase();
+    const matchingProducts = products
+      .filter((product) => productMatchesSearch(product, query))
+      .slice(0, 6)
+      .map((product) => ({
+        key: `product:${product.id}`,
+        label: product.name,
+        query: product.name,
+        type: "Product" as const,
+        imageUrl: product.imageUrl,
+      }));
+    const taxonomy = new Map<string, SearchSuggestion>();
+    const brands = new Map<string, SearchSuggestion>();
+
+    for (const product of products) {
+      for (const [type, value] of [
+        ["Department", product.department],
+        ["Category", product.category],
+        ["Subcategory", product.subcategory],
+      ] as const) {
+        if (!value) continue;
+        const label = formatStorefrontTaxonomyLabel(value);
+        if (!label.toLowerCase().includes(normalizedQuery)) continue;
+        const key = `${type.toLowerCase()}:${label.toLowerCase()}`;
+        if (!taxonomy.has(key)) {
+          taxonomy.set(key, { key, label, query: label, type });
+        }
+      }
+
+      const brand = product.brand?.trim();
+      if (brand && brand.toLowerCase().includes(normalizedQuery)) {
+        const key = `brand:${brand.toLowerCase()}`;
+        if (!brands.has(key)) {
+          brands.set(key, { key, label: brand, query: brand, type: "Brand" });
+        }
+      }
+    }
+
+    return [
+      { label: "Products", suggestions: matchingProducts },
+      {
+        label: "Categories",
+        suggestions: [...taxonomy.values()]
+          .sort((left, right) => left.label.localeCompare(right.label))
+          .slice(0, 6),
+      },
+      {
+        label: "Brands",
+        suggestions: [...brands.values()]
+          .sort((left, right) => left.label.localeCompare(right.label))
+          .slice(0, 5),
+      },
+    ].filter((group) => group.suggestions.length > 0) as SearchSuggestionGroup[];
+  }, [products, searchText]);
+  const visibleProducts = useMemo(() => {
+    return products.filter((product) => {
+      const categoryMatches = productMatchesStorefrontSelection(product, catalogSelection);
+      return categoryMatches && productMatchesSearch(product, searchText);
+    });
+  }, [catalogSelection, products, searchText]);
+  const activeSearchQuery = (initialSearchQuery ?? searchText).trim();
+  const searchMatchedProducts = useMemo(
+    () => products.filter((product) => productMatchesSearch(product, activeSearchQuery)),
+    [activeSearchQuery, products],
+  );
+  const searchCategoryFacets = useMemo(() => {
+    const facets = new Map<string, { value: string; label: string; count: number }>();
+    for (const product of searchMatchedProducts) {
+      const label = formatStorefrontTaxonomyLabel(product.category);
+      const value = label.toLowerCase();
+      const current = facets.get(value);
+      facets.set(value, { value, label, count: (current?.count ?? 0) + 1 });
+    }
+    return [...facets.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [searchMatchedProducts]);
+  const searchBrandFacets = useMemo(() => {
+    const facets = new Map<string, { value: string; label: string; count: number }>();
+    for (const product of searchMatchedProducts) {
+      const label = product.brand?.trim();
+      if (!label) continue;
+      const value = label.toLowerCase();
+      const current = facets.get(value);
+      facets.set(value, { value, label: current?.label ?? label, count: (current?.count ?? 0) + 1 });
+    }
+    return [...facets.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [searchMatchedProducts]);
+  const filteredSearchProducts = useMemo(
+    () => searchMatchedProducts.filter((product) => {
+      const category = formatStorefrontTaxonomyLabel(product.category).toLowerCase();
+      const brand = product.brand?.trim().toLowerCase() ?? "";
+      const price = getProductPrice(product);
+      return (
+        (selectedSearchCategories.length === 0 || selectedSearchCategories.includes(category)) &&
+        (selectedSearchBrands.length === 0 || selectedSearchBrands.includes(brand)) &&
+        price >= searchMinimumPrice &&
+        price <= searchMaximumPrice
+      );
+    }),
+    [
+      searchMatchedProducts,
+      searchMaximumPrice,
+      searchMinimumPrice,
+      selectedSearchBrands,
+      selectedSearchCategories,
+    ],
+  );
+  const activeSearchFilterCount =
+    selectedSearchCategories.length +
+    selectedSearchBrands.length +
+    Number(searchMinimumPrice !== initialPriceBounds.minimum || searchMaximumPrice !== priceSliderMaximum);
+  const searchRangeStart = priceSliderMaximum === initialPriceBounds.minimum
+    ? 0
+    : ((searchMinimumPrice - initialPriceBounds.minimum) / (priceSliderMaximum - initialPriceBounds.minimum)) * 100;
+  const searchRangeEnd = priceSliderMaximum === initialPriceBounds.minimum
+    ? 100
+    : ((searchMaximumPrice - initialPriceBounds.minimum) / (priceSliderMaximum - initialPriceBounds.minimum)) * 100;
+
+  const featuredProducts = products.filter((product) => product.featured).slice(0, 8);
+  const relatedProducts = useMemo(() => {
+    if (!quickProduct) return [];
+
+    return products
+      .filter((product) => product.id !== quickProduct.id)
+      .map((product) => ({ product, score: getRelatedProductScore(quickProduct, product) }))
+      .sort((left, right) =>
+        right.score - left.score ||
+        Number(right.product.featured) - Number(left.product.featured) ||
+        right.product.averageRating - left.product.averageRating ||
+        left.product.name.localeCompare(right.product.name)
+      )
+      .slice(0, 6)
+      .map(({ product }) => product);
+  }, [products, quickProduct]);
   const selectedProductPromotion = quickProduct
     ? getProductPromotion(quickProduct, quickVariant)
     : null;
@@ -766,6 +1351,10 @@ export function PublicStorefront({
   const selectedProductPrice = quickProduct
     ? selectedProductSellingUnit?.unitPrice ?? getProductPrice(quickProduct, quickVariant)
     : 0;
+  const quickMaximumQuantity = quickProduct && (quickProduct.variants.length === 0 || quickVariant)
+    ? getMaximumOrderQuantity(quickProduct, quickVariant, selectedProductSellingUnit)
+    : null;
+  const quickOutOfStock = quickMaximumQuantity === 0;
   const selectedProductOriginalPrice = quickProduct
     ? getProductOriginalPrice(quickProduct, quickVariant)
     : null;
@@ -783,9 +1372,11 @@ export function PublicStorefront({
       : getProductPreviewTotal(quickProduct, quickVariant, quickQuantity, selectedProductPrice)
     : 0;
   const cartQuantity = cart.reduce((sum, line) => sum + line.quantity, 0);
-  const cartQuoteKey = JSON.stringify(
-    cart.map((line) => [line.productId, line.variantCode, line.sellingUnitOfMeasure, line.quantity])
-  );
+  const cartQuoteKey = JSON.stringify({
+    lines: cart.map((line) => [line.productId, line.variantCode, line.sellingUnitOfMeasure, line.quantity]),
+    fulfilmentMethod: deliveryMethod,
+    pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
+  });
   const fallbackCartSubtotal = toCartMoney(
     cart.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0)
   );
@@ -842,6 +1433,7 @@ export function PublicStorefront({
   useEffect(() => {
     if (cart.length === 0) {
       setCartQuote(null);
+      setCartStockError(null);
       return;
     }
 
@@ -860,17 +1452,22 @@ export function PublicStorefront({
                 variantCode: line.variantCode,
                 sellingUnitOfMeasure: line.sellingUnitOfMeasure,
                 quantity: line.quantity
-              }))
+              })),
+              delivery: {
+                fulfilmentMethod: deliveryMethod,
+                pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
+              },
             }),
             signal: controller.signal
           }
         );
-        if (response.ok) {
-          setCartQuote({ key: quoteKey, value: await response.json() as EcommerceQuote });
-        }
+        const quote = await readJson<EcommerceQuote>(response);
+        setCartQuote({ key: quoteKey, value: quote });
+        setCartStockError(null);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
           setCartQuote(null);
+          setCartStockError(error instanceof Error ? error.message : "Some cart items are no longer available.");
         }
       }
     }, 120);
@@ -879,48 +1476,177 @@ export function PublicStorefront({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [cart, cartQuoteKey, storefront.store.code]);
+  }, [cart, cartQuoteKey, deliveryMethod, pickupStoreCode, storefront.store.code]);
+
+  useEffect(() => {
+    if (quickMaximumQuantity === null || quickMaximumQuantity <= 0) {
+      return;
+    }
+    setQuickQuantity((current) => Math.min(current, quickMaximumQuantity));
+  }, [quickMaximumQuantity]);
 
   async function refreshSession() {
     const response = await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/auth/session`, {
       cache: "no-store"
     });
     if (response.ok) {
-      setSession(await response.json());
+      const nextSession = (await response.json()) as CustomerSession;
+      setSession(nextSession);
+      return nextSession;
     }
+    return null;
+  }
+
+  function startSocialAuth(provider: SocialAuthProvider) {
+    const providerOption = socialAuthProviders.find((option) => option.id === provider);
+    if (!providerOption?.enabled) {
+      setAuthError(`${provider === "google" ? "Google" : "Facebook"} sign-in is not configured yet.`);
+      return;
+    }
+    setSocialAuthBusy(provider);
+    setAuthError(null);
+    window.sessionStorage.setItem(
+      socialAuthResumeKey,
+      resumeCheckoutAfterAuth ? "checkout" : "account",
+    );
+    const returnTo = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(
+      `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/auth/oauth/${provider}/start?returnTo=${encodeURIComponent(returnTo)}`,
+    );
   }
 
   function showToast(message: string) {
     setToast(message);
   }
 
-  function openProduct(product: Product) {
-    const variant = product.variants.length === 1 ? product.variants[0] : null;
-    setQuickProduct(product);
+  function applyQuickProduct(product: ProductDetail) {
+    const currentProduct = applyProductAvailability(
+      product,
+      availabilityByProductIdRef.current.get(product.id),
+    );
+    const variant = currentProduct.variants.length === 1 ? currentProduct.variants[0] : null;
+    setQuickProduct(currentProduct);
     setQuickVariant(variant);
     setQuickSellingUnitOfMeasure(
-      resolveProductSellingUnit(product, variant)?.unitOfMeasureCode ?? ""
+      resolveProductSellingUnit(currentProduct, variant)?.unitOfMeasureCode ?? "",
     );
     setQuickQuantity(1);
-    setQuickImageUrl(product.galleryImageUrls[0] ?? product.imageUrl);
+    setQuickImageUrl(currentProduct.galleryImageUrls[0] ?? currentProduct.imageUrl);
+    setProductDetailsBusy(false);
+    setImageViewerOpen(false);
+    setImageViewerZoomed(false);
+    setImageViewerProduct(null);
+    setImageViewerUrl(null);
     setProductDetailTab("DESCRIPTION");
     setReviewMessage(null);
+  }
+
+  async function loadProductDetails(product: Product) {
+    const productKey = normalizeProductCode(product.code);
+    const cached = productDetailsRef.current.get(productKey);
+    if (cached) {
+      applyQuickProduct(cached);
+      return;
+    }
+
+    const requestId = productDetailRequestIdRef.current + 1;
+    productDetailRequestIdRef.current = requestId;
+    setProductDetailsBusy(true);
+    try {
+      const detail = await readJson<ProductDetail>(
+        await fetch(
+          `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/products/${encodeURIComponent(product.code)}`,
+          { cache: "force-cache" },
+        ),
+      );
+      if (requestId !== productDetailRequestIdRef.current) {
+        return;
+      }
+      productDetailsRef.current.set(productKey, detail);
+      applyQuickProduct(detail);
+    } catch (error) {
+      if (requestId !== productDetailRequestIdRef.current) {
+        return;
+      }
+      setQuickProduct(null);
+      setProductDetailsBusy(false);
+      showToast(error instanceof Error ? error.message : "The product could not be loaded.");
+    }
+  }
+
+  function openProduct(product: Product) {
+    void loadProductDetails(product);
     router.push(
       `${publicStoreHref}/products/${encodeURIComponent(product.code)}`
     );
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function closeProduct() {
+    productDetailRequestIdRef.current += 1;
     closeImageViewer();
     setQuickProduct(null);
+    setProductDetailsBusy(false);
     router.push(publicStoreHref);
+  }
+
+  function showCatalog(selection: StorefrontCatalogSelection) {
+    setCatalogSelection(selection);
+    setSearchText("");
+    if (quickProduct) {
+      productDetailRequestIdRef.current += 1;
+      closeImageViewer();
+      setQuickProduct(null);
+      setProductDetailsBusy(false);
+      router.push(publicStoreHref);
+    }
+  }
+
+  function navigateToSearch(query: string) {
+    const normalizedQuery = query.trim();
+    setSearchFocused(false);
+    if (!normalizedQuery) {
+      setSearchText("");
+      router.push(publicStoreHref);
+      return;
+    }
+
+    setSearchText(normalizedQuery);
+    router.push(`${publicStoreHref}/search?q=${encodeURIComponent(normalizedQuery)}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function clearSearch() {
+    setSearchText("");
+    setSearchFocused(false);
+    if (searchResultsMode) {
+      router.push(publicStoreHref);
+    }
+  }
+
+  function toggleSearchFilter(
+    value: string,
+    setter: (updater: (current: string[]) => string[]) => void,
+  ) {
+    setter((current) => current.includes(value)
+      ? current.filter((candidate) => candidate !== value)
+      : [...current, value]);
+  }
+
+  function clearSearchFilters() {
+    setSelectedSearchCategories([]);
+    setSelectedSearchBrands([]);
+    setSearchMinimumPrice(initialPriceBounds.minimum);
+    setSearchMaximumPrice(priceSliderMaximum);
   }
 
   function updateGlobalSearch(value: string) {
     setSearchText(value);
     if (quickProduct) {
+      productDetailRequestIdRef.current += 1;
       closeImageViewer();
       setQuickProduct(null);
+      setProductDetailsBusy(false);
       router.push(publicStoreHref);
     }
   }
@@ -935,7 +1661,7 @@ export function PublicStorefront({
     setQuickImageUrl(quickProduct.galleryImageUrls[nextIndex]);
   }
 
-  function openImageViewer(product: Product, imageUrl: string | null) {
+  function openImageViewer(product: ProductDetail, imageUrl: string | null) {
     if (!imageUrl) {
       openProduct(product);
       return;
@@ -972,6 +1698,35 @@ export function PublicStorefront({
   ) {
     const unitOfMeasure = sellingUnit?.unitOfMeasureCode ?? product.baseUnitOfMeasure;
     const key = `${product.id}:${variant?.code ?? "base"}:${unitOfMeasure}`;
+    const availableBaseQuantity = getAvailableBaseQuantity(product, variant);
+    const requestedBaseQuantity = quantity * Math.max(0.001, Number(sellingUnit?.conversionFactor ?? 1));
+    const existingBaseQuantity = cart
+      .filter(
+        (line) =>
+          line.productId === product.id &&
+          line.variantCode === (variant?.code ?? null)
+      )
+      .reduce(
+        (total, line) => total + line.quantity * Math.max(0.001, line.uomConversionFactor),
+        0
+      );
+
+    if (
+      availableBaseQuantity !== null &&
+      existingBaseQuantity + requestedBaseQuantity > availableBaseQuantity + 0.0005
+    ) {
+      const remainingQuantity = Math.max(0, Math.floor(
+        (availableBaseQuantity - existingBaseQuantity + 0.0005) /
+          Math.max(0.001, Number(sellingUnit?.conversionFactor ?? 1))
+      ));
+      showToast(
+        remainingQuantity <= 0
+          ? `${product.name} is currently out of stock.`
+          : `Only ${remainingQuantity} more ${sellingUnit?.unitOfMeasureName ?? unitOfMeasure} can be ordered for ${product.name}.`
+      );
+      return;
+    }
+
     setCart((current) => {
       const existing = current.find((line) => line.key === key);
       if (existing) {
@@ -1001,6 +1756,23 @@ export function PublicStorefront({
     showToast(`${product.name} added to cart`);
   }
 
+  function addProductFromCard(product: Product) {
+    const variant = product.variants.length === 1 ? product.variants[0] : null;
+
+    if (productCardRequiresSelection(product.variants.length)) {
+      openProduct(product);
+      return;
+    }
+
+    const sellingUnit = resolveProductSellingUnit(product, variant);
+    if (getMaximumOrderQuantity(product, variant, sellingUnit) === 0) {
+      showToast(`${product.name} is currently out of stock.`);
+      return;
+    }
+
+    addProduct(product, variant, 1, sellingUnit);
+  }
+
   function updateCartQuantity(key: string, quantity: number) {
     if (quantity <= 0) {
       setCart((current) => current.filter((line) => line.key !== key));
@@ -1026,6 +1798,10 @@ export function PublicStorefront({
         await refreshSession();
         setAuthOpen(false);
         showToast("Welcome back");
+        if (resumeCheckoutAfterAuth) {
+          setResumeCheckoutAfterAuth(false);
+          await beginCheckout(true);
+        }
         return;
       }
 
@@ -1075,6 +1851,10 @@ export function PublicStorefront({
       await refreshSession();
       setAuthOpen(false);
       showToast("Account created");
+      if (resumeCheckoutAfterAuth) {
+        setResumeCheckoutAfterAuth(false);
+        await beginCheckout(true);
+      }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Authentication failed.");
     } finally {
@@ -1082,13 +1862,45 @@ export function PublicStorefront({
     }
   }
 
-  function beginCheckout() {
+  async function beginCheckout(authenticated = session.authenticated) {
     if (cart.length === 0) {
       return;
     }
-    if (!session.authenticated) {
+    if (!authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(true);
       setAuthOpen(true);
+      return;
+    }
+    try {
+      const response = await fetch(
+        `/api/ecommerce/${encodeURIComponent(storefront.store.code)}/quote`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            lines: cart.map((line) => ({
+              productId: line.productId,
+              variantCode: line.variantCode,
+              sellingUnitOfMeasure: line.sellingUnitOfMeasure,
+              quantity: line.quantity
+            })),
+            delivery: {
+              fulfilmentMethod: deliveryMethod,
+              pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
+            },
+          })
+        }
+      );
+      const quote = await readJson<EcommerceQuote>(response);
+      setCartQuote({ key: cartQuoteKey, value: quote });
+      setCartStockError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Some cart items are no longer available.";
+      setCartStockError(message);
+      setCheckoutError(message);
+      setDrawerView("cart");
+      showToast(message);
       return;
     }
     const availablePaymentOptions = checkoutOrderType === "LAYAWAY"
@@ -1139,6 +1951,7 @@ export function PublicStorefront({
         paymentTiming: "ON_DELIVERY" | "PREPAY";
         orderType: "SALES_ORDER" | "LAYAWAY";
         paymentAmountDueNow: number;
+        fulfillment: EcommerceQuote["fulfillment"];
       }>(
         await fetch(`/api/ecommerce/${encodeURIComponent(storefront.store.code)}/orders`, {
           method: "POST",
@@ -1155,6 +1968,7 @@ export function PublicStorefront({
             })),
             delivery: {
               fulfilmentMethod: deliveryMethod,
+              pickupStoreCode: deliveryMethod === "PICKUP" ? pickupStoreCode : null,
               recipientName,
               phone: deliveryPhone,
               addressLine1,
@@ -1179,7 +1993,11 @@ export function PublicStorefront({
       setCart([]);
       showToast("Order placed");
     } catch (error) {
-      setCheckoutError(error instanceof Error ? error.message : "Order could not be placed.");
+      const message = error instanceof Error ? error.message : "Order could not be placed.";
+      setCheckoutError(message);
+      if (/available|stock/i.test(message)) {
+        setCartStockError(message);
+      }
     } finally {
       setCheckoutBusy(false);
     }
@@ -1221,6 +2039,7 @@ export function PublicStorefront({
   async function openOrders() {
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(false);
       setAuthOpen(true);
       return;
     }
@@ -1264,6 +2083,7 @@ export function PublicStorefront({
   async function openAccount() {
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(false);
       setAuthOpen(true);
       return;
     }
@@ -1343,6 +2163,7 @@ export function PublicStorefront({
     setPassword("");
     setAuthError(null);
     setAuthMode("RESET");
+    setResumeCheckoutAfterAuth(false);
     setDrawerView(null);
     setAuthOpen(true);
   }
@@ -1386,6 +2207,7 @@ export function PublicStorefront({
     }
     if (!session.authenticated) {
       setAuthMode("SIGN_IN");
+      setResumeCheckoutAfterAuth(false);
       setAuthOpen(true);
       return;
     }
@@ -1413,7 +2235,7 @@ export function PublicStorefront({
   }
 
   return (
-    <main className={styles.page}>
+    <main className={styles.page} data-text-size={textSize.toLowerCase()}>
       <header className={styles.header}>
         <div className={styles.headerInner}>
           <button className={styles.brand} onClick={() => { setDrawerView(null); if (quickProduct) closeProduct(); }} type="button">
@@ -1423,20 +2245,93 @@ export function PublicStorefront({
               <small>{storefront.store.legalName}</small>
             </span>
           </button>
-          <label className={styles.headerSearch}>
-            <Search size={20} />
-            <input
-              aria-label="Search products, brands and categories"
-              onChange={(event) => updateGlobalSearch(event.target.value)}
-              placeholder="Search products, brands and categories"
-              value={searchText}
-            />
-            {searchText ? (
-              <button aria-label="Clear search" onClick={() => updateGlobalSearch("")} type="button">
-                <X size={17} />
-              </button>
+          <form
+            className={styles.searchArea}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setSearchFocused(false);
+              }
+            }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              navigateToSearch(searchText);
+            }}
+          >
+            <label className={styles.headerSearch}>
+              <Search size={20} />
+              <input
+                aria-label="Search products, brands and categories"
+                autoComplete="off"
+                onChange={(event) => updateGlobalSearch(event.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                placeholder="Search products, brands and categories"
+                value={searchText}
+              />
+              {searchText ? (
+                <button aria-label="Clear search" onClick={clearSearch} title="Clear search" type="button">
+                  <X size={17} />
+                </button>
+              ) : null}
+            </label>
+            {searchFocused && searchText.trim().length >= 1 ? (
+              <div aria-label="Search suggestions" className={styles.searchSuggestions}>
+                {searchSuggestionGroups.length > 0 ? searchSuggestionGroups.map((group) => (
+                  <section className={styles.searchSuggestionGroup} key={group.label}>
+                    <h2>{group.label}</h2>
+                    {group.suggestions.map((suggestion) => (
+                      <button
+                        key={suggestion.key}
+                        onClick={() => navigateToSearch(suggestion.query)}
+                        type="button"
+                      >
+                        <span className={styles.searchSuggestionVisual}>
+                          {suggestion.imageUrl ? (
+                            <StorefrontImage alt="" sizes="42px" src={suggestion.imageUrl} />
+                          ) : suggestion.type === "Brand" ? (
+                            <Tags size={18} />
+                          ) : (
+                            (() => {
+                              const SuggestionIcon = resolveCategoryIcon(suggestion.label);
+                              return <SuggestionIcon size={18} />;
+                            })()
+                          )}
+                        </span>
+                        <span><strong>{suggestion.label}</strong><small>{suggestion.type}</small></span>
+                        <ChevronRight size={16} />
+                      </button>
+                    ))}
+                  </section>
+                )) : (
+                  <div className={styles.searchSuggestionEmpty}>No matching products or categories</div>
+                )}
+                {searchSuggestionGroups.length > 0 ? (
+                  <button
+                    className={styles.searchAllResults}
+                    onClick={() => navigateToSearch(searchText)}
+                    type="button"
+                  >
+                    <Search size={17} />
+                    See all results for &quot;{searchText.trim()}&quot;
+                  </button>
+                ) : null}
+              </div>
             ) : null}
-          </label>
+          </form>
+          <div aria-label="Text size" className={styles.textSizeControl} role="group">
+            {(["SMALL", "MEDIUM", "LARGE"] as const).map((size) => (
+              <button
+                aria-label={`Use ${size.toLowerCase()} text`}
+                aria-pressed={textSize === size}
+                className={styles[`textSize${size[0]}${size.slice(1).toLowerCase()}` as keyof typeof styles]}
+                key={size}
+                onClick={() => setTextSize(size)}
+                title={`${size[0]}${size.slice(1).toLowerCase()} text`}
+                type="button"
+              >
+                A
+              </button>
+            ))}
+          </div>
           <div className={styles.headerActions}>
             <button className={styles.iconButton} onClick={() => void openOrders()} title="My orders" type="button">
               <PackageCheck size={20} />
@@ -1449,6 +2344,7 @@ export function PublicStorefront({
                   void openAccount();
                 } else {
                   setAuthMode("SIGN_IN");
+                  setResumeCheckoutAfterAuth(false);
                   setAuthOpen(true);
                 }
               }}
@@ -1471,13 +2367,21 @@ export function PublicStorefront({
           <button className={styles.backToShop} onClick={closeProduct} type="button">
             <ArrowLeft size={18} /> Back to shop
           </button>
-          <div className={styles.productPageHero}>
+          <ProductBreadcrumb product={quickProduct} onSelect={showCatalog} />
+          <div className={styles.productPageHero} data-testid="product-detail-hero">
             <div className={styles.productGallery}>
               <div className={styles.productGalleryStage}>
                 <button
                   aria-label={`Open image viewer for ${quickProduct.name}`}
                   className={styles.productZoomButton}
                   onClick={() => openImageViewer(quickProduct, quickImageUrl)}
+                  onMouseMove={(event) => {
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    const x = ((event.clientX - bounds.left) / bounds.width) * 100;
+                    const y = ((event.clientY - bounds.top) / bounds.height) * 100;
+                    event.currentTarget.style.setProperty("--product-zoom-x", `${x}%`);
+                    event.currentTarget.style.setProperty("--product-zoom-y", `${y}%`);
+                  }}
                   title="Open image viewer"
                   type="button"
                 >
@@ -1506,13 +2410,13 @@ export function PublicStorefront({
               {quickProduct.galleryImageUrls.length > 1 ? (
                 <div className={styles.thumbnailRail}>
                   {quickProduct.galleryImageUrls.map((imageUrl, index) => (
-                    <button aria-label={`View product image ${index + 1}`} className={quickImageUrl === imageUrl ? styles.thumbnailActive : undefined} key={imageUrl} onClick={() => setQuickImageUrl(imageUrl)} type="button"><img alt="" src={imageUrl} /></button>
+                    <button aria-label={`View product image ${index + 1}`} className={quickImageUrl === imageUrl ? styles.thumbnailActive : undefined} key={imageUrl} onClick={() => setQuickImageUrl(imageUrl)} type="button"><StorefrontImage alt="" sizes="58px" src={imageUrl} /></button>
                   ))}
                 </div>
               ) : null}
             </div>
             <div className={styles.productPageSummary}>
-              <span className={styles.productEyebrow}>{quickProduct.brand ?? quickProduct.category ?? "Product"}</span>
+              <span className={styles.productEyebrow}>{quickProduct.brand ?? formatStorefrontTaxonomyLabel(quickProduct.category)}</span>
               <h1>{quickProduct.name}</h1>
               <small>{quickProduct.code}</small>
               <div className={styles.productRating}><StarRating rating={quickProduct.averageRating} /><span>{quickProduct.averageRating > 0 ? quickProduct.averageRating.toFixed(1) : "New"} ({quickProduct.reviewCount} review{quickProduct.reviewCount === 1 ? "" : "s"})</span></div>
@@ -1533,7 +2437,7 @@ export function PublicStorefront({
               {quickProduct.variants.length > 0 ? (
                 <div className={styles.variantGrid}>
                   {quickProduct.variants.map((variant) => (
-                    <button className={quickVariant?.code === variant.code ? styles.variantActive : undefined} key={variant.code} onClick={() => {
+                    <button className={quickVariant?.code === variant.code ? styles.variantActive : undefined} disabled={getMaximumOrderQuantity(quickProduct, variant, resolveProductSellingUnit(quickProduct, variant)) === 0} key={variant.code} onClick={() => {
                       setQuickVariant(variant);
                       setQuickSellingUnitOfMeasure(
                         resolveProductSellingUnit(quickProduct, variant)?.unitOfMeasureCode ?? ""
@@ -1560,13 +2464,47 @@ export function PublicStorefront({
                 </div>
               ) : null}
               <div className={styles.purchaseAssurance}><BadgeCheck size={17} /><span>Secure order tracking</span><CreditCard size={17} /><span>{checkoutPaymentOptions.length} payment option{checkoutPaymentOptions.length === 1 ? "" : "s"}</span></div>
+              {quickMaximumQuantity !== null ? <p className={quickOutOfStock ? styles.stockUnavailable : styles.stockAvailable}>{quickOutOfStock ? "Out of stock" : `${quickMaximumQuantity} available to order`}</p> : null}
               <div className={styles.modalPurchase}>
-                <QuantityStepper onChange={setQuickQuantity} value={quickQuantity} />
-                <button className={styles.primaryButton} disabled={quickProduct.variants.length > 0 && !quickVariant} onClick={() => addProduct(quickProduct, quickVariant, quickQuantity, selectedProductSellingUnit)} type="button">
-                  <ShoppingCart size={19} /> Add · {money.format(selectedProductTotal)}
+                <QuantityStepper max={quickMaximumQuantity} onChange={setQuickQuantity} value={quickQuantity} />
+                <button className={styles.primaryButton} disabled={(quickProduct.variants.length > 0 && !quickVariant) || quickOutOfStock} onClick={() => addProduct(quickProduct, quickVariant, quickQuantity, selectedProductSellingUnit)} type="button">
+                  <ShoppingCart size={19} /> {quickOutOfStock ? "Out of stock" : `Add · ${money.format(selectedProductTotal)}`}
                 </button>
               </div>
             </div>
+            <aside aria-label="Product information" className={styles.productFactsPanel}>
+              <div className={styles.productSeller}>
+                <span><Store size={18} /></span>
+                <div><small>Sold by</small><strong>{storefront.store.name}</strong></div>
+              </div>
+              <section>
+                <h2>Product details</h2>
+                <dl className={styles.productFactList}>
+                  <div><dt>SKU</dt><dd>{quickProduct.sku || quickProduct.code}</dd></div>
+                  {quickProduct.brand ? <div><dt>Brand</dt><dd>{quickProduct.brand}</dd></div> : null}
+                  {quickProduct.department ? <div><dt>Department</dt><dd>{formatStorefrontTaxonomyLabel(quickProduct.department)}</dd></div> : null}
+                  {quickProduct.category ? <div><dt>Category</dt><dd>{formatStorefrontTaxonomyLabel(quickProduct.category)}</dd></div> : null}
+                  {quickProduct.subcategory ? <div><dt>Subcategory</dt><dd>{formatStorefrontTaxonomyLabel(quickProduct.subcategory)}</dd></div> : null}
+                  <div><dt>Unit</dt><dd>{selectedProductSellingUnit?.unitOfMeasureName ?? quickProduct.unitOfMeasure}</dd></div>
+                </dl>
+              </section>
+              <section>
+                <h2>Secure checkout</h2>
+                <ul className={styles.productConfidenceList}>
+                  <li><BadgeCheck size={17} /><span>Secure order tracking</span></li>
+                  {storefront.paymentMethods.length > 0 ? <li><CreditCard size={17} /><span>Secure online payment</span></li> : null}
+                  {storefront.store.payOnDeliveryEnabled ? <li><WalletCards size={17} /><span>Pay on delivery or collection</span></li> : null}
+                </ul>
+              </section>
+              <section>
+                <h2>Fulfilment</h2>
+                <ul className={styles.productConfidenceList}>
+                  {storefront.store.allowDelivery ? <li><Truck size={17} /><span>Delivery confirmed at checkout</span></li> : null}
+                  {storefront.store.allowPickup ? <li><Store size={17} /><span>Pickup from an eligible shop</span></li> : null}
+                  {quickProduct.trackInventory ? <li><PackageCheck size={17} /><span>Normal orders reserve available stock</span></li> : null}
+                </ul>
+              </section>
+            </aside>
           </div>
           <section className={styles.productInformation}>
             <div className={styles.detailTabs} role="tablist">
@@ -1596,7 +2534,161 @@ export function PublicStorefront({
               ) : null}
             </div>
           </section>
+          {relatedProducts.length > 0 ? (
+            <section aria-label="Related products" className={styles.relatedProducts}>
+              <div className={styles.sectionHeading}>
+                <div><span>Related products</span><h2>You may also like</h2></div>
+                <ShoppingBag size={20} />
+              </div>
+              <div className={styles.relatedProductGrid}>
+                {relatedProducts.map((product) => (
+                  <ProductCard
+                    compact
+                    key={`related-${product.id}`}
+                    money={money}
+                    onAdd={addProductFromCard}
+                    onOpen={openProduct}
+                    product={product}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
         </article>
+      ) : productDetailsBusy ? (
+        <section aria-live="polite" className={styles.emptyState}>
+          <LoaderCircle className={styles.spin} size={28} />
+          <h2>Loading product</h2>
+        </section>
+      ) : searchResultsMode ? (
+        <section className={styles.searchResultsPage} data-testid="storefront-search-results">
+          <nav aria-label="Search breadcrumb" className={styles.searchBreadcrumb}>
+            <button onClick={() => router.push(publicStoreHref)} type="button">Home</button>
+            <ChevronRight aria-hidden="true" size={14} />
+            <span aria-current="page">Search results</span>
+          </nav>
+          <div className={styles.searchResultsHeading}>
+            <div>
+              <span>{searchMatchedProducts.length} result{searchMatchedProducts.length === 1 ? "" : "s"}</span>
+              <h1>Products matching &quot;{activeSearchQuery}&quot;</h1>
+            </div>
+            <button
+              aria-expanded={searchFiltersOpen}
+              className={styles.searchFilterToggle}
+              onClick={() => setSearchFiltersOpen((current) => !current)}
+              type="button"
+            >
+              <SlidersHorizontal size={18} /> Filters
+              {activeSearchFilterCount > 0 ? <b>{activeSearchFilterCount}</b> : null}
+            </button>
+          </div>
+          <div className={styles.searchResultsLayout}>
+            <aside className={classNames(styles.searchFilters, searchFiltersOpen && styles.searchFiltersOpen)}>
+              <div className={styles.searchFiltersHeader}>
+                <strong>Filter results</strong>
+                <button
+                  aria-label="Close filters"
+                  onClick={() => setSearchFiltersOpen(false)}
+                  title="Close filters"
+                  type="button"
+                ><X size={18} /></button>
+              </div>
+              {searchCategoryFacets.length > 0 ? (
+                <fieldset className={styles.searchFilterGroup}>
+                  <legend>Categories</legend>
+                  {searchCategoryFacets.map((facet) => (
+                    <label key={facet.value}>
+                      <input
+                        checked={selectedSearchCategories.includes(facet.value)}
+                        onChange={() => toggleSearchFilter(facet.value, setSelectedSearchCategories)}
+                        type="checkbox"
+                      />
+                      <span>{facet.label}</span>
+                      <small>{facet.count}</small>
+                    </label>
+                  ))}
+                </fieldset>
+              ) : null}
+              {searchBrandFacets.length > 0 ? (
+                <fieldset className={styles.searchFilterGroup}>
+                  <legend>Brands</legend>
+                  {searchBrandFacets.map((facet) => (
+                    <label key={facet.value}>
+                      <input
+                        checked={selectedSearchBrands.includes(facet.value)}
+                        onChange={() => toggleSearchFilter(facet.value, setSelectedSearchBrands)}
+                        type="checkbox"
+                      />
+                      <span>{facet.label}</span>
+                      <small>{facet.count}</small>
+                    </label>
+                  ))}
+                </fieldset>
+              ) : null}
+              <fieldset className={styles.searchPriceFilter}>
+                <legend>Price range</legend>
+                <div className={styles.searchPriceValues}>
+                  <span>{money.format(searchMinimumPrice)}</span>
+                  <span>{money.format(searchMaximumPrice)}</span>
+                </div>
+                <div className={styles.searchPriceRange}>
+                  <span
+                    className={styles.searchPriceRangeActive}
+                    style={{ left: `${searchRangeStart}%`, right: `${100 - searchRangeEnd}%` }}
+                  />
+                  <input
+                    aria-label="Minimum price"
+                    max={priceSliderMaximum}
+                    min={initialPriceBounds.minimum}
+                    onChange={(event) => setSearchMinimumPrice(Math.min(Number(event.target.value), searchMaximumPrice))}
+                    step="1"
+                    type="range"
+                    value={searchMinimumPrice}
+                  />
+                  <input
+                    aria-label="Maximum price"
+                    max={priceSliderMaximum}
+                    min={initialPriceBounds.minimum}
+                    onChange={(event) => setSearchMaximumPrice(Math.max(Number(event.target.value), searchMinimumPrice))}
+                    step="1"
+                    type="range"
+                    value={searchMaximumPrice}
+                  />
+                </div>
+              </fieldset>
+              {activeSearchFilterCount > 0 ? (
+                <button className={styles.clearSearchFilters} onClick={clearSearchFilters} type="button">
+                  Clear all filters
+                </button>
+              ) : null}
+            </aside>
+            <div className={styles.searchResultsContent}>
+              <div className={styles.searchResultsToolbar}>
+                <strong>{filteredSearchProducts.length} product{filteredSearchProducts.length === 1 ? "" : "s"}</strong>
+                <span>Matched by product, category, or brand</span>
+              </div>
+              {filteredSearchProducts.length > 0 ? (
+                <div className={styles.searchProductGrid}>
+                  {filteredSearchProducts.map((product) => (
+                    <ProductCard
+                      key={product.id}
+                      money={money}
+                      onAdd={addProductFromCard}
+                      onOpen={openProduct}
+                      product={product}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.emptyState}>
+                  <Search size={28} />
+                  <h2>No products match these filters</h2>
+                  <button onClick={clearSearchFilters} type="button">Clear filters</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
       ) : (
         <>
           {storefront.promotions.length > 0 && !promotionStripDismissed ? (
@@ -1622,19 +2714,17 @@ export function PublicStorefront({
               </button>
             </section>
           ) : null}
-          <section className={styles.shopIntro}>
-            <img alt={`${storefront.store.name} storefront`} src={storefront.store.heroImageUrl} />
-            <div className={styles.shopIntroContent}>
-              <small>Shop from anywhere</small><h1>{storefront.store.name}</h1><p>{storefront.store.description}</p>
-              <span><Truck size={16} /> {storefront.store.allowDelivery ? "Delivery available" : "Pickup only"}</span>
-            </div>
-            {storefront.store.supportPhone ? <a href={`tel:${storefront.store.supportPhone}`}>Call shop</a> : null}
-          </section>
-          <section className={styles.discovery}>
-            <div className={styles.categoryRail}><button className={category === "ALL" ? styles.categoryActive : undefined} onClick={() => setCategory("ALL")} type="button">All</button>{storefront.categories.map((item) => <button className={category === item ? styles.categoryActive : undefined} key={item} onClick={() => setCategory(item)} type="button">{item}</button>)}</div>
-          </section>
-          {featuredProducts.length > 0 && category === "ALL" && !searchText ? <section className={styles.featuredSection}><div className={styles.sectionHeading}><div><span>Featured</span><h2>Popular right now</h2></div><Heart size={20} /></div><div className={styles.featuredRail}>{featuredProducts.map((product) => <ProductCard key={`featured-${product.id}`} money={money} onOpen={openProduct} onPreview={openImageViewer} product={product} compact />)}</div></section> : null}
-          <section className={styles.catalogSection}><div className={styles.sectionHeading}><div><span>{category === "ALL" ? "Shop" : category}</span><h2>{visibleProducts.length} product{visibleProducts.length === 1 ? "" : "s"}</h2></div></div>{visibleProducts.length > 0 ? <div className={styles.productGrid}>{visibleProducts.map((product) => <ProductCard key={product.id} money={money} onOpen={openProduct} onPreview={openImageViewer} product={product} />)}</div> : <div className={styles.emptyState}><Search size={28} /><h3>No matching products</h3><button onClick={() => { setSearchText(""); setCategory("ALL"); }} type="button">Clear filters</button></div>}</section>
+          <div className={styles.heroLayout} data-testid="storefront-hero-layout">
+            <StorefrontCategoryMenu
+              departments={catalogTree}
+              onSelect={showCatalog}
+              selection={catalogSelection}
+              totalProductCount={products.length}
+            />
+            <StorefrontHero store={storefront.store} />
+          </div>
+          {featuredProducts.length > 0 && catalogSelection.level === "ALL" && !searchText ? <section className={styles.featuredSection} data-testid="storefront-featured-section"><div className={styles.sectionHeading}><div><span>Featured</span><h2>Popular right now</h2></div><Heart size={20} /></div><div className={styles.featuredRail}>{featuredProducts.map((product) => <ProductCard key={`featured-${product.id}`} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} compact />)}</div></section> : null}
+          <section className={styles.catalogSection} data-testid="storefront-catalog-section"><div className={styles.sectionHeading}><div><span>{catalogSelectionLabel}</span><h2>{visibleProducts.length} product{visibleProducts.length === 1 ? "" : "s"}</h2></div></div>{visibleProducts.length > 0 ? <div className={styles.productGrid}>{visibleProducts.map((product) => <ProductCard key={product.id} money={money} onAdd={addProductFromCard} onOpen={openProduct} product={product} />)}</div> : <div className={styles.emptyState}><Search size={28} /><h3>No matching products</h3><button onClick={() => { setSearchText(""); setCatalogSelection({ level: "ALL" }); }} type="button">Clear filters</button></div>}</section>
         </>
       )}
 
@@ -1648,15 +2738,8 @@ export function PublicStorefront({
         <button className={!drawerView ? styles.mobileNavActive : undefined} onClick={() => { setDrawerView(null); if (quickProduct) closeProduct(); }} type="button"><ShoppingBag size={20} /><span>Shop</span></button>
         <button className={drawerView === "orders" ? styles.mobileNavActive : undefined} onClick={() => void openOrders()} type="button"><PackageCheck size={20} /><span>Orders</span></button>
         <button className={drawerView === "cart" || drawerView === "checkout" ? styles.mobileNavActive : undefined} onClick={() => setDrawerView("cart")} type="button"><ShoppingCart size={20} /><span>Cart</span><b>{cartQuantity}</b></button>
-        <button aria-label={session.authenticated ? "Open my account" : "Sign in"} className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => session.authenticated ? void openAccount() : setAuthOpen(true)} type="button"><CircleUserRound size={20} /><span>Account</span></button>
+        <button aria-label={session.authenticated ? "Open my account" : "Sign in"} className={drawerView === "account" ? styles.mobileNavActive : undefined} onClick={() => { if (session.authenticated) { void openAccount(); } else { setAuthMode("SIGN_IN"); setResumeCheckoutAfterAuth(false); setAuthOpen(true); } }} type="button"><CircleUserRound size={20} /><span>Account</span></button>
       </nav>
-
-      {cartQuantity > 0 && !drawerView ? (
-        <button className={styles.floatingCart} onClick={() => setDrawerView("cart")} type="button">
-          <span><ShoppingCart size={20} /><b>{cartQuantity} item{cartQuantity === 1 ? "" : "s"}</b></span>
-          <strong>{money.format(checkoutTotal)}</strong>
-        </button>
-      ) : null}
 
       {whatsappDigits ? (
         <a
@@ -1727,19 +2810,20 @@ export function PublicStorefront({
               onClick={() => setImageViewerZoomed((value) => !value)}
               type="button"
             >
-              <img alt={imageViewerProduct.name} src={imageViewerUrl} />
+              <img alt={imageViewerProduct.name} decoding="async" fetchPriority="high" src={imageViewerUrl} />
             </button>
           </div>
         </div>
       ) : null}
 
       <div className={classNames(styles.drawerBackdrop, drawerView && styles.drawerBackdropOpen)} onClick={() => setDrawerView(null)} />
-      <aside className={classNames(styles.drawer, drawerView && styles.drawerOpen)} aria-hidden={!drawerView}>
+      <aside className={classNames(styles.drawer, drawerView && styles.drawerOpen)} aria-hidden={!drawerView || authOpen} data-testid="storefront-drawer">
         {drawerView === "cart" ? (
           <CartPanel
             cart={cart}
+            stockError={cartStockError}
             money={money}
-            onCheckout={beginCheckout}
+            onCheckout={() => void beginCheckout()}
             onClose={() => setDrawerView(null)}
             onQuantity={updateCartQuantity}
             quote={currentCartQuote}
@@ -1754,10 +2838,13 @@ export function PublicStorefront({
             addressLine2={addressLine2}
             busy={checkoutBusy}
             checkoutError={checkoutError}
+            stockError={cartStockError}
             checkoutTotal={checkoutTotal}
+            fulfillment={currentCartQuote?.fulfillment ?? null}
             city={city}
             createdOrder={createdOrder}
             deliveryMethod={deliveryMethod}
+            pickupStoreCode={pickupStoreCode}
             deliveryNote={deliveryNote}
             deliveryPhone={deliveryPhone}
             money={money}
@@ -1767,6 +2854,7 @@ export function PublicStorefront({
             onCity={setCity}
             onClose={() => setDrawerView(null)}
             onDeliveryMethod={setDeliveryMethod}
+            onPickupStoreCode={setPickupStoreCode}
             onDeliveryNote={setDeliveryNote}
             onDeliveryPhone={setDeliveryPhone}
             onPay={startPayment}
@@ -1840,12 +2928,43 @@ export function PublicStorefront({
       </aside>
 
       {authOpen ? (
-        <div className={styles.modalBackdrop} role="presentation" onMouseDown={() => setAuthOpen(false)}>
+        <div className={styles.modalBackdrop} data-testid="storefront-auth-backdrop" role="presentation" onMouseDown={() => setAuthOpen(false)}>
           <section className={styles.authModal} role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
             <button className={styles.modalClose} onClick={() => setAuthOpen(false)} title="Close" type="button"><X size={20} /></button>
             <div className={styles.authMark}><CircleUserRound size={26} /></div>
             <span className={styles.productEyebrow}>{storefront.store.name}</span>
             <h2>{authMode === "SIGN_IN" ? "Welcome back" : authMode === "SIGN_UP" ? "Create account" : authMode === "RESET" ? "Reset password" : authMode === "RESET_VERIFY" ? "Set a new password" : "Verify your account"}</h2>
+            {authMode === "SIGN_IN" || authMode === "SIGN_UP" ? (
+              <>
+                <div className={styles.socialAuthOptions}>
+                  {(["google", "facebook"] as const).map((provider) => {
+                    const enabled = socialAuthProviders.some((option) => option.id === provider && option.enabled);
+                    const label = provider === "google" ? "Google" : "Facebook";
+                    return (
+                      <button
+                        aria-label={`Continue with ${label}`}
+                        className={styles.socialAuthButton}
+                        disabled={!enabled || Boolean(socialAuthBusy)}
+                        key={provider}
+                        onClick={() => startSocialAuth(provider)}
+                        title={enabled ? `Continue with ${label}` : `${label} sign-in is not configured`}
+                        type="button"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={provider === "google" ? styles.googleAuthMark : styles.facebookAuthMark}
+                        >
+                          {provider === "google" ? "G" : "f"}
+                        </span>
+                        <strong>Continue with {label}</strong>
+                        {socialAuthBusy === provider ? <LoaderCircle className={styles.spin} size={18} /> : <span />}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className={styles.socialAuthDivider}><span>or continue with email</span></div>
+              </>
+            ) : null}
             {authMode === "VERIFY" || authMode === "RESET_VERIFY" ? (
               <>
                 <p className={styles.authCopy}>Enter the code sent to {identifier}.</p>
@@ -1884,39 +3003,343 @@ export function PublicStorefront({
   );
 }
 
-function ProductCard({ product, money, onOpen, onPreview, compact = false }: {
+function ProductBreadcrumb({
+  product,
+  onSelect,
+}: {
+  product: ProductDetail;
+  onSelect: (selection: StorefrontCatalogSelection) => void;
+}) {
+  const department = formatStorefrontTaxonomyLabel(product.department);
+  const category = formatStorefrontTaxonomyLabel(product.category);
+  const subcategory = formatStorefrontTaxonomyLabel(product.subcategory);
+
+  return (
+    <nav aria-label="Breadcrumb" className={styles.productBreadcrumb}>
+      <button onClick={() => onSelect({ level: "ALL" })} type="button">
+        <House size={15} /> Shop
+      </button>
+      {product.department?.trim() ? (
+        <>
+          <ChevronRight aria-hidden="true" size={14} />
+          <button
+            onClick={() => onSelect({ level: "DEPARTMENT", department })}
+            type="button"
+          >
+            {department}
+          </button>
+        </>
+      ) : null}
+      {product.category?.trim() ? (
+        <>
+          <ChevronRight aria-hidden="true" size={14} />
+          <button
+            onClick={() => onSelect({ level: "CATEGORY", department, category })}
+            type="button"
+          >
+            {category}
+          </button>
+        </>
+      ) : null}
+      {product.subcategory?.trim() ? (
+        <>
+          <ChevronRight aria-hidden="true" size={14} />
+          <button
+            onClick={() => onSelect({
+              level: "SUBCATEGORY",
+              department,
+              category,
+              subcategory,
+            })}
+            type="button"
+          >
+            {subcategory}
+          </button>
+        </>
+      ) : null}
+      <ChevronRight aria-hidden="true" size={14} />
+      <span aria-current="page">{product.name}</span>
+    </nav>
+  );
+}
+
+function StorefrontCategoryMenu({
+  departments,
+  onSelect,
+  selection,
+  totalProductCount,
+}: {
+  departments: StorefrontDepartmentNode[];
+  onSelect: (selection: StorefrontCatalogSelection) => void;
+  selection: StorefrontCatalogSelection;
+  totalProductCount: number;
+}) {
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [mobileDepartment, setMobileDepartment] = useState<string | null>(null);
+  const [hoveredDepartment, setHoveredDepartment] = useState<string | null>(null);
+  const activeDepartment = departments.find(
+    (department) => department.name === (mobileDepartment ?? hoveredDepartment),
+  ) ?? null;
+  const ActiveDepartmentIcon = activeDepartment
+    ? resolveCategoryIcon(activeDepartment.name)
+    : null;
+
+  const selectCatalog = (nextSelection: StorefrontCatalogSelection) => {
+    setMobileDepartment(null);
+    setHoveredDepartment(null);
+    onSelect(nextSelection);
+  };
+
+  return (
+    <nav
+      aria-label="Product categories"
+      className={styles.categoryMenu}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setHoveredDepartment(null);
+        }
+      }}
+      onMouseLeave={() => setHoveredDepartment(null)}
+    >
+      <button
+        aria-expanded={mobileOpen}
+        className={styles.categoryMenuHeader}
+        onClick={() => setMobileOpen((current) => {
+          if (current) setMobileDepartment(null);
+          return !current;
+        })}
+        type="button"
+      >
+        <ListTree size={19} />
+        <strong>All categories</strong>
+        <ChevronDown className={mobileOpen ? styles.categoryMenuChevronOpen : undefined} size={17} />
+      </button>
+      <div className={classNames(styles.categoryMenuBody, mobileOpen && styles.categoryMenuBodyOpen)}>
+        <div className={styles.categoryMenuScroll}>
+          <button
+            aria-current={selection.level === "ALL" ? "true" : undefined}
+            className={classNames(styles.categoryMenuAll, selection.level === "ALL" && styles.categoryMenuActive)}
+            onClick={() => selectCatalog({ level: "ALL" })}
+            type="button"
+          >
+            <Boxes size={18} />
+            <span>All products</span>
+            <small>{totalProductCount}</small>
+          </button>
+          {departments.map((department) => {
+            const DepartmentIcon = resolveCategoryIcon(department.name);
+            const departmentExpanded = mobileDepartment === department.name;
+            const departmentSelected = selection.level === "DEPARTMENT"
+              && selection.department === department.name;
+            const departmentContainsSelection = selection.level !== "ALL"
+              && selection.department === department.name;
+
+            return (
+              <div
+                className={styles.categoryMenuGroup}
+                key={department.name}
+                onMouseEnter={() => setHoveredDepartment(department.name)}
+              >
+                <div className={styles.categoryMenuRow}>
+                  <button
+                    aria-current={departmentSelected ? "true" : undefined}
+                    className={classNames(
+                      styles.categoryMenuSelect,
+                      departmentSelected && styles.categoryMenuActive,
+                      departmentContainsSelection && !departmentSelected && styles.categoryMenuAncestor,
+                    )}
+                    onFocus={() => setHoveredDepartment(department.name)}
+                    onClick={() => selectCatalog({ level: "DEPARTMENT", department: department.name })}
+                    type="button"
+                  >
+                    <DepartmentIcon size={18} />
+                    <span>{department.name}</span>
+                    <small>{department.count}</small>
+                  </button>
+                  <button
+                    aria-expanded={departmentExpanded}
+                    aria-label={`${departmentExpanded ? "Collapse" : "Expand"} ${department.name}`}
+                    className={styles.categoryMenuExpand}
+                    onClick={() => setMobileDepartment((current) => current === department.name ? null : department.name)}
+                    type="button"
+                  >
+                    <ChevronRight className={departmentExpanded ? styles.categoryMenuFlyoutToggleOpen : undefined} size={16} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {activeDepartment ? (
+        <section
+          aria-label={`${activeDepartment.name} categories`}
+          className={classNames(styles.categoryMegaMenu, styles.categoryMegaMenuOpen)}
+        >
+          <div className={styles.categoryMegaMenuHeader}>
+            {ActiveDepartmentIcon ? <ActiveDepartmentIcon size={22} /> : null}
+            <div>
+              <span>Department</span>
+              <strong>{activeDepartment.name}</strong>
+            </div>
+            <button
+              onClick={() => selectCatalog({ level: "DEPARTMENT", department: activeDepartment.name })}
+              type="button"
+            >
+              View all <ChevronRight size={15} />
+            </button>
+          </div>
+          <div className={styles.categoryMegaMenuGrid}>
+            {activeDepartment.categories.map((category) => {
+              const CategoryIcon = resolveCategoryIcon(category.name);
+              const categorySelected = selection.level === "CATEGORY"
+                && selection.department === activeDepartment.name
+                && selection.category === category.name;
+
+              return (
+                <div className={styles.categoryMegaMenuSection} key={category.name}>
+                  <button
+                    aria-current={categorySelected ? "true" : undefined}
+                    className={categorySelected ? styles.categoryMegaMenuActive : undefined}
+                    onClick={() => selectCatalog({
+                      level: "CATEGORY",
+                      department: activeDepartment.name,
+                      category: category.name,
+                    })}
+                    type="button"
+                  >
+                    <CategoryIcon size={16} />
+                    <strong>{category.name}</strong>
+                    <small>{category.count}</small>
+                  </button>
+                  <div className={styles.categoryMegaMenuLinks}>
+                    {category.subcategories.map((subcategory) => {
+                      const selected = selection.level === "SUBCATEGORY"
+                        && selection.department === activeDepartment.name
+                        && selection.category === category.name
+                        && selection.subcategory === subcategory.name;
+                      return (
+                        <button
+                          aria-current={selected ? "true" : undefined}
+                          className={selected ? styles.categoryMegaMenuActive : undefined}
+                          key={subcategory.name}
+                          onClick={() => selectCatalog({
+                            level: "SUBCATEGORY",
+                            department: activeDepartment.name,
+                            category: category.name,
+                            subcategory: subcategory.name,
+                          })}
+                          type="button"
+                        >
+                          <span>{subcategory.name}</span>
+                          <small>{subcategory.count}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+    </nav>
+  );
+}
+
+function StorefrontHero({ store }: { store: PublicStorefrontData["store"] }) {
+  const slides = store.heroImageUrls.length > 0 ? store.heroImageUrls : [store.heroImageUrl];
+  const slideSignature = slides.join("|");
+  const [activeSlide, setActiveSlide] = useState(0);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    setActiveSlide(0);
+  }, [slideSignature]);
+
+  useEffect(() => {
+    if (paused || slides.length < 2) return;
+    const timer = window.setInterval(
+      () => setActiveSlide((current) => (current + 1) % slides.length),
+      5500,
+    );
+    return () => window.clearInterval(timer);
+  }, [paused, slides.length]);
+
+  const moveSlide = (direction: -1 | 1) => {
+    setActiveSlide((current) => (current + direction + slides.length) % slides.length);
+  };
+
+  return (
+    <section
+      aria-label={`${store.name} offers`}
+      className={styles.shopIntro}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+    >
+      <div className={styles.shopIntroTrack} style={{ transform: `translateX(-${activeSlide * 100}%)` }}>
+        {slides.map((imageUrl, index) => <div aria-hidden={index !== activeSlide} className={styles.shopIntroSlide} key={`${imageUrl}-${index}`}><StorefrontImage alt={index === 0 ? `${store.name} storefront` : ""} priority={index === 0} sizes="(max-width: 639px) calc(100vw - 28px), (max-width: 1268px) calc(100vw - 28px), 1240px" src={imageUrl} /></div>)}
+      </div>
+      <h1 className={styles.srOnly}>{store.name}</h1>
+      {slides.length > 1 ? <><div className={styles.heroControls}><button aria-label="Previous banner" onClick={() => moveSlide(-1)} title="Previous banner" type="button"><ChevronLeft size={22} /></button><button aria-label="Next banner" onClick={() => moveSlide(1)} title="Next banner" type="button"><ChevronRight size={22} /></button></div><div aria-label="Storefront banners" className={styles.heroDots}>{slides.map((imageUrl, index) => <button aria-label={`Show banner ${index + 1}`} aria-pressed={index === activeSlide} className={index === activeSlide ? styles.heroDotActive : undefined} key={`${imageUrl}-dot-${index}`} onClick={() => setActiveSlide(index)} title={`Show banner ${index + 1}`} type="button" />)}</div></> : null}
+      {store.supportPhone ? <a href={`tel:${store.supportPhone}`}>Call shop</a> : null}
+    </section>
+  );
+}
+
+function ProductCard({ product, money, onOpen, onAdd, compact = false }: {
   product: Product;
   money: Intl.NumberFormat;
   onOpen: (product: Product) => void;
-  onPreview: (product: Product, imageUrl: string | null) => void;
+  onAdd: (product: Product) => void;
   compact?: boolean;
 }) {
   const promotion = getProductPromotion(product);
   const displayPrice = getProductPrice(product);
   const originalPrice = getProductOriginalPrice(product);
-  const previewImageUrl = product.galleryImageUrls[0] ?? product.imageUrl;
+  const previewImageUrl = product.imageUrl;
 
   return (
-    <article className={classNames(styles.productCard, compact && styles.productCardCompact)}>
+    <article
+      className={classNames(styles.productCard, compact && styles.productCardCompact)}
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest(`.${styles.productQuickAdd}`)) return;
+        onOpen(product);
+      }}
+    >
       <button
-        aria-label={previewImageUrl ? `Preview image for ${product.name}` : `View details for ${product.name}`}
+        aria-label={`View details for ${product.name}`}
         className={styles.productVisualButton}
-        onClick={() => previewImageUrl ? onPreview(product, previewImageUrl) : onOpen(product)}
-        title={previewImageUrl ? "Preview product image" : "View product details"}
+        title="View product details"
         type="button"
       >
         <ProductVisual imageUrl={previewImageUrl} product={product} />
-        {previewImageUrl ? <span className={styles.productImageZoomCue}><ZoomIn size={16} /></span> : null}
         {promotion ? (
           <span className={styles.promotionBadge}><BadgePercent size={13} />{getPromotionLabel(promotion, money)}</span>
         ) : product.featured ? <span className={styles.featuredBadge}>Featured</span> : null}
+        {isProductOutOfStock(product) ? (
+          <span className={styles.outOfStockRibbon} data-testid="out-of-stock-ribbon">
+            Out of stock
+          </span>
+        ) : null}
       </button>
       <div className={styles.productCardBody}>
-        <span>{product.brand ?? product.category ?? product.code}</span>
-        <button onClick={() => onOpen(product)} type="button"><h3>{product.name}</h3></button>
+        <span>{product.brand ?? (product.category ? formatStorefrontTaxonomyLabel(product.category) : product.code)}</span>
+        <button type="button"><h3>{product.name}</h3></button>
         <div className={styles.cardRating}><StarRating rating={product.averageRating} /><span>{product.reviewCount > 0 ? product.reviewCount : "New"}</span></div>
         <div className={styles.productCardFooter}>
-          <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : "Available to order"}</small></div>
+          <div><strong>{money.format(displayPrice)}</strong>{originalPrice ? <del>{money.format(originalPrice)}</del> : null}<small>{promotion ? `${promotion.name} · ${getPromotionScopeLabel(promotion)}` : isProductOutOfStock(product) ? "Out of stock" : product.variants.length > 0 ? `${product.variants.length} options` : product.availableQuantity === null ? "Available" : `${Math.floor(product.availableQuantity)} available`}</small></div>
+          <button
+            aria-label={`Add ${product.name} to cart`}
+            className={styles.productQuickAdd}
+            disabled={isProductOutOfStock(product)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdd(product);
+            }}
+            title="Add to cart"
+            type="button"
+          ><ShoppingCart size={18} /></button>
         </div>
       </div>
     </article>
@@ -1935,9 +3358,12 @@ function WhatsAppMark() {
 }
 
 function ProductVisual({ product, large = false, imageUrl = product.imageUrl }: { product: Product; large?: boolean; imageUrl?: string | null }) {
+  const sizes = large
+    ? "(max-width: 899px) calc(100vw - 44px), (max-width: 1199px) 50vw, 620px"
+    : "(max-width: 639px) 50vw, (max-width: 899px) 33vw, (max-width: 1179px) 25vw, 248px";
   return (
     <div className={classNames(styles.productVisual, large && styles.productVisualLarge)}>
-      {imageUrl ? <img alt={product.name} loading="lazy" src={imageUrl} /> : <span>{productInitials(product.name)}</span>}
+      {imageUrl ? <StorefrontImage alt={product.name} sizes={sizes} src={imageUrl} /> : <span>{productInitials(product.name)}</span>}
     </div>
   );
 }
@@ -1947,12 +3373,13 @@ function StarRating({ rating }: { rating: number }) {
   return <span aria-label={rating > 0 ? `${rating} out of 5 stars` : "Not yet rated"} className={styles.stars}>{[1, 2, 3, 4, 5].map((value) => <Star fill={value <= rounded ? "currentColor" : "none"} key={value} size={13} />)}</span>;
 }
 
-function QuantityStepper({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+function QuantityStepper({ value, onChange, max = null }: { value: number; onChange: (value: number) => void; max?: number | null }) {
+  const maximumQuantity = max === null ? 999 : Math.max(0, max);
   return (
     <div className={styles.quantityStepper}>
       <button aria-label="Decrease quantity" onClick={() => onChange(Math.max(1, value - 1))} type="button"><Minus size={17} /></button>
       <strong>{value}</strong>
-      <button aria-label="Increase quantity" onClick={() => onChange(Math.min(999, value + 1))} type="button"><Plus size={17} /></button>
+      <button aria-label="Increase quantity" disabled={value >= maximumQuantity} onClick={() => onChange(Math.min(maximumQuantity, value + 1))} type="button"><Plus size={17} /></button>
     </div>
   );
 }
@@ -1973,7 +3400,7 @@ function DrawerHeader({
   return (
     <header className={styles.drawerHeader}>
       {onBack ? <button onClick={onBack} title="Back" type="button"><ArrowLeft size={20} /></button> : <span />}
-      <h2>{title}</h2>
+      <h2 title={title}>{title}</h2>
       <div className={styles.drawerHeaderActions}>
         {onRefresh ? <button aria-label="Refresh order details" disabled={busy} onClick={onRefresh} title="Refresh order details" type="button"><RefreshCw className={busy ? styles.spin : undefined} size={19} /></button> : null}
         <button onClick={onClose} title="Close" type="button"><X size={20} /></button>
@@ -1982,8 +3409,9 @@ function DrawerHeader({
   );
 }
 
-function CartPanel({ cart, money, quote, subtotal, discount, total, onClose, onQuantity, onCheckout }: {
+function CartPanel({ cart, stockError, money, quote, subtotal, discount, total, onClose, onQuantity, onCheckout }: {
   cart: CartLine[];
+  stockError: string | null;
   money: Intl.NumberFormat;
   quote: EcommerceQuote | null;
   subtotal: number;
@@ -2003,7 +3431,7 @@ function CartPanel({ cart, money, quote, subtotal, discount, total, onClose, onQ
           <div className={styles.cartLines}>
             {cart.map((line, index) => (
               <article className={styles.cartLine} key={line.key}>
-                <div className={styles.cartThumb}>{line.imageUrl ? <img alt="" src={line.imageUrl} /> : productInitials(line.name)}</div>
+                <div className={styles.cartThumb}>{line.imageUrl ? <StorefrontImage alt="" sizes="72px" src={line.imageUrl} /> : productInitials(line.name)}</div>
                 <div className={styles.cartLineMain}><strong>{line.name}</strong><span>{line.variantName ?? line.productCode} · {line.sellingUnitName}{line.uomConversionFactor !== 1 ? ` (${line.uomConversionFactor} ${line.baseUnitOfMeasure})` : ""}</span><small>{quote?.lines[index]?.appliedPromotionName ? `${quote.lines[index].appliedPromotionName} · ` : ""}{money.format(quote?.lines[index]?.totalAmount ?? line.unitPrice * line.quantity)}</small></div>
                 <div className={styles.cartLineActions}>
                   <QuantityStepper onChange={(quantity) => onQuantity(line.key, quantity)} value={line.quantity} />
@@ -2016,7 +3444,8 @@ function CartPanel({ cart, money, quote, subtotal, discount, total, onClose, onQ
             <div className={styles.totalLine}><span>Subtotal</span><strong>{money.format(subtotal)}</strong></div>
             {discount > 0 ? <div className={styles.totalLine}><span>Promotion savings</span><strong>-{money.format(discount)}</strong></div> : null}
             <div className={styles.totalLine}><span>Total</span><strong>{money.format(total)}</strong></div>
-            <button className={styles.primaryButton} onClick={onCheckout} type="button">Checkout <ChevronRight size={19} /></button>
+            {stockError ? <p className={styles.formError}>{stockError}</p> : null}
+            <button className={styles.primaryButton} disabled={Boolean(stockError)} onClick={onCheckout} type="button">Checkout <ChevronRight size={19} /></button>
           </div>
         </>
       )}
@@ -2029,8 +3458,10 @@ function CheckoutPanel(props: {
   subtotal: number;
   discount: number;
   checkoutTotal: number;
+  fulfillment: EcommerceQuote["fulfillment"] | null;
   money: Intl.NumberFormat;
   deliveryMethod: "DELIVERY" | "PICKUP";
+  pickupStoreCode: string;
   recipientName: string;
   deliveryPhone: string;
   addressLine1: string;
@@ -2041,6 +3472,7 @@ function CheckoutPanel(props: {
   saveAddress: boolean;
   busy: boolean;
   checkoutError: string | null;
+  stockError: string | null;
   createdOrder: {
     orderNo: string;
     totalAmount: number;
@@ -2050,6 +3482,7 @@ function CheckoutPanel(props: {
     paymentTiming: "ON_DELIVERY" | "PREPAY";
     orderType: "SALES_ORDER" | "LAYAWAY";
     paymentAmountDueNow: number;
+    fulfillment: EcommerceQuote["fulfillment"];
   } | null;
   paymentOptions: CheckoutPaymentOption[];
   selectedPaymentCode: string;
@@ -2060,6 +3493,7 @@ function CheckoutPanel(props: {
   onClose: () => void;
   onBack: () => void;
   onDeliveryMethod: (value: "DELIVERY" | "PICKUP") => void;
+  onPickupStoreCode: (value: string) => void;
   onRecipientName: (value: string) => void;
   onDeliveryPhone: (value: string) => void;
   onAddressLine1: (value: string) => void;
@@ -2075,6 +3509,9 @@ function CheckoutPanel(props: {
   onReceiptEmail: (value: string) => void;
   onPay: (tenderMethodCode: string) => void;
 }) {
+  const pickupLocation = props.store.pickupLocations.find(
+    (location) => location.storeCode === props.pickupStoreCode,
+  );
   if (props.createdOrder) {
     return (
       <div className={styles.drawerContent}>
@@ -2085,6 +3522,19 @@ function CheckoutPanel(props: {
           <p>{props.createdOrder.orderNo}</p>
           <strong>{props.money.format(props.createdOrder.totalAmount)}</strong>
           {props.createdOrder.orderType === "LAYAWAY" ? <small>Deposit due now: {props.money.format(props.createdOrder.paymentAmountDueNow)}</small> : null}
+          <div className={styles.pickupInfo}>
+            <Store size={21} />
+            <div>
+              <strong>
+                {props.createdOrder.fulfillment.routingMethod === "NETWORK_TRANSFER"
+                  ? "Network fulfilment is being arranged"
+                  : props.createdOrder.fulfillment.method === "PICKUP"
+                    ? `Pickup from ${props.createdOrder.fulfillment.storeName}`
+                    : `Delivery dispatching from ${props.createdOrder.fulfillment.storeName}`}
+              </strong>
+              <p>{props.createdOrder.fulfillment.inventoryLocationName}</p>
+            </div>
+          </div>
         </div>
         <div className={styles.paymentSection}>
           {props.createdOrder.paymentTiming === "PREPAY" ? (
@@ -2140,8 +3590,39 @@ function CheckoutPanel(props: {
             <label className={styles.checkField}><input checked={props.saveAddress} onChange={(event) => props.onSaveAddress(event.target.checked)} type="checkbox" /><span>Save this address</span></label>
           </section>
         ) : (
-          <div className={styles.pickupInfo}><LocateFixed size={22} /><div><strong>{props.store.name}</strong><p>{props.store.address || "Pickup details will appear with your order."}</p></div></div>
+          <section className={styles.checkoutSection}>
+            <h3>Pickup shop</h3>
+            <label className={styles.field}>
+              <span>Collect from</span>
+              <select onChange={(event) => props.onPickupStoreCode(event.target.value)} value={props.pickupStoreCode}>
+                {props.store.pickupLocations.map((location) => (
+                  <option key={location.storeCode} value={location.storeCode}>{location.name}</option>
+                ))}
+              </select>
+            </label>
+            {pickupLocation?.address ? (
+              <div className={styles.pickupInfo}><LocateFixed size={22} /><div><strong>{pickupLocation.name}</strong><p>{pickupLocation.address}</p></div></div>
+            ) : null}
+          </section>
         )}
+        {props.fulfillment ? (
+          <div className={styles.pickupInfo}>
+            <Store size={21} />
+            <div>
+              <strong>
+                {props.deliveryMethod === "PICKUP"
+                  ? "Pickup stock assigned"
+                  : props.fulfillment.networkAllocation
+                    ? "Delivery stock secured across the fulfilment network"
+                    : "Delivery stock assigned"}
+              </strong>
+              <p>
+                {props.deliveryMethod === "PICKUP" ? "Collect from" : "Dispatching from"} {props.fulfillment.storeName}
+                {" · "}{props.fulfillment.inventoryLocationName}
+              </p>
+            </div>
+          </div>
+        ) : null}
         <section className={styles.checkoutSection}>
           <h3>Payment</h3>
           {props.orderType === "LAYAWAY" ? (
@@ -2165,10 +3646,10 @@ function CheckoutPanel(props: {
           {props.discount > 0 ? <div><span>Promotion savings</span><strong>-{props.money.format(props.discount)}</strong></div> : null}
           <div><span>Total</span><strong>{props.money.format(props.checkoutTotal)}</strong></div>
         </section>
-        {props.checkoutError ? <p className={styles.formError}>{props.checkoutError}</p> : null}
+        {props.checkoutError ?? props.stockError ? <p className={styles.formError}>{props.checkoutError ?? props.stockError}</p> : null}
       </div>
       <div className={styles.drawerDock}>
-        <button className={styles.primaryButton} disabled={props.busy || !props.selectedPaymentCode} onClick={props.onPlaceOrder} type="button">
+        <button className={styles.primaryButton} disabled={props.busy || !props.selectedPaymentCode || Boolean(props.stockError)} onClick={props.onPlaceOrder} type="button">
           {props.busy ? <LoaderCircle className={styles.spin} size={19} /> : props.orderType === "LAYAWAY" ? <WalletCards size={19} /> : <ShoppingBag size={19} />} {props.orderType === "LAYAWAY" ? `Start Layaway · ${props.money.format(props.layawayDepositAmount)}` : `Place order · ${props.money.format(props.checkoutTotal)}`}
         </button>
       </div>
@@ -2330,7 +3811,7 @@ function OrdersPanel(props: {
           title={order.orderNo}
         />
         <div className={styles.orderDetailScroll}>
-          <div className={styles.orderStatusHero}><span>{order.orderType === "LAYAWAY" ? `LAYAWAY · ${order.status.replace(/_/g, " ")}` : order.status.replace(/_/g, " ")}</span><h2>{props.money.format(order.totalAmount)}</h2><p>{formatFriendlyDateTime(order.placedAt)}</p></div>
+          <div className={styles.orderStatusHero}><span>{order.orderType === "LAYAWAY" ? `LAYAWAY · ${formatCustomerOrderStatus(order)}` : formatCustomerOrderStatus(order)}</span><h2>{props.money.format(order.totalAmount)}</h2><p>{formatFriendlyDateTime(order.placedAt)}</p></div>
           <div className={styles.orderTimeline}>
             {order.timeline.map((event, index) => (
               <div key={event.id}><span className={index === order.timeline.length - 1 ? styles.timelineCurrent : undefined}><Check size={14} /></span><div><strong>{event.label}</strong>{event.note ? <p>{event.note}</p> : null}<small>{formatFriendlyDateTime(event.createdAt)}</small></div></div>
@@ -2341,6 +3822,8 @@ function OrdersPanel(props: {
             {order.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant ?? `${line.quantity} item(s)`}</small></span><b>{props.money.format(line.lineTotal)}</b></div>)}
           </section>
           {order.deliveryAddress ? <div className={styles.pickupInfo}><Truck size={21} /><div><strong>Delivery</strong><p>{order.deliveryAddress}</p>{order.trackingReference ? <small>{order.trackingReference}</small> : null}</div></div> : null}
+          {order.fulfilmentMethod === "DELIVERY" && order.fulfillment ? <div className={styles.pickupInfo}><Truck size={21} /><div><strong>Delivery prepared by {order.fulfillment.storeName}</strong><p>{order.fulfillment.routingMethod === "NETWORK_TRANSFER" ? "The dispatch shop is coordinating stock for one delivery." : order.fulfillment.inventoryLocationName ?? "Store sales location"}</p></div></div> : null}
+          {order.fulfilmentMethod === "PICKUP" && order.fulfillment ? <div className={styles.pickupInfo}><Store size={21} /><div><strong>Pickup from {order.fulfillment.storeName}</strong><p>{order.fulfillment.inventoryLocationName ?? "Store sales location"}</p></div></div> : null}
           {order.orderType === "LAYAWAY" && order.balanceAmount > 0 && order.selectedPaymentMethodCode ? (
             <section className={styles.checkoutSection}>
               <h3>Pay Layaway balance</h3>
@@ -2361,7 +3844,7 @@ function OrdersPanel(props: {
       <DrawerHeader onClose={props.onClose} title="My orders" />
       <div className={styles.accountStrip}><span><CircleUserRound size={22} /></span><div><strong>{props.session.customer?.fullName}</strong><small>{props.session.customer?.email ?? props.session.customer?.phone}</small></div><button onClick={props.onSignOut} type="button">Sign out</button></div>
       <button className={styles.refreshButton} disabled={props.busy} onClick={props.onRefresh} type="button"><RefreshCw className={props.busy ? styles.spin : undefined} size={17} />Refresh</button>
-      {props.busy ? <div className={styles.drawerEmpty}><LoaderCircle className={styles.spin} size={30} /></div> : props.orders.length === 0 ? <div className={styles.drawerEmpty}><PackageCheck size={34} /><h3>No orders yet</h3></div> : <div className={styles.orderList}>{props.orders.map((order) => <button key={order.id} onClick={() => props.onSelect(order)} type="button"><span className={styles.orderIcon}>{order.deliveryStatus === "DELIVERED" ? <PackageCheck size={21} /> : <Truck size={21} />}</span><span><strong>{order.orderNo}</strong><small>{formatFriendlyDateTime(order.placedAt)} · {order.status.replace(/_/g, " ")}</small></span><b>{props.money.format(order.totalAmount)}</b><ChevronRight size={18} /></button>)}</div>}
+      {props.busy ? <div className={styles.drawerEmpty}><LoaderCircle className={styles.spin} size={30} /></div> : props.orders.length === 0 ? <div className={styles.drawerEmpty}><PackageCheck size={34} /><h3>No orders yet</h3></div> : <div className={styles.orderList}>{props.orders.map((order) => <button key={order.id} onClick={() => props.onSelect(order)} type="button"><span className={styles.orderIcon}>{order.deliveryStatus === "DELIVERED" ? <PackageCheck size={21} /> : order.fulfilmentMethod === "PICKUP" ? <Store size={21} /> : <Truck size={21} />}</span><span><strong>{order.orderNo}</strong><small>{formatFriendlyDateTime(order.placedAt)} · {formatCustomerOrderStatus(order)}</small></span><b>{props.money.format(order.totalAmount)}</b><ChevronRight size={18} /></button>)}</div>}
     </div>
   );
 }

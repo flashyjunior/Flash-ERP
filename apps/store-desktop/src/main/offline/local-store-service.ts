@@ -11,6 +11,8 @@ import type {
   EnterpriseBarcodePublishedPayload,
   EnterpriseCatalogProductPublishedPayload,
   EnterpriseCustomerPublishedPayload,
+  EnterpriseSupplierPublishedPayload,
+  EnterpriseEcommerceSalesOrderPublishedPayload,
   EnterpriseBankAccountPublishedPayload,
   EnterpriseInterStoreTransferPublishedPayload,
   EnterpriseInterStoreTransferRequestTargetPublishedPayload,
@@ -88,6 +90,7 @@ import {
 
 import {
   computeNextStoreSyncAt,
+  readStoreEcommerceFulfillmentEligibility,
   readStoreSyncPolicyFromMetadata,
   resolveInventoryTransferUom,
   storeSyncPolicyToMetadataEntries,
@@ -229,6 +232,7 @@ import { localStoreSchemaSql } from "./local-store-schema.js";
 import {
   createPosReceiptSeriesToken,
   formatPosTransactionNumber,
+  isEcommercePosTransactionNumber,
   isLegacyPosTransactionNumber,
   isPosReceiptSeriesToken,
   POS_RECEIPT_MAX_SEQUENCE,
@@ -6346,12 +6350,33 @@ export class LocalStoreService {
       });
     }
 
+    const ecommerceEligibilityByLocation =
+      readStoreEcommerceFulfillmentEligibility(
+        this.metadata("ecommerce_fulfillment_locations_json"),
+      );
+
     return filteredRows
       .slice(0, limit)
       .map<StoreInventoryBrowseItem>((row) => {
         const batches = asBooleanFlag(row.track_expiry)
           ? this.getInventoryBatchRows(row.location_code, row.product_code)
           : [];
+        const activeReservedQuantity = this.getActiveReservedProductBaseQuantity({
+          inventoryLocationCode: row.location_code,
+          productCode: row.product_code,
+        });
+        const safetyStockLevel =
+          row.safety_stock_level === null
+            ? 0
+            : Number(asNumber(row.safety_stock_level).toFixed(3));
+        const ecommerceEligibility = ecommerceEligibilityByLocation.get(
+          row.location_code.trim().toUpperCase(),
+        );
+        const ecommerceEligible = Boolean(
+          ecommerceEligibility?.supportsPickup ||
+            ecommerceEligibility?.supportsDelivery,
+        );
+        const quantityOnHand = Number(asNumber(row.quantity_on_hand).toFixed(3));
 
         return {
         locationCode: row.location_code,
@@ -6366,7 +6391,22 @@ export class LocalStoreService {
         subcategory: row.subcategory,
         barcode:
           this.getRepresentativeBarcode(row.product_code)?.barcode_code ?? null,
-        quantityOnHand: Number(asNumber(row.quantity_on_hand).toFixed(3)),
+        quantityOnHand,
+        activeReservedQuantity,
+        ecommerceSellableQuantity: ecommerceEligible
+          ? Number(
+              Math.max(
+                0,
+                quantityOnHand - activeReservedQuantity - safetyStockLevel,
+              ).toFixed(3),
+            )
+          : 0,
+        ecommercePickupEligible: ecommerceEligibility?.supportsPickup ?? false,
+        ecommerceDeliveryEligible:
+          ecommerceEligibility?.supportsDelivery ?? false,
+        ecommerceEligibilityLabel:
+          ecommerceEligibility?.label ??
+          "Not configured for ecommerce fulfilment",
         minStockLevel:
           row.min_stock_level === null
             ? null
@@ -17591,6 +17631,18 @@ export class LocalStoreService {
           1,
           asNumber(fulfilledSalesOrder.record_version) + 1,
         );
+        const fulfilledReservations = this.getSalesOrderReservationPayloads(
+          fulfilledSalesOrder.id,
+        ).map((reservation) =>
+          reservation.status === "ACTIVE"
+            ? {
+                ...reservation,
+                status: "CONSUMED" as const,
+                releaseReason: `Consumed by fulfilment ${transactionNo}.`,
+                releasedAt: timestamp,
+              }
+            : reservation,
+        );
         const salesOrderPayload: StoreSalesOrderRecordedPayload = {
           orderId: fulfilledSalesOrder.id,
           orderNo: fulfilledSalesOrder.order_no,
@@ -17623,12 +17675,12 @@ export class LocalStoreService {
             asNumber(fulfilledSalesOrder.minimum_deposit_amount).toFixed(2),
           ),
           reservationStatus:
-            fulfilledSalesOrder.order_type === "LAYAWAY"
+            fulfilledSalesOrder.reservation_status === "ACTIVE"
               ? "CONSUMED"
               : fulfilledSalesOrder.reservation_status,
           reservationCreatedAt: fulfilledSalesOrder.reservation_created_at,
           reservationReleasedAt:
-            fulfilledSalesOrder.order_type === "LAYAWAY"
+            fulfilledSalesOrder.reservation_status === "ACTIVE"
               ? timestamp
               : fulfilledSalesOrder.reservation_released_at,
           layawayExpiresAt: fulfilledSalesOrder.layaway_expires_at,
@@ -17647,24 +17699,12 @@ export class LocalStoreService {
           fulfilledTransactionNo: transactionNo,
           fulfilledAt: timestamp,
           cancelledAt: null,
-          reservations: this.getSalesOrderReservationPayloads(
-            fulfilledSalesOrder.id,
-          ).map((reservation) =>
-            fulfilledSalesOrder.order_type === "LAYAWAY" &&
-            reservation.status === "ACTIVE"
-              ? {
-                  ...reservation,
-                  status: "CONSUMED" as const,
-                  releaseReason: `Consumed by fulfilment ${transactionNo}.`,
-                  releasedAt: timestamp,
-                }
-              : reservation,
-          ),
+          reservations: fulfilledReservations,
         };
 
         this.db
           .prepare(
-            "UPDATE sales_order SET status = 'FULFILLED', paid_amount = ?, balance_amount = 0, reservation_status = CASE WHEN order_type = 'LAYAWAY' THEN 'CONSUMED' ELSE reservation_status END, reservation_released_at = CASE WHEN order_type = 'LAYAWAY' THEN ? ELSE reservation_released_at END, fulfilled_transaction_id = ?, fulfilled_transaction_no = ?, fulfilled_at = ?, record_version = ?, updated_at = ? WHERE id = ?",
+            "UPDATE sales_order SET status = 'FULFILLED', paid_amount = ?, balance_amount = 0, reservation_status = CASE WHEN reservation_status = 'ACTIVE' THEN 'CONSUMED' ELSE reservation_status END, reservation_released_at = CASE WHEN reservation_status = 'ACTIVE' THEN ? ELSE reservation_released_at END, fulfilled_transaction_id = ?, fulfilled_transaction_no = ?, fulfilled_at = ?, record_version = ?, updated_at = ? WHERE id = ?",
           )
           .run(
             paidAmount,
@@ -17676,7 +17716,7 @@ export class LocalStoreService {
             timestamp,
             fulfilledSalesOrder.id,
           );
-        if (fulfilledSalesOrder.order_type === "LAYAWAY") {
+        if (fulfilledSalesOrder.reservation_status === "ACTIVE") {
           this.transitionLayawayReservations({
             salesOrderId: fulfilledSalesOrder.id,
             status: "CONSUMED",
@@ -22387,6 +22427,13 @@ export class LocalStoreService {
         );
       }
 
+      if (Array.isArray(storePayload.ecommerceFulfillmentLocations)) {
+        this.setMetadata(
+          "ecommerce_fulfillment_locations_json",
+          JSON.stringify(storePayload.ecommerceFulfillmentLocations),
+        );
+      }
+
       if (Array.isArray(storePayload.productSizes)) {
         this.setMetadata(
           "product_sizes_json",
@@ -23386,6 +23433,57 @@ export class LocalStoreService {
     }
 
     if (
+      event.aggregateType === "supplier" &&
+      event.eventType === "supplier.published"
+    ) {
+      const supplierPayload =
+        payload as Partial<EnterpriseSupplierPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        typeof supplierPayload.storeCode !== "string" ||
+        supplierPayload.storeCode !== storeCode ||
+        typeof supplierPayload.supplierId !== "string" ||
+        typeof supplierPayload.supplierNo !== "string" ||
+        typeof supplierPayload.supplierName !== "string" ||
+        typeof supplierPayload.status !== "string"
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid supplier publication payload.",
+        );
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO supplier_snapshot (supplier_no, supplier_name, phone, email, tax_number, address_line1, city, country_code, status, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) ON CONFLICT(supplier_no) DO UPDATE SET supplier_name = excluded.supplier_name, phone = excluded.phone, email = excluded.email, address_line1 = excluded.address_line1, city = excluded.city, country_code = excluded.country_code, status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .run(
+          supplierPayload.supplierNo,
+          supplierPayload.supplierName,
+          typeof supplierPayload.phone === "string"
+            ? supplierPayload.phone
+            : null,
+          typeof supplierPayload.email === "string"
+            ? supplierPayload.email
+            : null,
+          typeof supplierPayload.addressLine1 === "string"
+            ? supplierPayload.addressLine1
+            : null,
+          typeof supplierPayload.city === "string"
+            ? supplierPayload.city
+            : null,
+          typeof supplierPayload.countryCode === "string"
+            ? supplierPayload.countryCode
+            : null,
+          supplierPayload.status,
+          appliedAt,
+        );
+
+      return;
+    }
+
+    if (
       event.aggregateType === "purchaseOrder" &&
       event.eventType === "purchase-order.published"
     ) {
@@ -23518,6 +23616,229 @@ export class LocalStoreService {
           );
       }
 
+      return;
+    }
+
+    if (
+      event.aggregateType === "salesOrder" &&
+      event.eventType === "sales-order.published"
+    ) {
+      const order =
+        payload as Partial<EnterpriseEcommerceSalesOrderPublishedPayload>;
+      const storeCode =
+        this.metadata("store_code") ?? defaultStoreConfig.storeCode;
+
+      if (
+        order.source !== "ECOMMERCE" ||
+        order.storeCode !== storeCode ||
+        typeof order.orderId !== "string" ||
+        typeof order.orderNo !== "string" ||
+        typeof order.sourceTransactionId !== "string" ||
+        typeof order.sourceTransactionNo !== "string" ||
+        typeof order.totalAmount !== "number" ||
+        typeof order.paidAmount !== "number" ||
+        typeof order.balanceAmount !== "number" ||
+        typeof order.salesOrderRecordVersion !== "number" ||
+        !Array.isArray(order.lines) ||
+        !Array.isArray(order.reservations) ||
+        (order.fulfilmentMethod !== "PICKUP" && order.fulfilmentMethod !== "DELIVERY") ||
+        (order.paymentTiming !== "PREPAY" && order.paymentTiming !== "ON_DELIVERY") ||
+        (order.status !== "OPEN" && order.status !== "CANCELLED" && order.status !== "EXPIRED")
+      ) {
+        throw new Error(
+          "Flash ERP received an invalid ecommerce sales-order publication payload.",
+        );
+      }
+
+      const existing = this.db
+        .prepare(
+          "SELECT record_version FROM sales_order WHERE id = ? LIMIT 1",
+        )
+        .get(order.orderId) as { record_version: number | string } | undefined;
+      if (
+        existing &&
+        asNumber(existing.record_version) > order.salesOrderRecordVersion
+      ) {
+        return;
+      }
+
+      for (const line of order.lines) {
+        if (
+          typeof line !== "object" ||
+          line === null ||
+          typeof line.lineId !== "string" ||
+          typeof line.productCode !== "string" ||
+          typeof line.productName !== "string" ||
+          typeof line.quantity !== "number" ||
+          typeof line.unitPrice !== "number" ||
+          typeof line.lineTotal !== "number"
+        ) {
+          throw new Error(
+            "Flash ERP received an invalid ecommerce sales-order line.",
+          );
+        }
+        const product = this.db
+          .prepare("SELECT id FROM product_snapshot WHERE product_code = ? LIMIT 1")
+          .get(line.productCode) as { id: string } | undefined;
+        if (!product) {
+          throw new Error(
+            `Flash ERP cannot prepare ${order.orderNo} until product ${line.productCode} has synced to this shop.`,
+          );
+        }
+      }
+
+      const transactionStatus = order.status === "OPEN" ? "PARKED" : "VOIDED";
+      const detailJson = JSON.stringify({
+        source: "ECOMMERCE",
+        fulfilmentMethod: order.fulfilmentMethod,
+        paymentTiming: order.paymentTiming,
+        selectedPaymentMethodCode: order.selectedPaymentMethodCode ?? null,
+        selectedPaymentMethodName: order.selectedPaymentMethodName ?? null,
+        recipientName: order.recipientName ?? null,
+        deliveryPhone: order.deliveryPhone ?? null,
+        deliveryAddress: order.deliveryAddress ?? null,
+        networkAllocation: order.networkAllocation === true,
+      });
+
+      this.db
+        .prepare(
+          "INSERT INTO pos_transaction (id, transaction_no, shift_id, cashier_code, customer_id, source_transaction_id, source_transaction_no, transaction_type, status, subtotal_amount, discount_amount, tax_amount, total_amount, paid_amount, change_amount, notes, header_reference, additional_details, record_version, updated_at) VALUES (?, ?, NULL, 'ECOMMERCE', ?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, customer_id = excluded.customer_id, subtotal_amount = excluded.subtotal_amount, discount_amount = excluded.discount_amount, tax_amount = excluded.tax_amount, total_amount = excluded.total_amount, paid_amount = excluded.paid_amount, notes = excluded.notes, header_reference = excluded.header_reference, additional_details = excluded.additional_details, record_version = excluded.record_version, updated_at = excluded.updated_at",
+        )
+        .run(
+          order.sourceTransactionId,
+          order.sourceTransactionNo,
+          order.customerId ?? null,
+          order.sourceTransactionId,
+          order.sourceTransactionNo,
+          transactionStatus,
+          order.subtotalAmount ?? order.totalAmount,
+          order.discountAmount ?? 0,
+          order.taxAmount ?? 0,
+          order.totalAmount,
+          order.paidAmount,
+          order.note ?? null,
+          order.orderNo,
+          detailJson,
+          order.salesOrderRecordVersion,
+          appliedAt,
+        );
+
+      if (!existing) {
+        for (const line of order.lines) {
+          const product = this.db
+            .prepare("SELECT id FROM product_snapshot WHERE product_code = ? LIMIT 1")
+            .get(line.productCode) as { id: string };
+          this.db
+            .prepare(
+              "INSERT INTO pos_transaction_line (id, pos_transaction_id, product_id, line_intent, source_line_id, inventory_location_code, applied_promotion_code, applied_promotion_name, product_code_snapshot, product_variant_code_snapshot, product_name_snapshot, variant_size, variant_color, variant_attributes_snapshot, line_note, serial_numbers_json, batch_allocations_json, quantity, selling_unit_of_measure, base_unit_of_measure, uom_conversion_factor, base_quantity, unit_price, discount_amount, tax_amount, line_total, manual_price_override, manual_discount_override) VALUES (?, ?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+            )
+            .run(
+              line.lineId,
+              order.sourceTransactionId,
+              product.id,
+              line.lineId,
+              order.dispatchInventoryLocationCode ?? null,
+              line.appliedPromotionCode ?? null,
+              line.appliedPromotionName ?? null,
+              line.productCode,
+              line.productVariantCode ?? null,
+              line.productName,
+              line.variantSize ?? null,
+              line.variantColor ?? null,
+              line.variantAttributesSnapshot ?? null,
+              line.lineNote ?? null,
+              line.quantity,
+              line.sellingUnitOfMeasure ?? "EA",
+              line.baseUnitOfMeasure ?? "EA",
+              line.uomConversionFactor ?? 1,
+              line.baseQuantity ?? line.quantity,
+              line.unitPrice,
+              line.discountAmount ?? 0,
+              line.taxAmount ?? 0,
+              line.lineTotal,
+            );
+        }
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO sales_order (id, order_no, source_transaction_id, source_transaction_no, customer_id, customer_no, customer_name, order_type, status, total_amount, deposit_amount, paid_amount, balance_amount, deposit_tender_method_code, deposit_tender_method_name, deposit_payment_method, deposit_reference, deposit_paid_at, layaway_policy_snapshot_json, minimum_deposit_amount, reservation_status, reservation_created_at, reservation_released_at, layaway_expires_at, expired_at, cancellation_fee_amount, refunded_amount, record_version, operator_name, note, fulfilled_transaction_id, fulfilled_transaction_no, synced_at, created_at, fulfilled_at, cancelled_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, total_amount = excluded.total_amount, deposit_amount = excluded.deposit_amount, paid_amount = excluded.paid_amount, balance_amount = excluded.balance_amount, deposit_tender_method_code = excluded.deposit_tender_method_code, deposit_tender_method_name = excluded.deposit_tender_method_name, deposit_payment_method = excluded.deposit_payment_method, deposit_reference = excluded.deposit_reference, deposit_paid_at = excluded.deposit_paid_at, reservation_status = excluded.reservation_status, reservation_created_at = excluded.reservation_created_at, reservation_released_at = excluded.reservation_released_at, layaway_expires_at = excluded.layaway_expires_at, expired_at = excluded.expired_at, cancellation_fee_amount = excluded.cancellation_fee_amount, refunded_amount = excluded.refunded_amount, record_version = excluded.record_version, note = excluded.note, fulfilled_transaction_id = excluded.fulfilled_transaction_id, fulfilled_transaction_no = excluded.fulfilled_transaction_no, fulfilled_at = excluded.fulfilled_at, cancelled_at = excluded.cancelled_at, updated_at = excluded.updated_at",
+        )
+        .run(
+          order.orderId,
+          order.orderNo,
+          order.sourceTransactionId,
+          order.sourceTransactionNo,
+          order.customerId ?? null,
+          order.customerNo ?? null,
+          order.customerName ?? null,
+          order.orderType ?? "SALES_ORDER",
+          order.status,
+          order.totalAmount,
+          order.depositAmount ?? 0,
+          order.paidAmount,
+          order.balanceAmount,
+          order.depositTenderMethodCode ?? null,
+          order.depositTenderMethodName ?? null,
+          order.depositPaymentMethod ?? null,
+          order.depositReference ?? null,
+          order.depositPaidAt ?? null,
+          order.layawayPolicySnapshotJson ?? null,
+          order.minimumDepositAmount ?? 0,
+          order.reservationStatus ?? "NOT_APPLICABLE",
+          order.reservationCreatedAt ?? null,
+          order.reservationReleasedAt ?? null,
+          order.layawayExpiresAt ?? null,
+          order.expiredAt ?? null,
+          order.cancellationFeeAmount ?? 0,
+          order.refundedAmount ?? 0,
+          order.salesOrderRecordVersion,
+          order.operatorName ?? "Customer web order",
+          order.note ?? null,
+          order.fulfilledTransactionId ?? null,
+          order.fulfilledTransactionNo ?? null,
+          order.createdAt ?? appliedAt,
+          order.fulfilledAt ?? null,
+          order.cancelledAt ?? null,
+          appliedAt,
+        );
+
+      this.db
+        .prepare("DELETE FROM sales_order_inventory_reservation WHERE sales_order_id = ?")
+        .run(order.orderId);
+      for (const reservation of order.reservations) {
+        if (
+          typeof reservation !== "object" ||
+          reservation === null ||
+          typeof reservation.reservationId !== "string" ||
+          typeof reservation.salesOrderLineId !== "string" ||
+          typeof reservation.productCode !== "string" ||
+          typeof reservation.baseQuantity !== "number"
+        ) {
+          throw new Error(
+            "Flash ERP received an invalid ecommerce sales-order reservation.",
+          );
+        }
+        this.db
+          .prepare(
+            "INSERT INTO sales_order_inventory_reservation (id, sales_order_id, sales_order_line_id, inventory_location_code, product_code, product_variant_code, base_unit_of_measure, base_quantity, status, release_reason, created_at, released_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            reservation.reservationId,
+            order.orderId,
+            reservation.salesOrderLineId,
+            reservation.inventoryLocationCode ?? null,
+            reservation.productCode,
+            reservation.productVariantCode ?? null,
+            reservation.baseUnitOfMeasure,
+            reservation.baseQuantity,
+            reservation.status,
+            reservation.releaseReason ?? null,
+            reservation.createdAt,
+            reservation.releasedAt ?? null,
+            appliedAt,
+          );
+      }
       return;
     }
 
@@ -25805,6 +26126,37 @@ export class LocalStoreService {
     );
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_sales_order_reservation_stock ON sales_order_inventory_reservation(inventory_location_code, product_code, product_variant_code, status)",
+    );
+    this.db.exec(
+      `UPDATE sales_order_inventory_reservation
+       SET status = CASE (
+             SELECT sales_order.status
+             FROM sales_order
+             WHERE sales_order.id = sales_order_inventory_reservation.sales_order_id
+           )
+             WHEN 'FULFILLED' THEN 'CONSUMED'
+             WHEN 'CANCELLED' THEN 'RELEASED'
+             WHEN 'EXPIRED' THEN 'EXPIRED'
+           END,
+           release_reason = COALESCE(
+             NULLIF(release_reason, ''),
+             'Reconciled from terminal sales order state.'
+           ),
+           released_at = COALESCE(
+             released_at,
+             (SELECT COALESCE(fulfilled_at, cancelled_at, expired_at, updated_at)
+              FROM sales_order
+              WHERE sales_order.id = sales_order_inventory_reservation.sales_order_id),
+             CURRENT_TIMESTAMP
+           ),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE status = 'ACTIVE'
+         AND EXISTS (
+           SELECT 1
+           FROM sales_order
+           WHERE sales_order.id = sales_order_inventory_reservation.sales_order_id
+             AND sales_order.status IN ('FULFILLED', 'CANCELLED', 'EXPIRED')
+         )`,
     );
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS idx_eod_reconciliation_shift ON eod_reconciliation(shift_id, reconciled_at DESC)",
@@ -28543,6 +28895,25 @@ export class LocalStoreService {
     return Number(asNumber(row?.value).toFixed(3));
   }
 
+  private getActiveReservedProductBaseQuantity(input: {
+    inventoryLocationCode: string | null;
+    productCode: string;
+  }) {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(base_quantity), 0) AS value
+         FROM sales_order_inventory_reservation
+         WHERE status = 'ACTIVE'
+           AND COALESCE(inventory_location_code, '') = COALESCE(?, '')
+           AND product_code = ?`,
+      )
+      .get(input.inventoryLocationCode, input.productCode) as
+      | NumericRow
+      | undefined;
+
+    return Number(asNumber(row?.value).toFixed(3));
+  }
+
   private getOwnActiveReservedBaseQuantity(input: {
     salesOrderId: string;
     inventoryLocationCode: string | null;
@@ -29140,6 +29511,15 @@ export class LocalStoreService {
           row.payload_json,
         ) as StorePosTransactionCompletedPayload;
       } catch {
+        continue;
+      }
+
+      if (isEcommercePosTransactionNumber(payload.transactionNo)) {
+        this.db
+          .prepare(
+            "UPDATE sync_outbox SET failure_kind = NULL, error_message = NULL, updated_at = ? WHERE id = ?",
+          )
+          .run(repairedAt, row.id);
         continue;
       }
 

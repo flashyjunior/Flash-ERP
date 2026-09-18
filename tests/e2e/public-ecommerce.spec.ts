@@ -4,6 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 import bcrypt from "bcryptjs";
 import "dotenv/config";
 
+import { formatStorefrontTaxonomyLabel } from "../../apps/enterprise-web/src/components/ecommerce/storefront-category-tree";
 import { prisma } from "../../apps/enterprise-web/src/lib/db/prisma";
 
 const storeCode = process.env.FLASH_ERP_E2E_ECOMMERCE_STORE;
@@ -64,6 +65,83 @@ async function dismissInventoryStartupAlert(page: Page) {
     await expect(inventoryAlert).toBeHidden();
   }
 }
+
+type PublicCatalogSnapshot = {
+  store?: {
+    heroImageUrls?: string[];
+  };
+  products?: Array<{
+    code?: string;
+    name?: string;
+    department?: string | null;
+    category?: string | null;
+    subcategory?: string | null;
+    availableQuantity?: number | null;
+    variants?: Array<{ code?: string }>;
+    promotion?: { code?: string } | null;
+  }>;
+  promotions?: Array<{ code?: string }>;
+};
+
+async function waitForPublicCatalog(
+  page: Page,
+  description: string,
+  predicate: (catalog: PublicCatalogSnapshot) => boolean
+) {
+  await expect
+    .poll(
+      async () => {
+        try {
+          const response = await page.request.get(
+            `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+          );
+          if (!response.ok()) return false;
+          return predicate((await response.json()) as PublicCatalogSnapshot);
+        } catch {
+          return false;
+        }
+      },
+      {
+        message: `Waiting for ${description} to reach the public storefront catalog.`,
+        timeout: 35_000,
+        intervals: [250, 500, 1_000]
+      }
+    )
+    .toBe(true);
+}
+
+test("keeps checkout-triggered customer sign-in above the mobile cart", async ({ page }, testInfo) => {
+  test.skip(!storeCode, "Set FLASH_ERP_E2E_ECOMMERCE_STORE to an enabled public storefront.");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+
+  const addToCartButton = page.getByRole("button", { name: /^Add .+ to cart$/ }).first();
+  test.skip(
+    await addToCartButton.count() === 0,
+    "The storefront has no available simple product for checkout overlay acceptance.",
+  );
+  await addToCartButton.click();
+  await page.getByRole("button", { name: "Open cart" }).click();
+  const storefrontDrawer = page.getByTestId("storefront-drawer");
+  await storefrontDrawer.getByRole("button", { name: "Checkout", exact: true }).click();
+
+  const authDialog = page.getByRole("dialog");
+  await expect(authDialog.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+  const overlayStacking = await page.evaluate(() => ({
+    auth: Number.parseInt(getComputedStyle(document.querySelector('[data-testid="storefront-auth-backdrop"]')!).zIndex, 10),
+    drawer: Number.parseInt(getComputedStyle(document.querySelector('[data-testid="storefront-drawer"]')!).zIndex, 10),
+  }));
+  expect(overlayStacking.auth).toBeGreaterThan(overlayStacking.drawer);
+  expect(await authDialog.evaluate((dialog) => {
+    const bounds = dialog.getBoundingClientRect();
+    const topmostElement = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return topmostElement !== null && dialog.contains(topmostElement);
+  })).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("checkout-auth-mobile.png"), fullPage: false });
+});
 
 test.describe("public ecommerce extension", () => {
   test.skip(!storeCode, "Set FLASH_ERP_E2E_ECOMMERCE_STORE to an enabled public storefront.");
@@ -155,12 +233,198 @@ test.describe("public ecommerce extension", () => {
   });
 
   test("renders a usable storefront across mobile, tablet, and desktop", async ({ page }, testInfo) => {
+    test.setTimeout(300_000);
     await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await expect(page.locator("h1")).toHaveCount(1);
     await expect(page.getByPlaceholder("Search products, brands and categories")).toBeVisible();
     await expect(page.locator("article").filter({ has: page.getByRole("heading", { level: 3 }) })).not.toHaveCount(0);
+    await expect(page.getByRole("navigation", { name: "Product categories" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "All categories" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /All products/ })).toBeVisible();
 
-    const hero = page.locator("section").filter({ has: page.getByRole("heading", { level: 1 }) }).locator("img").first();
+    const providerResponse = await page.request.get(
+      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/auth/oauth/providers`
+    );
+    expect(providerResponse.ok(), await providerResponse.text()).toBeTruthy();
+    const providerAvailability = (await providerResponse.json()) as {
+      providers: Array<{ id: "google" | "facebook"; enabled: boolean }>;
+    };
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    const authDialog = page.getByRole("dialog");
+    for (const provider of providerAvailability.providers) {
+      const label = provider.id === "google" ? "Google" : "Facebook";
+      const providerButton = authDialog.getByRole("button", { name: `Continue with ${label}` });
+      await expect(providerButton).toBeVisible();
+      if (provider.enabled) {
+        await expect(providerButton).toBeEnabled();
+      } else {
+        await expect(providerButton).toBeDisabled();
+      }
+    }
+    await authDialog.screenshot({ path: testInfo.outputPath("social-auth-options.png") });
+    await authDialog.getByRole("button", { name: "Create a customer account" }).click();
+    await expect(authDialog.getByRole("heading", { name: "Create account" })).toBeVisible();
+    await expect(authDialog.getByRole("button", { name: "Continue with Google" })).toBeVisible();
+    await expect(authDialog.getByRole("button", { name: "Continue with Facebook" })).toBeVisible();
+    await authDialog.screenshot({ path: testInfo.outputPath("social-signup-options.png") });
+    await authDialog.getByTitle("Close").click();
+
+    const searchInput = page.getByPlaceholder("Search products, brands and categories");
+    const mediumFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await page.getByRole("button", { name: "Use small text" }).click();
+    const smallFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await page.getByRole("button", { name: "Use medium text" }).click();
+    const restoredMediumFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await page.getByRole("button", { name: "Use large text" }).click();
+    const largeFontSize = await searchInput.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    expect(restoredMediumFontSize).toBeCloseTo(mediumFontSize, 1);
+    expect(mediumFontSize / smallFontSize).toBeGreaterThanOrEqual(1.1);
+    expect(largeFontSize / mediumFontSize).toBeGreaterThanOrEqual(1.2);
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Use large text" })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "Use medium text" }).click();
+
+    const catalogResponse = await page.request.get(
+      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+    );
+    expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+    const catalog = (await catalogResponse.json()) as PublicCatalogSnapshot;
+    const partialNameSearch = catalog.products
+      ?.flatMap((product) => product.name.split(/\s+/).map((token) => ({ product, token })))
+      .find(({ token }) => {
+        if (token.length < 5) return false;
+        const fragment = token.slice(1, Math.min(token.length, 5)).toLowerCase();
+        return catalog.products?.filter((product) => product.name.toLowerCase().includes(fragment)).length === 1;
+      });
+    if (partialNameSearch) {
+      const fragment = partialNameSearch.token
+        .slice(1, Math.min(partialNameSearch.token.length, 5))
+        .toLowerCase();
+      await searchInput.fill(fragment[0] ?? fragment);
+      await expect(page.locator('[aria-label="Search suggestions"]')).toBeVisible();
+      await searchInput.fill(fragment);
+      const productSuggestion = page
+        .locator('[aria-label="Search suggestions"]')
+        .getByRole("button", { name: `${partialNameSearch.product.name} Product`, exact: true });
+      await expect(productSuggestion).toBeVisible();
+      await productSuggestion.click();
+      await expect(page).toHaveURL(/\/shop\/[^/]+\/search\?q=/, { timeout: 60_000 });
+      await expect(page.getByTestId("storefront-search-results")).toContainText(
+        partialNameSearch.product.name
+      );
+      await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+    }
+
+    const unavailableProduct = catalog.products?.find((product) => product.availableQuantity === 0);
+    if (unavailableProduct) {
+      await page.goto(
+        `/shop/${encodeURIComponent(storeCode ?? "")}/search?q=${encodeURIComponent(unavailableProduct.name)}`
+      );
+      const unavailableCard = page.locator("article").filter({
+        has: page.getByRole("heading", { level: 3, name: unavailableProduct.name, exact: true })
+      });
+      await expect(unavailableCard.getByTestId("out-of-stock-ribbon")).toHaveText("Out of stock");
+      await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+    }
+
+    const departmentName = catalog.products
+      ?.map((product) => product.department?.trim())
+      .find((value): value is string => Boolean(value));
+    if (departmentName) {
+      const departmentDisplayName = formatStorefrontTaxonomyLabel(departmentName);
+      const departmentCount = catalog.products?.filter(
+        (product) => product.department?.trim() === departmentName
+      ).length ?? 0;
+      const escapedDepartmentName = departmentDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const categoriesNavigation = page.getByRole("navigation", { name: "Product categories" });
+      const departmentButton = categoriesNavigation.getByRole("button", {
+        name: new RegExp(`^${escapedDepartmentName}\\s+${departmentCount}$`)
+      });
+      await expect(page.getByRole("region", { name: `${departmentDisplayName} categories` })).toHaveCount(0);
+      await departmentButton.hover();
+      await expect(page.getByRole("region", { name: `${departmentDisplayName} categories` })).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath("category-mega-menu-desktop.png"),
+        fullPage: false
+      });
+      await departmentButton.click();
+      await expect(page.getByRole("region", { name: `${departmentDisplayName} categories` })).toHaveCount(0);
+      await expect(page.getByRole("heading", {
+        level: 2,
+        name: `${departmentCount} product${departmentCount === 1 ? "" : "s"}`
+      })).toBeVisible();
+      await categoriesNavigation.getByRole("button", {
+        name: `All products ${catalog.products?.length ?? 0}`
+      }).click();
+    }
+
+    const searchCategory = catalog.products
+      ?.map((product) => product.category?.trim())
+      .find((value): value is string => Boolean(value));
+    if (searchCategory) {
+      const searchCategoryLabel = formatStorefrontTaxonomyLabel(searchCategory);
+      const escapedSearchCategory = searchCategoryLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      await searchInput.fill(searchCategory);
+      const suggestions = page.locator('[aria-label="Search suggestions"]');
+      await expect(suggestions).toBeVisible();
+      await suggestions.screenshot({ path: testInfo.outputPath("search-suggestions-desktop.png") });
+      await suggestions.getByRole("button", {
+        name: new RegExp(`^${escapedSearchCategory}\\s+Category$`)
+      }).click();
+      await expect(page).toHaveURL(/\/shop\/[^/]+\/search\?q=/, { timeout: 60_000 });
+      await expect(page.getByTestId("storefront-search-results")).toBeVisible();
+      await expect(page.getByRole("group", { name: "Categories" })).toBeVisible();
+      await expect(page.getByRole("group", { name: "Price range" })).toBeVisible();
+      await page.getByTestId("storefront-search-results").screenshot({
+        path: testInfo.outputPath("search-results-desktop.png")
+      });
+
+      const resultCard = page.locator("article").filter({
+        has: page.getByRole("heading", { level: 3 })
+      }).first();
+      const resultVisual = resultCard.getByRole("button", { name: /^View details for / }).locator("div").first();
+      await expect(resultVisual).toHaveCSS("background-color", "rgb(255, 255, 255)");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const filterToggle = page.getByRole("button", { name: "Filters", exact: false });
+      await expect(filterToggle).toBeVisible();
+      await filterToggle.click();
+      await expect(page.getByRole("group", { name: "Categories" })).toBeVisible();
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+        )
+      ).toBeLessThanOrEqual(1);
+      await page.getByTestId("storefront-search-results").screenshot({
+        path: testInfo.outputPath("search-results-mobile.png")
+      });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.goto(`/shop/${encodeURIComponent(storeCode ?? "")}`);
+    }
+    for (const imageUrl of catalog.store?.heroImageUrls ?? []) {
+      const imageResponse = await page.request.get(imageUrl);
+      expect(imageResponse.ok(), `Storefront banner is unavailable: ${imageUrl}`).toBeTruthy();
+    }
+
+    const simpleProduct = catalog.products?.find(
+      (product) =>
+        product.name &&
+        (product.variants?.length ?? 0) <= 1 &&
+        product.availableQuantity !== 0
+    );
+    test.skip(!simpleProduct?.name, "The storefront has no available simple product for direct-add acceptance.");
+    const storefrontUrl = page.url();
+    await page.getByRole("button", { name: `Add ${simpleProduct?.name} to cart` }).first().click();
+    await expect(page).toHaveURL(storefrontUrl);
+    await expect(page.getByText(`${simpleProduct?.name} added to cart`)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open cart" }).locator("b")).toHaveText("1");
+    await expect(page.getByRole("button", { name: /1 item/ })).toHaveCount(0);
+
+    const heroSection = page.locator('section[aria-label$=" offers"]');
+    await expect(heroSection.getByText("Shop from anywhere")).toHaveCount(0);
+    const hiddenHeroHeadingBox = await heroSection.locator("h1").boundingBox();
+    expect(hiddenHeroHeadingBox?.width ?? 0).toBeLessThanOrEqual(1);
+    expect(hiddenHeroHeadingBox?.height ?? 0).toBeLessThanOrEqual(1);
+    const hero = heroSection.locator("img").first();
     await expect(hero).toBeVisible();
     expect(await hero.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
 
@@ -170,11 +434,31 @@ test.describe("public ecommerce extension", () => {
       { name: "desktop", width: 1440, height: 1000 }
     ]) {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.evaluate(() => window.scrollTo(0, 0));
       await expect(page.getByPlaceholder("Search products, brands and categories")).toBeVisible();
       const horizontalOverflow = await page.evaluate(
         () => document.documentElement.scrollWidth - document.documentElement.clientWidth
       );
       expect(horizontalOverflow, `${viewport.name} has horizontal page overflow`).toBeLessThanOrEqual(1);
+      if (viewport.name === "desktop") {
+        const heroBox = await heroSection.boundingBox();
+        const catalogBox = await page.getByTestId("storefront-catalog-section").boundingBox();
+        expect(heroBox?.height ?? 0).toBeGreaterThanOrEqual(470);
+        expect((await page.getByTestId("storefront-hero-layout").boundingBox())?.width ?? 0)
+          .toBeGreaterThanOrEqual(viewport.width - 50);
+        expect(Math.abs((catalogBox?.x ?? 0) - (heroBox?.x ?? 0)))
+          .toBeLessThanOrEqual(1);
+        expect(Math.abs(
+          ((catalogBox?.x ?? 0) + (catalogBox?.width ?? 0)) -
+          ((heroBox?.x ?? 0) + (heroBox?.width ?? 0))
+        )).toBeLessThanOrEqual(1);
+        const featuredSection = page.getByTestId("storefront-featured-section");
+        if (await featuredSection.count()) {
+          const featuredBox = await featuredSection.boundingBox();
+          expect(Math.abs((featuredBox?.x ?? 0) - (heroBox?.x ?? 0)))
+            .toBeLessThanOrEqual(1);
+        }
+      }
       await page.screenshot({
         path: testInfo.outputPath(`storefront-${viewport.name}.png`),
         fullPage: false
@@ -182,16 +466,66 @@ test.describe("public ecommerce extension", () => {
     }
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("heading", { level: 3 }).first().click();
-    await expect(page).toHaveURL(/\/shop\/[^/]+\/products\/[^/]+$/);
+    const productCard = page.locator("article").filter({ has: page.getByRole("heading", { level: 3 }) }).first();
+    const productHeading = productCard.getByRole("heading", { level: 3 });
+    const productName = (await productHeading.innerText()).trim();
+    await productCard.locator("strong").first().click();
+    await expect(page).toHaveURL(/\/shop\/[^/]+\/products\/[^/]+$/, { timeout: 60_000 });
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+    await expect(breadcrumb).toBeVisible();
+    await expect(breadcrumb).toContainText(productName);
     await expect(page.getByRole("link", { name: /on WhatsApp$/ })).toBeVisible();
     await expect(page.getByRole("link", { name: /on WhatsApp$/ }).locator("svg")).toBeVisible();
     await expect(page.getByRole("tab", { name: "Description", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Specifications", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: /Reviews/ })).toBeVisible();
+    const productInformation = page.locator('aside[aria-label="Product information"]');
+    await expect(productInformation.getByRole("heading", { name: "Product details" })).toBeVisible();
+    await expect(productInformation.getByRole("heading", { name: "Secure checkout" })).toBeVisible();
+    await expect(productInformation.getByRole("heading", { name: "Fulfilment" })).toBeVisible();
+    const relatedProducts = page.getByRole("region", { name: "Related products" });
+    await expect(relatedProducts.getByRole("heading", { name: "You may also like" })).toBeVisible();
+    await expect(relatedProducts.locator("article")).not.toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: testInfo.outputPath("product-details-mobile.png"), fullPage: false });
+    await page.getByTestId("product-detail-hero").screenshot({
+      path: testInfo.outputPath("product-details-mobile-full.png")
+    });
+    await relatedProducts.screenshot({ path: testInfo.outputPath("related-products-mobile.png") });
+
+    const galleryThumbnails = page.getByRole("button", { name: /^View product image / });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    if (await galleryThumbnails.count()) {
+      const thumbnailBox = await galleryThumbnails.first().boundingBox();
+      const mainImageBox = await page.getByRole("button", { name: `Open image viewer for ${productName}` }).boundingBox();
+      expect(thumbnailBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThan(mainImageBox?.x ?? 0);
+    }
+    const zoomTarget = page.getByRole("button", { name: `Open image viewer for ${productName}` });
+    await zoomTarget.scrollIntoViewIfNeeded();
+    const zoomTargetBox = await zoomTarget.boundingBox();
+    const zoomImage = zoomTarget.locator("img");
+    if (zoomTargetBox) {
+      await page.mouse.move(
+        zoomTargetBox.x + zoomTargetBox.width * 0.25,
+        zoomTargetBox.y + zoomTargetBox.height * 0.35
+      );
+      const leftTransformOrigin = await zoomImage.evaluate(
+        (element) => getComputedStyle(element).transformOrigin
+      );
+      expect(await zoomImage.evaluate((element) => getComputedStyle(element).transform)).not.toBe("none");
+      await page.mouse.move(
+        zoomTargetBox.x + zoomTargetBox.width * 0.75,
+        zoomTargetBox.y + zoomTargetBox.height * 0.65
+      );
+      const rightTransformOrigin = await zoomImage.evaluate(
+        (element) => getComputedStyle(element).transformOrigin
+      );
+      expect(rightTransformOrigin).not.toBe(leftTransformOrigin);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    await page.getByTestId("product-detail-hero").screenshot({ path: testInfo.outputPath("product-details-desktop.png") });
+    await relatedProducts.screenshot({ path: testInfo.outputPath("related-products-desktop.png") });
   });
 
   test("keeps alternate selling UOM price and base conversion through the storefront cart", async ({
@@ -389,6 +723,10 @@ test.describe("public ecommerce extension", () => {
         message: expect.stringContaining("not an active sale unit")
       });
 
+      await waitForPublicCatalog(page, "the alternate-UOM product", (catalog) =>
+        catalog.products?.some((candidate) => candidate.code === productCode) ?? false
+      );
+
       await page.goto(
         `/shop/${encodeURIComponent(storeCode ?? "")}/products/${encodeURIComponent(productCode)}`
       );
@@ -459,7 +797,7 @@ test.describe("public ecommerce extension", () => {
         await page.locator(".rms-scan-strip input").first().fill("Alternate UOM Browser QA");
         const productSuggestion = page
           .locator(".rms-customer-suggestions.is-product button")
-          .filter({ hasText: "Alternate UOM Browser QA" });
+          .filter({ hasText: productCode });
         await expect(productSuggestion).toHaveCount(1);
         await productSuggestion.click();
 
@@ -556,6 +894,43 @@ test.describe("public ecommerce extension", () => {
         paymentMethodCode,
         customerNote: "Alternate-UOM persisted-order acceptance"
       };
+
+      const insufficientQuoteResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
+        {
+          data: {
+            lines: [{
+              productId: product.id,
+              quantity: 5,
+              sellingUnitOfMeasure: cartonUnitCode
+            }]
+          }
+        }
+      );
+      expect(insufficientQuoteResponse.status()).toBe(409);
+      await expect(insufficientQuoteResponse.json()).resolves.toMatchObject({
+        message: expect.stringContaining("available")
+      });
+
+      const insufficientOrderResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
+        {
+          headers: { "idempotency-key": `e2e-uom-insufficient-${crypto.randomUUID()}` },
+          data: {
+            ...orderRequest,
+            lines: [{
+              productId: product.id,
+              quantity: 5,
+              sellingUnitOfMeasure: cartonUnitCode
+            }]
+          }
+        }
+      );
+      expect(insufficientOrderResponse.status()).toBe(409);
+      await expect(insufficientOrderResponse.json()).resolves.toMatchObject({
+        message: expect.stringContaining("available")
+      });
+
       const checkoutRequestKey = `e2e-uom-checkout-${crypto.randomUUID()}`;
       const createOrderResponse = await page.request.post(
         `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/orders`,
@@ -804,6 +1179,7 @@ test.describe("public ecommerce extension", () => {
   });
 
   test("advertises an eligible promotion before checkout", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     const normalizedStoreCode = (storeCode ?? "").trim();
@@ -910,6 +1286,13 @@ test.describe("public ecommerce extension", () => {
     });
 
     try {
+      await waitForPublicCatalog(page, "the storefront promotion fixtures", (catalog) => {
+        const promotionCodes = new Set(catalog.promotions?.map((promotion) => promotion.code) ?? []);
+        const promotedProduct = catalog.products?.find((candidate) => candidate.code === product.code);
+        return promotionCodes.has(storewidePromotionCode) &&
+          promotedProduct?.promotion?.code === bonusPromotionCode;
+      });
+
       const catalogResponse = await page.request.get(
         `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
       );
@@ -1057,55 +1440,138 @@ test.describe("public ecommerce extension", () => {
           code: { in: [promotionCode, bonusPromotionCode, storewidePromotionCode] }
         }
       });
+      await waitForPublicCatalog(page, "the promotion fixture cleanup", (catalog) => {
+        const promotionCodes = new Set(catalog.promotions?.map((promotion) => promotion.code) ?? []);
+        const visibleProductPromotion = catalog.products?.find(
+          (candidate) => candidate.code === product.code
+        )?.promotion?.code;
+        return !promotionCodes.has(storewidePromotionCode) &&
+          ![promotionCode, bonusPromotionCode].includes(visibleProductPromotion ?? "");
+      });
     }
   });
 
   test("quotes bonus-buy totals and navigates the product gallery", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
-    const catalogResponse = await page.request.get(
-      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
-    );
-    expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
-    const catalog = (await catalogResponse.json()) as {
-      store: { currencyCode: string };
-      products: Array<{
+    const normalizedStoreCode = (storeCode ?? "").trim();
+    const store = await prisma.store.findFirstOrThrow({
+      where: {
+        OR: [
+          { code: normalizedStoreCode.toUpperCase() },
+          { ecommerceSlug: normalizedStoreCode.toLowerCase() }
+        ]
+      },
+      select: { code: true, retailOrgId: true }
+    });
+    const promotionCode = `E2E-STOREFRONT-BONUS-${crypto.randomBytes(5).toString("hex").toUpperCase()}`;
+    const activeDaysOfWeek = JSON.stringify([
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+      "SUNDAY"
+    ]);
+
+    await prisma.promotionCampaign.create({
+      data: {
+        retailOrgId: store.retailOrgId,
+        code: promotionCode,
+        name: "Flash Cola bonus-buy storefront QA",
+        description: "Gallery and bonus-buy checkout verification.",
+        discountType: "PERCENT",
+        targetScope: "PRODUCT",
+        discountValue: 100,
+        minimumLineQuantity: 3,
+        buyQuantity: 2,
+        rewardQuantity: 1,
+        targetProductCode: "FLASH-COLA-50CL",
+        eligibleStoreCodes: JSON.stringify([store.code]),
+        activeDaysOfWeek,
+        activeFromMinutes: 0,
+        activeToMinutes: 1439,
+        priority: -2_000_000_010,
+        status: "ACTIVE",
+        originNodeCode: "E2E",
+        lastModifiedByNodeCode: "E2E"
+      }
+    });
+
+    try {
+      await waitForPublicCatalog(page, "the bonus-buy gallery fixture", (catalog) =>
+        catalog.products?.some(
+          (candidate) =>
+            candidate.code === "FLASH-COLA-50CL" && candidate.promotion?.code === promotionCode
+        ) ?? false
+      );
+
+      const catalogResponse = await page.request.get(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/catalog`
+      );
+      expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+      const catalog = (await catalogResponse.json()) as {
+        store: { currencyCode: string };
+        products: Array<{
+          id: string;
+          code: string;
+          name: string;
+          unitPrice: number;
+          promotion: null | { code: string };
+        }>;
+      };
+      const product = catalog.products.find((candidate) => candidate.code === "FLASH-COLA-50CL");
+      expect(product).toBeTruthy();
+      expect(product?.promotion?.code).toBe(promotionCode);
+      expect(product).not.toHaveProperty("description");
+      expect(product).not.toHaveProperty("galleryImageUrls");
+      expect(product).not.toHaveProperty("reviews");
+
+      const productDetailResponse = await page.request.get(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/products/${encodeURIComponent(product?.code ?? "")}`,
+      );
+      expect(productDetailResponse.ok(), await productDetailResponse.text()).toBeTruthy();
+      const productDetail = (await productDetailResponse.json()) as {
         id: string;
         code: string;
-        name: string;
-        unitPrice: number;
         galleryImageUrls: string[];
-        promotion: null | { code: string };
-      }>;
-    };
-    const product = catalog.products.find((candidate) => candidate.code === "FLASH-COLA-50CL");
-    expect(product).toBeTruthy();
-    expect(product?.promotion?.code).toBe("FLASH-COLA-BUY2GET1");
+        specifications: Array<{ name: string; value: string }>;
+        reviews: Array<{ id: string }>;
+      };
+      expect(productDetail).toMatchObject({ id: product?.id, code: product?.code });
+      expect(Array.isArray(productDetail.galleryImageUrls)).toBe(true);
+      expect(Array.isArray(productDetail.specifications)).toBe(true);
+      expect(Array.isArray(productDetail.reviews)).toBe(true);
 
-    const quoteResponse = await page.request.post(
-      `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
-      { data: { lines: [{ productId: product?.id, variantCode: null, quantity: 3 }] } }
-    );
-    expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
-    const quote = (await quoteResponse.json()) as {
-      subtotalAmount: number;
-      discountAmount: number;
-      totalAmount: number;
-      lines: Array<{ appliedPromotionCode: string | null }>;
-    };
-    expect(quote).toMatchObject({
-      subtotalAmount: 7.5,
-      discountAmount: 2.5,
-      totalAmount: 5
-    });
-    expect(quote.lines[0]?.appliedPromotionCode).toBe("FLASH-COLA-BUY2GET1");
+      const quoteResponse = await page.request.post(
+        `/api/ecommerce/${encodeURIComponent(storeCode ?? "")}/quote`,
+        { data: { lines: [{ productId: product?.id, variantCode: null, quantity: 3 }] } }
+      );
+      expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
+      const quote = (await quoteResponse.json()) as {
+        subtotalAmount: number;
+        discountAmount: number;
+        totalAmount: number;
+        lines: Array<{ appliedPromotionCode: string | null }>;
+      };
+      const expectedDiscount = Number(product!.unitPrice.toFixed(2));
+      const expectedSubtotal = Number((product!.unitPrice * 3).toFixed(2));
+      const expectedTotal = Number((product!.unitPrice * 2).toFixed(2));
+      expect(quote).toMatchObject({
+        subtotalAmount: expectedSubtotal,
+        discountAmount: expectedDiscount,
+        totalAmount: expectedTotal
+      });
+      expect(quote.lines[0]?.appliedPromotionCode).toBe(promotionCode);
 
-    await page.goto(
-      `/shop/${encodeURIComponent(storeCode ?? "")}/products/FLASH-COLA-50CL`
-    );
-    await expect(page.getByRole("heading", { level: 1, name: product?.name })).toBeVisible();
+      await page.goto(
+        `/shop/${encodeURIComponent(storeCode ?? "")}/products/FLASH-COLA-50CL`
+      );
+      await expect(page.getByRole("heading", { level: 1, name: product?.name })).toBeVisible();
 
-    if ((product?.galleryImageUrls.length ?? 0) > 1) {
+      if (productDetail.galleryImageUrls.length > 1) {
       const mainImage = page.getByRole("button", {
         name: `Open image viewer for ${product?.name}`
       }).locator("img");
@@ -1121,23 +1587,34 @@ test.describe("public ecommerce extension", () => {
       await viewer.getByRole("button", { name: "Next product image" }).click();
       await expect(viewerImage).not.toHaveAttribute("src", viewerImageUrl ?? "");
       await viewer.getByRole("button", { name: "Close image viewer" }).click();
-    }
+      }
 
-    await page.getByRole("button", { name: "Increase quantity" }).click();
-    await page.getByRole("button", { name: "Increase quantity" }).click();
-    const formattedTotal = new Intl.NumberFormat("en-GH", {
-      style: "currency",
-      currency: catalog.store.currencyCode,
-      maximumFractionDigits: 2
-    }).format(5);
-    const addButton = page.getByRole("button", { name: `Add · ${formattedTotal}` });
-    await expect(addButton).toBeVisible();
-    await addButton.click();
-    await page.getByRole("button", { name: "Open cart" }).click();
-    await expect(page.getByText("Promotion savings", { exact: true })).toBeVisible();
-    await expect(page.getByText(formattedTotal, { exact: true }).last()).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("bonus-buy-cart-and-gallery.png"), fullPage: false });
-    expect(pageErrors).toEqual([]);
+      await page.getByRole("button", { name: "Increase quantity" }).click();
+      await page.getByRole("button", { name: "Increase quantity" }).click();
+      const formattedTotal = new Intl.NumberFormat("en-GH", {
+        style: "currency",
+        currency: catalog.store.currencyCode,
+        maximumFractionDigits: 2
+      }).format(expectedTotal);
+      const addButton = page.getByRole("button", { name: `Add · ${formattedTotal}` });
+      await expect(addButton).toBeVisible();
+      await addButton.click();
+      await page.getByRole("button", { name: "Open cart" }).click();
+      await expect(page.getByText("Promotion savings", { exact: true })).toBeVisible();
+      await expect(page.getByText(formattedTotal, { exact: true }).last()).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath("bonus-buy-cart-and-gallery.png"), fullPage: false });
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await prisma.promotionCampaign.deleteMany({
+        where: { retailOrgId: store.retailOrgId, code: promotionCode }
+      });
+      await waitForPublicCatalog(page, "the bonus-buy gallery fixture cleanup", (catalog) =>
+        !catalog.products?.some(
+          (candidate) =>
+            candidate.code === "FLASH-COLA-50CL" && candidate.promotion?.code === promotionCode
+        )
+      );
+    }
   });
 
   test("creates a verified customer and bridges checkout into a trackable sales order", async ({
@@ -1217,8 +1694,19 @@ test.describe("public ecommerce extension", () => {
       }
     );
     expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
-    const createdOrder = (await orderResponse.json()) as { orderNo: string; status: string };
+    const createdOrder = (await orderResponse.json()) as {
+      orderNo: string;
+      status: string;
+      fulfillment: {
+        storeCode: string;
+        storeName: string;
+        inventoryLocationCode: string;
+        inventoryLocationName: string;
+      };
+    };
     expect(createdOrder.orderNo).toMatch(/^SO-/);
+    expect(createdOrder.fulfillment.storeCode).toBeTruthy();
+    expect(createdOrder.fulfillment.inventoryLocationCode).toBeTruthy();
     createdOrderNo = createdOrder.orderNo;
     const ecommerceOrder = await prisma.ecommerceOrder.findFirstOrThrow({
       where: { orderNo: createdOrder.orderNo },
@@ -1229,15 +1717,31 @@ test.describe("public ecommerce extension", () => {
         deliveryFeeAmount: true,
         salesOrder: {
           select: {
+            storeId: true,
             lines: { select: { productCodeSnapshot: true } }
           }
-        }
+        },
+        fulfillments: {
+          select: {
+            storeId: true,
+            storeCodeSnapshot: true,
+            inventoryLocationCodeSnapshot: true,
+            status: true,
+          },
+        },
       }
     });
     createdEcommerceOrderId = ecommerceOrder.id;
     createdSalesOrderId = ecommerceOrder.salesOrderId;
     expect(ecommerceOrder.status).toBe("PLACED");
     expect(Number(ecommerceOrder.deliveryFeeAmount)).toBe(0);
+    expect(ecommerceOrder.fulfillments).toHaveLength(1);
+    expect(ecommerceOrder.fulfillments[0]).toMatchObject({
+      storeId: ecommerceOrder.salesOrder.storeId,
+      storeCodeSnapshot: createdOrder.fulfillment.storeCode,
+      inventoryLocationCodeSnapshot: createdOrder.fulfillment.inventoryLocationCode,
+      status: "PLACED",
+    });
     expect(ecommerceOrder.salesOrder.lines).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ productCodeSnapshot: "ECOM-DELIVERY" })])
     );
@@ -1258,11 +1762,19 @@ test.describe("public ecommerce extension", () => {
     );
     expect(ordersResponse.ok()).toBeTruthy();
     const orders = (await ordersResponse.json()) as {
-      orders: Array<{ orderNo: string; lines: Array<{ productName: string }> }>;
+      orders: Array<{
+        orderNo: string;
+        lines: Array<{ productName: string }>;
+        fulfillment: { storeCode: string; inventoryLocationCode: string } | null;
+      }>;
     };
     const savedOrder = orders.orders.find((order) => order.orderNo === createdOrder.orderNo);
     expect(savedOrder?.lines).toHaveLength(1);
     expect(savedOrder?.lines[0]?.productName).toBe(orderProduct.name);
+    expect(savedOrder?.fulfillment).toMatchObject({
+      storeCode: createdOrder.fulfillment.storeCode,
+      inventoryLocationCode: createdOrder.fulfillment.inventoryLocationCode,
+    });
 
     const sessionRefresh = page.waitForResponse(
       (response) =>

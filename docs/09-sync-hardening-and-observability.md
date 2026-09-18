@@ -33,6 +33,14 @@ Inbound events are keyed by globally unique `idempotencyKey` values. When a stor
 
 Downstream publication also uses deterministic idempotency keys and `skipDuplicates` for generated publication batches, so repeated master-data publication runs do not create duplicate packets.
 
+## Manual Master-Data Publication
+
+Enterprise-owned master data is normally evaluated when a shop pulls from HQ. A first pull without a cursor queues the shop's eligible bootstrap data; later pulls queue records whose current version has not already been published for that shop. Product publication follows the shop catalogue policy unless an operational workflow explicitly requires a product dependency.
+
+An authorised operator can open `Sync > Node detail`, choose `Queue master data`, select one or more data groups, and enter an audit note. HQ immediately creates the selected downstream packets and records a `PUBLISH_MASTER_DATA` operator action. The action does not contact or wake an offline shop: the queued packets remain visible in Downstream delivery until that shop's next scheduled or manual pull acknowledges them.
+
+The selectable groups cover store setup, security, customers, suppliers, products, pricing, tax and tenders, promotions, banking, and gift certificates. Suppliers use the governed `supplier.published` contract and are applied by the SQLite, PostgreSQL, and SQL Server Store Desktop adapters.
+
 ## Data Integrity Guarantees
 
 Enterprise projection still runs inside a database transaction for each push batch. The sync event row, canonical projection writes, checkpoint updates, acknowledgement updates, operator actions, and security/audit evidence commit together. If projection fails, the inbound sync event is retained with `FAILED` or `DEAD_LETTER` status and the security log captures enough context for administrator diagnosis.

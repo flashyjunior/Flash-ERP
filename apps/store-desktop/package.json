@@ -1,6 +1,6 @@
 {
   "name": "@flash-erp/store-desktop",
-  "version": "0.1.79",
+  "version": "0.1.83",
   "description": "Flash ERP store desktop point-of-sale and sync runtime.",
   "author": "Flash Code Solutions",
   "private": true,

@@ -9,6 +9,7 @@ import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import { WorkspaceTabs, WorkspaceTabsContent } from "@/components/layouts/workspace-tabs";
+import { matchesInventorySearchTerms } from "@/components/enterprise/enterprise-inventory-search";
 import type { EnterpriseInventoryWorkspaceData } from "@/server/repositories/enterprise-inventory.repository";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -557,8 +558,48 @@ export function EnterpriseInventoryWorkspace({
       },
       {
         accessorKey: "onHandQuantity",
-        header: "Current qty",
+        header: "On hand",
         cell: ({ row }) => quantityFormatter.format(row.original.onHandQuantity)
+      },
+      {
+        accessorKey: "activeReservedQuantity",
+        header: "Active reserved",
+        cell: ({ row }) => quantityFormatter.format(row.original.activeReservedQuantity)
+      },
+      {
+        accessorKey: "safetyStockLevel",
+        header: "Safety stock",
+        cell: ({ row }) => quantityFormatter.format(row.original.safetyStockLevel)
+      },
+      {
+        accessorKey: "ecommerceSellableQuantity",
+        header: "Web sellable",
+        cell: ({ row }) =>
+          row.original.ecommercePickupEligible || row.original.ecommerceDeliveryEligible
+            ? quantityFormatter.format(row.original.ecommerceSellableQuantity)
+            : "-"
+      },
+      {
+        accessorKey: "ecommerceEligibilityLabel",
+        header: "Ecommerce eligibility",
+        cell: ({ row }) => {
+          const modes = [
+            row.original.ecommercePickupEligible ? "Pickup" : null,
+            row.original.ecommerceDeliveryEligible ? "Delivery" : null
+          ].filter((value): value is string => Boolean(value));
+
+          return (
+            <div className="min-w-0" title={row.original.ecommerceEligibilityLabel}>
+              <p className="font-medium text-stone-900">
+                {modes.length ? modes.join(" + ") : "Not eligible"}
+              </p>
+              <p className="max-w-72 truncate text-xs text-stone-500">
+                {row.original.ecommerceEligibilityLabel}
+              </p>
+            </div>
+          );
+        },
+        meta: { disableTruncate: true }
       },
       {
         accessorKey: "estimatedRetailValue",
@@ -609,8 +650,21 @@ export function EnterpriseInventoryWorkspace({
     () =>
       workspace.stockPositionRows.filter(
         (row) =>
-          (!stockShopFilter || row.locationCode === stockShopFilter) &&
-          (!stockProductFilter || row.productCode === stockProductFilter)
+          matchesInventorySearchTerms(
+            [
+              row.storeCode,
+              row.storeName,
+              row.warehouseCode,
+              row.warehouseName,
+              row.locationCode,
+              row.locationName,
+            ],
+            stockShopFilter,
+          ) &&
+          matchesInventorySearchTerms(
+            [row.productCode, row.sku, row.productName],
+            stockProductFilter,
+          )
       ),
     [stockProductFilter, stockShopFilter, workspace.stockPositionRows]
   );
@@ -2704,30 +2758,36 @@ export function EnterpriseInventoryWorkspace({
               searchPlaceholder="Optional text search"
               toolbarFilters={
                 <>
-                  <select
-                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
+                  <input
+                    aria-label="Search shops and locations"
+                    autoComplete="off"
+                    className="w-full min-w-0 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 outline-none transition placeholder:text-stone-400 focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)] sm:w-auto sm:min-w-[16rem] sm:flex-1 md:min-w-[20rem]"
+                    list="stock-shop-options"
                     onChange={(event) => setStockShopFilter(event.target.value)}
+                    placeholder="Search shop or location"
+                    type="search"
                     value={stockShopFilter}
-                  >
-                    <option value="">All shops and locations</option>
+                  />
+                  <datalist id="stock-shop-options">
                     {stockShopOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
+                      <option key={option.value} value={option.label} />
                     ))}
-                  </select>
-                  <select
-                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
+                  </datalist>
+                  <input
+                    aria-label="Search products"
+                    autoComplete="off"
+                    className="w-full min-w-0 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 outline-none transition placeholder:text-stone-400 focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)] sm:w-auto sm:min-w-[16rem] sm:flex-1 md:min-w-[20rem]"
+                    list="stock-product-options"
                     onChange={(event) => setStockProductFilter(event.target.value)}
+                    placeholder="Search product name, code, or SKU"
+                    type="search"
                     value={stockProductFilter}
-                  >
-                    <option value="">All products</option>
+                  />
+                  <datalist id="stock-product-options">
                     {stockProductOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
+                      <option key={option.value} value={option.label} />
                     ))}
-                  </select>
+                  </datalist>
                 </>
               }
             />

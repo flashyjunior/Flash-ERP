@@ -8,8 +8,28 @@ function parsePositiveInteger(value, fallback) {
 /** @type {import("next").NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  images: {
+    formats: ["image/avif", "image/webp"],
+    // Ecommerce uploads have immutable, generated filenames. Keeping optimized
+    // derivatives lets repeat storefront visits avoid image reprocessing.
+    minimumCacheTTL: 31_536_000,
+  },
+  async headers() {
+    return [
+      {
+        source: "/uploads/ecommerce/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=31536000, immutable",
+          },
+        ],
+      },
+    ];
+  },
   ...(deployBuild
     ? {
+        output: "standalone",
         typescript: {
           ignoreBuildErrors: true,
         },

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   ArrowUpRight,
   BellRing,
   Check,
@@ -11,14 +12,17 @@ import {
   Eye,
   LoaderCircle,
   Image as ImageIcon,
+  MapPin,
   PackageCheck,
   Pencil,
+  Plus,
   RefreshCw,
   Search,
   Settings2,
   ShoppingBag,
   Store,
   Truck,
+  Trash2,
   UploadCloud,
   WalletCards,
   X
@@ -35,7 +39,63 @@ import styles from "./online-store-ecommerce-workspace.module.css";
 type Workspace = OnlineStoreEcommerceWorkspaceData;
 type Order = Workspace["orders"][number];
 type Product = Workspace["products"][number];
-type Tab = "ORDERS" | "PRODUCTS" | "PAYMENTS" | "STOREFRONT";
+type Tab = "ORDERS" | "PRODUCTS" | "PAYMENTS" | "STOREFRONT" | "MONITORING";
+type MonitoringOperation = {
+  requests: number;
+  completed: number;
+  failed: number;
+  averageDurationMs: number;
+  p95DurationMs: number;
+  maxDurationMs: number;
+  lastCompletedAt: string | null;
+  lastFailureAt: string | null;
+};
+type OperationalHealthIncident = {
+  key: string;
+  severity: "warning" | "critical";
+  count: number;
+  oldestAt: string | null;
+  detail: string;
+};
+type OperationalHealth = {
+  status: "healthy" | "attention" | "critical";
+  checkedAt: string;
+  thresholds: {
+    staleReservationHours: number;
+    paymentFailureWindowHours: number;
+    blockedTransferHours: number;
+    queueAgeHours: number;
+  };
+  scan: {
+    limit: number;
+    scannedActiveReservations: number;
+    activeReservationCount: number;
+    activeOrderCount: number;
+    limited: boolean;
+  };
+  incidents: OperationalHealthIncident[];
+};
+type MonitoringSnapshot = {
+  status: "awaiting-data" | "healthy" | "degraded";
+  startedAt: string;
+  checkedAt: string;
+  slowRequestThresholdMs: number;
+  sampleLimit: number;
+  operations: Record<string, MonitoringOperation>;
+  operationalHealth: OperationalHealth | null;
+  operationalHealthError: string | null;
+};
+
+const monitoringOperations = [
+  ["CATALOG", "Catalog"],
+  ["PRODUCT_DETAIL", "Product detail"],
+  ["QUOTE", "Quote"],
+  ["ORDER_CREATE", "Order placement"],
+  ["PAYMENT_INITIALIZE", "Payment start"],
+  ["PAYMENT_VERIFY", "Payment verification"],
+  ["PAYMENT_WEBHOOK", "Payment webhook"],
+  ["STAFF_QUEUE", "Staff queue"],
+] as const;
 const productPageSize = 20;
 
 const nextStatuses: Record<string, string[]> = {
@@ -45,6 +105,12 @@ const nextStatuses: Record<string, string[]> = {
   READY: ["OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"],
   OUT_FOR_DELIVERY: ["DELIVERED"]
 };
+
+function nextStatusesForOrder(order: Order) {
+  return (nextStatuses[order.status] ?? []).filter(
+    (status) => order.fulfilmentMethod !== "PICKUP" || status !== "OUT_FOR_DELIVERY",
+  );
+}
 
 function formatStatus(value: string) {
   return value
@@ -76,6 +142,56 @@ function toneForStatus(status: string) {
   return styles.neutral;
 }
 
+function formatOrderStatus(order: Pick<Order, "fulfilmentMethod" | "status">) {
+  if (order.fulfilmentMethod === "PICKUP") {
+    if (order.status === "READY") return "Awaiting Pickup";
+    if (order.status === "DELIVERED") return "Picked Up";
+  }
+  return formatStatus(order.status);
+}
+
+function orderStatusActionLabel(order: Order, status: string) {
+  if (status === "CONFIRMED") return "Accept order";
+  if (order.fulfilmentMethod === "PICKUP") {
+    if (status === "READY") return "Ready for pickup";
+    if (status === "DELIVERED") return "Picked up";
+  }
+  return formatStatus(status);
+}
+
+function formatDuration(milliseconds: number | undefined) {
+  if (!milliseconds) return "-";
+  return `${Math.round(milliseconds)} ms`;
+}
+
+function formatObservedAt(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleTimeString() : "-";
+}
+
+function monitoringTone(status: MonitoringSnapshot["status"] | undefined) {
+  if (status === "healthy") return styles.good;
+  if (status === "degraded") return styles.warning;
+  return styles.neutral;
+}
+
+function monitoringLabel(status: MonitoringSnapshot["status"] | undefined) {
+  if (status === "healthy") return "Healthy";
+  if (status === "degraded") return "Needs attention";
+  return "Awaiting traffic";
+}
+
+function healthTone(status: OperationalHealth["status"] | undefined) {
+  if (status === "healthy") return styles.good;
+  if (status === "critical") return styles.bad;
+  return styles.warning;
+}
+
+function healthLabel(status: OperationalHealth["status"] | undefined) {
+  if (status === "healthy") return "Operationally healthy";
+  if (status === "critical") return "Critical operational risk";
+  return "Operational review needed";
+}
+
 export function OnlineStoreEcommerceWorkspace({
   initialWorkspace,
   embedded = false
@@ -92,6 +208,9 @@ export function OnlineStoreEcommerceWorkspace({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [monitoring, setMonitoring] = useState<MonitoringSnapshot | null>(null);
+  const [monitoringBusy, setMonitoringBusy] = useState(false);
+  const [monitoringError, setMonitoringError] = useState<string | null>(null);
   const [settings, setSettings] = useState({
     ecommerceEnabled: workspace.store.ecommerceEnabled,
     ecommerceSlug: workspace.store.ecommerceSlug ?? "",
@@ -100,6 +219,11 @@ export function OnlineStoreEcommerceWorkspace({
     ecommerceSupportPhone: workspace.store.ecommerceSupportPhone ?? "",
     ecommerceSupportEmail: workspace.store.ecommerceSupportEmail ?? "",
     ecommerceHeroImageUrl: workspace.store.ecommerceHeroImageUrl ?? "",
+    ecommerceHeroImageUrls: workspace.store.ecommerceHeroImageUrls.length > 0
+      ? workspace.store.ecommerceHeroImageUrls
+      : workspace.store.ecommerceHeroImageUrl
+        ? [workspace.store.ecommerceHeroImageUrl]
+        : [],
     ecommerceWhatsappPhone: workspace.store.ecommerceWhatsappPhone ?? "",
     ecommerceAllowPickup: workspace.store.ecommerceAllowPickup,
     ecommerceAllowDelivery: workspace.store.ecommerceAllowDelivery,
@@ -107,6 +231,14 @@ export function OnlineStoreEcommerceWorkspace({
     ecommerceLayawayEnabled: workspace.store.ecommerceLayawayEnabled,
   });
   const [paymentMethods, setPaymentMethods] = useState(workspace.paymentMethods);
+  const [fulfillmentLocations, setFulfillmentLocations] = useState(
+    workspace.fulfillmentLocations.map((location) => ({
+      inventoryLocationId: location.inventoryLocationId,
+      supportsPickup: location.supportsPickup,
+      supportsDelivery: location.supportsDelivery,
+      routingPriority: location.routingPriority,
+    })),
+  );
   const liveSignatureRef = useRef("");
   const liveOrderCountRef = useRef(workspace.orders.length);
 
@@ -140,6 +272,33 @@ export function OnlineStoreEcommerceWorkspace({
     );
     setWorkspace(fresh);
     setPaymentMethods(fresh.paymentMethods);
+    setFulfillmentLocations(
+      fresh.fulfillmentLocations.map((location) => ({
+        inventoryLocationId: location.inventoryLocationId,
+        supportsPickup: location.supportsPickup,
+        supportsDelivery: location.supportsDelivery,
+        routingPriority: location.routingPriority,
+      })),
+    );
+  }
+
+  async function refreshMonitoring() {
+    setMonitoringBusy(true);
+    try {
+      const snapshot = await readJson<MonitoringSnapshot>(
+        await fetch("/api/online-store/ecommerce/performance", { cache: "no-store" })
+      );
+      setMonitoring(snapshot);
+      setMonitoringError(null);
+    } catch (refreshError) {
+      setMonitoringError(
+        refreshError instanceof Error
+          ? refreshError.message
+          : "Ecommerce performance data could not be loaded."
+      );
+    } finally {
+      setMonitoringBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -182,6 +341,13 @@ export function OnlineStoreEcommerceWorkspace({
   useEffect(() => {
     setProductPage((current) => Math.min(current, productPageCount));
   }, [productPageCount]);
+
+  useEffect(() => {
+    if (activeTab !== "MONITORING") return;
+    void refreshMonitoring();
+    const interval = window.setInterval(() => void refreshMonitoring(), 30_000);
+    return () => window.clearInterval(interval);
+  }, [activeTab]);
 
   async function perform(key: string, action: () => Promise<{ message?: string }>) {
     setBusyKey(key);
@@ -231,6 +397,30 @@ export function OnlineStoreEcommerceWorkspace({
     );
   }
 
+  async function uploadHeroBanner(index: number, file: File) {
+    const key = `hero-upload:${index}`;
+    setBusyKey(key);
+    setError(null);
+    setMessage(null);
+    try {
+      const uploaded = await uploadImage(file);
+      setSettings((current) => {
+        const ecommerceHeroImageUrls = [...current.ecommerceHeroImageUrls];
+        ecommerceHeroImageUrls[index] = uploaded.url;
+        return {
+          ...current,
+          ecommerceHeroImageUrls,
+          ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? ""
+        };
+      });
+      setMessage("Storefront banner uploaded. Save storefront settings to publish it.");
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "The storefront banner could not be uploaded.");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   function savePaymentOptions() {
     return perform("payments", async () =>
       readJson<{ message: string }>(
@@ -269,10 +459,41 @@ export function OnlineStoreEcommerceWorkspace({
         await fetch("/api/online-store/ecommerce/settings", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(settings)
+          body: JSON.stringify({ ...settings, fulfillmentLocations })
         })
       )
     );
+  }
+
+  function addFulfillmentLocation() {
+    const selectedIds = new Set(fulfillmentLocations.map((location) => location.inventoryLocationId));
+    const nextLocation = workspace.availableFulfillmentLocations.find(
+      (location) => !selectedIds.has(location.id),
+    );
+    if (!nextLocation) {
+      setError("Every active shop sales location is already listed.");
+      return;
+    }
+    setFulfillmentLocations((current) => [
+      ...current,
+      {
+        inventoryLocationId: nextLocation.id,
+        supportsPickup: true,
+        supportsDelivery: true,
+        routingPriority: (current.length + 1) * 10,
+      },
+    ]);
+  }
+
+  function updateFulfillmentLocation(
+    inventoryLocationId: string,
+    patch: Partial<(typeof fulfillmentLocations)[number]>,
+  ) {
+    setFulfillmentLocations((current) => current.map((location) =>
+      location.inventoryLocationId === inventoryLocationId
+        ? { ...location, ...patch }
+        : location,
+    ));
   }
 
   const content = (
@@ -290,6 +511,7 @@ export function OnlineStoreEcommerceWorkspace({
               disabled={busyKey === "refresh"}
               onClick={() => perform("refresh", async () => {
                 await refreshWorkspace();
+                if (activeTab === "MONITORING") await refreshMonitoring();
                 return { message: "Ecommerce workspace refreshed." };
               })}
               title="Refresh"
@@ -318,6 +540,7 @@ export function OnlineStoreEcommerceWorkspace({
           <button className={activeTab === "PRODUCTS" ? styles.activeTab : undefined} onClick={() => setActiveTab("PRODUCTS")} role="tab" type="button"><ShoppingBag size={18} />Products</button>
           <button className={activeTab === "PAYMENTS" ? styles.activeTab : undefined} onClick={() => setActiveTab("PAYMENTS")} role="tab" type="button"><WalletCards size={18} />Payments</button>
           <button className={activeTab === "STOREFRONT" ? styles.activeTab : undefined} onClick={() => setActiveTab("STOREFRONT")} role="tab" type="button"><Settings2 size={18} />Storefront</button>
+          <button className={activeTab === "MONITORING" ? styles.activeTab : undefined} onClick={() => setActiveTab("MONITORING")} role="tab" type="button"><Activity size={18} />Monitoring</button>
         </div>
 
         {activeTab === "ORDERS" ? (
@@ -332,10 +555,10 @@ export function OnlineStoreEcommerceWorkspace({
                 <tbody>
                   {workspace.orders.map((order) => (
                     <tr key={order.id}>
-                      <td><strong>{order.orderNo}</strong><small>{order.orderType === "LAYAWAY" ? "Layaway" : "Customer order"}</small><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatStatus(order.status)}</span></td>
+                      <td><strong>{order.orderNo}</strong><small>{order.orderType === "LAYAWAY" ? "Layaway" : "Customer order"}</small><span className={`${styles.pill} ${toneForStatus(order.status)}`}>{formatOrderStatus(order)}</span></td>
                       <td><strong>{order.customer.fullName}</strong><small>{order.customer.phone ?? order.customer.email ?? order.customer.customerNo}</small></td>
                       <td>{new Date(order.placedAt).toLocaleString()}</td>
-                      <td>{formatStatus(order.fulfilmentMethod)}</td>
+                      <td><strong>{formatStatus(order.fulfilmentMethod)}</strong><small>{order.fulfillment?.storeName ?? workspace.store.name}{order.fulfillment?.inventoryLocationName ? ` · ${order.fulfillment.inventoryLocationName}` : ""}</small></td>
                       <td><span className={`${styles.pill} ${toneForStatus(order.paymentStatus)}`}>{formatStatus(order.paymentStatus)}</span></td>
                       <td><strong>{money(order.currencyCode, order.totalAmount)}</strong><small>{order.balanceAmount > 0 ? `${money(order.currencyCode, order.balanceAmount)} due` : "Settled"}</small></td>
                       <td><button aria-label={`View ${order.orderNo}`} onClick={() => setSelectedOrderId(order.id)} title="View order" type="button"><Eye size={18} /></button></td>
@@ -451,6 +674,79 @@ export function OnlineStoreEcommerceWorkspace({
           </section>
         ) : null}
 
+        {activeTab === "MONITORING" ? (
+          <section className={styles.surface}>
+            <div className={styles.sectionHeading}>
+              <div><span>Live process data</span><h2>Storefront performance</h2></div>
+              <button
+                aria-label="Refresh performance monitoring"
+                className={styles.monitoringRefresh}
+                disabled={monitoringBusy}
+                onClick={() => void refreshMonitoring()}
+                title="Refresh performance monitoring"
+                type="button"
+              >
+                {monitoringBusy ? <LoaderCircle className={styles.spin} size={18} /> : <RefreshCw size={18} />}
+              </button>
+            </div>
+            <div className={styles.monitoringSummary}>
+              <span className={`${styles.pill} ${monitoringTone(monitoring?.status)}`}>{monitoringLabel(monitoring?.status)}</span>
+              <small>{monitoring ? `p95 threshold ${monitoring.slowRequestThresholdMs} ms` : "Loading live measurements"}</small>
+              {monitoring?.startedAt ? <small>Since {new Date(monitoring.startedAt).toLocaleString()}</small> : null}
+            </div>
+            {monitoringError ? <div className={styles.monitoringError}><X size={16} />{monitoringError}</div> : null}
+            {monitoring?.operationalHealthError ? <div className={styles.monitoringError}><X size={16} />{monitoring.operationalHealthError}</div> : null}
+            {monitoring?.operationalHealth ? (
+              <>
+                <div className={styles.operationalHealthSummary}>
+                  <span className={`${styles.pill} ${healthTone(monitoring.operationalHealth.status)}`}>{healthLabel(monitoring.operationalHealth.status)}</span>
+                  <small>{monitoring.operationalHealth.incidents.length} active condition(s)</small>
+                  <small>{monitoring.operationalHealth.scan.limited ? `Sampled up to ${monitoring.operationalHealth.scan.limit} active records` : "Complete active queue scan"}</small>
+                  <small>Checked {new Date(monitoring.operationalHealth.checkedAt).toLocaleTimeString()}</small>
+                </div>
+                <div className={styles.tableWrap}>
+                  <table className={styles.operationalHealthTable}>
+                    <thead><tr><th>Operational condition</th><th>Severity</th><th>Count</th><th>Oldest signal</th><th>Current detail</th></tr></thead>
+                    <tbody>
+                      {monitoring.operationalHealth.incidents.map((incident) => (
+                        <tr key={incident.key}>
+                          <td><strong>{formatStatus(incident.key)}</strong></td>
+                          <td><span className={`${styles.pill} ${incident.severity === "critical" ? styles.bad : styles.warning}`}>{incident.severity}</span></td>
+                          <td>{incident.count}</td>
+                          <td>{formatObservedAt(incident.oldestAt)}</td>
+                          <td className={styles.operationalHealthDetail}>{incident.detail}</td>
+                        </tr>
+                      ))}
+                      {monitoring.operationalHealth.incidents.length === 0 ? <tr><td className={styles.empty} colSpan={5}>No active ecommerce operational conditions.</td></tr> : null}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : null}
+            <div className={styles.tableWrap}>
+              <table className={styles.monitoringTable}>
+                <thead><tr><th>Operation</th><th>Requests</th><th>Average</th><th>p95</th><th>Maximum</th><th>Failures</th><th>Last signal</th></tr></thead>
+                <tbody>
+                  {monitoringOperations.map(([operation, label]) => {
+                    const metric = monitoring?.operations[operation];
+                    return (
+                      <tr key={operation}>
+                        <td><strong>{label}</strong><small>{operation.replaceAll("_", " ")}</small></td>
+                        <td>{metric?.requests ?? 0}</td>
+                        <td>{formatDuration(metric?.averageDurationMs)}</td>
+                        <td>{formatDuration(metric?.p95DurationMs)}</td>
+                        <td>{formatDuration(metric?.maxDurationMs)}</td>
+                        <td><span className={`${styles.pill} ${metric?.failed ? styles.bad : styles.neutral}`}>{metric?.failed ?? 0}</span></td>
+                        <td><strong>{formatObservedAt(metric?.lastCompletedAt)}</strong><small>{metric?.lastFailureAt ? `Failure ${formatObservedAt(metric.lastFailureAt)}` : "No recent failure"}</small></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ) : null}
+
         {activeTab === "STOREFRONT" ? (
           <section className={styles.settingsLayout}>
             <div className={styles.settingsIntro}>
@@ -466,10 +762,24 @@ export function OnlineStoreEcommerceWorkspace({
                 <label><span>Storefront name</span><input onChange={(event) => setSettings((current) => ({ ...current, ecommerceDisplayName: event.target.value }))} value={settings.ecommerceDisplayName} /></label>
                 <label><span>Public URL name</span><div className={styles.slugInput}><small>/shop/</small><input onChange={(event) => setSettings((current) => ({ ...current, ecommerceSlug: event.target.value.replace(/[^a-z0-9-]/gi, "").toLowerCase() }))} value={settings.ecommerceSlug} /></div></label>
               </div>
-              <div className={styles.heroUpload}>
-                <div className={styles.heroPreview}>{settings.ecommerceHeroImageUrl ? <img alt="Storefront background preview" src={settings.ecommerceHeroImageUrl} /> : <ImageIcon size={28} />}</div>
-                <label><span>Storefront background</span><small>Use a clear landscape image, ideally 1600 x 700.</small><input accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; void perform("hero-upload", async () => { const uploaded = await uploadImage(file); setSettings((current) => ({ ...current, ecommerceHeroImageUrl: uploaded.url })); return uploaded; }); }} type="file" /></label>
-              </div>
+              <section className={styles.heroUpload}>
+                <header><span><ImageIcon size={18} /><strong>Storefront banners</strong></span><small>Up to four landscape images rotate on the public storefront.</small></header>
+                <div className={styles.heroBannerGrid}>
+                  {[0, 1, 2, 3].map((index) => {
+                    const imageUrl = settings.ecommerceHeroImageUrls[index] ?? null;
+                    return (
+                      <div className={styles.heroBannerSlot} key={index}>
+                        <div className={styles.heroPreview}>{imageUrl ? <img alt={`Storefront banner ${index + 1}`} src={imageUrl} /> : <ImageIcon size={24} />}</div>
+                        <label>
+                          <span>Banner {index + 1}</span>
+                          <input accept="image/jpeg,image/png,image/webp,image/avif" disabled={busyKey === `hero-upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; void uploadHeroBanner(index, file); }} type="file" />
+                        </label>
+                        {imageUrl ? <button aria-label={`Remove storefront banner ${index + 1}`} className={styles.heroBannerRemove} onClick={() => setSettings((current) => { const ecommerceHeroImageUrls = current.ecommerceHeroImageUrls.filter((_, imageIndex) => imageIndex !== index); return { ...current, ecommerceHeroImageUrls, ecommerceHeroImageUrl: ecommerceHeroImageUrls[0] ?? "" }; })} title="Remove banner" type="button"><Trash2 size={16} /></button> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
               <label><span>Description</span><textarea onChange={(event) => setSettings((current) => ({ ...current, ecommerceDescription: event.target.value }))} rows={4} value={settings.ecommerceDescription} /></label>
               <div className={styles.formGrid}>
                 <label><span>Support phone</span><input inputMode="tel" onChange={(event) => setSettings((current) => ({ ...current, ecommerceSupportPhone: event.target.value }))} value={settings.ecommerceSupportPhone} /></label>
@@ -480,6 +790,43 @@ export function OnlineStoreEcommerceWorkspace({
                 <label><input checked={settings.ecommerceAllowDelivery} onChange={(event) => setSettings((current) => ({ ...current, ecommerceAllowDelivery: event.target.checked }))} type="checkbox" /><Truck size={19} /><span><strong>Delivery</strong><small>Collect a delivery address.</small></span></label>
                 <label><input checked={settings.ecommerceAllowPickup} onChange={(event) => setSettings((current) => ({ ...current, ecommerceAllowPickup: event.target.checked }))} type="checkbox" /><Store size={19} /><span><strong>Store pickup</strong><small>Customer collects at the shop.</small></span></label>
               </div>
+              <section className={styles.fulfillmentLocations}>
+                <header>
+                  <span><MapPin size={18} /><strong>Fulfilment locations</strong></span>
+                  <button onClick={addFulfillmentLocation} type="button"><Plus size={16} />Add location</button>
+                </header>
+                <p>Delivery uses eligible network stock, reserves each source location, and creates internal transfers to the chosen dispatch location when needed. Pickup only accepts stock available at the selected shop.</p>
+                {fulfillmentLocations.length > 0 ? (
+                  <div className={styles.fulfillmentLocationRows}>
+                    {fulfillmentLocations.map((location) => (
+                      <div className={styles.fulfillmentLocationRow} key={location.inventoryLocationId}>
+                        <label>
+                          <span>Sales location</span>
+                          <select
+                            onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { inventoryLocationId: event.target.value })}
+                            value={location.inventoryLocationId}
+                          >
+                            {workspace.availableFulfillmentLocations.map((availableLocation) => (
+                              <option key={availableLocation.id} value={availableLocation.id}>
+                                {[availableLocation.storeName, availableLocation.name, availableLocation.code].filter(Boolean).join(" - ")}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>Priority</span>
+                          <input min={1} onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { routingPriority: Math.max(1, Number(event.target.value) || 1) })} type="number" value={location.routingPriority} />
+                        </label>
+                        <label className={styles.fulfillmentCheck}><input checked={location.supportsDelivery} onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { supportsDelivery: event.target.checked })} type="checkbox" /><Truck size={16} />Delivery</label>
+                        <label className={styles.fulfillmentCheck}><input checked={location.supportsPickup} onChange={(event) => updateFulfillmentLocation(location.inventoryLocationId, { supportsPickup: event.target.checked })} type="checkbox" /><Store size={16} />Pickup</label>
+                        <button aria-label="Remove fulfilment location" onClick={() => setFulfillmentLocations((current) => current.filter((entry) => entry.inventoryLocationId !== location.inventoryLocationId))} title="Remove fulfilment location" type="button"><Trash2 size={17} /></button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className={styles.fulfillmentFallback}>The storefront currently uses its own default sales location.</div>
+                )}
+              </section>
               <button className={styles.saveButton} disabled={busyKey === "settings"} type="submit">{busyKey === "settings" ? <LoaderCircle className={styles.spin} size={18} /> : <Check size={18} />}Save storefront</button>
             </form>
           </section>
@@ -491,7 +838,7 @@ export function OnlineStoreEcommerceWorkspace({
           <section aria-label={`Order ${selectedOrder.orderNo}`} aria-modal="true" className={styles.orderDialog} role="dialog">
             <header><div><span>Customer order</span><h2>{selectedOrder.orderNo}</h2></div><button aria-label="Close order" onClick={() => setSelectedOrderId(null)} title="Close" type="button"><X size={21} /></button></header>
             <div className={styles.orderSummary}>
-              <div><small>Status</small><strong>{formatStatus(selectedOrder.status)}</strong></div>
+              <div><small>Status</small><strong>{formatOrderStatus(selectedOrder)}</strong></div>
               <div><small>Payment</small><strong>{formatStatus(selectedOrder.paymentStatus)}</strong></div>
               <div><small>Order total</small><strong>{money(selectedOrder.currencyCode, selectedOrder.totalAmount)}</strong></div>
               <div><small>Balance</small><strong>{money(selectedOrder.currencyCode, selectedOrder.balanceAmount)}</strong></div>
@@ -501,13 +848,31 @@ export function OnlineStoreEcommerceWorkspace({
                 {selectedOrder.status === "PLACED" ? (
                   <div className={styles.acceptanceNotice}><BellRing size={18} /><span><strong>{selectedOrder.orderType === "LAYAWAY" && selectedOrder.paidAmount + 0.005 >= selectedOrder.minimumDepositAmount ? "Layaway deposit received" : selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Awaiting payment" : "Awaiting acceptance"}</strong><small>{selectedOrder.orderType === "LAYAWAY" && selectedOrder.paidAmount + 0.005 >= selectedOrder.minimumDepositAmount ? "The minimum deposit is satisfied. Staff may accept the Layaway; full-payment fulfilment rules still apply." : selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID" ? "Confirm the required online payment before accepting this order." : "This order is not available in the POS fulfilment lane until staff accepts it."}</small></span></div>
                 ) : null}
+                {selectedOrder.networkTransferSummary.outstanding > 0 ? (
+                  <div className={styles.acceptanceNotice}><Truck size={18} /><span><strong>Stock is still routing to the dispatch shop</strong><small>{selectedOrder.networkTransferSummary.outstanding} of {selectedOrder.networkTransferSummary.total} network transfer{selectedOrder.networkTransferSummary.total === 1 ? "" : "s"} must be received before this order can be marked ready for the customer.</small></span></div>
+                ) : null}
                 <h3>Items</h3>
                 <div className={styles.lineItems}>{selectedOrder.lines.map((line) => <div key={line.id}><span><strong>{line.productName}</strong><small>{line.variant || line.productCode}</small></span><span>{line.quantity} x {money(selectedOrder.currencyCode, line.unitPrice)}</span><strong>{money(selectedOrder.currencyCode, line.lineTotal)}</strong></div>)}</div>
               </section>
               <aside>
-                <h3>Delivery</h3>
+                <h3>{selectedOrder.fulfilmentMethod === "PICKUP" ? "Pickup" : "Delivery"}</h3>
                 <p><strong>{selectedOrder.recipientName}</strong><br />{selectedOrder.deliveryPhone}<br />{selectedOrder.fulfilmentMethod === "DELIVERY" ? selectedOrder.deliveryAddress : "Store pickup"}</p>
                 {selectedOrder.deliveryNote ? <p><small>Customer note</small><br />{selectedOrder.deliveryNote}</p> : null}
+                {selectedOrder.fulfillment ? <><h3>{selectedOrder.fulfilmentMethod === "PICKUP" ? "Pickup location" : "Delivery fulfilment"}</h3><p><strong>{selectedOrder.fulfillment.storeName}</strong><br />{selectedOrder.fulfillment.inventoryLocationName ?? "Store sales location"}<br /><small>{selectedOrder.fulfillment.routingMethod === "NETWORK_TRANSFER" ? "Network allocation - source transfer(s) may be pending" : formatStatus(selectedOrder.fulfillment.status)}</small></p></> : null}
+                {selectedOrder.networkTransfers.length > 0 ? (
+                  <section className={styles.networkTransferPanel}>
+                    <header><span><Truck size={17} />Network stock routing</span><strong>{selectedOrder.networkTransferSummary.received} of {selectedOrder.networkTransferSummary.total} received</strong></header>
+                    <p>{selectedOrder.networkTransferSummary.outstanding > 0 ? "The dispatch shop must receive the remaining transfer stock before this customer order can be marked ready." : "All planned network stock has arrived at the dispatch shop."}</p>
+                    <div className={styles.networkTransferRows}>
+                      {selectedOrder.networkTransfers.map((transfer) => (
+                        <div className={styles.networkTransferRow} key={transfer.transferNo}>
+                          <span><strong>{transfer.productName}</strong><small>{transfer.productCode} · from {transfer.sourceStoreName}</small></span>
+                          <span><strong>{transfer.receivedQuantity} / {transfer.requestedQuantity}</strong><small>{formatStatus(transfer.status)}</small></span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
                 <h3>Customer</h3>
                 <p>{selectedOrder.customer.fullName}<br />{selectedOrder.customer.phone ?? ""}<br />{selectedOrder.customer.email ?? ""}</p>
                 {selectedOrder.refundRequests.length > 0 ? (
@@ -528,10 +893,12 @@ export function OnlineStoreEcommerceWorkspace({
               </aside>
             </div>
             <footer>
-              <div><span className={`${styles.pill} ${toneForStatus(selectedOrder.status)}`}>{formatStatus(selectedOrder.status)}</span><small>{new Date(selectedOrder.placedAt).toLocaleString()}</small></div>
-              <div className={styles.statusActions}>{(nextStatuses[selectedOrder.status] ?? []).map((status) => {
+              <div><span className={`${styles.pill} ${toneForStatus(selectedOrder.status)}`}>{formatOrderStatus(selectedOrder)}</span><small>{new Date(selectedOrder.placedAt).toLocaleString()}</small></div>
+              <div className={styles.statusActions}>{nextStatusesForOrder(selectedOrder).map((status) => {
                 const paymentBlocksAcceptance = status === "CONFIRMED" && selectedOrder.paymentTiming === "PREPAY" && selectedOrder.paymentStatus !== "PAID";
-                return <button className={status === "CANCELLED" ? styles.cancelAction : undefined} disabled={busyKey === `order:${selectedOrder.id}` || paymentBlocksAcceptance} key={status} onClick={() => void updateOrderStatus(selectedOrder, status)} title={paymentBlocksAcceptance ? "Online payment must be confirmed first" : undefined} type="button">{status === "CONFIRMED" ? "Accept order" : formatStatus(status)}</button>;
+                const transferBlocksProgress = ["READY", "OUT_FOR_DELIVERY", "DELIVERED"].includes(status) && selectedOrder.networkTransferSummary.outstanding > 0;
+                const blockedTitle = paymentBlocksAcceptance ? "Online payment must be confirmed first" : transferBlocksProgress ? "Receive all network transfer stock at the dispatch shop first" : undefined;
+                return <button className={status === "CANCELLED" ? styles.cancelAction : undefined} disabled={busyKey === `order:${selectedOrder.id}` || paymentBlocksAcceptance || transferBlocksProgress} key={status} onClick={() => void updateOrderStatus(selectedOrder, status)} title={blockedTitle} type="button">{orderStatusActionLabel(selectedOrder, status)}</button>;
               })}</div>
             </footer>
           </section>

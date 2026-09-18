@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import path from "node:path";
 
 function parsePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -28,6 +30,10 @@ const env = {
   NEXT_TELEMETRY_DISABLED: process.env.NEXT_TELEMETRY_DISABLED || "1",
   NODE_OPTIONS: nodeOptions,
 };
+
+const nextBuildDirectory = path.resolve("apps/enterprise-web/.next");
+console.log(`[deploy-build] Removing stale Next output from ${nextBuildDirectory}.`);
+rmSync(nextBuildDirectory, { recursive: true, force: true });
 
 console.log(
   `[deploy-build] Building enterprise web with ${workerCount} Next worker(s) and Node heap cap ${memoryMb} MB.`,

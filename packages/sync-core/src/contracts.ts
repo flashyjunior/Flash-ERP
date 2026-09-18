@@ -348,6 +348,22 @@ export type StoreSalesOrderRecordedPayload = {
   reservations?: StoreSalesOrderReservationPayload[];
 };
 
+export type EnterpriseEcommerceSalesOrderPublishedPayload =
+  StoreSalesOrderRecordedPayload & {
+    source: "ECOMMERCE";
+    salesOrderRecordVersion: number;
+    fulfilmentMethod: "PICKUP" | "DELIVERY";
+    paymentTiming: "PREPAY" | "ON_DELIVERY";
+    selectedPaymentMethodCode: string | null;
+    selectedPaymentMethodName: string | null;
+    recipientName: string;
+    deliveryPhone: string;
+    deliveryAddress: string | null;
+    dispatchInventoryLocationCode: string | null;
+    dispatchInventoryLocationName: string | null;
+    networkAllocation: boolean;
+  };
+
 export type StoreSalesOrderLinePayload = {
   lineId: string;
   productCode: string;
@@ -559,6 +575,14 @@ export type EnterpriseStoreSettingsPublishedPayload = {
     productCodes: string[] | null;
     productSortOrders?: Record<string, number> | null;
   } | null;
+  ecommerceFulfillmentLocations?: Array<{
+    inventoryLocationCode: string;
+    storefrontStoreCode: string;
+    storefrontStoreName: string;
+    supportsPickup: boolean;
+    supportsDelivery: boolean;
+    routingPriority: number;
+  }>;
   publishedAt: string;
 };
 
@@ -657,6 +681,22 @@ export type EnterpriseCustomerPublishedPayload = {
   creditLimitAmount: number | null;
   receivableBalanceAmount: number;
   note: string | null;
+  status: string;
+  publishedAt: string;
+};
+
+export type EnterpriseSupplierPublishedPayload = {
+  storeCode: string;
+  supplierId: string;
+  supplierNo: string;
+  supplierName: string;
+  contactName: string | null;
+  phone: string | null;
+  email: string | null;
+  addressLine1: string | null;
+  city: string | null;
+  countryCode: string | null;
+  leadTimeDays: number | null;
   status: string;
   publishedAt: string;
 };
@@ -1059,6 +1099,56 @@ export type StoreNodeReplayRequest = {
   operatorName?: string;
 };
 
+export type StoreMasterDataPublicationScope =
+  | "STORE_SETUP"
+  | "SECURITY"
+  | "CUSTOMERS"
+  | "SUPPLIERS"
+  | "PRODUCTS"
+  | "PRICING"
+  | "TAX_AND_TENDERS"
+  | "PROMOTIONS"
+  | "BANKING"
+  | "GIFT_CERTIFICATES";
+
+export type StoreMasterDataPublicationRequest = {
+  scopes: StoreMasterDataPublicationScope[];
+  note?: string;
+  operatorName?: string;
+};
+
+export type StoreMasterDataPublicationResponse = {
+  nodeCode: string;
+  scopes: StoreMasterDataPublicationScope[];
+  queuedCount: number;
+  note: string;
+  operatorName: string;
+  serverProcessedAt: string;
+};
+
+export type StoreMasterDataDistributionRequest = {
+  nodeCodes: string[];
+  scopes: StoreMasterDataPublicationScope[];
+  note?: string;
+  operatorName?: string;
+};
+
+export type StoreMasterDataDistributionTarget = {
+  storeCode: string;
+  storeName: string;
+  nodeCode: string;
+  queuedCount: number;
+};
+
+export type StoreMasterDataDistributionResponse = {
+  targets: StoreMasterDataDistributionTarget[];
+  scopes: StoreMasterDataPublicationScope[];
+  queuedCount: number;
+  note: string;
+  operatorName: string;
+  serverProcessedAt: string;
+};
+
 export type StoreNodeInboundActionRequest = {
   note?: string;
   operatorName?: string;
@@ -1169,6 +1259,7 @@ export type SyncOperatorActionType =
   | "REQUEST_COUNT_VARIANCE"
   | "REQUEST_STOCK_TRANSFER"
   | "PUBLISH_LOCATION_TOPOLOGY"
+  | "PUBLISH_MASTER_DATA"
   | "STORE_TASK_COMPLETED";
 
 export type StoreNodeSyncTrigger =
@@ -1514,6 +1605,22 @@ export type StoreRemoteInventoryLookupRow = {
   categoryCode: string | null;
   subcategory: string | null;
   quantityOnHand: number;
+  activeReservedQuantity?: number;
+  safetyStockQuantity?: number;
+  ecommerceSellableQuantity?: number;
+  ecommercePickupEligible?: boolean;
+  ecommerceDeliveryEligible?: boolean;
+  locationBreakdown?: Array<{
+    locationCode: string;
+    locationName: string;
+    quantityOnHand: number;
+    activeReservedQuantity: number;
+    safetyStockLevel: number;
+    ecommerceSellableQuantity: number;
+    ecommercePickupEligible: boolean;
+    ecommerceDeliveryEligible: boolean;
+    ecommerceEligibilityLabel: string;
+  }>;
   unitPrice: number;
   updatedAt: string;
 };

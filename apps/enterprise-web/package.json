@@ -24,6 +24,7 @@
     "recharts": "^3.8.1",
     "redis": "^5.12.1",
     "sanitize-html": "^2.17.6",
+    "sharp": "^0.34.5",
     "tailwind-merge": "^3.3.1",
     "tinymce": "^8.4.0",
     "write-excel-file": "^4.1.1"

@@ -16,6 +16,75 @@ import type { LayawaySettings } from "@flash-erp/domain";
 
 export type StoreInventoryBatchAllocation = InventoryBatchAllocationPayload;
 
+export type StoreEcommerceFulfillmentEligibility = {
+  supportsPickup: boolean;
+  supportsDelivery: boolean;
+  routingPriority: number;
+  label: string;
+};
+
+export function readStoreEcommerceFulfillmentEligibility(
+  value: string | null | undefined,
+) {
+  const byLocation = new Map<string, StoreEcommerceFulfillmentEligibility>();
+
+  if (!value?.trim()) {
+    return byLocation;
+  }
+
+  let rows: unknown;
+
+  try {
+    rows = JSON.parse(value);
+  } catch {
+    return byLocation;
+  }
+
+  if (!Array.isArray(rows)) {
+    return byLocation;
+  }
+
+  for (const row of rows) {
+    if (
+      typeof row !== "object" ||
+      row === null ||
+      typeof row.inventoryLocationCode !== "string" ||
+      typeof row.storefrontStoreName !== "string" ||
+      typeof row.supportsPickup !== "boolean" ||
+      typeof row.supportsDelivery !== "boolean" ||
+      typeof row.routingPriority !== "number"
+    ) {
+      continue;
+    }
+
+    const locationCode = row.inventoryLocationCode.trim().toUpperCase();
+
+    if (!locationCode) {
+      continue;
+    }
+
+    const modes = [
+      row.supportsPickup ? "pickup" : null,
+      row.supportsDelivery ? "delivery" : null,
+    ].filter((mode): mode is string => Boolean(mode));
+    const detail = `${row.storefrontStoreName}: ${modes.length ? modes.join(" + ") : "disabled"} (priority ${row.routingPriority})`;
+    const current = byLocation.get(locationCode);
+
+    byLocation.set(locationCode, {
+      supportsPickup: (current?.supportsPickup ?? false) || row.supportsPickup,
+      supportsDelivery:
+        (current?.supportsDelivery ?? false) || row.supportsDelivery,
+      routingPriority: Math.min(
+        current?.routingPriority ?? Number.MAX_SAFE_INTEGER,
+        row.routingPriority,
+      ),
+      label: current ? `${current.label}; ${detail}` : detail,
+    });
+  }
+
+  return byLocation;
+}
+
 export type StoreCatalogBatchAvailability = {
   batchId: string;
   batchNo: string;
@@ -1147,6 +1216,11 @@ export type StoreInventoryBrowseItem = {
   subcategory: string | null;
   barcode: string | null;
   quantityOnHand: number;
+  activeReservedQuantity: number;
+  ecommerceSellableQuantity: number;
+  ecommercePickupEligible: boolean;
+  ecommerceDeliveryEligible: boolean;
+  ecommerceEligibilityLabel: string;
   minStockLevel: number | null;
   reorderPoint: number | null;
   safetyStockLevel: number | null;

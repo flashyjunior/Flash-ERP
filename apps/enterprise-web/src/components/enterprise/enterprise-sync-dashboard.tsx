@@ -1,7 +1,11 @@
 "use client";
 
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
-import { ArrowUpRight, BellRing, HardDriveDownload, ShoppingCart, Store } from "lucide-react";
+import { ArrowUpRight, BellRing, HardDriveDownload, Send, ShoppingCart, Store } from "lucide-react";
+import type {
+  StoreMasterDataDistributionResponse,
+  StoreMasterDataPublicationScope
+} from "@flash-erp/sync-core";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, type FormEvent } from "react";
 
@@ -36,6 +40,11 @@ type EnterpriseSyncDashboardData = {
     lastSync: string;
     posture: SyncPosture;
   }>;
+  publicationTargets: Array<{
+    storeCode: string;
+    storeName: string;
+    nodeCode: string;
+  }>;
   priorities: string[];
   downstreamOwnership: Array<{
     title: string;
@@ -64,6 +73,24 @@ const recoveryLanes = [
 ];
 
 const numberFormatter = new Intl.NumberFormat("en-US");
+
+const masterDataPublicationOptions: Array<{
+  value: StoreMasterDataPublicationScope;
+  label: string;
+}> = [
+  { value: "STORE_SETUP", label: "Store setup and locations" },
+  { value: "SECURITY", label: "Users, roles and permissions" },
+  { value: "CUSTOMERS", label: "Customers" },
+  { value: "SUPPLIERS", label: "Suppliers" },
+  { value: "PRODUCTS", label: "Products, categories, units and barcodes" },
+  { value: "PRICING", label: "Product pricing" },
+  { value: "TAX_AND_TENDERS", label: "Taxes and tender methods" },
+  { value: "PROMOTIONS", label: "Promotions" },
+  { value: "BANKING", label: "Bank accounts" },
+  { value: "GIFT_CERTIFICATES", label: "Gift certificates" }
+];
+
+const allMasterDataPublicationScopes = masterDataPublicationOptions.map((option) => option.value);
 
 function buildSuggestedNodeCode(storeCode: string) {
   return storeCode ? `${storeCode}-desktop-01` : "";
@@ -114,7 +141,9 @@ function PostureBadge({ value }: { value: StoreNodeRow["posture"] }) {
 }
 
 const storeFilter: FilterFn<StoreNodeRow> = (row, _columnId, filterValue) => {
-  const query = String(filterValue ?? "").trim().toLowerCase();
+  const query = String(filterValue ?? "")
+    .trim()
+    .toLowerCase();
 
   if (!query) {
     return true;
@@ -197,9 +226,7 @@ function RegisterStoreNodeDialog({
     } catch (error) {
       setStatus("error");
       setMessage(
-        error instanceof Error
-          ? error.message
-          : "Flash ERP could not register that store node."
+        error instanceof Error ? error.message : "Flash ERP could not register that store node."
       );
     }
   }
@@ -304,9 +331,251 @@ function RegisterStoreNodeDialog({
   );
 }
 
+function MasterDataDistributionDialog({
+  targets
+}: {
+  targets: EnterpriseSyncDashboardData["publicationTargets"];
+}) {
+  const router = useRouter();
+  const [isOpen, setIsOpen] = useState(false);
+  const [selectedNodeCodes, setSelectedNodeCodes] = useState<string[]>([]);
+  const [selectedScopes, setSelectedScopes] = useState<StoreMasterDataPublicationScope[]>(
+    allMasterDataPublicationScopes
+  );
+  const [note, setNote] = useState("Manually publishing selected enterprise master data from HQ.");
+  const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
+  const [message, setMessage] = useState<string | null>(null);
+
+  function toggleNode(nodeCode: string) {
+    setSelectedNodeCodes((current) =>
+      current.includes(nodeCode)
+        ? current.filter((candidate) => candidate !== nodeCode)
+        : [...current, nodeCode]
+    );
+  }
+
+  function toggleScope(scope: StoreMasterDataPublicationScope) {
+    setSelectedScopes((current) =>
+      current.includes(scope)
+        ? current.filter((candidate) => candidate !== scope)
+        : [...current, scope]
+    );
+  }
+
+  async function handleSubmit() {
+    if (selectedNodeCodes.length === 0 || selectedScopes.length === 0) {
+      setStatus("error");
+      setMessage("Select at least one shop and one data group.");
+      return;
+    }
+
+    setStatus("submitting");
+    setMessage("Flash ERP is building the selected shop publication batches.");
+
+    try {
+      const response = await fetch("/api/sync/master-data-publications", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          nodeCodes: selectedNodeCodes,
+          scopes: selectedScopes,
+          note
+        })
+      });
+      const payload = (await response.json()) as
+        StoreMasterDataDistributionResponse | { error?: string };
+
+      if (!response.ok) {
+        throw new Error(
+          "error" in payload && payload.error
+            ? payload.error
+            : "Flash ERP could not queue the selected master data."
+        );
+      }
+
+      const distribution = payload as StoreMasterDataDistributionResponse;
+      setStatus("success");
+      setMessage(
+        `Queued ${numberFormatter.format(distribution.queuedCount)} packet(s) for ${numberFormatter.format(distribution.targets.length)} shop(s).`
+      );
+      router.refresh();
+    } catch (error) {
+      setStatus("error");
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Flash ERP could not queue the selected master data."
+      );
+    }
+  }
+
+  return (
+    <ActionDialog
+      description="Select the shops and enterprise-owned data groups that should be queued for downstream delivery."
+      onOpenChange={(nextOpen) => {
+        setIsOpen(nextOpen);
+
+        if (nextOpen) {
+          setStatus("idle");
+          setMessage(null);
+        }
+      }}
+      open={isOpen}
+      title="Queue master data"
+      triggerLabel="Queue master data"
+      widthClassName="max-w-3xl"
+    >
+      <div className="space-y-5">
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-stone-900">
+              <Store className="h-4 w-4 text-[var(--brand)]" />
+              Select shops
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                className="text-sm font-semibold text-[var(--brand)] hover:text-[var(--brand-deep)]"
+                onClick={() => setSelectedNodeCodes(targets.map((target) => target.nodeCode))}
+                type="button"
+              >
+                Select all
+              </button>
+              <button
+                className="text-sm font-semibold text-stone-600 hover:text-stone-950"
+                onClick={() => setSelectedNodeCodes([])}
+                type="button"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="grid max-h-52 gap-2 overflow-y-auto sm:grid-cols-2">
+            {targets.length === 0 ? (
+              <div className="border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-600 sm:col-span-2">
+                No active shop desktop nodes are available.
+              </div>
+            ) : (
+              targets.map((target) => (
+                <label
+                  className="flex min-h-12 items-center gap-3 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800"
+                  key={target.storeCode}
+                >
+                  <input
+                    checked={selectedNodeCodes.includes(target.nodeCode)}
+                    className="h-4 w-4 accent-[var(--brand)]"
+                    onChange={() => toggleNode(target.nodeCode)}
+                    type="checkbox"
+                  />
+                  <span className="min-w-0">
+                    <span className="block font-semibold text-stone-900">{target.storeName}</span>
+                    <span className="block truncate text-xs text-stone-500">{target.nodeCode}</span>
+                  </span>
+                </label>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-3 border-t border-stone-200 pt-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-stone-900">
+              <HardDriveDownload className="h-4 w-4 text-[var(--brand)]" />
+              Select data groups
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                className="text-sm font-semibold text-[var(--brand)] hover:text-[var(--brand-deep)]"
+                onClick={() => setSelectedScopes(allMasterDataPublicationScopes)}
+                type="button"
+              >
+                Select all
+              </button>
+              <button
+                className="text-sm font-semibold text-stone-600 hover:text-stone-950"
+                onClick={() => setSelectedScopes([])}
+                type="button"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {masterDataPublicationOptions.map((option) => (
+              <label
+                className="flex min-h-12 items-center gap-3 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800"
+                key={option.value}
+              >
+                <input
+                  checked={selectedScopes.includes(option.value)}
+                  className="h-4 w-4 accent-[var(--brand)]"
+                  onChange={() => toggleScope(option.value)}
+                  type="checkbox"
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <label className="block space-y-2 text-sm text-stone-700">
+          <span className="block font-semibold text-stone-900">Audit note</span>
+          <textarea
+            className="min-h-24 w-full rounded-lg border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)]"
+            disabled={status === "submitting"}
+            onChange={(event) => setNote(event.target.value)}
+            value={note}
+          />
+        </label>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            className="inline-flex items-center gap-2 rounded-lg bg-[var(--brand)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--brand-deep)] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={
+              status === "submitting" ||
+              selectedNodeCodes.length === 0 ||
+              selectedScopes.length === 0
+            }
+            onClick={() => void handleSubmit()}
+            type="button"
+          >
+            <Send className="h-4 w-4" />
+            {status === "submitting" ? "Queueing..." : "Queue selected data"}
+          </button>
+          <button
+            className="rounded-lg border border-stone-300 bg-white px-5 py-3 text-sm font-semibold text-stone-700 transition hover:border-stone-400 hover:text-stone-950"
+            disabled={status === "submitting"}
+            onClick={() => setIsOpen(false)}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+
+        {message ? (
+          <div
+            className={`rounded-lg border px-4 py-3 text-sm ${
+              status === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-800"
+                : status === "success"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-sky-200 bg-sky-50 text-sky-800"
+            }`}
+          >
+            {message}
+          </div>
+        ) : null}
+      </div>
+    </ActionDialog>
+  );
+}
+
 export function EnterpriseSyncDashboard({
+  canPublishMasterData,
   dashboard
 }: {
+  canPublishMasterData: boolean;
   dashboard: EnterpriseSyncDashboardData;
 }) {
   const columns = useMemo<ColumnDef<StoreNodeRow>[]>(
@@ -385,15 +654,23 @@ export function EnterpriseSyncDashboard({
         summaries={{
           network:
             "Track last sync time, upstream backlog, and downstream pressure for every store node.",
-          downstream:
-            "Review the domains that enterprise owns and pushes into store environments.",
-          conflicts:
-            "Make conflict posture explicit instead of allowing silent retail data drift."
+          downstream: "Review the domains that enterprise owns and pushes into store environments.",
+          conflicts: "Make conflict posture explicit instead of allowing silent retail data drift."
         }}
         tabs={[
-          { value: "network", label: "Network", badge: "Live", badgeTone: "success" },
+          {
+            value: "network",
+            label: "Network",
+            badge: "Live",
+            badgeTone: "success"
+          },
           { value: "downstream", label: "Downstream" },
-          { value: "conflicts", label: "Conflicts", badge: "Review", badgeTone: "warning" }
+          {
+            value: "conflicts",
+            label: "Conflicts",
+            badge: "Review",
+            badgeTone: "warning"
+          }
         ]}
       >
         <WorkspaceTabsContent value="network">
@@ -407,7 +684,14 @@ export function EnterpriseSyncDashboard({
                 getRowHref={(row) => `/sync/nodes/${row.nodeCode}`}
                 globalFilterFn={storeFilter}
                 searchPlaceholder="Search stores, node codes, or sync posture"
-                toolbarActions={<RegisterStoreNodeDialog storeOptions={dashboard.storeOptions} />}
+                toolbarActions={
+                  <div className="flex flex-wrap items-center gap-2">
+                    {canPublishMasterData ? (
+                      <MasterDataDistributionDialog targets={dashboard.publicationTargets} />
+                    ) : null}
+                    <RegisterStoreNodeDialog storeOptions={dashboard.storeOptions} />
+                  </div>
+                }
               />
             </div>
 
@@ -523,7 +807,8 @@ export function EnterpriseSyncDashboard({
               Next implementation lane
             </p>
             <h2 className="mt-1 text-lg font-semibold text-stone-950">
-              Node drill-downs are live. The next lane is replay controls and dead-letter actions directly from each store workspace.
+              Node drill-downs are live. The next lane is replay controls and dead-letter actions
+              directly from each store workspace.
             </h2>
           </div>
           <div className="rounded-full border border-stone-200 bg-white/90 px-4 py-2 text-sm font-semibold text-stone-700">

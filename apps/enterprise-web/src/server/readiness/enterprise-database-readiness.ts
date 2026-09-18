@@ -17,6 +17,12 @@ const requiredMigrationNames = [
   "20260814030000_ecommerce_layaway",
   "20260814040000_sync_downstream_failure_details",
   "20260814050000_sqlserver_schema_reconciliation",
+  "20260820010000_multi_branch_ecommerce_fulfillment",
+  "20260820020000_ecommerce_network_allocation",
+  "20260825010000_ecommerce_store_payment_reconciliation",
+  "20260825020000_ecommerce_terminal_reservation_reconciliation",
+  "20260826010000_public_trial_signup",
+  "20260827010000_trial_workspace_lifecycle",
 ];
 
 const requiredTables = [
@@ -43,6 +49,12 @@ const requiredTables = [
   "EcommerceOrderStatusEvent",
   "EcommerceStorePaymentMethod",
   "EcommerceProductReview",
+  "EcommerceFulfillmentLocation",
+  "EcommerceFulfillment",
+  "EcommerceFulfillmentLine",
+  "trial_signup_request",
+  "trial_lifecycle_event",
+  "trial_workspace_runtime",
   "StoreProductSellingUnit",
   "SalesOrderInventoryReservation",
 ];
@@ -94,6 +106,7 @@ const requiredColumns = [
   { tableName: "Store", columnName: "ecommerceAllowPickup" },
   { tableName: "Store", columnName: "ecommerceAllowDelivery" },
   { tableName: "Store", columnName: "ecommerceHeroImageUrl" },
+  { tableName: "Store", columnName: "ecommerceHeroSlidesJson" },
   { tableName: "Store", columnName: "ecommerceWhatsappPhone" },
   { tableName: "Store", columnName: "ecommercePayOnDeliveryEnabled" },
   { tableName: "Product", columnName: "ecommercePublished" },
@@ -105,6 +118,7 @@ const requiredColumns = [
   { tableName: "Product", columnName: "ecommerceGalleryJson" },
   { tableName: "EcommerceOrder", columnName: "paymentTiming" },
   { tableName: "EcommerceOrder", columnName: "selectedPaymentMethodCode" },
+  { tableName: "EcommerceOrder", columnName: "storefrontStoreId" },
   { tableName: "EcommerceCustomerAccount", columnName: "failedLoginAttempts" },
   { tableName: "EcommerceCustomerAccount", columnName: "lockedUntil" },
   { tableName: "EcommerceOrder", columnName: "checkoutRequestKey" },

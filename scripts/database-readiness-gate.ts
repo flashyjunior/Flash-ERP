@@ -17,7 +17,13 @@ const requiredMigrationNames = [
   "20260814020000_layaway_lifecycle",
   "20260814030000_ecommerce_layaway",
   "20260814040000_sync_downstream_failure_details",
-  "20260814050000_sqlserver_schema_reconciliation"
+  "20260814050000_sqlserver_schema_reconciliation",
+  "20260820010000_multi_branch_ecommerce_fulfillment",
+  "20260820020000_ecommerce_network_allocation",
+  "20260825010000_ecommerce_store_payment_reconciliation",
+  "20260825020000_ecommerce_terminal_reservation_reconciliation",
+  "20260826010000_public_trial_signup",
+  "20260827010000_trial_workspace_lifecycle"
 ];
 const requiredTables = [
   "GlAccount",
@@ -25,7 +31,13 @@ const requiredTables = [
   "GlJournalLine",
   "OperatingExpense",
   "StoreProductSellingUnit",
-  "SalesOrderInventoryReservation"
+  "SalesOrderInventoryReservation",
+  "EcommerceFulfillmentLocation",
+  "EcommerceFulfillment",
+  "EcommerceFulfillmentLine",
+  "trial_signup_request",
+  "trial_lifecycle_event",
+  "trial_workspace_runtime"
 ];
 const requiredColumns = [
   { tableName: "TenderMethod", columnName: "gatewayProvider" },
@@ -47,6 +59,7 @@ const requiredColumns = [
   { tableName: "EcommerceOrder", columnName: "checkoutRequestKey" },
   { tableName: "EcommerceOrder", columnName: "checkoutRequestHash" },
   { tableName: "EcommerceOrder", columnName: "layawayDepositAmount" },
+  { tableName: "EcommerceOrder", columnName: "storefrontStoreId" },
   { tableName: "EcommercePayment", columnName: "initializationRequestKey" },
   { tableName: "EcommercePayment", columnName: "initializationRequestHash" },
   { tableName: "RetailOrg", columnName: "stockUpdateMode" },

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { NextResponse } from "next/server";
 
 import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { resolveEnterpriseWebRoot } from "@/server/files/fuel-evidence-storage";
 export const runtime = "nodejs";
 
 const maxUploadBytes = 5 * 1024 * 1024;
@@ -17,15 +18,6 @@ const supportedMimeTypes = new Map<string, string>([
   ["image/avif", ".avif"]
 ]);
 const supportedExtensions = new Set<string>([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]);
-
-function resolveEnterpriseWebRoot() {
-  const candidates = [process.cwd(), path.join(process.cwd(), "apps", "enterprise-web")];
-
-  return (
-    candidates.find((candidate) => existsSync(path.join(candidate, "next.config.ts"))) ??
-    candidates[0]
-  );
-}
 
 function resolveExtension(file: File) {
   const supportedExtension = supportedMimeTypes.get(file.type);
