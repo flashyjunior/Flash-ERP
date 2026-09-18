@@ -491,6 +491,7 @@ export type EnterpriseSignInResult =
   | {
       requiresMfa: false;
       sessionId: string;
+      token: string;
       expiresAt: Date;
     }
   | {
@@ -504,6 +505,7 @@ export type EnterpriseSignInResult =
 export type EnterpriseMfaVerifyResult = {
   message: string;
   sessionId: string;
+  token: string;
   expiresAt: Date;
 };
 
@@ -801,6 +803,30 @@ export async function resetEnterprisePassword(token: string, nextPassword: strin
   };
 }
 
+async function readSessionTokenFromRequest(): Promise<string | null> {
+  try {
+    const cookieStore = await cookies();
+    const cookieToken = cookieStore.get(sessionCookieName)?.value;
+    if (cookieToken) {
+      return cookieToken;
+    }
+  } catch {
+    // cookies() unavailable outside request context
+  }
+
+  try {
+    const headerStore = await headers();
+    const authHeader = headerStore.get("authorization");
+    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+      return authHeader.slice(7).trim();
+    }
+  } catch {
+    // headers() unavailable outside request context
+  }
+
+  return null;
+}
+
 async function issueEnterpriseSession(input: {
   retailOrgId: string;
   sourceNodeCode: string;
@@ -840,14 +866,18 @@ async function issueEnterpriseSession(input: {
     }
   });
 
-  const cookieStore = await cookies();
-  cookieStore.set(sessionCookieName, token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: await shouldUseSecureCookies(),
-    expires: expiresAt,
-    path: "/"
-  });
+  try {
+    const cookieStore = await cookies();
+    cookieStore.set(sessionCookieName, token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: await shouldUseSecureCookies(),
+      expires: expiresAt,
+      path: "/"
+    });
+  } catch {
+    // Cookie store unavailable when operating purely over Bearer header
+  }
 
   await writeSecurityLog({
     retailOrgId: input.retailOrgId,
@@ -870,6 +900,7 @@ async function issueEnterpriseSession(input: {
 
   return {
     sessionId: session.id,
+    token,
     expiresAt
   };
 }
@@ -1260,13 +1291,13 @@ export async function verifyEnterpriseMfaChallenge(
   return {
     message: "Flash ERP verified MFA and signed you in.",
     sessionId: session.sessionId,
+    token: session.token,
     expiresAt: session.expiresAt
   };
 }
 
 export async function clearEnterpriseSession() {
-  const cookieStore = await cookies();
-  const token = cookieStore.get(sessionCookieName)?.value;
+  const token = await readSessionTokenFromRequest();
 
   if (token) {
     const tokenHash = hashSessionToken(token);
@@ -1282,8 +1313,13 @@ export async function clearEnterpriseSession() {
     invalidateEnterpriseReadCache(`auth-session:${tokenHash}`);
   }
 
-  cookieStore.delete(sessionCookieName);
-  cookieStore.delete(stepUpCookieName);
+  try {
+    const cookieStore = await cookies();
+    cookieStore.delete(sessionCookieName);
+    cookieStore.delete(stepUpCookieName);
+  } catch {
+    // Cookie store unavailable
+  }
 }
 
 export async function createEnterpriseStepUpVerification(
@@ -1699,8 +1735,7 @@ export async function updateEnterpriseOwnProfile(
 export async function getEnterpriseSession(
   options: { refreshExpiresAt?: boolean } = {}
 ): Promise<EnterpriseSession | null> {
-  const cookieStore = await cookies();
-  const token = cookieStore.get(sessionCookieName)?.value;
+  const token = await readSessionTokenFromRequest();
 
   if (!token) {
     return null;
@@ -1843,13 +1878,18 @@ export async function getEnterpriseSession(
   }
 
   if (options.refreshExpiresAt) {
-    cookieStore.set(sessionCookieName, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: await shouldUseSecureCookies(),
-      expires: refreshedExpiresAt,
-      path: "/"
-    });
+    try {
+      const cookieStore = await cookies();
+      cookieStore.set(sessionCookieName, token, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: await shouldUseSecureCookies(),
+        expires: refreshedExpiresAt,
+        path: "/"
+      });
+    } catch {
+      // Cookie store unavailable when operating purely over Bearer header
+    }
   }
 
   return {

@@ -36,6 +36,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       message: "Flash ERP signed you in.",
       requiresMfa: false,
+      token: session.token,
+      sessionId: session.sessionId,
       expiresAt: session.expiresAt.toISOString()
     });
   } catch (error) {

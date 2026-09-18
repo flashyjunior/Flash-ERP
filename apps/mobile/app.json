@@ -1,11 +1,48 @@
 {
   "expo": {
-    "name": "Flash ERP Mobile",
+    "name": "Flash ERP",
     "slug": "flash-erp-mobile",
-    "scheme": "flash-erp-mobile",
+    "version": "1.0.0",
+    "scheme": "flasherp",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
-    "plugins": ["expo-router"],
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#090d16"
+    },
+    "ios": {
+      "bundleIdentifier": "com.flasherp.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Flash ERP uses the camera to scan product barcodes and capture fuel delivery evidence photos.",
+        "NSPhotoLibraryUsageDescription": "Flash ERP accesses photos to attach receipts to expense claims."
+      }
+    },
+    "android": {
+      "package": "com.flasherp.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#2563eb"
+      },
+      "permissions": [
+        "CAMERA",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Flash ERP to access the camera for barcode scanning."
+        }
+      ],
+      "expo-secure-store",
+      "expo-sqlite"
+    ],
     "experiments": {
       "typedRoutes": true
     }
