@@ -29,18 +29,30 @@ export default function LoginScreen() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    mobileStorage.getServerUrl().then(setServerUrl);
+    mobileStorage
+      .getServerUrl()
+      .then(setServerUrl)
+      .catch((error) => {
+        console.warn("[flash-erp:mobile] Failed reading server URL; using default.", error);
+        setServerUrl(DEFAULT_SERVER_URL);
+      });
   }, []);
 
   const handleTestConnection = async () => {
     Haptics.selectionAsync();
     setPingStatus({ testing: true });
-    await mobileStorage.setServerUrl(serverUrl);
-    const result = await mobileApi.checkServerHealth();
-    setPingStatus({ testing: false, alive: result.ok, latencyMs: result.latencyMs });
-    if (result.ok) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } else {
+    try {
+      await mobileStorage.setServerUrl(serverUrl);
+      const result = await mobileApi.checkServerHealth();
+      setPingStatus({ testing: false, alive: result.ok, latencyMs: result.latencyMs });
+      if (result.ok) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      }
+    } catch (error) {
+      console.warn("[flash-erp:mobile] Connection test failed.", error);
+      setPingStatus({ testing: false, alive: false });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     }
   };

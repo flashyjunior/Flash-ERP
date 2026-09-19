@@ -29,14 +29,18 @@ export default function OutboxManagerScreen() {
   const [feedback, setFeedback] = useState<string | null>(null);
 
   const loadData = async () => {
-    const list = await mobileOfflineDb.getPendingMutations();
-    const s = await mobileOfflineDb.getOutboxStats();
-    setMutations(list);
-    setStats(s);
+    try {
+      const list = await mobileOfflineDb.getPendingMutations();
+      const s = await mobileOfflineDb.getOutboxStats();
+      setMutations(list);
+      setStats(s);
+    } catch (error) {
+      console.warn("[flash-erp:mobile] Outbox load failed.", error);
+    }
   };
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, []);
 
   const handleSyncAll = async () => {

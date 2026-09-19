@@ -22,25 +22,32 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   const refreshState = async () => {
-    const currentMode = await mobileStorage.getOperationMode();
-    const currentUrl = await mobileStorage.getServerUrl();
-    const stats = await mobileOfflineDb.getOutboxStats();
-    setMode(currentMode);
-    setServerUrl(currentUrl);
-    setPendingCount(stats.pending);
+    try {
+      const currentMode = await mobileStorage.getOperationMode();
+      const currentUrl = await mobileStorage.getServerUrl();
+      const stats = await mobileOfflineDb.getOutboxStats();
+      setMode(currentMode);
+      setServerUrl(currentUrl);
+      setPendingCount(stats.pending);
 
-    if (currentMode !== "OFFLINE") {
-      const ping = await mobileApi.checkServerHealth();
-      setServerAlive(ping.ok);
-      setLatency(ping.latencyMs);
-    } else {
-      setServerAlive(false);
+      if (currentMode !== "OFFLINE") {
+        const ping = await mobileApi.checkServerHealth();
+        setServerAlive(ping.ok);
+        setLatency(ping.latencyMs);
+      } else {
+        setServerAlive(false);
+      }
+    } catch (error) {
+      // The status bar must never take the app down on a refresh hiccup.
+      console.warn("[flash-erp:mobile] Status bar refresh failed.", error);
     }
   };
 
   useEffect(() => {
-    refreshState();
-    const interval = setInterval(refreshState, 15000);
+    void refreshState();
+    const interval = setInterval(() => {
+      void refreshState();
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -51,9 +58,13 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
 
   const handleSelectMode = async (selected: OperationMode) => {
     Haptics.selectionAsync();
-    await mobileStorage.setOperationMode(selected);
+    try {
+      await mobileStorage.setOperationMode(selected);
+    } catch (error) {
+      console.warn("[flash-erp:mobile] Failed persisting operation mode.", error);
+    }
     setMode(selected);
-    refreshState();
+    void refreshState();
   };
 
   const handleTriggerSync = async () => {

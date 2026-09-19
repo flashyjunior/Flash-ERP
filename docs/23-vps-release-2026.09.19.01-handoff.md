@@ -110,6 +110,46 @@ deployer verifies.
    `Invoke-RestMethod http://84.247.188.30:3000/api` (route directory + health).
 5. Do not reuse the release directory on failure — build a fresh release ID.
 
+## Mobile APK crash fix (app closed silently right after first screen)
+
+Symptom on the installed preview APK: first screen renders, then the app
+process dies with no error. Release builds turn unhandled async errors into a
+silent process kill (no redbox), so the fix has two parts.
+
+Root-cause candidates eliminated by hardening (all were unguarded at mount):
+
+- `app/index.tsx` — `loadDashboard()` ran in `useEffect` with no catch.
+- `components/HeaderStatusBar.tsx` — `refreshState()` ran at mount and on a
+  15-second interval with no catch (runs on every screen).
+- `app/outbox.tsx` — `loadData()` unguarded at mount.
+- `app/login.tsx` — `getServerUrl().then(...)` without catch; connection test
+  unguarded.
+- `lib/mobile-offline-db.ts` — SQLite calls after a successful open could
+  reject (queries were not wrapped); `PRAGMA journal_mode = WAL` could fail on
+  some storage configs; the fallback path swallowed errors silently.
+
+Changes (app version bumped 1.0.0 → 1.0.1):
+
+- `lib/mobile-offline-db.ts` now guarantees its methods never reject: every
+  SQLite operation falls back to the in-memory store and logs a warning tagged
+  `[flash-erp:mobile]`; the WAL pragma is non-fatal; DB-open failures log the
+  real error instead of vanishing.
+- `app/index.tsx`, `app/outbox.tsx`, `app/login.tsx`,
+  `components/HeaderStatusBar.tsx` — all mount-time and periodic async chains
+  are wrapped; failures degrade to last-known state instead of rejecting.
+- `app/_layout.tsx` — global crash visibility:
+  - `ErrorUtils.setGlobalHandler` logs every uncaught JS error to logcat
+    (tag `[flash-erp:mobile]`, filter `adb logcat -s ReactNativeJS`).
+  - `unhandledrejection` listener logs unhandled promise rejections.
+  - `FatalErrorBoundary` wraps the whole router: any fatal render error now
+    shows an on-screen "Flash ERP hit a fatal error" card with the message and
+    stack plus a Close & Restart button, instead of a silent app close.
+
+If the crash is native (e.g. a device-specific Keychain/Keystore or SQLite
+native exception, which bypasses JS try/catch), the next launch will now show
+the error screen when JS-visible, and logcat will carry the
+`[flash-erp:mobile]` traces needed to pin the exact module.
+
 ## Still outstanding (needs the user's machine / credentials)
 
 - **APK:** `eas-cli build -p android --profile preview` in `apps/mobile`
