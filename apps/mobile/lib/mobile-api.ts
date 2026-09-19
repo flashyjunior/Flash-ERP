@@ -16,21 +16,8 @@ import {
   type OutboxEntityType
 } from "./mobile-offline-db";
 
-export interface MobileUserSession {
-  sessionId: string;
-  userId: string;
-  loginId: string;
-  displayName: string;
-  accountStatus: string;
-  homeStoreCode: string | null;
-  homeStoreName: string | null;
-  roleCodes: string[];
-  permissionCodes: string[];
-  isOnlineStoreUser?: boolean;
-  expiresAt: string;
-}
-
-
+import { readMobileSession, type MobileUserSession } from "./mobile-session";
+export type { MobileUserSession } from "./mobile-session";
 
 export interface MobileCustomer {
   id: string;
@@ -89,12 +76,18 @@ export interface ApiResponse<T = unknown> {
   queuedMutationId?: string;
 }
 
+class MobileHttpError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 async function request<T = unknown>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  authToken?: string | null
 ): Promise<{ status: number; data: T }> {
   const baseUrl = await mobileStorage.getServerUrl();
-  const token = await mobileStorage.getAuthToken();
+  const token = authToken === undefined ? await mobileStorage.getAuthToken() : authToken;
+  const sessionVersion = mobileStorage.getSessionVersion();
   const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
   const url = `${baseUrl}${cleanEndpoint}`;
 
@@ -114,27 +107,30 @@ async function request<T = unknown>(
   try {
     const response = await fetch(url, {
       ...options,
+      credentials: "omit", // Mobile uses Bearer auth, not an unrelated browser/native cookie.
       headers,
       signal: controller.signal
     });
-    clearTimeout(timeoutId);
-
     const text = await response.text();
     let data: any = {};
     try {
       data = JSON.parse(text);
     } catch {
-      data = { rawText: text };
+      if (response.ok) throw new MobileHttpError("The server returned an invalid response. Please try again.", response.status);
+      data = {};
     }
 
     if (!response.ok) {
-      throw new Error(data?.message || `HTTP ${response.status}: Flash ERP server error.`);
+      if (response.status === 401 && token && sessionVersion === mobileStorage.getSessionVersion() && await mobileStorage.getAuthToken() === token) {
+        await mobileStorage.clearAllSession("Your session has expired. Please sign in again.");
+      }
+      throw new MobileHttpError(data?.message || `HTTP ${response.status}: Flash ERP server error.`, response.status);
     }
 
     return { status: response.status, data };
-  } catch (error: any) {
+  } finally {
+    // Include response-body reads in the deadline, not just response headers.
     clearTimeout(timeoutId);
-    throw error;
   }
 }
 
@@ -153,43 +149,63 @@ export const mobileApi = {
   // 2. Authentication
   async signIn(input: { loginId: string; password: string }): Promise<ApiResponse<{ token?: string; user?: any }>> {
     try {
+      await mobileStorage.clearAllSession();
       const { data } = await request<any>("/api/auth/sign-in", {
         method: "POST",
         body: JSON.stringify(input)
       });
 
-      if (data.token) {
-        await mobileStorage.setAuthToken(data.token);
+      // A 200 can be an MFA challenge, not a completed sign-in. Never navigate
+      // to the dashboard until both the bearer token and fresh profile exist.
+      if (data?.requiresMfa) {
+        throw new Error("This account requires multi-factor authentication, which this mobile app does not yet support. Please sign in through the web app.");
+      }
+      if (typeof data?.token !== "string" || !data.token.trim()) {
+        throw new Error("The server did not return a sign-in token. Please try again or contact HQ IT.");
       }
 
-      // Fetch active session profile
-      const sessionResult = await this.fetchSession();
-      if (sessionResult.data) {
-        await mobileStorage.setUserSnapshot(sessionResult.data);
+      await mobileStorage.setAuthToken(data.token);
+      const sessionResult = await this.fetchSession({ allowCached: false });
+      if (!sessionResult.ok || !sessionResult.data) {
+        throw new Error(sessionResult.error || "Could not load your signed-in profile. Please try again.");
       }
 
       return { ok: true, data };
     } catch (error: any) {
+      // Do not leave a partial login or another operator's cached profile behind.
+      await mobileStorage.clearAllSession();
       return { ok: false, error: error.message || "Failed to sign in." };
     }
   },
 
-  async fetchSession(): Promise<ApiResponse<MobileUserSession>> {
+  async fetchSession(options: { allowCached?: boolean } = {}): Promise<ApiResponse<MobileUserSession>> {
+    const version = mobileStorage.getSessionVersion();
     try {
-      const { data } = await request<any>("/api/auth/session");
-      const session = data?.session ?? (data?.userId ? data : null);
+      if (!await mobileStorage.getAuthToken()) return { ok: false, error: "Please sign in." };
+      const { data } = await request<unknown>("/api/auth/session");
+      if (version !== mobileStorage.getSessionVersion()) return { ok: false, error: "Session changed. Please sign in again." };
+      const session = readMobileSession(data);
       if (session) {
         await mobileStorage.setUserSnapshot(session);
         return { ok: true, data: session };
       }
-      return { ok: false, error: "No active session." };
+      await mobileStorage.clearAllSession("The saved session is invalid. Please sign in again.");
+      return { ok: false, error: "The server returned an invalid session profile. Please try again or contact HQ IT." };
     } catch (error: any) {
-      // Return cached user snapshot if offline
-      const cached = await mobileStorage.getUserSnapshot<MobileUserSession>();
-      if (cached) {
-        return { ok: true, data: cached, isOffline: true };
+      // Offline reads can use a cached profile, but a new sign-in must validate
+      // the new token online rather than reuse a previous operator's snapshot.
+      if (version !== mobileStorage.getSessionVersion()) return { ok: false, error: "Session changed. Please sign in again." };
+      if (error instanceof MobileHttpError && (error.status === 401 || error.status === 403)) {
+        await mobileStorage.clearAllSession("Your session is no longer available. Please sign in again.");
+        return { ok: false, error: error.message };
       }
-      return { ok: false, error: error.message };
+      if (options.allowCached !== false) {
+        const cached = readMobileSession(await mobileStorage.getUserSnapshot());
+        if (cached) {
+          return { ok: true, data: cached, isOffline: true };
+        }
+      }
+      return { ok: false, error: error.message || "Could not load your signed-in profile." };
     }
   },
 
@@ -216,12 +232,14 @@ export const mobileApi = {
   },
 
   async signOut(): Promise<void> {
-    try {
-      await request("/api/auth/sign-out", { method: "POST" });
-    } catch {
-      // Proceed with local logout regardless of network
-    }
+    const token = await mobileStorage.getAuthToken();
+    // Revoke local access immediately. Late session responses cannot restore it.
     await mobileStorage.clearAllSession();
+    try {
+      await request("/api/auth/sign-out", { method: "POST" }, token);
+    } catch {
+      // Local logout already completed, even if HQ is unreachable.
+    }
   },
 
   async searchCustomers(query = ""): Promise<ApiResponse<MobileCustomer[]>> {
@@ -247,7 +265,16 @@ export const mobileApi = {
   },
 
   async fetchDashboardAnalytics(): Promise<ApiResponse<{ salesTotal: number; transactionCount: number; averageBasket: number; pendingApprovals: number; trend: Array<{ date: string; total: number }>; topProducts: Array<{ productCode: string; productName: string; quantity: number; sales: number }>; generatedAt: string }>> {
-    try { const { data } = await request<any>("/api/mobile/dashboard"); return { ok: true, data }; }
+    try {
+      const { data } = await request<any>("/api/mobile/dashboard");
+      const number = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+      if (!data || ![data.salesTotal, data.transactionCount, data.averageBasket, data.pendingApprovals].every(number) ||
+        !Array.isArray(data.trend) || !data.trend.every((day: any) => typeof day?.date === "string" && number(day.total)) ||
+        !Array.isArray(data.topProducts) || !data.topProducts.every((product: any) => typeof product?.productName === "string" && number(product.quantity) && number(product.sales))) {
+        return { ok: false, error: "Sales analytics are unavailable: the server returned an invalid response." };
+      }
+      return { ok: true, data };
+    }
     catch (error: any) { return { ok: false, error: error.message || "Dashboard analytics are unavailable." }; }
   },
 
@@ -326,7 +353,7 @@ export const mobileApi = {
         return { ok: true, data: item };
       }
     } catch (onlineError: any) {
-      if (mode === "ONLINE") {
+      if (mode === "ONLINE" || onlineError instanceof MobileHttpError) {
         return { ok: false, error: onlineError.message };
       }
       // If AUTO mode, fall back to offline cache on network failure
@@ -428,7 +455,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Count posted directly to HQ ledger." };
     } catch (err: any) {
-      if (mode === "ONLINE") {
+      if (mode === "ONLINE" || err instanceof MobileHttpError) {
         return { ok: false, error: err.message };
       }
       // Auto fallback to queue
@@ -473,7 +500,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Sale posted to HQ accounting." };
     } catch (err: any) {
-      if (mode === "ONLINE") {
+      if (mode === "ONLINE" || err instanceof MobileHttpError) {
         return { ok: false, error: err.message };
       }
       const mutation = await mobileOfflineDb.enqueueMutation({
@@ -570,7 +597,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Goods received and committed to inventory." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({
         entityType: "GOODS_RECEIPT",
         action: "POST_GOODS_RECEIPT",
@@ -607,7 +634,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Transfer issued successfully." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({
         entityType: "TRANSFER",
         action: "ISSUE_TRANSFER",
@@ -640,7 +667,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Transfer received and cleared into stock." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({
         entityType: "TRANSFER",
         action: "RECEIVE_TRANSFER",
@@ -733,7 +760,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Tank dip reading committed." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({
         entityType: "FUEL_DIP",
         action: "POST_FUEL_DIP",
@@ -768,7 +795,7 @@ export const mobileApi = {
       });
       return { ok: true, data, message: "Meter reading recorded." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({
         entityType: "FUEL_METER",
         action: "POST_FUEL_METER",
@@ -854,7 +881,7 @@ export const mobileApi = {
       const { data } = await request(endpoint, { method: "POST", body: JSON.stringify(onlineInput) });
       return { ok: true, data, message: "Expense claim submitted for approval." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({
         entityType: "EXPENSE_CLAIM",
         action: "POST_EXPENSE_CLAIM",
@@ -913,7 +940,7 @@ export const mobileApi = {
       const { data } = await request(endpoint, { method: "POST", body: JSON.stringify(onlineInput) });
       return { ok: true, data, message: "Leave request submitted." };
     } catch (err: any) {
-      if (mode === "ONLINE") return { ok: false, error: err.message };
+      if (mode === "ONLINE" || err instanceof MobileHttpError) return { ok: false, error: err.message };
       const mutation = await mobileOfflineDb.enqueueMutation({ entityType: "LEAVE_REQUEST", action: "POST_LEAVE_REQUEST", endpoint, payload: input });
       return { ok: true, isOffline: true, queuedMutationId: mutation.id, message: "Leave request queued after network failure." };
     }

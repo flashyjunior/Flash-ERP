@@ -111,7 +111,7 @@ export default function AccountScreen() {
         style: "destructive",
         onPress: async () => {
           await mobileApi.signOut();
-          router.replace("/login");
+          // Protected navigation already removed authenticated screens.
         },
       },
     ]);

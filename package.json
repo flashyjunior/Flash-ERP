@@ -84,9 +84,12 @@
     "e2e:certification": "playwright test",
     "bootstrap:enterprise-admin": "tsx scripts/bootstrap-enterprise-admin.ts",
     "bootstrap:store-operators": "tsx scripts/bootstrap-store-operators.ts",
+    "acceptance:mobile-auth": "tsx scripts/mobile-auth-regression-gate.ts",
     "acceptance:mobile-operations": "tsx scripts/mobile-operational-regression-gate.ts",
-    "acceptance:mobile": "npm run acceptance:mobile-startup && npm run acceptance:mobile-operations",
-    "acceptance:mobile:static": "npm run acceptance:mobile-startup -- --static-only && npm run acceptance:mobile-operations"
+    "acceptance:mobile": "npm --workspace @flash-erp/mobile run typecheck && npm run acceptance:mobile-startup && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations && npm run acceptance:mobile-ui",
+    "acceptance:mobile:static": "npm run acceptance:mobile-startup -- --static-only && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations",
+    "acceptance:mobile-ui": "playwright test --config playwright.mobile.config.ts",
+    "build:mobile:preview": "npm run acceptance:mobile && cd apps/mobile && npx eas-cli build -p android --profile preview"
   },
   "dependencies": {
     "@prisma/adapter-mssql": "^7.7.0",
@@ -96,6 +99,7 @@
     "@playwright/test": "^1.59.1",
     "@types/pg": "^8.20.0",
     "dotenv": "^17.2.2",
+    "jsqr": "1.2.0",
     "prisma": "^7.7.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
