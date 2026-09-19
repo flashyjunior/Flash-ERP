@@ -86,10 +86,11 @@ export default function LoginScreen() {
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 24}
       style={styles.container}
     >
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
         {/* Brand Header */}
         <View style={styles.brandHero}>
           <View style={styles.logoBadge}>
@@ -205,7 +206,7 @@ export default function LoginScreen() {
               <ActivityIndicator color="#ffffff" size="small" />
             ) : (
               <>
-                <Text style={styles.signInButtonText}>Enter Workspace</Text>
+                <Text style={styles.signInButtonText}>Login</Text>
                 <Ionicons name="arrow-forward" size={18} color="#ffffff" />
               </>
             )}
@@ -225,7 +226,9 @@ const styles = StyleSheet.create({
     padding: 20,
     gap: 20,
     justifyContent: "center",
-    minHeight: "100%"
+    flexGrow: 1,
+    minHeight: "100%",
+    paddingBottom: 40
   },
   brandHero: {
     alignItems: "center",

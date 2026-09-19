@@ -13,11 +13,27 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import * as Location from "expo-location";
+import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileApi } from "../lib/mobile-api";
 
+
+async function preserveEvidenceFile(uri: string, prefix: string): Promise<string> {
+  if (!FileSystem.documentDirectory) return uri;
+  const directory = `${FileSystem.documentDirectory}pending-evidence/`;
+  await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+  const destination = `${directory}${prefix}-${Date.now()}.jpg`;
+  await FileSystem.copyAsync({ from: uri, to: destination });
+  return destination;
+}
+
 type HrTab = "ATTENDANCE" | "EXPENSE" | "LEAVE";
+type LeaveTypeOption = { id: string; code: string; name: string; isPaid: boolean; requiresAttachment: boolean; availableDays: number };
+type LeaveHistoryItem = { id: string; requestNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; reason: string | null; status: string; attachmentUrl?: string | null };
 
 export default function SelfServiceScreen() {
   const [activeTab, setActiveTab] = useState<HrTab>("ATTENDANCE");
@@ -29,11 +45,25 @@ export default function SelfServiceScreen() {
   const [expenseTitle, setExpenseTitle] = useState<string>("");
   const [expenseAmount, setExpenseAmount] = useState<string>("");
   const [expenseCategory, setExpenseCategory] = useState<string>("MEALS");
+  const [receiptImageUri, setReceiptImageUri] = useState<string | null>(null);
+  const [expenseHistory, setExpenseHistory] = useState<Array<{ id: string; claimNo: string; claimDate: string; purpose: string; totalAmount: number; currencyCode: string; status: string; category: string | null }>>([]);
 
   // Leave form
   const [leaveReason, setLeaveReason] = useState<string>("");
+  const [leaveTypes, setLeaveTypes] = useState<LeaveTypeOption[]>([]);
+  const [selectedLeaveTypeId, setSelectedLeaveTypeId] = useState("");
+  const [leaveHistory, setLeaveHistory] = useState<LeaveHistoryItem[]>([]);
+  const [cancellingLeaveId, setCancellingLeaveId] = useState<string | null>(null);
+  const [cancellationReason, setCancellationReason] = useState("");
   const [leaveStartDate, setLeaveStartDate] = useState<string>("");
   const [leaveEndDate, setLeaveEndDate] = useState<string>("");
+  const [leaveDocumentUri, setLeaveDocumentUri] = useState<string | null>(null);
+  const [datePickerField, setDatePickerField] = useState<"start" | "end" | null>(null);
+
+  const selectedLeaveType = leaveTypes.find((type) => type.id === selectedLeaveTypeId) ?? null;
+  const requestedLeaveDays = leaveStartDate && leaveEndDate && leaveEndDate >= leaveStartDate
+    ? Math.floor((new Date(`${leaveEndDate}T00:00:00Z`).getTime() - new Date(`${leaveStartDate}T00:00:00Z`).getTime()) / 86400000) + 1
+    : 0;
 
   const [loading, setLoading] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(
@@ -41,6 +71,18 @@ export default function SelfServiceScreen() {
   );
 
   useEffect(() => {
+    void mobileApi.fetchMyExpenseClaims().then((response) => { if (response.ok && response.data) setExpenseHistory(response.data); });
+    void mobileApi.fetchMyLeaveWorkspace().then((response) => {
+      if (!response.ok || !response.data) return;
+      setLeaveTypes(response.data.leaveTypes);
+      setSelectedLeaveTypeId((current) => current || response.data!.leaveTypes[0]?.id || "");
+      setLeaveHistory(response.data.requests);
+    });
+    void mobileApi.fetchMyAttendance().then((response) => {
+      if (!response.ok || !response.data) return;
+      setClockInTime(response.data.checkInAt ? new Date(response.data.checkInAt).toLocaleTimeString() : null);
+      setClockedIn(Boolean(response.data.checkInAt && !response.data.checkOutAt));
+    });
     const update = () => setCurrentTime(new Date().toLocaleTimeString());
     update();
     const interval = setInterval(update, 1000);
@@ -53,9 +95,15 @@ export default function SelfServiceScreen() {
     setFeedback(null);
     try {
       const now = new Date().toISOString();
+      const permission = await Location.requestForegroundPermissionsAsync();
+      let locationNote = "Location permission was not granted";
+      if (permission.status === "granted") {
+        const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        locationNote = `GPS ${location.coords.latitude.toFixed(6)},${location.coords.longitude.toFixed(6)} accuracy ${Math.round(location.coords.accuracy ?? 0)}m`;
+      }
       const res = await mobileApi.submitAttendance({
-        checkInTime: now,
-        locationNote: "Mobile GPS verified check-in"
+        ...(clockedIn ? { checkOutTime: now } : { checkInTime: now }),
+        locationNote
       });
       if (res.ok) {
         setClockedIn(!clockedIn);
@@ -84,11 +132,13 @@ export default function SelfServiceScreen() {
     setLoading(true);
     setFeedback(null);
     try {
+      const receiptUrl = receiptImageUri || undefined;
       const res = await mobileApi.submitExpenseClaim({
         title: expenseTitle.trim(),
         amount: amt,
         category: expenseCategory,
-        expenseDate: new Date().toISOString()
+        expenseDate: new Date().toISOString(),
+        receiptUrl
       });
       if (res.ok) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -100,6 +150,8 @@ export default function SelfServiceScreen() {
         });
         setExpenseTitle("");
         setExpenseAmount("");
+        setReceiptImageUri(null);
+        void mobileApi.fetchMyExpenseClaims().then((history) => { if (history.ok && history.data) setExpenseHistory(history.data); });
       } else {
         setFeedback({ type: "error", message: res.error || "Failed submitting claim." });
       }
@@ -108,6 +160,52 @@ export default function SelfServiceScreen() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const cancelLeave = async () => {
+    if (!cancellingLeaveId || !cancellationReason.trim()) { setFeedback({ type: "error", message: "Enter a cancellation reason." }); return; }
+    setLoading(true); const response = await mobileApi.cancelLeaveRequest(cancellingLeaveId, cancellationReason.trim()); setLoading(false);
+    if (!response.ok) { setFeedback({ type: "error", message: response.error || "Cancellation failed." }); return; }
+    setCancellingLeaveId(null); setCancellationReason(""); setFeedback({ type: "success", message: response.message || "Leave application cancelled." });
+    const workspace = await mobileApi.fetchMyLeaveWorkspace(); if (workspace.ok && workspace.data) { setLeaveTypes(workspace.data.leaveTypes); setLeaveHistory(workspace.data.requests); }
+  };
+
+  const handleLeaveDateChange = (_event: DateTimePickerEvent, date?: Date) => {
+    const field = datePickerField;
+    if (Platform.OS === "android") setDatePickerField(null);
+    if (!date || !field) return;
+    const value = date.toISOString().slice(0, 10);
+    if (field === "start") setLeaveStartDate(value);
+    else setLeaveEndDate(value);
+  };
+
+  const handleSubmitLeave = async () => {
+    setFeedback(null);
+    if (!selectedLeaveTypeId || !leaveStartDate || !leaveEndDate || !leaveReason.trim()) {
+      setFeedback({ type: "error", message: "Choose a leave type, start and end dates, and enter a reason." });
+      return;
+    }
+    if (leaveEndDate < leaveStartDate) {
+      setFeedback({ type: "error", message: "End date cannot be before start date." });
+      return;
+    }
+    if (selectedLeaveType && requestedLeaveDays > selectedLeaveType.availableDays) {
+      setFeedback({ type: "error", message: `This request needs ${requestedLeaveDays} days, but only ${selectedLeaveType.availableDays.toFixed(1)} are available.` });
+      return;
+    }
+    if (selectedLeaveType?.requiresAttachment && !leaveDocumentUri) { setFeedback({ type: "error", message: `${selectedLeaveType.name} requires a supporting document.` }); return; }
+    setLoading(true);
+    const res = await mobileApi.submitLeaveRequest({ leaveTypeId: selectedLeaveTypeId, startDate: leaveStartDate, endDate: leaveEndDate, reason: leaveReason.trim(), attachmentUrl: leaveDocumentUri || undefined, attachmentMimeType: leaveDocumentUri ? "image/jpeg" : undefined });
+    setLoading(false);
+    if (!res.ok) {
+      setFeedback({ type: "error", message: res.error || "Failed submitting leave application." });
+      return;
+    }
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setFeedback({ type: "success", message: res.isOffline ? "Leave application and supporting document queued for sync." : (res.message || "Leave application submitted to HR.") });
+    void mobileApi.fetchMyExpenseClaims().then((response) => { if (response.ok && response.data) setExpenseHistory(response.data); });
+    void mobileApi.fetchMyLeaveWorkspace().then((workspace) => { if (workspace.ok && workspace.data) { setLeaveTypes(workspace.data.leaveTypes); setLeaveHistory(workspace.data.requests); } });
+    setLeaveStartDate(""); setLeaveEndDate(""); setLeaveReason(""); setLeaveDocumentUri(null);
   };
 
   return (
@@ -235,13 +333,15 @@ export default function SelfServiceScreen() {
 
               <TouchableOpacity
                 style={styles.photoReceiptButton}
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setFeedback({ type: "success", message: "Receipt photo snapped and attached." });
+                onPress={async () => {
+                  const permission = await ImagePicker.requestCameraPermissionsAsync();
+                  if (!permission.granted) { setFeedback({ type: "error", message: "Camera permission is required to photograph a receipt." }); return; }
+                  const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.75, allowsEditing: true });
+                  if (!result.canceled && result.assets[0]?.uri) { setReceiptImageUri(await preserveEvidenceFile(result.assets[0].uri, "expense")); setFeedback({ type: "success", message: "Receipt photo attached to this claim." }); }
                 }}
               >
                 <Ionicons name="camera-outline" size={20} color={mobileTheme.primary} />
-                <Text style={styles.photoReceiptText}>Attach Receipt Photo</Text>
+                <Text style={styles.photoReceiptText}>{receiptImageUri ? "Receipt Photo Attached · Retake" : "Attach Receipt Photo"}</Text>
               </TouchableOpacity>
             </View>
 
@@ -259,6 +359,11 @@ export default function SelfServiceScreen() {
                 </>
               )}
             </TouchableOpacity>
+            <View style={styles.leaveHistoryCard}>
+              <Text style={styles.cardTitle}>My Expense Claims</Text>
+              {expenseHistory.map((claim) => <View key={claim.id} style={styles.leaveHistoryRow}><View style={{ flex: 1 }}><Text style={styles.leaveHistoryTitle}>{claim.purpose} · {claim.claimNo}</Text><Text style={styles.leaveHistoryDates}>{claim.claimDate} · {claim.category || "Expense"}</Text></View><View style={{ alignItems: "flex-end", gap: 4 }}><Text style={styles.expenseHistoryAmount}>{claim.currencyCode} {claim.totalAmount.toFixed(2)}</Text><View style={styles.leaveStatus}><Text style={styles.leaveStatusText}>{claim.status}</Text></View></View></View>)}
+              {expenseHistory.length === 0 && <Text style={styles.emptyLeaveText}>No expense claims submitted yet.</Text>}
+            </View>
           </View>
         )}
 
@@ -268,21 +373,27 @@ export default function SelfServiceScreen() {
             <View style={styles.card}>
               <Text style={styles.cardTitle}>Apply for Employee Leave</Text>
 
+              <Text style={styles.inputLabel}>Leave Type</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.leaveTypeRow}>
+                {leaveTypes.map((type) => <TouchableOpacity key={type.id} style={[styles.leaveTypeChip, selectedLeaveTypeId === type.id && styles.leaveTypeChipActive]} onPress={() => setSelectedLeaveTypeId(type.id)}><Text style={[styles.leaveTypeName, selectedLeaveTypeId === type.id && styles.leaveTypeNameActive]}>{type.name}</Text><Text style={[styles.leaveBalance, selectedLeaveTypeId === type.id && styles.leaveTypeNameActive]}>{type.availableDays.toFixed(1)} days available</Text></TouchableOpacity>)}
+              </ScrollView>
+              {leaveTypes.length === 0 && <Text style={styles.emptyLeaveText}>No active leave types or entitlements are available.</Text>}
+
               <Text style={styles.inputLabel}>Start Date</Text>
-              <TextInput
-                style={styles.fieldInput}
-                value={leaveStartDate}
-                onChangeText={setLeaveStartDate}
-                placeholder="YYYY-MM-DD"
-              />
+              <TouchableOpacity style={styles.dateField} onPress={() => setDatePickerField("start")}>
+                <Text style={leaveStartDate ? styles.dateValue : styles.datePlaceholder}>{leaveStartDate || "Choose start date"}</Text>
+                <Ionicons name="calendar-outline" size={20} color={mobileTheme.primary} />
+              </TouchableOpacity>
 
               <Text style={styles.inputLabel}>End Date</Text>
-              <TextInput
-                style={styles.fieldInput}
-                value={leaveEndDate}
-                onChangeText={setLeaveEndDate}
-                placeholder="YYYY-MM-DD"
-              />
+              <TouchableOpacity style={styles.dateField} onPress={() => setDatePickerField("end")}>
+                <Text style={leaveEndDate ? styles.dateValue : styles.datePlaceholder}>{leaveEndDate || "Choose end date"}</Text>
+                <Ionicons name="calendar-outline" size={20} color={mobileTheme.primary} />
+              </TouchableOpacity>
+
+              {requestedLeaveDays > 0 && <View style={styles.requestedDaysRow}><Text style={styles.requestedDaysLabel}>Requested duration</Text><Text style={styles.requestedDaysValue}>{requestedLeaveDays} day(s)</Text></View>}
+
+              <TouchableOpacity style={styles.photoReceiptButton} onPress={async () => { const permission = await ImagePicker.requestMediaLibraryPermissionsAsync(); if (!permission.granted) { setFeedback({ type: "error", message: "Photo-library permission is required to attach a leave document." }); return; } const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 }); if (!result.canceled && result.assets[0]?.uri) setLeaveDocumentUri(await preserveEvidenceFile(result.assets[0].uri, "leave")); }}><Ionicons name="document-attach-outline" size={20} color={mobileTheme.primary}/><Text style={styles.photoReceiptText}>{leaveDocumentUri ? "Supporting Document Attached · Change" : selectedLeaveType?.requiresAttachment ? "Attach Required Supporting Document" : "Attach Supporting Document (Optional)"}</Text></TouchableOpacity>
 
               <Text style={styles.inputLabel}>Reason for Leave</Text>
               <TextInput
@@ -296,16 +407,30 @@ export default function SelfServiceScreen() {
 
             <TouchableOpacity
               style={[styles.submitButton, loading && styles.disabled]}
-              onPress={() => {
-                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                setFeedback({ type: "success", message: "Leave application submitted to HR." });
-              }}
+              onPress={handleSubmitLeave}
               disabled={loading}
             >
               <Ionicons name="calendar" size={18} color="#ffffff" />
               <Text style={styles.submitButtonText}>Submit Leave Application</Text>
             </TouchableOpacity>
+
+            <View style={styles.leaveHistoryCard}>
+              <Text style={styles.cardTitle}>My Leave History</Text>
+              {leaveHistory.map((item) => <View key={item.id} style={styles.leaveHistoryRow}><View style={{ flex: 1 }}><Text style={styles.leaveHistoryTitle}>{item.leaveTypeName} · {item.requestNo} {item.attachmentUrl ? "📎" : ""}</Text><Text style={styles.leaveHistoryDates}>{item.startDate} to {item.endDate} · {item.requestedDays} day(s)</Text></View><View style={{ alignItems: "flex-end", gap: 5 }}><View style={styles.leaveStatus}><Text style={styles.leaveStatusText}>{item.status}</Text></View>{["DRAFT","SUBMITTED","APPROVED"].includes(item.status) && <TouchableOpacity onPress={() => { setCancellingLeaveId(item.id); setCancellationReason(""); }}><Text style={styles.cancelLeaveText}>Cancel</Text></TouchableOpacity>}</View></View>)}
+              {cancellingLeaveId && <View style={styles.cancelBox}><Text style={styles.inputLabel}>Cancellation reason</Text><TextInput style={styles.fieldInput} value={cancellationReason} onChangeText={setCancellationReason} placeholder="Why are you cancelling this leave?"/><View style={styles.cancelActions}><TouchableOpacity onPress={() => setCancellingLeaveId(null)}><Text style={styles.dismissText}>Keep Leave</Text></TouchableOpacity><TouchableOpacity style={styles.confirmCancel} onPress={cancelLeave}><Text style={styles.confirmCancelText}>Confirm Cancellation</Text></TouchableOpacity></View></View>}
+              {leaveHistory.length === 0 && <Text style={styles.emptyLeaveText}>No leave applications submitted yet.</Text>}
+            </View>
           </View>
+        )}
+
+        {datePickerField && (
+          <DateTimePicker
+            value={new Date((datePickerField === "start" ? leaveStartDate : leaveEndDate) || Date.now())}
+            mode="date"
+            display={Platform.OS === "ios" ? "inline" : "default"}
+            minimumDate={datePickerField === "end" && leaveStartDate ? new Date(leaveStartDate) : undefined}
+            onChange={handleLeaveDateChange}
+          />
         )}
 
         {/* Feedback Alert */}
@@ -487,6 +612,38 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10
   },
+  leaveTypeRow: { gap: 8, paddingVertical: 2 },
+  leaveTypeChip: { minWidth: 135, padding: 11, borderRadius: mobileTheme.radiusMedium, borderWidth: 1, borderColor: mobileTheme.borderColor, backgroundColor: mobileTheme.neutralLight },
+  leaveTypeChipActive: { backgroundColor: mobileTheme.primary, borderColor: mobileTheme.primary },
+  leaveTypeName: { fontSize: 13, fontWeight: "800", color: mobileTheme.textColor },
+  leaveTypeNameActive: { color: "#ffffff" },
+  leaveBalance: { marginTop: 3, fontSize: 11, color: mobileTheme.mutedText },
+  emptyLeaveText: { paddingVertical: 10, color: mobileTheme.mutedText, textAlign: "center" },
+  leaveHistoryCard: { padding: 16, gap: 12, borderRadius: mobileTheme.radiusLarge, backgroundColor: mobileTheme.surfaceBackground, borderWidth: 1, borderColor: mobileTheme.borderColor },
+  leaveHistoryRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: mobileTheme.borderColor },
+  leaveHistoryTitle: { fontSize: 13, fontWeight: "800", color: mobileTheme.textColor },
+  leaveHistoryDates: { marginTop: 3, fontSize: 11, color: mobileTheme.mutedText },
+  leaveStatus: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 20, backgroundColor: mobileTheme.primaryLight },
+  leaveStatusText: { fontSize: 10, fontWeight: "800", color: mobileTheme.primary },
+  cancelLeaveText: { fontSize: 11, fontWeight: "800", color: mobileTheme.danger },
+  cancelBox: { padding: 12, gap: 8, borderRadius: 10, backgroundColor: mobileTheme.dangerLight }, cancelActions: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 14 }, dismissText: { color: mobileTheme.mutedText, fontWeight: "700" }, confirmCancel: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: mobileTheme.danger }, confirmCancelText: { color: "#fff", fontWeight: "800" },
+  expenseHistoryAmount: { fontSize: 12, fontWeight: "900", color: mobileTheme.textColor },
+  requestedDaysRow: { flexDirection: "row", justifyContent: "space-between", padding: 10, borderRadius: 8, backgroundColor: mobileTheme.primaryLight },
+  requestedDaysLabel: { fontWeight: "700", color: mobileTheme.mutedText },
+  requestedDaysValue: { fontWeight: "900", color: mobileTheme.primary },
+  dateField: {
+    height: 48,
+    borderWidth: 1,
+    borderColor: mobileTheme.borderColor,
+    borderRadius: mobileTheme.radiusMedium,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: mobileTheme.surfaceBackground
+  },
+  dateValue: { color: mobileTheme.textColor, fontSize: 14 },
+  datePlaceholder: { color: mobileTheme.neutralMuted, fontSize: 14 },
   noteInput: {
     borderWidth: 1,
     borderColor: mobileTheme.borderColor,

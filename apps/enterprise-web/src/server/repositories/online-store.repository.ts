@@ -12724,7 +12724,6 @@ export async function createOnlineStoreCorrection(
     const sourceTransaction = await tx.posTransaction.findFirst({
       where: {
         retailOrgId: session.retailOrgId,
-        storeId: store.id,
         transactionNo: sourceTransactionNo,
         status: PosTransactionStatus.COMPLETED,
         transactionType: {
@@ -12802,7 +12801,6 @@ export async function createOnlineStoreCorrection(
               },
               posTransaction: {
                 retailOrgId: session.retailOrgId,
-                storeId: store.id,
                 status: PosTransactionStatus.COMPLETED,
                 transactionType: {
                   in: [PosTransactionType.RETURN, PosTransactionType.EXCHANGE]

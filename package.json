@@ -83,7 +83,10 @@
     "e2e:electron": "playwright test --project=store-electron",
     "e2e:certification": "playwright test",
     "bootstrap:enterprise-admin": "tsx scripts/bootstrap-enterprise-admin.ts",
-    "bootstrap:store-operators": "tsx scripts/bootstrap-store-operators.ts"
+    "bootstrap:store-operators": "tsx scripts/bootstrap-store-operators.ts",
+    "acceptance:mobile-operations": "tsx scripts/mobile-operational-regression-gate.ts",
+    "acceptance:mobile": "npm run acceptance:mobile-startup && npm run acceptance:mobile-operations",
+    "acceptance:mobile:static": "npm run acceptance:mobile-startup -- --static-only && npm run acceptance:mobile-operations"
   },
   "dependencies": {
     "@prisma/adapter-mssql": "^7.7.0",

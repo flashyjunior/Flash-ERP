@@ -13,6 +13,8 @@ export interface CachedProduct {
   barcode: string;
   unitPrice: number;
   unitOfMeasure: string;
+  taxRatePercent?: number;
+  isTaxInclusive?: boolean;
   sellingUnitsJson?: string;
   stockQuantity: number;
   storeCode?: string | null;
@@ -26,7 +28,8 @@ export type OutboxEntityType =
   | "TRANSFER"
   | "FUEL_DIP"
   | "FUEL_METER"
-  | "EXPENSE_CLAIM";
+  | "EXPENSE_CLAIM"
+  | "LEAVE_REQUEST";
 
 export type OutboxStatus = "PENDING" | "SYNCING" | "SYNCED" | "FAILED";
 
@@ -82,6 +85,13 @@ class MemoryOfflineStorage {
       }
     }
     return results;
+  }
+
+  async clearProducts() { this.products.clear(); }
+
+  async pruneProducts(validProductCodes: string[]) {
+    const valid = new Set(validProductCodes);
+    for (const [key, product] of this.products) if (!valid.has(product.productCode)) this.products.delete(key);
   }
 
   async enqueueMutation(mutation: OutboxMutation) {
@@ -177,6 +187,12 @@ async function getNativeDb() {
         );
         CREATE INDEX IF NOT EXISTS idx_outbox_status ON mobile_outbox(status);
       `);
+      for (const migration of [
+        "ALTER TABLE cached_products ADD COLUMN tax_rate_percent REAL NOT NULL DEFAULT 0;",
+        "ALTER TABLE cached_products ADD COLUMN is_tax_inclusive INTEGER NOT NULL DEFAULT 0;"
+      ]) {
+        try { await db.execAsync(migration); } catch { /* Column already exists. */ }
+      }
       nativeDb = db;
       return nativeDb;
     }
@@ -204,13 +220,15 @@ export const mobileOfflineDb = {
         for (const p of products) {
           await db.runAsync(
             `INSERT INTO cached_products 
-               (id, product_code, product_name, barcode, unit_price, unit_of_measure, selling_units_json, stock_quantity, store_code, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               (id, product_code, product_name, barcode, unit_price, unit_of_measure, tax_rate_percent, is_tax_inclusive, selling_units_json, stock_quantity, store_code, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(product_code) DO UPDATE SET
                product_name = excluded.product_name,
                barcode = excluded.barcode,
                unit_price = excluded.unit_price,
                unit_of_measure = excluded.unit_of_measure,
+               tax_rate_percent = excluded.tax_rate_percent,
+               is_tax_inclusive = excluded.is_tax_inclusive,
                selling_units_json = excluded.selling_units_json,
                stock_quantity = excluded.stock_quantity,
                store_code = excluded.store_code,
@@ -222,6 +240,8 @@ export const mobileOfflineDb = {
               p.barcode || null,
               p.unitPrice,
               p.unitOfMeasure,
+              p.taxRatePercent ?? 0,
+              p.isTaxInclusive ? 1 : 0,
               p.sellingUnitsJson || null,
               p.stockQuantity,
               p.storeCode || null,
@@ -234,6 +254,24 @@ export const mobileOfflineDb = {
       console.warn("[flash-erp:mobile] SQLite product cache write failed; cached in memory instead.", error);
       await memoryStore.saveProducts(products);
     }
+  },
+
+  async clearProducts(): Promise<void> {
+    const stats = await this.getOutboxStats();
+    if (stats.pending + stats.failed > 0) throw new Error("Sync pending transactions before clearing the offline catalog.");
+    const db = await getNativeDb();
+    if (!db) { await memoryStore.clearProducts(); return; }
+    await db.runAsync("DELETE FROM cached_products;");
+  },
+
+  async pruneProducts(validProductCodes: string[]): Promise<void> {
+    const db = await getNativeDb();
+    if (!db) { await memoryStore.pruneProducts(validProductCodes); return; }
+    try {
+      if (validProductCodes.length === 0) { await db.runAsync("DELETE FROM cached_products;"); return; }
+      const placeholders = validProductCodes.map(() => "?").join(",");
+      await db.runAsync(`DELETE FROM cached_products WHERE product_code NOT IN (${placeholders});`, validProductCodes);
+    } catch (error) { console.warn("[flash-erp:mobile] Product cache pruning failed.", error); }
   },
 
   async findProductByBarcode(barcode: string): Promise<CachedProduct | null> {
@@ -261,6 +299,8 @@ export const mobileOfflineDb = {
         barcode: row.barcode,
         unitPrice: row.unit_price,
         unitOfMeasure: row.unit_of_measure,
+        taxRatePercent: Number(row.tax_rate_percent ?? 0),
+        isTaxInclusive: Boolean(row.is_tax_inclusive),
         sellingUnitsJson: row.selling_units_json,
         stockQuantity: row.stock_quantity,
         storeCode: row.store_code,
@@ -297,6 +337,8 @@ export const mobileOfflineDb = {
         barcode: row.barcode,
         unitPrice: row.unit_price,
         unitOfMeasure: row.unit_of_measure,
+        taxRatePercent: Number(row.tax_rate_percent ?? 0),
+        isTaxInclusive: Boolean(row.is_tax_inclusive),
         sellingUnitsJson: row.selling_units_json,
         stockQuantity: row.stock_quantity,
         storeCode: row.store_code,

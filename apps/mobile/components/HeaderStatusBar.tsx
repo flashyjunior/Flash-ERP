@@ -24,12 +24,15 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [catalogSyncedAt, setCatalogSyncedAt] = useState<string | null>(null);
 
   const refreshState = async () => {
     try {
       const currentMode = await mobileStorage.getOperationMode();
       const currentUrl = await mobileStorage.getServerUrl();
       const stats = await mobileOfflineDb.getOutboxStats();
+      const lastCatalogSync = await mobileStorage.getCatalogSyncedAt();
+      setCatalogSyncedAt(lastCatalogSync);
       setMode(currentMode);
       setServerUrl(currentUrl);
       setPendingCount(stats.pending);
@@ -97,7 +100,9 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
     setSyncing(true);
     setSyncMessage("Downloading master product catalog...");
     try {
-      const res = await mobileApi.syncCatalogToLocalDb();
+      const res = await mobileApi.syncCatalogToLocalDb((downloaded, total) => {
+        setSyncMessage(`Downloading catalog... ${downloaded} of ${total} products`);
+      });
       if (res.error) {
         setSyncMessage(`Download failed: ${res.error}`);
       } else {
@@ -220,6 +225,7 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
                   Download Catalog for Offline Use
                 </Text>
               </TouchableOpacity>
+              {catalogSyncedAt && <Text style={styles.catalogSyncTime}>Catalog last updated {new Date(catalogSyncedAt).toLocaleString()}</Text>}
             </View>
 
             {syncMessage && (
@@ -415,6 +421,7 @@ const styles = StyleSheet.create({
     borderRadius: mobileTheme.radiusMedium,
     gap: 8
   },
+  catalogSyncTime: { textAlign: "center", fontSize: 11, color: mobileTheme.mutedText },
   catalogButtonText: {
     color: mobileTheme.primary,
     fontSize: 14,

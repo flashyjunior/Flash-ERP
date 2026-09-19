@@ -12,12 +12,14 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileOfflineDb, type OutboxMutation } from "../lib/mobile-offline-db";
 import { mobileApi } from "../lib/mobile-api";
 
 export default function OutboxManagerScreen() {
+  const insets = useSafeAreaInsets();
   const [mutations, setMutations] = useState<OutboxMutation[]>([]);
   const [stats, setStats] = useState<{ pending: number; failed: number; synced: number; total: number }>({
     pending: 0,
@@ -180,7 +182,7 @@ export default function OutboxManagerScreen() {
         data={mutations}
         keyExtractor={(item) => item.id}
         renderItem={renderMutation}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={[styles.listContent, { paddingBottom: 24 }]}
         ListEmptyComponent={
           <View style={styles.emptyState}>
             <Ionicons name="checkmark-done-circle-outline" size={54} color={mobileTheme.accent} />
@@ -191,7 +193,7 @@ export default function OutboxManagerScreen() {
       />
 
       {/* Bottom Floating Actions */}
-      <View style={styles.footerActions}>
+      <View style={[styles.footerActions, { paddingBottom: Math.max(insets.bottom, 16) }]}>
         <TouchableOpacity
           style={[styles.syncAllButton, syncing && styles.syncAllButtonDisabled]}
           onPress={handleSyncAll}
