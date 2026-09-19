@@ -76,8 +76,104 @@ export interface ApiResponse<T = unknown> {
   queuedMutationId?: string;
 }
 
+export interface MobileErrorLogEntry {
+  seq: number;
+  time: string;
+  tag: string;
+  method?: string;
+  endpoint?: string;
+  status?: number | null;
+  mode?: string;
+  serverHost?: string;
+  message: string;
+}
+
+const ERROR_LOG_CAP = 150;
+const ERROR_LOG_FILE = "flash-erp-error-log.json";
+const errorLogBuffer: MobileErrorLogEntry[] = [];
+let errorLogSeq = 0;
+
+function serverHostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host || baseUrl;
+  } catch {
+    return baseUrl;
+  }
+}
+
+function persistErrorLogBestEffort(): void {
+  try {
+    const fileSystem = FileSystem as unknown as {
+      documentDirectory?: string | null;
+      writeAsStringAsync?: (uri: string, content: string) => Promise<void>;
+    };
+    const directory = fileSystem?.documentDirectory;
+    if (!directory || typeof fileSystem?.writeAsStringAsync !== "function") return;
+    void fileSystem.writeAsStringAsync(directory + ERROR_LOG_FILE, JSON.stringify(errorLogBuffer.slice(-ERROR_LOG_CAP))).catch(() => {});
+  } catch {
+    // Diagnostics must never break API calls.
+  }
+}
+
+function recordErrorLog(entry: Omit<MobileErrorLogEntry, "seq" | "time">): void {
+  try {
+    errorLogSeq += 1;
+    errorLogBuffer.push({ ...entry, seq: errorLogSeq, time: new Date().toISOString(), message: entry.message.slice(0, 500) });
+    while (errorLogBuffer.length > ERROR_LOG_CAP) errorLogBuffer.shift();
+    persistErrorLogBestEffort();
+  } catch {
+    // Diagnostics must never break API calls.
+  }
+}
+
+async function readPersistedErrorLog(): Promise<MobileErrorLogEntry[]> {
+  try {
+    const fileSystem = FileSystem as unknown as {
+      documentDirectory?: string | null;
+      readAsStringAsync?: (uri: string) => Promise<string>;
+    };
+    const directory = fileSystem?.documentDirectory;
+    if (!directory || typeof fileSystem?.readAsStringAsync !== "function") return [];
+    const raw = await fileSystem.readAsStringAsync(directory + ERROR_LOG_FILE);
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is MobileErrorLogEntry =>
+      Boolean(entry) && typeof entry === "object" && typeof (entry as MobileErrorLogEntry).message === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
 class MobileHttpError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly endpoint: string = "",
+    readonly method: string = "",
+    readonly serverMessage: string = ""
+  ) { super(message); }
+}
+
+function friendlyHttpMessage(status: number, serverMessage: string, method: string, endpoint: string): string {
+  if (serverMessage && status !== 404 && status !== 405) return serverMessage;
+  if (status === 404 || status === 405) {
+    const detail = serverMessage ? `${serverMessage} ` : "";
+    return `${detail}HQ rejected this request (HTTP ${status} on ${method} ${endpoint}). The HQ Enterprise Web build is outdated or missing this feature — update HQ to the latest version, or continue offline. Details were saved under My Account › Diagnostics.`;
+  }
+  if (status >= 500) {
+    return serverMessage || `HQ reported a server error (HTTP ${status} on ${method} ${endpoint}). Try again; if it continues, copy diagnostics from My Account and send them to HQ IT.`;
+  }
+  if (status === 401) return serverMessage || "Your session has expired. Please sign in again.";
+  if (status === 403) return serverMessage || "Your account is not permitted to do this. Contact HQ to review your role or home shop.";
+  return serverMessage || `HQ rejected this request (HTTP ${status} on ${method} ${endpoint}).`;
+}
+
+/** Online-only features must fail fast in OFFLINE mode with guidance, never a raw network error. */
+async function requireOnlineMode(feature: string): Promise<ApiResponse<never> | null> {
+  const mode = await mobileStorage.getOperationMode();
+  if (mode !== "OFFLINE") return null;
+  return { ok: false, isOffline: true, error: `${feature} needs a live HQ connection. Switch to AUTO or ONLINE (tap the status bar at the top), then try again.` };
 }
 
 async function request<T = unknown>(
@@ -90,10 +186,14 @@ async function request<T = unknown>(
   const sessionVersion = mobileStorage.getSessionVersion();
   const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
   const url = `${baseUrl}${cleanEndpoint}`;
+  const method = (options.method || "GET").toUpperCase();
 
+  // Never send Content-Type on bodyless requests: strict proxies/gateways in
+  // front of HQ can reject a GET that claims a JSON body.
+  const hasBody = options.body !== undefined && options.body !== null && options.body !== "";
   const headers: Record<string, string> = {
     Accept: "application/json",
-    "Content-Type": "application/json",
+    ...(hasBody ? { "Content-Type": "application/json" } : {}),
     ...(options.headers as Record<string, string>)
   };
 
@@ -114,9 +214,9 @@ async function request<T = unknown>(
     const text = await response.text();
     let data: any = {};
     try {
-      data = JSON.parse(text);
+      data = text ? JSON.parse(text) : {};
     } catch {
-      if (response.ok) throw new MobileHttpError("The server returned an invalid response. Please try again.", response.status);
+      if (response.ok) throw new MobileHttpError("The server returned an invalid response. Please try again.", response.status, cleanEndpoint, method);
       data = {};
     }
 
@@ -124,10 +224,42 @@ async function request<T = unknown>(
       if (response.status === 401 && token && sessionVersion === mobileStorage.getSessionVersion() && await mobileStorage.getAuthToken() === token) {
         await mobileStorage.clearAllSession("Your session has expired. Please sign in again.");
       }
-      throw new MobileHttpError(data?.message || `HTTP ${response.status}: Flash ERP server error.`, response.status);
+      const serverMessage = typeof data?.message === "string" ? data.message : "";
+      const httpError = new MobileHttpError(
+        friendlyHttpMessage(response.status, serverMessage, method, cleanEndpoint),
+        response.status,
+        cleanEndpoint,
+        method,
+        serverMessage
+      );
+      recordErrorLog({
+        tag: "api",
+        method,
+        endpoint: cleanEndpoint,
+        status: response.status,
+        serverHost: serverHostOf(baseUrl),
+        message: serverMessage ? `${httpError.message} [server said: ${serverMessage.slice(0, 200)}]` : httpError.message
+      });
+      throw httpError;
     }
 
     return { status: response.status, data };
+  } catch (error) {
+    if (error instanceof MobileHttpError) throw error;
+    // Network-level failure (no response at all): keep it a plain Error so AUTO
+    // mode can still fall back to the offline cache/outbox, but explain the cause.
+    const causeMessage = error instanceof Error ? error.message : "Unknown network failure";
+    const timedOut = causeMessage.toLowerCase().includes("abort");
+    const networkError = new Error(
+      timedOut
+        ? `HQ did not answer within 12 seconds (${serverHostOf(baseUrl)}). Check your internet connection, or switch to OFFLINE to keep working — details saved under My Account › Diagnostics.`
+        : `Could not reach HQ at ${serverHostOf(baseUrl)} (${causeMessage}). Check your internet connection, or switch to OFFLINE to keep working — details saved under My Account › Diagnostics.`
+    );
+    (networkError as { cause?: unknown }).cause = error;
+    (networkError as { endpoint?: string }).endpoint = cleanEndpoint;
+    (networkError as { method?: string }).method = method;
+    recordErrorLog({ tag: "network", method, endpoint: cleanEndpoint, status: null, serverHost: serverHostOf(baseUrl), message: `${networkError.message} [cause: ${causeMessage.slice(0, 200)}]` });
+    throw networkError;
   } finally {
     // Include response-body reads in the deadline, not just response headers.
     clearTimeout(timeoutId);
@@ -243,6 +375,8 @@ export const mobileApi = {
   },
 
   async searchCustomers(query = ""): Promise<ApiResponse<MobileCustomer[]>> {
+    const offline = await requireOnlineMode("Customer search");
+    if (offline) return offline;
     try {
       const { data } = await request<any>(`/api/online-store/customers?query=${encodeURIComponent(query.trim())}`);
       return { ok: true, data: Array.isArray(data?.customers) ? data.customers : [] };
@@ -385,6 +519,8 @@ export const mobileApi = {
 
   // 4. Download / Refresh Full Catalog into Offline SQLite
   async syncCatalogToLocalDb(onProgress?: (downloaded: number, total: number) => void): Promise<{ count: number; error?: string }> {
+    const offline = await requireOnlineMode("Catalog download");
+    if (offline) return { count: 0, error: offline.error };
     try {
       let page = 1;
       let count = 0;
@@ -561,6 +697,13 @@ export const mobileApi = {
         const msg = err.message || "Sync failure";
         errors.push(`${mutation.entityType} [${mutation.id}]: ${msg}`);
         await mobileOfflineDb.markMutationStatus(mutation.id, "FAILED", msg);
+        recordErrorLog({
+          tag: "sync",
+          method: "POST",
+          endpoint: mutation.endpoint,
+          status: typeof err?.status === "number" ? err.status : null,
+          message: `Outbox ${mutation.entityType} ${mutation.id} failed: ${msg}`
+        });
       }
     }
 
@@ -680,11 +823,15 @@ export const mobileApi = {
 
   // 10. Held Sales & Layaway Orders
   async searchReceipts(query: string): Promise<ApiResponse<any[]>> {
+    const offline = await requireOnlineMode("Receipt search");
+    if (offline) return offline;
     try { const { data } = await request<any>(`/api/online-store/receipts?query=${encodeURIComponent(query.trim())}`); return { ok: true, data: Array.isArray(data?.receipts) ? data.receipts : [] }; }
     catch (error: any) { return { ok: false, error: error.message || "Receipt search failed." }; }
   },
 
   async submitCorrection(input: { sourceTransactionNo: string; correctionType: "RETURN" | "EXCHANGE"; returnLines: Array<{ sourceLineId: string; quantity: number }>; saleLines?: Array<{ productId: string; quantity: number; unitPrice?: number; sellingUnitOfMeasure?: string; productVariantCode?: string | null }>; payments: any[]; note: string }): Promise<ApiResponse<any>> {
+    const offline = await requireOnlineMode("Returns and exchanges");
+    if (offline) return offline;
     try { const { data } = await request<any>("/api/online-store/corrections", { method: "POST", body: JSON.stringify(input) }); return { ok: true, data, message: data?.message || `${input.correctionType === "EXCHANGE" ? "Exchange" : "Return"} completed.` }; }
     catch (error: any) { return { ok: false, error: error.message || "Return or exchange failed." }; }
   },
@@ -693,6 +840,8 @@ export const mobileApi = {
     transactionId: string; transactionNo: string; customerId: string | null; customerName: string; totalAmount: number; updatedAt: string;
     lines: Array<{ productId: string; productCode: string; productName: string; quantity: number; unitPrice: number; taxAmount: number; lineTotal: number; sellingUnitOfMeasure: string }>;
   }>>> {
+    const offline = await requireOnlineMode("Held sales");
+    if (offline) return offline;
     try {
       const { data } = await request<any>("/api/online-store/held-sales");
       return { ok: true, data: Array.isArray(data?.heldSales) ? data.heldSales : [] };
@@ -704,6 +853,8 @@ export const mobileApi = {
     customerId?: string;
     note?: string;
   }): Promise<ApiResponse> {
+    const offline = await requireOnlineMode("Parking a sale");
+    if (offline) return offline;
     try {
       const { data } = await request("/api/online-store/held-sales", {
         method: "POST",
@@ -722,6 +873,8 @@ export const mobileApi = {
     payments?: any[];
     note?: string;
   }): Promise<ApiResponse> {
+    const offline = await requireOnlineMode("Sales orders and layaway");
+    if (offline) return offline;
     try {
       const { data } = await request("/api/online-store/sales-orders", {
         method: "POST",
@@ -808,6 +961,8 @@ export const mobileApi = {
 
   // 12. HR Self-Service (Attendance, Expense Claims, Leave)
   async fetchMyAttendance(): Promise<ApiResponse<{ checkInAt: string | null; checkOutAt: string | null; attendanceStatus: string } | null>> {
+    const offline = await requireOnlineMode("Attendance status");
+    if (offline) return offline;
     try {
       const { data } = await request<any>("/api/human-resources/attendance?self=true");
       return { ok: true, data: data?.attendance ?? null };
@@ -822,6 +977,8 @@ export const mobileApi = {
     checkOutTime?: string;
     locationNote?: string;
   }): Promise<ApiResponse> {
+    const offline = await requireOnlineMode("Clock in/out");
+    if (offline) return offline;
     try {
       const { data } = await request("/api/human-resources/attendance", {
         method: "POST",
@@ -848,6 +1005,8 @@ export const mobileApi = {
   },
 
   async fetchMyExpenseClaims(): Promise<ApiResponse<Array<{ id: string; claimNo: string; claimDate: string; purpose: string; totalAmount: number; currencyCode: string; status: string; category: string | null; evidenceUrl: string | null }>>> {
+    const offline = await requireOnlineMode("Expense claims");
+    if (offline) return offline;
     try { const { data } = await request<any>("/api/human-resources/expense-claims"); return { ok: true, data: Array.isArray(data?.claims) ? data.claims : [] }; }
     catch (error: any) { return { ok: false, error: error.message || "Could not load expense claims." }; }
   },
@@ -897,6 +1056,8 @@ export const mobileApi = {
     leaveTypes: Array<{ id: string; code: string; name: string; isPaid: boolean; requiresAttachment: boolean; availableDays: number }>;
     requests: Array<{ id: string; requestNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; reason: string | null; status: string; attachmentUrl?: string | null }>;
   }>> {
+    const offline = await requireOnlineMode("Leave information");
+    if (offline) return offline;
     try {
       const { data } = await request<any>("/api/human-resources/leave/requests");
       return { ok: true, data };
@@ -911,6 +1072,8 @@ export const mobileApi = {
   },
 
   async cancelLeaveRequest(leaveRequestId: string, reason: string): Promise<ApiResponse> {
+    const offline = await requireOnlineMode("Cancelling leave");
+    if (offline) return offline;
     try { const { data } = await request("/api/human-resources/leave/requests", { method: "PATCH", body: JSON.stringify({ leaveRequestId, reason }) }); return { ok: true, data, message: "Leave application cancelled." }; }
     catch (error: any) { return { ok: false, error: error.message || "Could not cancel the leave application." }; }
   },
@@ -944,5 +1107,102 @@ export const mobileApi = {
       const mutation = await mobileOfflineDb.enqueueMutation({ entityType: "LEAVE_REQUEST", action: "POST_LEAVE_REQUEST", endpoint, payload: input });
       return { ok: true, isOffline: true, queuedMutationId: mutation.id, message: "Leave request queued after network failure." };
     }
+  },
+
+  // 13. Manager approvals (online-only: a decision must be validated against live HQ state)
+  async fetchPendingApprovals(): Promise<ApiResponse<{
+    leave: Array<{ id: string; requestNo: string; employeeName: string; employeeNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; reason: string | null; status: string; submittedAt: string }>;
+    expenses: Array<{ id: string; claimNo: string; employeeName: string; employeeNo: string; claimDate: string; purpose: string; totalAmount: number; currencyCode: string; status: string; lineCount: number; submittedAt: string | null }>;
+    pendingCount: number;
+  }>> {
+    const offline = await requireOnlineMode("Manager approvals");
+    if (offline) return offline;
+    try {
+      const { data } = await request<any>("/api/mobile/approvals");
+      const leave = Array.isArray(data?.leave) ? data.leave : [];
+      const expenses = Array.isArray(data?.expenses) ? data.expenses : [];
+      return { ok: true, data: { leave, expenses, pendingCount: typeof data?.pendingCount === "number" ? data.pendingCount : leave.length + expenses.length } };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not load pending approvals." };
+    }
+  },
+
+  async decideLeaveRequest(input: { leaveRequestId: string; action: "APPROVE" | "REJECT"; note?: string }): Promise<ApiResponse> {
+    const offline = await requireOnlineMode("Leave decisions");
+    if (offline) return offline;
+    try {
+      const { data } = await request("/api/human-resources/leave/requests/decision", {
+        method: "POST",
+        body: JSON.stringify({ leaveRequestId: input.leaveRequestId, action: input.action, note: input.note || undefined })
+      });
+      return { ok: true, data, message: input.action === "APPROVE" ? "Leave request approved." : "Leave request rejected." };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not update the leave request." };
+    }
+  },
+
+  async decideExpenseClaim(input: { expenseClaimId: string; action: "APPROVE" | "REJECT"; note?: string }): Promise<ApiResponse> {
+    const offline = await requireOnlineMode("Expense claim decisions");
+    if (offline) return offline;
+    try {
+      const { data } = await request("/api/human-resources/expense-claims/actions", {
+        method: "POST",
+        body: JSON.stringify({ expenseClaimId: input.expenseClaimId, action: input.action, note: input.note || undefined })
+      });
+      return { ok: true, data, message: input.action === "APPROVE" ? "Expense claim approved." : "Expense claim rejected." };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not update the expense claim." };
+    }
+  },
+
+  // 14. On-device diagnostics (My Account › Diagnostics). Never contains tokens or passwords.
+  async readErrorLog(): Promise<MobileErrorLogEntry[]> {
+    const persisted = await readPersistedErrorLog();
+    const seen = new Set(errorLogBuffer.map((entry) => `${entry.seq}:${entry.time}`));
+    return [...persisted.filter((entry) => !seen.has(`${entry.seq}:${entry.time}`)), ...errorLogBuffer].slice(-ERROR_LOG_CAP);
+  },
+
+  async clearErrorLog(): Promise<void> {
+    errorLogBuffer.length = 0;
+    try {
+      const fileSystem = FileSystem as unknown as {
+        documentDirectory?: string | null;
+        deleteAsync?: (uri: string, options?: { idempotent?: boolean }) => Promise<void>;
+      };
+      const directory = fileSystem?.documentDirectory;
+      if (directory && typeof fileSystem?.deleteAsync === "function") {
+        await fileSystem.deleteAsync(directory + ERROR_LOG_FILE, { idempotent: true }).catch(() => {});
+      }
+    } catch {
+      // Clearing memory is enough; file cleanup is best-effort.
+    }
+  },
+
+  async exportErrorLog(): Promise<string> {
+    const [serverUrl, mode, catalogSyncedAt, outbox, session] = await Promise.all([
+      mobileStorage.getServerUrl().catch(() => "unknown"),
+      mobileStorage.getOperationMode().catch(() => "unknown" as OperationMode),
+      mobileStorage.getCatalogSyncedAt().catch(() => null),
+      mobileOfflineDb.getOutboxStats().catch(() => ({ pending: -1, failed: -1, synced: -1, total: -1 })),
+      mobileStorage.getUserSnapshot<MobileUserSession>().catch(() => null)
+    ]);
+    const entries = await this.readErrorLog();
+    const lines = [
+      "Flash ERP mobile diagnostics",
+      `Exported: ${new Date().toISOString()}`,
+      `HQ server: ${serverUrl}`,
+      `Operation mode: ${mode}`,
+      `Signed in as: ${session?.loginId ?? "not signed in"}${session?.homeStoreCode ? ` (shop ${session.homeStoreCode})` : ""}`,
+      `Catalog last synced: ${catalogSyncedAt ?? "never"}`,
+      `Outbox: ${outbox.pending} pending, ${outbox.failed} failed, ${outbox.synced} synced`,
+      `Logged errors: ${entries.length}`,
+      "---"
+    ];
+    for (const entry of entries.slice(-100)) {
+      const where = [entry.method, entry.endpoint].filter(Boolean).join(" ");
+      const status = entry.status === null || entry.status === undefined ? "no-response" : `HTTP ${entry.status}`;
+      lines.push(`[${entry.time}] #${entry.seq} ${entry.tag} ${where} ${status}${entry.serverHost ? ` @${entry.serverHost}` : ""}: ${entry.message}`);
+    }
+    return lines.join("\n").slice(0, 60000);
   }
 };

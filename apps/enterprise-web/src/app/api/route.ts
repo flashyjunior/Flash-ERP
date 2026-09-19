@@ -49,6 +49,10 @@ export function GET() {
         expenseClaims: "/api/human-resources/expense-claims",
         employees: "/api/human-resources/employees"
       },
+      mobile: {
+        dashboard: "/api/mobile/dashboard",
+        approvals: "/api/mobile/approvals"
+      },
       fuelOperations: {
         dips: "/api/fuel-operations/dips",
         meterReadings: "/api/fuel-operations/meter-readings",

@@ -10,6 +10,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileStorage } from "../lib/mobile-storage";
@@ -18,6 +19,9 @@ import { mobileApi, type MobileUserSession } from "../lib/mobile-api";
 import { canOpenMobileRoute } from "../lib/mobile-access";
 
 export default function DashboardScreen() {
+  // Android edge-to-edge (Expo SDK 54+): the system gesture bar overlaps any
+  // view pinned to the bottom edge, so the nav must pad for the bottom inset.
+  const insets = useSafeAreaInsets();
   const [user, setUser] = useState<MobileUserSession | null>(null);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -79,7 +83,7 @@ export default function DashboardScreen() {
       <HeaderStatusBar onSyncComplete={loadDashboard} />
 
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: 104 + Math.max(insets.bottom, 0) }]}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
         {/* User Identity & Store Header */}
@@ -254,7 +258,7 @@ export default function DashboardScreen() {
         <View style={styles.gridTwoColumns}>
           {/* Manager Approvals */}
           <TouchableOpacity
-            style={[styles.tileCard, !user?.permissionCodes?.some((code) => code.includes("approve")) && styles.hidden]}
+            style={[styles.tileCard, !canOpenMobileRoute(user, "approvals") && styles.hidden]}
             onPress={() => navigateTo("/approvals")}
             activeOpacity={0.8}
           >
@@ -301,7 +305,7 @@ export default function DashboardScreen() {
         </View>
       </ScrollView>
       {user && (
-        <View style={styles.bottomNav}>
+        <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 12) }]}>
           <TouchableOpacity style={styles.bottomNavItem}><Ionicons name="home" size={22} color={mobileTheme.primary} /><Text style={styles.bottomNavActive}>Home</Text></TouchableOpacity>
           {canOpenMobileRoute(user, "cart") && <TouchableOpacity style={styles.bottomNavItem} onPress={() => navigateTo("/cart")}><Ionicons name="cart-outline" size={22} color={mobileTheme.mutedText} /><Text style={styles.bottomNavText}>Sales</Text></TouchableOpacity>}
           <TouchableOpacity style={styles.bottomNavItem} onPress={() => navigateTo("/self-service")}><Ionicons name="person-outline" size={22} color={mobileTheme.mutedText} /><Text style={styles.bottomNavText}>My HR</Text></TouchableOpacity>
@@ -455,11 +459,12 @@ const styles = StyleSheet.create({
   noShopTitle: { fontSize: 15, fontWeight: "800", color: mobileTheme.textColor },
   noShopText: { marginTop: 3, fontSize: 12, lineHeight: 18, color: mobileTheme.mutedText },
   bottomNav: {
-    position: "absolute", left: 0, right: 0, bottom: 0, height: 72,
+    position: "absolute", left: 0, right: 0, bottom: 0, minHeight: 64,
     flexDirection: "row", alignItems: "center", justifyContent: "space-around",
+    paddingTop: 10,
     backgroundColor: mobileTheme.surfaceBackground, borderTopWidth: 1, borderTopColor: mobileTheme.borderColor
   },
-  bottomNavItem: { flex: 1, alignItems: "center", gap: 3 },
+  bottomNavItem: { flex: 1, alignItems: "center", justifyContent: "center", gap: 3, minHeight: 48, paddingVertical: 4 },
   bottomNavActive: { fontSize: 11, fontWeight: "800", color: mobileTheme.primary },
   bottomNavText: { fontSize: 11, fontWeight: "700", color: mobileTheme.mutedText },
   systemBar: {
