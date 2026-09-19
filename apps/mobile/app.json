@@ -2,7 +2,7 @@
   "expo": {
     "name": "Flash ERP",
     "slug": "flash-erp-mobile",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "scheme": "flasherp",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -22,6 +22,7 @@
     },
     "android": {
       "package": "com.flasherp.mobile",
+      "versionCode": 3,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#2563eb"
@@ -31,8 +32,7 @@
         "INTERNET",
         "ACCESS_NETWORK_STATE",
         "android.permission.RECORD_AUDIO"
-      ],
-      "usesCleartextTraffic": true
+      ]
     },
     "plugins": [
       "expo-router",
@@ -43,7 +43,15 @@
         }
       ],
       "expo-secure-store",
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

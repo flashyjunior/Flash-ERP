@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { View, Text, TouchableOpacity, StyleSheet, Modal } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { mobileTheme } from "../lib/mobile-theme";
@@ -12,6 +13,9 @@ interface HeaderStatusBarProps {
 }
 
 export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
+  // Android on SDK 54 is always edge-to-edge: the dark header must extend under the
+  // translucent status bar and push its own content below the system inset.
+  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<OperationMode>("AUTO");
   const [serverUrl, setServerUrl] = useState<string>("");
   const [pendingCount, setPendingCount] = useState<number>(0);
@@ -116,7 +120,7 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
   return (
     <>
       <TouchableOpacity
-        style={styles.container}
+        style={[styles.container, { paddingTop: insets.top + 10 }]}
         onPress={handleOpenModal}
         activeOpacity={0.8}
       >
