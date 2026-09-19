@@ -26,7 +26,7 @@ export default function LoginScreen() {
   const [pingStatus, setPingStatus] = useState<{ testing: boolean; alive?: boolean; latencyMs?: number } | null>(
     null
   );
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(() => mobileStorage.getSessionMessage());
 
   useEffect(() => {
     mobileStorage
@@ -65,9 +65,8 @@ export default function LoginScreen() {
 
     setLoading(true);
     setErrorMessage(null);
-    await mobileStorage.setServerUrl(serverUrl);
-
     try {
+      await mobileStorage.setServerUrl(serverUrl);
       const res = await mobileApi.signIn({ loginId: loginId.trim(), password });
       if (res.ok) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

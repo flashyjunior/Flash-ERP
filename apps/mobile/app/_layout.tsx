@@ -1,8 +1,8 @@
 import React, { Component, useEffect, useState, type ReactNode } from "react";
 import { AppState, View, Text, TouchableOpacity, StyleSheet, ScrollView } from "react-native";
-import { Stack, router, useSegments } from "expo-router";
+import { Stack } from "expo-router";
 import { mobileStorage } from "../lib/mobile-storage";
-import type { MobileUserSession } from "../lib/mobile-api";
+import { readMobileSession, type MobileUserSession } from "../lib/mobile-session";
 import { canOpenMobileRoute } from "../lib/mobile-access";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
@@ -144,23 +144,83 @@ function BiometricLock({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function SessionRouteGuard({ children }: { children: ReactNode }) {
-  const segments = useSegments();
+function SessionNavigator() {
+  const [session, setSession] = useState<MobileUserSession | null>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
     let active = true;
-    void mobileStorage.getUserSnapshot<MobileUserSession>().then((session) => {
-      if (!active) return;
-      const route = String(segments[0] ?? "");
-      if (!session && route !== "login") router.replace("/login");
-      else if (session && route === "login") router.replace("/");
-      else if (session && route && route !== "login" && !canOpenMobileRoute(session, route)) router.replace("/");
-      setReady(true);
-    });
-    return () => { active = false; };
-  }, [segments]);
+    let readVersion = 0;
+    const refresh = async () => {
+      const version = ++readVersion;
+      try {
+        const [raw, token] = await Promise.all([mobileStorage.getUserSnapshot(), mobileStorage.getAuthToken()]);
+        if (!active || version !== readVersion) return;
+        setSession(token ? readMobileSession(raw) : null);
+      } catch (error) {
+        console.warn(`${LOG_TAG} Session restore failed.`, error);
+        if (active && version === readVersion) setSession(null);
+      } finally {
+        if (active && version === readVersion) setReady(true);
+      }
+    };
+    const unsubscribe = mobileStorage.subscribeSessionChanges(() => { void refresh(); });
+    void refresh();
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
+  // Hydrate before choosing routes so a restored-session deep link is not
+  // discarded as unauthorized. No imperative navigation runs during bootstrap.
   if (!ready) return <View style={{ flex: 1, backgroundColor: mobileTheme.screenBackground }} />;
-  return <>{children}</>;
+  // Protected screens never mount/fetch without access, and are removed from
+  // navigation history immediately on sign-out or revoked permissions.
+  return (
+    <View style={{ flex: 1 }}>
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: mobileTheme.screenBackground } }}>
+        <Stack.Protected guard={!session}>
+          <Stack.Screen name="login" options={{ title: "Sign In" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "index")}>
+          <Stack.Screen name="index" options={{ title: "Flash ERP" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "scanner")}>
+          <Stack.Screen name="scanner" options={{ title: "Stock & Barcode Lookup" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "stock-count")}>
+          <Stack.Screen name="stock-count" options={{ title: "Cycle Count" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "goods-receipt")}>
+          <Stack.Screen name="goods-receipt" options={{ title: "Goods Receiving" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "transfers")}>
+          <Stack.Screen name="transfers" options={{ title: "Inter-Store Transfers" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "cart")}>
+          <Stack.Screen name="cart" options={{ title: "Assisted Selling & Cart" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "fuel-operations")}>
+          <Stack.Screen name="fuel-operations" options={{ title: "Fuel Station Operations" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "approvals")}>
+          <Stack.Screen name="approvals" options={{ title: "Manager Approvals" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "self-service")}>
+          <Stack.Screen name="self-service" options={{ title: "HR & Self-Service" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "outbox")}>
+          <Stack.Screen name="outbox" options={{ title: "Outbox Queue" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "account")}>
+          <Stack.Screen name="account" options={{ title: "My Account" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "receipt")}>
+          <Stack.Screen name="receipt" options={{ title: "Sale Receipt" }} />
+        </Stack.Protected>
+        <Stack.Protected guard={Boolean(session) && canOpenMobileRoute(session, "returns")}>
+          <Stack.Screen name="returns" options={{ title: "Returns" }} />
+        </Stack.Protected>
+      </Stack>
+    </View>
+  );
 }
 
 export default function RootLayout() {
@@ -169,31 +229,7 @@ export default function RootLayout() {
       <StatusBar style="light" />
       <FatalErrorBoundary>
         <BiometricLock>
-        <SessionRouteGuard>
-        <Stack
-          screenOptions={{
-            headerShown: false,
-            contentStyle: {
-              backgroundColor: mobileTheme.screenBackground
-            }
-          }}
-        >
-          <Stack.Screen name="index" options={{ title: "Flash ERP" }} />
-          <Stack.Screen name="scanner" options={{ title: "Stock & Barcode Lookup" }} />
-          <Stack.Screen name="stock-count" options={{ title: "Cycle Count" }} />
-          <Stack.Screen name="goods-receipt" options={{ title: "Goods Receiving" }} />
-          <Stack.Screen name="transfers" options={{ title: "Inter-Store Transfers" }} />
-          <Stack.Screen name="cart" options={{ title: "Assisted Selling & Cart" }} />
-          <Stack.Screen name="fuel-operations" options={{ title: "Fuel Station Operations" }} />
-          <Stack.Screen name="approvals" options={{ title: "Manager Approvals" }} />
-          <Stack.Screen name="self-service" options={{ title: "HR & Self-Service" }} />
-          <Stack.Screen name="outbox" options={{ title: "Outbox Queue" }} />
-          <Stack.Screen name="account" options={{ title: "My Account" }} />
-          <Stack.Screen name="receipt" options={{ title: "Sale Receipt" }} />
-          <Stack.Screen name="returns" options={{ title: "Returns" }} />
-          <Stack.Screen name="login" options={{ title: "Sign In", presentation: "modal" }} />
-        </Stack>
-        </SessionRouteGuard>
+          <SessionNavigator />
         </BiometricLock>
       </FatalErrorBoundary>
     </>

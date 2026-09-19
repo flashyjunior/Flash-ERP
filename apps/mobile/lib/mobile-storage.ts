@@ -23,71 +23,66 @@ export type OperationMode = "ONLINE" | "OFFLINE" | "AUTO";
 
 export const DEFAULT_SERVER_URL = "http://84.247.188.30:3000";
 
-// In-memory fallback for environments without SecureStore (e.g. standard Web preview)
-const memoryStore = new Map<string, string>();
+// Failed writes must shadow persistent storage, even if a later read succeeds
+// with null or an older value (e.g. an oversized permission snapshot). A null
+// tombstone also prevents a failed delete from resurrecting a signed-out user.
+const memoryStore = new Map<string, string | null>();
 
 async function setItem(key: string, value: string): Promise<void> {
-  if (Platform.OS === "web") {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.setItem(key, value);
-        return;
-      }
-    } catch {
-      // Fallback to memory
-    }
-    memoryStore.set(key, value);
-    return;
-  }
-
+  memoryStore.set(key, value);
   try {
-    await SecureStore.setItemAsync(key, value);
+    if (Platform.OS === "web") {
+      if (typeof window === "undefined" || !window.localStorage) return;
+      window.localStorage.setItem(key, value);
+    } else {
+      await SecureStore.setItemAsync(key, value);
+    }
+    memoryStore.delete(key);
   } catch {
-    memoryStore.set(key, value);
+    // Keep the in-memory override for this app run.
   }
 }
 
 async function getItem(key: string): Promise<string | null> {
-  if (Platform.OS === "web") {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        return window.localStorage.getItem(key);
-      }
-    } catch {
-      // Fallback to memory
-    }
-    return memoryStore.get(key) ?? null;
-  }
-
+  if (memoryStore.has(key)) return memoryStore.get(key) ?? null;
   try {
+    if (Platform.OS === "web") {
+      return typeof window !== "undefined" ? window.localStorage?.getItem(key) ?? null : null;
+    }
     return await SecureStore.getItemAsync(key);
   } catch {
-    return memoryStore.get(key) ?? null;
+    return null;
   }
 }
 
 async function deleteItem(key: string): Promise<void> {
-  if (Platform.OS === "web") {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.removeItem(key);
-        return;
-      }
-    } catch {
-      // Fallback
+  memoryStore.set(key, null);
+  try {
+    if (Platform.OS === "web") {
+      if (typeof window === "undefined" || !window.localStorage) return;
+      window.localStorage.removeItem(key);
+    } else {
+      await SecureStore.deleteItemAsync(key);
     }
     memoryStore.delete(key);
-    return;
-  }
-
-  try {
-    await SecureStore.deleteItemAsync(key);
   } catch {
-    memoryStore.delete(key);
+    // Keep the tombstone so a subsequent read cannot restore stale credentials.
   }
 }
 
+// Session changes drive protected navigation, including expiry on any screen.
+const sessionListeners = new Set<() => void>();
+let sessionVersion = 0;
+let sessionMessage: string | null = null;
+function notifySessionChange() { for (const listener of sessionListeners) listener(); }
+
 export const mobileStorage = {
+  getSessionVersion(): number { return sessionVersion; },
+  getSessionMessage(): string | null { return sessionMessage; },
+  subscribeSessionChanges(listener: () => void): () => void {
+    sessionListeners.add(listener);
+    return () => { sessionListeners.delete(listener); };
+  },
   // Server URL
   async getServerUrl(): Promise<string> {
     const stored = await getItem(KEYS.SERVER_URL);
@@ -120,6 +115,8 @@ export const mobileStorage = {
   },
   async setUserSnapshot(snapshot: unknown): Promise<void> {
     await setItem(KEYS.USER_SNAPSHOT, JSON.stringify(snapshot));
+    sessionMessage = null;
+    notifySessionChange();
   },
   async clearUserSnapshot(): Promise<void> {
     await deleteItem(KEYS.USER_SNAPSHOT);
@@ -168,8 +165,11 @@ export const mobileStorage = {
   },
 
   // Full Session Logout
-  async clearAllSession(): Promise<void> {
+  async clearAllSession(message: string | null = null): Promise<void> {
+    sessionVersion += 1;
+    sessionMessage = message;
     await deleteItem(KEYS.AUTH_TOKEN);
     await deleteItem(KEYS.USER_SNAPSHOT);
+    notifySessionChange();
   }
 };

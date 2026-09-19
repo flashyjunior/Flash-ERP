@@ -19,6 +19,7 @@ import { canOpenMobileRoute } from "../lib/mobile-access";
 
 export default function DashboardScreen() {
   const [user, setUser] = useState<MobileUserSession | null>(null);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [cachedProductsCount, setCachedProductsCount] = useState<number>(0);
   const [outboxPendingCount, setOutboxPendingCount] = useState<number>(0);
@@ -34,8 +35,10 @@ export default function DashboardScreen() {
         setUser(cached);
       }
 
+      if (!await mobileStorage.getAuthToken()) return;
       const dashboard = await mobileApi.fetchDashboardAnalytics();
-      if (dashboard.ok && dashboard.data) setAnalytics(dashboard.data);
+      setAnalytics(dashboard.ok && dashboard.data ? dashboard.data : null);
+      setAnalyticsError(dashboard.ok ? null : dashboard.error || "Sales analytics are unavailable.");
 
       const stats = await mobileOfflineDb.getOutboxStats();
       setOutboxPendingCount(stats.pending + stats.failed);
@@ -67,7 +70,7 @@ export default function DashboardScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     await mobileApi.signOut();
     setUser(null);
-    router.push("/login");
+    // Protected navigation removes authenticated screens immediately.
   };
 
   return (
@@ -96,7 +99,7 @@ export default function DashboardScreen() {
           </View>
 
           {user ? (
-            <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Sign out" style={styles.signOutButton} onPress={handleSignOut}>
               <Ionicons name="log-out-outline" size={18} color={mobileTheme.danger} />
             </TouchableOpacity>
           ) : (
@@ -109,6 +112,7 @@ export default function DashboardScreen() {
           )}
         </View>
 
+        {analyticsError && canOpenMobileRoute(user, "cart") && <Text accessibilityRole="alert" style={{ color: mobileTheme.mutedText }}>{analyticsError}</Text>}
         {analytics && canOpenMobileRoute(user, "cart") && <View style={styles.analyticsCard}>
           <View style={styles.analyticsHeader}><View><Text style={styles.analyticsEyebrow}>TODAY AT YOUR SHOP</Text><Text style={styles.analyticsTotal}>GHS {analytics.salesTotal.toFixed(2)}</Text></View><View style={styles.livePill}><View style={styles.liveDot}/><Text style={styles.liveText}>LIVE</Text></View></View>
           <View style={styles.analyticsMetrics}><View><Text style={styles.analyticsMetricValue}>{analytics.transactionCount}</Text><Text style={styles.analyticsMetricLabel}>Transactions</Text></View><View><Text style={styles.analyticsMetricValue}>GHS {analytics.averageBasket.toFixed(2)}</Text><Text style={styles.analyticsMetricLabel}>Average basket</Text></View>{analytics.pendingApprovals > 0 && <View><Text style={styles.analyticsMetricValue}>{analytics.pendingApprovals}</Text><Text style={styles.analyticsMetricLabel}>Approvals</Text></View>}</View>
