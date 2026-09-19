@@ -20,7 +20,7 @@
  * Run: npm run acceptance:mobile-startup            (full, exports a bundle, ~1 min)
  *      npm run acceptance:mobile-startup -- --static-only
  */
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -47,6 +47,39 @@ function pass(message: string) {
 
 function readJson<T>(absolutePath: string): T {
   return JSON.parse(readFileSync(absolutePath, "utf8")) as T;
+}
+
+/**
+ * Build a readable failure report from a spawnSync result. When the child process
+ * could not be spawned (or was killed before producing output) `stdout`/`stderr`
+ * are `undefined`, not empty strings – the real cause is in `result.error` – so
+ * every field must be treated as optional.
+ */
+function spawnFailureDetail(result: SpawnSyncReturns<string>): string {
+  const parts: string[] = [];
+  if (result.error) parts.push(`spawn error: ${result.error.message}`);
+  if (result.signal) parts.push(`process terminated by ${result.signal}`);
+  for (const stream of [result.stderr, result.stdout]) {
+    if (typeof stream === "string" && stream.trim()) parts.push(stream.trim());
+  }
+  return parts.length > 0 ? parts.join("\n").slice(-4000) : "(no output captured)";
+}
+
+/**
+ * Resolve the workspace-local expo CLI entry point (the `expo` bin is a plain
+ * CommonJS script: node_modules/expo/bin/cli). We spawn it with the Node binary
+ * that is already running this gate instead of shelling out to `npx`:
+ * `npx.cmd` is a Windows batch file and spawning it via spawnSync can fail
+ * (ENOENT, PATH or .cmd resolution issues) with no stdout/stderr captured,
+ * which previously crashed this script with a TypeError instead of reporting
+ * why `expo export` did not run.
+ */
+function resolveExpoCli(): string | null {
+  const candidates = [
+    path.join(mobileRoot, "node_modules", "expo", "bin", "cli"),
+    path.join(workspaceRoot, "node_modules", "expo", "bin", "cli")
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
 function resolveFromMobile(request: string): string | null {
@@ -199,84 +232,93 @@ if (!staticOnly) {
   }
 
   const outputDir = mkdtempSync(path.join(tmpdir(), "flash-erp-mobile-startup-gate-"));
-  try {
-    const exportResult = spawnSync(
-      process.platform === "win32" ? "npx.cmd" : "npx",
-      [
-        "expo",
-        "export",
-        "--platform",
-        "android",
-        "--output-dir",
-        outputDir,
-        "--no-bytecode",
-        "--no-minify",
-        "--source-maps"
-      ],
-      {
-        cwd: mobileRoot,
-        encoding: "utf8",
-        env: { ...process.env, CI: "1", EXPO_NO_TELEMETRY: "1", EXPO_OFFLINE: "1" },
-        maxBuffer: 64 * 1024 * 1024
-      }
+  const expoCli = resolveExpoCli();
+  if (!expoCli) {
+    fail(
+      "expo CLI not found (looked for apps/mobile/node_modules/expo/bin/cli and node_modules/expo/bin/cli) – " +
+        "run `npm install` at the workspace root first."
     );
+  } else {
+    try {
+      const exportResult = spawnSync(
+        process.execPath,
+        [
+          expoCli,
+          "export",
+          "--platform",
+          "android",
+          "--output-dir",
+          outputDir,
+          "--no-bytecode",
+          "--no-minify",
+          "--source-maps"
+        ],
+        {
+          cwd: mobileRoot,
+          encoding: "utf8",
+          env: { ...process.env, CI: "1", EXPO_NO_TELEMETRY: "1", EXPO_OFFLINE: "1" },
+          maxBuffer: 64 * 1024 * 1024,
+          timeout: 15 * 60 * 1000
+        }
+      );
 
-    if (exportResult.status !== 0) {
-      fail("`expo export --platform android` failed:\n" + (exportResult.stderr || exportResult.stdout).slice(-4000));
-    } else {
-      pass("Production Android bundle exported.");
-      const jsDir = path.join(outputDir, "_expo", "static", "js", "android");
-      const mapFile = readdirSync(jsDir).find((name) => name.endsWith(".map"));
-      const bundleFile = readdirSync(jsDir).find((name) => name.endsWith(".js"));
-      if (!mapFile || !bundleFile) {
-        fail("Exported bundle or source map not found.");
+      if (exportResult.status !== 0) {
+        fail("`expo export --platform android` failed:\n" + spawnFailureDetail(exportResult));
       } else {
-        const sources = readJson<{ sources: string[] }>(path.join(jsDir, mapFile)).sources;
-        const bundle = readFileSync(path.join(jsDir, bundleFile), "utf8");
-
-        const singletons = [
-          "react",
-          "react-native",
-          "expo",
-          "expo-modules-core",
-          "expo-router",
-          "react-native-safe-area-context",
-          "react-native-screens"
-        ];
-        let duplicates = 0;
-        for (const name of singletons) {
-          const dirs = new Set<string>();
-          const pattern = new RegExp(`^(.*node_modules/${name.replace("/", "\\/")})/`);
-          for (const source of sources) {
-            const match = source.replace(/\\/g, "/").match(pattern);
-            if (match) dirs.add(match[1]);
-          }
-          if (dirs.size > 1) {
-            duplicates += 1;
-            // Expo writes source-map paths relative to the monorepo (server) root, e.g.
-            // "/node_modules/react" and "/apps/mobile/node_modules/react".
-            fail(`${name} is bundled ${dirs.size} times: ${[...dirs].map((d) => d.replace(/^\/+/, "")).join(", ")}`);
-          }
-        }
-        if (duplicates === 0) {
-          pass("React, React Native and the Expo runtime are each bundled exactly once.");
-        }
-
-        const reactVersions = [...bundle.matchAll(/exports\.version = "(19\.[^"]+)"/g)].map((m) => m[1]);
-        const uniqueReactVersions = [...new Set(reactVersions)];
-        if (uniqueReactVersions.length !== 1) {
-          fail(`Expected exactly one React version in the bundle, found: ${uniqueReactVersions.join(", ") || "none"}`);
+        pass("Production Android bundle exported.");
+        const jsDir = path.join(outputDir, "_expo", "static", "js", "android");
+        const mapFile = readdirSync(jsDir).find((name) => name.endsWith(".map"));
+        const bundleFile = readdirSync(jsDir).find((name) => name.endsWith(".js"));
+        if (!mapFile || !bundleFile) {
+          fail("Exported bundle or source map not found.");
         } else {
-          pass(`Bundled React version: ${uniqueReactVersions[0]}.`);
-        }
+          const sources = readJson<{ sources: string[] }>(path.join(jsDir, mapFile)).sources;
+          const bundle = readFileSync(path.join(jsDir, bundleFile), "utf8");
 
-        if (/_reactNative\d*\.ErrorUtils\b/.test(bundle)) {
-          fail("Bundle dereferences react-native's non-existent ErrorUtils export.");
+          const singletons = [
+            "react",
+            "react-native",
+            "expo",
+            "expo-modules-core",
+            "expo-router",
+            "react-native-safe-area-context",
+            "react-native-screens"
+          ];
+          let duplicates = 0;
+          for (const name of singletons) {
+            const dirs = new Set<string>();
+            const pattern = new RegExp(`^(.*node_modules/${name.replace("/", "\\/")})/`);
+            for (const source of sources) {
+              const match = source.replace(/\\/g, "/").match(pattern);
+              if (match) dirs.add(match[1]);
+            }
+            if (dirs.size > 1) {
+              duplicates += 1;
+              // Expo writes source-map paths relative to the monorepo (server) root, e.g.
+              // "/node_modules/react" and "/apps/mobile/node_modules/react".
+              fail(`${name} is bundled ${dirs.size} times: ${[...dirs].map((d) => d.replace(/^\/+/, "")).join(", ")}`);
+            }
+          }
+          if (duplicates === 0) {
+            pass("React, React Native and the Expo runtime are each bundled exactly once.");
+          }
+
+          const reactVersions = [...bundle.matchAll(/exports\.version = "(19\.[^"]+)"/g)].map((m) => m[1]);
+          const uniqueReactVersions = [...new Set(reactVersions)];
+          if (uniqueReactVersions.length !== 1) {
+            fail(`Expected exactly one React version in the bundle, found: ${uniqueReactVersions.join(", ") || "none"}`);
+          } else {
+            pass(`Bundled React version: ${uniqueReactVersions[0]}.`);
+          }
+
+          if (/_reactNative\d*\.ErrorUtils\b/.test(bundle)) {
+            fail("Bundle dereferences react-native's non-existent ErrorUtils export.");
+          }
         }
       }
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
     }
-  } finally {
-    rmSync(outputDir, { recursive: true, force: true });
   }
 }
 
