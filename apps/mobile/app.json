@@ -30,8 +30,7 @@
       "permissions": [
         "CAMERA",
         "INTERNET",
-        "ACCESS_NETWORK_STATE",
-        "android.permission.RECORD_AUDIO"
+        "ACCESS_NETWORK_STATE"
       ]
     },
     "plugins": [
@@ -50,6 +49,25 @@
           "android": {
             "usesCleartextTraffic": true
           }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Flash ERP to select receipt and leave evidence images.",
+          "cameraPermission": "Allow Flash ERP to photograph expense receipts."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Flash ERP to record your location when clocking in or out."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Flash ERP to use Face ID to unlock the app."
         }
       ]
     ],

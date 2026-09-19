@@ -11,7 +11,12 @@ const KEYS = {
   AUTH_TOKEN: "flash_erp_auth_token",
   SERVER_URL: "flash_erp_server_url",
   USER_SNAPSHOT: "flash_erp_user_snapshot",
-  OPERATION_MODE: "flash_erp_operation_mode"
+  OPERATION_MODE: "flash_erp_operation_mode",
+  TENDER_METHODS: "flash_erp_tender_methods",
+  POS_CART: "flash_erp_pos_cart",
+  LAST_RECEIPT: "flash_erp_last_receipt",
+  CATALOG_SYNCED_AT: "flash_erp_catalog_synced_at",
+  BIOMETRIC_LOCK: "flash_erp_biometric_lock"
 } as const;
 
 export type OperationMode = "ONLINE" | "OFFLINE" | "AUTO";
@@ -130,6 +135,36 @@ export const mobileStorage = {
   },
   async setOperationMode(mode: OperationMode): Promise<void> {
     await setItem(KEYS.OPERATION_MODE, mode);
+  },
+
+  async getBiometricLockEnabled(): Promise<boolean> { return (await getItem(KEYS.BIOMETRIC_LOCK)) === "true"; },
+  async setBiometricLockEnabled(enabled: boolean): Promise<void> { await setItem(KEYS.BIOMETRIC_LOCK, String(enabled)); },
+
+  async getCatalogSyncedAt(): Promise<string | null> { return await getItem(KEYS.CATALOG_SYNCED_AT); },
+  async setCatalogSyncedAt(value: string): Promise<void> { await setItem(KEYS.CATALOG_SYNCED_AT, value); },
+
+  async getLastReceipt<T = unknown>(): Promise<T | null> {
+    const raw = await getItem(KEYS.LAST_RECEIPT);
+    if (!raw) return null;
+    try { return JSON.parse(raw) as T; } catch { return null; }
+  },
+  async setLastReceipt(receipt: unknown): Promise<void> { await setItem(KEYS.LAST_RECEIPT, JSON.stringify(receipt)); },
+
+  async getPosCart<T = unknown>(): Promise<T | null> {
+    const raw = await getItem(KEYS.POS_CART);
+    if (!raw) return null;
+    try { return JSON.parse(raw) as T; } catch { return null; }
+  },
+  async setPosCart(cart: unknown): Promise<void> { await setItem(KEYS.POS_CART, JSON.stringify(cart)); },
+  async clearPosCart(): Promise<void> { await deleteItem(KEYS.POS_CART); },
+
+  async getTenderMethods<T = unknown>(): Promise<T | null> {
+    const raw = await getItem(KEYS.TENDER_METHODS);
+    if (!raw) return null;
+    try { return JSON.parse(raw) as T; } catch { return null; }
+  },
+  async setTenderMethods(tenders: unknown): Promise<void> {
+    await setItem(KEYS.TENDER_METHODS, JSON.stringify(tenders));
   },
 
   // Full Session Logout

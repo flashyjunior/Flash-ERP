@@ -25,6 +25,8 @@ export default function BarcodeScannerScreen() {
   const [inputCode, setInputCode] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [product, setProduct] = useState<InventoryLookupResult | null>(null);
+  const [selectedUnitCode, setSelectedUnitCode] = useState<string | null>(null);
+  const [selectedVariantCode, setSelectedVariantCode] = useState<string | null>(null);
   const [isOfflineResult, setIsOfflineResult] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -38,6 +40,8 @@ export default function BarcodeScannerScreen() {
       const res = await mobileApi.lookupProduct(clean);
       if (res.ok && res.data) {
         setProduct(res.data);
+        setSelectedUnitCode(res.data.sellingUnits?.find((unit) => unit.isDefault)?.unitOfMeasureCode ?? null);
+        setSelectedVariantCode(null);
         setIsOfflineResult(Boolean(res.isOffline));
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setCameraActive(false); // Close camera upon successful scan
@@ -239,7 +243,7 @@ export default function BarcodeScannerScreen() {
               <View style={styles.uomSection}>
                 <Text style={styles.sectionHeader}>Alternate Selling Units</Text>
                 {product.sellingUnits.map((u, i) => (
-                  <View key={i} style={styles.uomRow}>
+                  <TouchableOpacity key={i} style={[styles.uomRow, selectedUnitCode === u.unitOfMeasureCode && styles.optionSelected]} onPress={() => setSelectedUnitCode(u.unitOfMeasureCode)}>
                     <Text style={styles.uomName}>
                       {u.unitOfMeasureName} ({u.unitOfMeasureCode})
                     </Text>
@@ -249,10 +253,12 @@ export default function BarcodeScannerScreen() {
                     <Text style={styles.uomPrice}>
                       GHS {u.unitPrice.toFixed(2)}
                     </Text>
-                  </View>
+                  </TouchableOpacity>
                 ))}
               </View>
             )}
+
+            {product.variants && product.variants.length > 0 && <View style={styles.uomSection}><Text style={styles.sectionHeader}>Product Variant</Text>{product.variants.map((variant) => <TouchableOpacity key={variant.id} style={[styles.uomRow, selectedVariantCode === variant.code && styles.optionSelected]} onPress={() => setSelectedVariantCode(variant.code)}><View><Text style={styles.uomName}>{variant.name}</Text><Text style={styles.uomConversion}>{variant.attributes.map((a) => `${a.name}: ${a.value}`).join(" · ")}</Text></View><Text style={styles.uomPrice}>GHS {variant.unitPrice.toFixed(2)}</Text></TouchableOpacity>)}</View>}
 
             {/* Location Breakdown if present */}
             {product.locations && product.locations.length > 0 && (
@@ -272,6 +278,28 @@ export default function BarcodeScannerScreen() {
 
             {/* Quick Actions */}
             <View style={styles.cardActions}>
+              <TouchableOpacity
+                style={styles.saleActionButton}
+                disabled={product.quantityOnHand <= 0}
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  router.push({ pathname: "/cart", params: {
+                    addProductId: product.productId,
+                    addProductCode: product.productCode,
+                    addProductName: product.productName,
+                    addUnitPrice: String(product.sellingUnits?.find((unit) => unit.unitOfMeasureCode === selectedUnitCode)?.unitPrice ?? product.variants?.find((variant) => variant.code === selectedVariantCode)?.unitPrice ?? product.unitPrice),
+                    addUnitOfMeasure: product.sellingUnits?.find((unit) => unit.unitOfMeasureCode === selectedUnitCode)?.unitOfMeasureCode ?? product.unitOfMeasure,
+                    addConversionFactor: String(product.sellingUnits?.find((unit) => unit.unitOfMeasureCode === selectedUnitCode)?.conversionFactor ?? 1),
+                    addVariantCode: selectedVariantCode ?? "",
+                    addTaxRate: String(product.taxRatePercent),
+                    addTaxInclusive: product.isTaxInclusive ? "true" : "false",
+                    addStock: String(product.quantityOnHand)
+                  }});
+                }}
+              >
+                <Ionicons name="cart-outline" size={18} color="#ffffff" />
+                <Text style={styles.actionButtonText}>{product.quantityOnHand > 0 ? "Add to Sales POS" : "Out of Stock"}</Text>
+              </TouchableOpacity>
               <TouchableOpacity
                 style={styles.countActionButton}
                 onPress={() => {
@@ -537,6 +565,7 @@ const styles = StyleSheet.create({
     color: mobileTheme.softText,
     fontWeight: "600"
   },
+  optionSelected: { backgroundColor: mobileTheme.primaryLight, borderRadius: 8, paddingHorizontal: 8 },
   uomSection: {
     borderTopWidth: 1,
     borderTopColor: mobileTheme.borderColor,
@@ -596,7 +625,12 @@ const styles = StyleSheet.create({
     color: mobileTheme.textColor
   },
   cardActions: {
-    marginTop: 4
+    marginTop: 4,
+    gap: 10
+  },
+  saleActionButton: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    backgroundColor: mobileTheme.accent, paddingVertical: 12, borderRadius: mobileTheme.radiusMedium, gap: 7
   },
   countActionButton: {
     flexDirection: "row",

@@ -1,8 +1,13 @@
-import React, { Component, type ReactNode } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from "react-native";
-import { Stack } from "expo-router";
+import React, { Component, useEffect, useState, type ReactNode } from "react";
+import { AppState, View, Text, TouchableOpacity, StyleSheet, ScrollView } from "react-native";
+import { Stack, router, useSegments } from "expo-router";
+import { mobileStorage } from "../lib/mobile-storage";
+import type { MobileUserSession } from "../lib/mobile-api";
+import { canOpenMobileRoute } from "../lib/mobile-access";
 import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
 import { mobileTheme } from "../lib/mobile-theme";
+import * as LocalAuthentication from "expo-local-authentication";
 
 const LOG_TAG = "[flash-erp:mobile]";
 
@@ -117,11 +122,54 @@ class FatalErrorBoundary extends Component<{ children: ReactNode }, { error: Err
   }
 }
 
+
+
+function BiometricLock({ children }: { children: ReactNode }) {
+  const [locked, setLocked] = useState(false);
+  const [enabled, setEnabled] = useState(false);
+  const backgroundedAt = React.useRef<number | null>(null);
+  useEffect(() => {
+    void mobileStorage.getBiometricLockEnabled().then(setEnabled);
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "background" || state === "inactive") backgroundedAt.current = Date.now();
+      if (state === "active" && enabled && backgroundedAt.current && Date.now() - backgroundedAt.current >= 5 * 60_000) setLocked(true);
+    });
+    return () => subscription.remove();
+  }, [enabled]);
+  const unlock = async () => {
+    const result = await LocalAuthentication.authenticateAsync({ promptMessage: "Unlock Flash ERP", cancelLabel: "Cancel", disableDeviceFallback: false });
+    if (result.success) { backgroundedAt.current = null; setLocked(false); }
+  };
+  if (locked) return <View style={styles.lockContainer}><View style={styles.lockIcon}><Ionicons name="lock-closed" size={34} color="#fff" /></View><Text style={styles.lockTitle}>Flash ERP is locked</Text><Text style={styles.lockHint}>Authenticate to continue without losing your current work.</Text><TouchableOpacity style={styles.fatalButton} onPress={unlock}><Text style={styles.fatalButtonText}>Unlock</Text></TouchableOpacity></View>;
+  return <>{children}</>;
+}
+
+function SessionRouteGuard({ children }: { children: ReactNode }) {
+  const segments = useSegments();
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void mobileStorage.getUserSnapshot<MobileUserSession>().then((session) => {
+      if (!active) return;
+      const route = String(segments[0] ?? "");
+      if (!session && route !== "login") router.replace("/login");
+      else if (session && route === "login") router.replace("/");
+      else if (session && route && route !== "login" && !canOpenMobileRoute(session, route)) router.replace("/");
+      setReady(true);
+    });
+    return () => { active = false; };
+  }, [segments]);
+  if (!ready) return <View style={{ flex: 1, backgroundColor: mobileTheme.screenBackground }} />;
+  return <>{children}</>;
+}
+
 export default function RootLayout() {
   return (
     <>
       <StatusBar style="light" />
       <FatalErrorBoundary>
+        <BiometricLock>
+        <SessionRouteGuard>
         <Stack
           screenOptions={{
             headerShown: false,
@@ -140,14 +188,23 @@ export default function RootLayout() {
           <Stack.Screen name="approvals" options={{ title: "Manager Approvals" }} />
           <Stack.Screen name="self-service" options={{ title: "HR & Self-Service" }} />
           <Stack.Screen name="outbox" options={{ title: "Outbox Queue" }} />
+          <Stack.Screen name="account" options={{ title: "My Account" }} />
+          <Stack.Screen name="receipt" options={{ title: "Sale Receipt" }} />
+          <Stack.Screen name="returns" options={{ title: "Returns" }} />
           <Stack.Screen name="login" options={{ title: "Sign In", presentation: "modal" }} />
         </Stack>
+        </SessionRouteGuard>
+        </BiometricLock>
       </FatalErrorBoundary>
     </>
   );
 }
 
 const styles = StyleSheet.create({
+  lockContainer: { flex: 1, alignItems: "center", justifyContent: "center", padding: 28, gap: 14, backgroundColor: mobileTheme.screenBackground },
+  lockIcon: { width: 72, height: 72, borderRadius: 24, alignItems: "center", justifyContent: "center", backgroundColor: mobileTheme.primary },
+  lockTitle: { fontSize: 22, fontWeight: "900", color: mobileTheme.textColor },
+  lockHint: { textAlign: "center", color: mobileTheme.mutedText, marginBottom: 8 },
   fatalContainer: {
     flex: 1,
     backgroundColor: mobileTheme.neutralDark,

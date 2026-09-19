@@ -8,6 +8,7 @@
  */
 
 import { mobileStorage, type OperationMode } from "./mobile-storage";
+import * as FileSystem from "expo-file-system/legacy";
 import {
   mobileOfflineDb,
   type CachedProduct,
@@ -25,18 +26,44 @@ export interface MobileUserSession {
   homeStoreName: string | null;
   roleCodes: string[];
   permissionCodes: string[];
+  isOnlineStoreUser?: boolean;
   expiresAt: string;
 }
 
+
+
+export interface MobileCustomer {
+  id: string;
+  customerNo: string;
+  fullName: string;
+  phone: string | null;
+  email: string | null;
+  customerType: string;
+}
+
+export interface MobileTenderMethod {
+  id: string;
+  code: string;
+  name: string;
+  paymentMethod: string;
+  requiresReference: boolean;
+  allowChange: boolean;
+  sortOrder: number;
+}
+
 export interface InventoryLookupResult {
+  productId: string;
   productCode: string;
   productName: string;
   barcode: string | null;
   unitPrice: number;
   unitOfMeasure: string;
+  taxRatePercent: number;
+  isTaxInclusive: boolean;
   quantityOnHand: number;
   storeCode?: string;
   locations?: Array<{ locationCode: string; locationName: string; quantity: number }>;
+  variants?: Array<{ id: string; code: string; name: string; barcode: string | null; unitPrice: number; quantityOnHand: number; attributes: Array<{ name: string; value: string }> }>;
   sellingUnits?: Array<{
     unitOfMeasureCode: string;
     unitOfMeasureName: string;
@@ -45,6 +72,12 @@ export interface InventoryLookupResult {
     barcode: string;
     isDefault: boolean;
   }>;
+}
+
+function readCachedProductOptions(product: CachedProduct): Pick<InventoryLookupResult, "sellingUnits" | "variants"> {
+  if (!product.sellingUnitsJson) return {};
+  try { const parsed = JSON.parse(product.sellingUnitsJson); return { sellingUnits: Array.isArray(parsed?.sellingUnits) ? parsed.sellingUnits : undefined, variants: Array.isArray(parsed?.variants) ? parsed.variants : undefined }; }
+  catch { return {}; }
 }
 
 export interface ApiResponse<T = unknown> {
@@ -144,9 +177,10 @@ export const mobileApi = {
   async fetchSession(): Promise<ApiResponse<MobileUserSession>> {
     try {
       const { data } = await request<any>("/api/auth/session");
-      if (data?.session) {
-        await mobileStorage.setUserSnapshot(data.session);
-        return { ok: true, data: data.session };
+      const session = data?.session ?? (data?.userId ? data : null);
+      if (session) {
+        await mobileStorage.setUserSnapshot(session);
+        return { ok: true, data: session };
       }
       return { ok: false, error: "No active session." };
     } catch (error: any) {
@@ -159,6 +193,28 @@ export const mobileApi = {
     }
   },
 
+  async fetchProfile(): Promise<ApiResponse<{ displayName: string; email: string | null; loginId: string }>> {
+    try { const { data } = await request<any>("/api/auth/profile"); return { ok: true, data: data.profile }; }
+    catch (error: any) { return { ok: false, error: error.message || "Could not load your profile." }; }
+  },
+
+  async updateProfile(input: { displayName: string; email: string | null }): Promise<ApiResponse> {
+    try { const { data } = await request("/api/auth/profile", { method: "PATCH", body: JSON.stringify(input) }); return { ok: true, data, message: "Profile updated successfully." }; }
+    catch (error: any) { return { ok: false, error: error.message || "Could not update your profile." }; }
+  },
+
+  async changePassword(input: { currentPassword: string; nextPassword: string }): Promise<ApiResponse> {
+    try {
+      const { data } = await request("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify(input)
+      });
+      return { ok: true, data, message: "Password updated successfully." };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not update your password." };
+    }
+  },
+
   async signOut(): Promise<void> {
     try {
       await request("/api/auth/sign-out", { method: "POST" });
@@ -166,6 +222,33 @@ export const mobileApi = {
       // Proceed with local logout regardless of network
     }
     await mobileStorage.clearAllSession();
+  },
+
+  async searchCustomers(query = ""): Promise<ApiResponse<MobileCustomer[]>> {
+    try {
+      const { data } = await request<any>(`/api/online-store/customers?query=${encodeURIComponent(query.trim())}`);
+      return { ok: true, data: Array.isArray(data?.customers) ? data.customers : [] };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Customer search failed." };
+    }
+  },
+
+  async fetchTenderMethods(): Promise<ApiResponse<MobileTenderMethod[]>> {
+    try {
+      const { data } = await request<any>("/api/online-store/tender-methods");
+      const tenders = Array.isArray(data?.tenders) ? data.tenders as MobileTenderMethod[] : [];
+      await mobileStorage.setTenderMethods(tenders);
+      return { ok: true, data: tenders };
+    } catch (error: any) {
+      const cached = await mobileStorage.getTenderMethods<MobileTenderMethod[]>();
+      if (cached?.length) return { ok: true, data: cached, isOffline: true };
+      return { ok: false, error: error.message || "Tender settings are unavailable." };
+    }
+  },
+
+  async fetchDashboardAnalytics(): Promise<ApiResponse<{ salesTotal: number; transactionCount: number; averageBasket: number; pendingApprovals: number; trend: Array<{ date: string; total: number }>; topProducts: Array<{ productCode: string; productName: string; quantity: number; sales: number }>; generatedAt: string }>> {
+    try { const { data } = await request<any>("/api/mobile/dashboard"); return { ok: true, data }; }
+    catch (error: any) { return { ok: false, error: error.message || "Dashboard analytics are unavailable." }; }
   },
 
   // 3. Resilient Product & Barcode Lookup
@@ -182,13 +265,17 @@ export const mobileApi = {
         return {
           ok: true,
           data: {
+            productId: cached.id,
             productCode: cached.productCode,
             productName: cached.productName,
             barcode: cached.barcode,
             unitPrice: cached.unitPrice,
             unitOfMeasure: cached.unitOfMeasure,
+            taxRatePercent: cached.taxRatePercent ?? 0,
+            isTaxInclusive: cached.isTaxInclusive ?? false,
             quantityOnHand: cached.stockQuantity,
-            storeCode: cached.storeCode || undefined
+            storeCode: cached.storeCode || undefined,
+            ...readCachedProductOptions(cached)
           },
           isOffline: true
         };
@@ -198,23 +285,24 @@ export const mobileApi = {
 
     // Attempt Online Lookup via Enterprise Web /api/online-store/inventory-lookup
     try {
-      const { data } = await request<any>("/api/online-store/inventory-lookup", {
-        method: "POST",
-        body: JSON.stringify({ query: clean, limit: 1 })
-      });
+      const { data } = await request<any>(`/api/catalog/products?limit=1&query=${encodeURIComponent(clean)}`);
 
-      const row = Array.isArray(data?.products) ? data.products[0] : (data?.product ?? null);
+      const row = Array.isArray(data?.data) ? data.data[0] : null;
       if (row) {
         const item: InventoryLookupResult = {
+          productId: row.productId || row.id,
           productCode: row.productCode || row.code,
           productName: row.productName || row.name,
           barcode: row.barcode || null,
           unitPrice: Number(row.unitPrice || row.price || 0),
           unitOfMeasure: row.unitOfMeasure || row.uom || "EA",
+          taxRatePercent: Number(row.taxRatePercent || 0),
+          isTaxInclusive: Boolean(row.isTaxInclusive),
           quantityOnHand: Number(row.quantityOnHand || row.stock || 0),
           storeCode: row.storeCode,
           locations: row.locations,
-          sellingUnits: row.sellingUnits
+          sellingUnits: row.sellingUnits,
+          variants: row.variants
         };
 
         // Update local SQLite cache in background for future offline use
@@ -226,8 +314,11 @@ export const mobileApi = {
             barcode: item.barcode || "",
             unitPrice: item.unitPrice,
             unitOfMeasure: item.unitOfMeasure,
+            taxRatePercent: item.taxRatePercent,
+            isTaxInclusive: item.isTaxInclusive,
             stockQuantity: item.quantityOnHand,
             storeCode: item.storeCode,
+            sellingUnitsJson: JSON.stringify({ sellingUnits: item.sellingUnits ?? [], variants: item.variants ?? [] }),
             updatedAt: new Date().toISOString()
           }
         ]).catch(() => {});
@@ -247,11 +338,14 @@ export const mobileApi = {
       return {
         ok: true,
         data: {
+          productId: cached.id,
           productCode: cached.productCode,
           productName: cached.productName,
           barcode: cached.barcode,
           unitPrice: cached.unitPrice,
           unitOfMeasure: cached.unitOfMeasure,
+          taxRatePercent: cached.taxRatePercent ?? 0,
+          isTaxInclusive: cached.isTaxInclusive ?? false,
           quantityOnHand: cached.stockQuantity,
           storeCode: cached.storeCode || undefined
         },
@@ -263,23 +357,39 @@ export const mobileApi = {
   },
 
   // 4. Download / Refresh Full Catalog into Offline SQLite
-  async syncCatalogToLocalDb(): Promise<{ count: number; error?: string }> {
+  async syncCatalogToLocalDb(onProgress?: (downloaded: number, total: number) => void): Promise<{ count: number; error?: string }> {
     try {
-      const { data } = await request<any>("/api/catalog/products?limit=500");
-      const list = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
-      const formatted: CachedProduct[] = list.map((p: any) => ({
-        id: p.id || p.productCode,
-        productCode: p.productCode || p.code,
-        productName: p.productName || p.name,
-        barcode: p.barcode || "",
-        unitPrice: Number(p.unitPrice || 0),
-        unitOfMeasure: p.unitOfMeasure || "EA",
-        stockQuantity: Number(p.quantityOnHand || 0),
-        updatedAt: new Date().toISOString()
-      }));
-
-      await mobileOfflineDb.saveProducts(formatted);
-      return { count: formatted.length };
+      let page = 1;
+      let count = 0;
+      let hasMore = true;
+      const validProductCodes: string[] = [];
+      while (hasMore) {
+        const { data } = await request<any>(`/api/catalog/products?limit=100&page=${page}`);
+        const list = Array.isArray(data?.data) ? data.data : [];
+        const formatted: CachedProduct[] = list.map((p: any) => ({
+          id: p.id || p.productCode,
+          productCode: p.productCode || p.code,
+          productName: p.productName || p.name,
+          barcode: p.barcode || "",
+          unitPrice: Number(p.unitPrice || 0),
+          unitOfMeasure: p.unitOfMeasure || "EA",
+          taxRatePercent: Number(p.taxRatePercent || 0),
+          isTaxInclusive: Boolean(p.isTaxInclusive),
+          sellingUnitsJson: JSON.stringify({ sellingUnits: p.sellingUnits ?? [], variants: p.variants ?? [] }),
+          stockQuantity: Number(p.quantityOnHand || 0),
+          storeCode: p.storeCode,
+          updatedAt: new Date().toISOString()
+        }));
+        await mobileOfflineDb.saveProducts(formatted);
+        validProductCodes.push(...formatted.map((product) => product.productCode));
+        count += formatted.length;
+        onProgress?.(count, Number(data?.total ?? count));
+        hasMore = Boolean(data?.hasMore) && formatted.length > 0;
+        page += 1;
+      }
+      await mobileOfflineDb.pruneProducts(validProductCodes);
+      await mobileStorage.setCatalogSyncedAt(new Date().toISOString());
+      return { count };
     } catch (err: any) {
       return { count: 0, error: err.message };
     }
@@ -401,6 +511,18 @@ export const mobileApi = {
       await mobileOfflineDb.markMutationStatus(mutation.id, "SYNCING");
       try {
         const payload = JSON.parse(mutation.payloadJson);
+        if (mutation.entityType === "EXPENSE_CLAIM" && typeof payload.receiptUrl === "string" && !payload.receiptUrl.startsWith("/api/")) {
+          const upload = await this.uploadExpenseReceipt(payload.receiptUrl);
+          if (!upload.ok || !upload.data?.url) throw new Error(upload.error || "Expense evidence upload failed.");
+          payload.receiptUrl = upload.data.url;
+        }
+        if (mutation.entityType === "LEAVE_REQUEST" && typeof payload.attachmentUrl === "string" && !payload.attachmentUrl.startsWith("/api/")) {
+          const upload = await this.uploadLeaveDocument(payload.attachmentUrl);
+          if (!upload.ok || !upload.data?.url) throw new Error(upload.error || "Leave evidence upload failed.");
+          payload.attachmentUrl = upload.data.url;
+          payload.attachmentFileName = upload.data.fileName;
+          payload.attachmentMimeType = "image/jpeg";
+        }
         await request(mutation.endpoint, {
           method: "POST",
           body: JSON.stringify(payload)
@@ -530,6 +652,26 @@ export const mobileApi = {
   },
 
   // 10. Held Sales & Layaway Orders
+  async searchReceipts(query: string): Promise<ApiResponse<any[]>> {
+    try { const { data } = await request<any>(`/api/online-store/receipts?query=${encodeURIComponent(query.trim())}`); return { ok: true, data: Array.isArray(data?.receipts) ? data.receipts : [] }; }
+    catch (error: any) { return { ok: false, error: error.message || "Receipt search failed." }; }
+  },
+
+  async submitCorrection(input: { sourceTransactionNo: string; correctionType: "RETURN" | "EXCHANGE"; returnLines: Array<{ sourceLineId: string; quantity: number }>; saleLines?: Array<{ productId: string; quantity: number; unitPrice?: number; sellingUnitOfMeasure?: string; productVariantCode?: string | null }>; payments: any[]; note: string }): Promise<ApiResponse<any>> {
+    try { const { data } = await request<any>("/api/online-store/corrections", { method: "POST", body: JSON.stringify(input) }); return { ok: true, data, message: data?.message || `${input.correctionType === "EXCHANGE" ? "Exchange" : "Return"} completed.` }; }
+    catch (error: any) { return { ok: false, error: error.message || "Return or exchange failed." }; }
+  },
+
+  async fetchHeldSales(): Promise<ApiResponse<Array<{
+    transactionId: string; transactionNo: string; customerId: string | null; customerName: string; totalAmount: number; updatedAt: string;
+    lines: Array<{ productId: string; productCode: string; productName: string; quantity: number; unitPrice: number; taxAmount: number; lineTotal: number; sellingUnitOfMeasure: string }>;
+  }>>> {
+    try {
+      const { data } = await request<any>("/api/online-store/held-sales");
+      return { ok: true, data: Array.isArray(data?.heldSales) ? data.heldSales : [] };
+    } catch (error: any) { return { ok: false, error: error.message || "Could not load held sales." }; }
+  },
+
   async holdSale(input: {
     lines: any[];
     customerId?: string;
@@ -638,9 +780,19 @@ export const mobileApi = {
   },
 
   // 12. HR Self-Service (Attendance, Expense Claims, Leave)
+  async fetchMyAttendance(): Promise<ApiResponse<{ checkInAt: string | null; checkOutAt: string | null; attendanceStatus: string } | null>> {
+    try {
+      const { data } = await request<any>("/api/human-resources/attendance?self=true");
+      return { ok: true, data: data?.attendance ?? null };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not load today's attendance." };
+    }
+  },
+
   async submitAttendance(input: {
     employeeId?: string;
-    checkInTime: string;
+    checkInTime?: string;
+    checkOutTime?: string;
     locationNote?: string;
   }): Promise<ApiResponse> {
     try {
@@ -648,10 +800,29 @@ export const mobileApi = {
         method: "POST",
         body: JSON.stringify(input)
       });
-      return { ok: true, data, message: "Attendance clocked in successfully." };
+      return { ok: true, data, message: input.checkOutTime ? "Attendance clocked out successfully." : "Attendance clocked in successfully." };
     } catch (err: any) {
       return { ok: false, error: err.message };
     }
+  },
+
+  async uploadExpenseReceipt(uri: string): Promise<ApiResponse<{ url: string }>> {
+    try {
+      const baseUrl = await mobileStorage.getServerUrl();
+      const token = await mobileStorage.getAuthToken();
+      const form = new FormData();
+      form.append("file", { uri, name: `receipt-${Date.now()}.jpg`, type: "image/jpeg" } as any);
+      const response = await fetch(`${baseUrl}/api/human-resources/expense-claims/attachments`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.message || `Receipt upload failed (${response.status}).`);
+      if (uri.includes("pending-evidence/")) await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      return { ok: true, data };
+    } catch (error: any) { return { ok: false, error: error.message || "Receipt upload failed." }; }
+  },
+
+  async fetchMyExpenseClaims(): Promise<ApiResponse<Array<{ id: string; claimNo: string; claimDate: string; purpose: string; totalAmount: number; currencyCode: string; status: string; category: string | null; evidenceUrl: string | null }>>> {
+    try { const { data } = await request<any>("/api/human-resources/expense-claims"); return { ok: true, data: Array.isArray(data?.claims) ? data.claims : [] }; }
+    catch (error: any) { return { ok: false, error: error.message || "Could not load expense claims." }; }
   },
 
   async submitExpenseClaim(input: {
@@ -674,10 +845,13 @@ export const mobileApi = {
       return { ok: true, isOffline: true, queuedMutationId: mutation.id, message: "Expense claim queued offline." };
     }
     try {
-      const { data } = await request(endpoint, {
-        method: "POST",
-        body: JSON.stringify(input)
-      });
+      const onlineInput = { ...input };
+      if (onlineInput.receiptUrl && !onlineInput.receiptUrl.startsWith("/api/")) {
+        const upload = await this.uploadExpenseReceipt(onlineInput.receiptUrl);
+        if (!upload.ok || !upload.data?.url) throw new Error(upload.error || "Receipt upload failed.");
+        onlineInput.receiptUrl = upload.data.url;
+      }
+      const { data } = await request(endpoint, { method: "POST", body: JSON.stringify(onlineInput) });
       return { ok: true, data, message: "Expense claim submitted for approval." };
     } catch (err: any) {
       if (mode === "ONLINE") return { ok: false, error: err.message };
@@ -691,20 +865,57 @@ export const mobileApi = {
     }
   },
 
+  async fetchMyLeaveWorkspace(): Promise<ApiResponse<{
+    year: number;
+    leaveTypes: Array<{ id: string; code: string; name: string; isPaid: boolean; requiresAttachment: boolean; availableDays: number }>;
+    requests: Array<{ id: string; requestNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; reason: string | null; status: string; attachmentUrl?: string | null }>;
+  }>> {
+    try {
+      const { data } = await request<any>("/api/human-resources/leave/requests");
+      return { ok: true, data };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not load your leave information." };
+    }
+  },
+
+  async uploadLeaveDocument(uri: string): Promise<ApiResponse<{ url: string; fileName?: string }>> {
+    try { const baseUrl = await mobileStorage.getServerUrl(); const token = await mobileStorage.getAuthToken(); const form = new FormData(); form.append("file", { uri, name: `leave-support-${Date.now()}.jpg`, type: "image/jpeg" } as any); const response = await fetch(`${baseUrl}/api/human-resources/leave/requests/attachments`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form }); const data = await response.json(); if (!response.ok) throw new Error(data?.message || "Leave document upload failed."); if (uri.includes("pending-evidence/")) await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {}); return { ok: true, data }; }
+    catch (error: any) { return { ok: false, error: error.message || "Leave document upload failed." }; }
+  },
+
+  async cancelLeaveRequest(leaveRequestId: string, reason: string): Promise<ApiResponse> {
+    try { const { data } = await request("/api/human-resources/leave/requests", { method: "PATCH", body: JSON.stringify({ leaveRequestId, reason }) }); return { ok: true, data, message: "Leave application cancelled." }; }
+    catch (error: any) { return { ok: false, error: error.message || "Could not cancel the leave application." }; }
+  },
+
   async submitLeaveRequest(input: {
     leaveTypeId: string;
     startDate: string;
     endDate: string;
     reason: string;
+    attachmentUrl?: string;
+    attachmentFileName?: string;
+    attachmentMimeType?: string;
   }): Promise<ApiResponse> {
+    const endpoint = "/api/human-resources/leave/requests";
+    const mode = await mobileStorage.getOperationMode();
+    if (mode === "OFFLINE") {
+      const mutation = await mobileOfflineDb.enqueueMutation({ entityType: "LEAVE_REQUEST", action: "POST_LEAVE_REQUEST", endpoint, payload: input });
+      return { ok: true, isOffline: true, queuedMutationId: mutation.id, message: "Leave request and evidence queued offline." };
+    }
     try {
-      const { data } = await request("/api/human-resources/leave/requests", {
-        method: "POST",
-        body: JSON.stringify(input)
-      });
+      const onlineInput = { ...input };
+      if (onlineInput.attachmentUrl && !onlineInput.attachmentUrl.startsWith("/api/")) {
+        const upload = await this.uploadLeaveDocument(onlineInput.attachmentUrl);
+        if (!upload.ok || !upload.data?.url) throw new Error(upload.error || "Leave document upload failed.");
+        onlineInput.attachmentUrl = upload.data.url; onlineInput.attachmentFileName = upload.data.fileName; onlineInput.attachmentMimeType = "image/jpeg";
+      }
+      const { data } = await request(endpoint, { method: "POST", body: JSON.stringify(onlineInput) });
       return { ok: true, data, message: "Leave request submitted." };
     } catch (err: any) {
-      return { ok: false, error: err.message };
+      if (mode === "ONLINE") return { ok: false, error: err.message };
+      const mutation = await mobileOfflineDb.enqueueMutation({ entityType: "LEAVE_REQUEST", action: "POST_LEAVE_REQUEST", endpoint, payload: input });
+      return { ok: true, isOffline: true, queuedMutationId: mutation.id, message: "Leave request queued after network failure." };
     }
   }
 };
