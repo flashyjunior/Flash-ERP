@@ -56,6 +56,13 @@ const test = base.extend<{ backend: Backend; runtimeErrors: string[] }>({
         case "/api/human-resources/attendance": data = { attendance: [] }; break;
         case "/api/human-resources/expense-claims": data = { claims: [] }; break;
         case "/api/human-resources/leave/requests": data = { year: 2026, leaveTypes: [], requests: [] }; break;
+        case "/api/mobile/approvals": data = {
+          leave: [{ id: "leave-1", requestNo: "LV-2026-001", employeeName: "Ama Serwaa", employeeNo: "EMP-014", leaveTypeName: "Annual Leave", startDate: "2026-09-24", endDate: "2026-09-26", requestedDays: 3, reason: "Family event travel", status: "SUBMITTED", submittedAt: new Date().toISOString() }],
+          expenses: [{ id: "expense-1", claimNo: "EXP-2026-011", employeeName: "Kwame Mensah", employeeNo: "EMP-022", claimDate: "2026-09-18", purpose: "Fuel for Tema delivery run", totalAmount: 450, currencyCode: "GHS", status: "SUBMITTED", lineCount: 2, submittedAt: new Date().toISOString() }],
+          pendingCount: 2,
+        }; break;
+        case "/api/human-resources/leave/requests/decision": data = { message: "Leave request approved." }; break;
+        case "/api/human-resources/expense-claims/actions": data = { message: "Expense claim approved." }; break;
         default: throw new Error(`Missing test HTTP fixture: ${route.request().method()} ${url.pathname}`);
       }
       await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(data) });
@@ -273,13 +280,28 @@ test("network failure queues a stock count for later sync", async ({ page, backe
   await expect(page.getByText("STOCK_COUNT", { exact: true })).toBeVisible();
 });
 
-test("approvals do not display fabricated transactions or success controls", async ({ page }) => {
+test("approvals show the live HQ queue and record real decisions", async ({ page, backend }) => {
   await login(page);
   await dashboard(page);
   await page.getByText("Approvals & KPIs", { exact: true }).click();
-  await expect(page.getByText("Use Enterprise Web for approvals", { exact: true })).toBeVisible();
-  await expect(page.getByText("Authorize", { exact: true })).not.toBeVisible();
+  await expect(page.getByText("Manager Approvals & KPIs", { exact: true })).toBeVisible();
+  // Queue content comes from HQ, never from hardcoded demo values.
+  await expect(page.getByText("LV-2026-001", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ama Serwaa · EMP-014", { exact: true })).toBeVisible();
   await expect(page.getByText("GHS 48,250", { exact: true })).not.toBeVisible();
+  await expect(page.getByText("Authorize", { exact: true })).not.toBeVisible();
+  // Two-tap confirmation writes the decision to HQ and removes the row.
+  await page.getByText("Review & Decide", { exact: true }).click();
+  await page.getByText("Approve", { exact: true }).click();
+  await page.getByText("Confirm Approve", { exact: true }).click();
+  await expect(page.getByText("LV-2026-001 approved at HQ.", { exact: true })).toBeVisible();
+  await expect(page.getByText("LV-2026-001", { exact: true })).not.toBeVisible();
+  expect(backend.requests).toContain("/api/mobile/approvals");
+  expect(backend.requests).toContain("/api/human-resources/leave/requests/decision");
+  // Expense queue renders live HQ amounts.
+  await page.getByText("Expenses (1)", { exact: true }).click();
+  await expect(page.getByText("EXP-2026-011", { exact: true })).toBeVisible();
+  await expect(page.getByText("GHS 450.00", { exact: true })).toBeVisible();
 });
 
 

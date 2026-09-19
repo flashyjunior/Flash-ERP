@@ -76,12 +76,16 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
 
   const handleTriggerSync = async () => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    if (mode === "OFFLINE") {
+      setSyncMessage("Outbox sync needs a live HQ connection. Switch to AUTO or ONLINE above, then sync.");
+      return;
+    }
     setSyncing(true);
     setSyncMessage("Syncing outbox to Enterprise HQ...");
     try {
       const res = await mobileApi.drainOutboxQueue();
       if (res.failed > 0) {
-        setSyncMessage(`Synced ${res.synced} mutations, ${res.failed} failed.`);
+        setSyncMessage(`Synced ${res.synced}, ${res.failed} failed. First error: ${res.errors[0] ?? "unknown"}. Full details: My Account › Diagnostics.`);
       } else {
         setSyncMessage(`Successfully synced all ${res.synced} mutations!`);
       }
@@ -97,6 +101,10 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
   };
 
   const handleDownloadCatalog = async () => {
+    if (mode === "OFFLINE") {
+      setSyncMessage("Catalog download needs a live HQ connection. Switch to AUTO or ONLINE above, then download.");
+      return;
+    }
     setSyncing(true);
     setSyncMessage("Downloading master product catalog...");
     try {

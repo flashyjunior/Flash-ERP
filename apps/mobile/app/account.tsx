@@ -3,8 +3,10 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
+  Share,
   StyleSheet,
   Switch,
   Text,
@@ -38,6 +40,10 @@ export default function AccountScreen() {
   const [showPasswords, setShowPasswords] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [diagCount, setDiagCount] = useState(0);
+  const [diagVisible, setDiagVisible] = useState(false);
+  const [diagText, setDiagText] = useState("");
+  const [diagBusy, setDiagBusy] = useState(false);
 
   useEffect(() => {
     void Promise.all([
@@ -49,6 +55,7 @@ export default function AccountScreen() {
       void mobileStorage.getLastReceipt().then((receipt) => setHasLastReceipt(Boolean(receipt)));
       void Promise.all([mobileStorage.getBiometricLockEnabled(), LocalAuthentication.hasHardwareAsync(), LocalAuthentication.isEnrolledAsync()]).then(([enabled, hardware, enrolled]) => { setBiometricEnabled(enabled); setBiometricAvailable(hardware && enrolled); });
       void mobileApi.fetchProfile().then((response) => { if (response.ok && response.data) { setDisplayName(response.data.displayName); setEmail(response.data.email || ""); } });
+      void mobileApi.readErrorLog().then((entries) => setDiagCount(entries.length)).catch(() => setDiagCount(0));
     });
   }, []);
 
@@ -100,6 +107,35 @@ export default function AccountScreen() {
     Alert.alert("Clear offline catalog", "Downloaded products will be removed from this device. Your account and completed transactions are not deleted.", [
       { text: "Cancel", style: "cancel" },
       { text: "Clear Catalog", style: "destructive", onPress: async () => { await mobileOfflineDb.clearProducts(); setFeedback({ type: "success", message: "Offline product catalog cleared." }); } }
+    ]);
+  };
+
+  const openDiagnostics = async () => {
+    setDiagBusy(true);
+    try {
+      const exported = await mobileApi.exportErrorLog();
+      setDiagText(exported);
+      setDiagVisible(true);
+      const entries = await mobileApi.readErrorLog();
+      setDiagCount(entries.length);
+    } finally {
+      setDiagBusy(false);
+    }
+  };
+
+  const shareDiagnostics = async () => {
+    try {
+      const exported = diagText || (await mobileApi.exportErrorLog());
+      await Share.share({ message: exported, title: "Flash ERP diagnostics" });
+    } catch {
+      // Share sheet dismissed or unavailable.
+    }
+  };
+
+  const clearDiagnostics = () => {
+    Alert.alert("Clear diagnostics", "Remove all saved error details from this device?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Clear", style: "destructive", onPress: async () => { await mobileApi.clearErrorLog(); setDiagCount(0); setDiagText(""); setDiagVisible(false); } }
     ]);
   };
 
@@ -173,11 +209,58 @@ export default function AccountScreen() {
 
         <View style={styles.card}><Text style={styles.cardTitle}>Device storage</Text><Text style={styles.helper}>Remove downloaded catalog data when troubleshooting or changing shops. Pending transactions are always protected.</Text><TouchableOpacity style={styles.cacheButton} onPress={clearOfflineCatalog}><Ionicons name="trash-bin-outline" size={18} color={mobileTheme.warning} /><Text style={styles.cacheText}>Clear Offline Catalog</Text></TouchableOpacity></View>
 
+        <View style={styles.diagCard}>
+          <View style={styles.diagHeader}>
+            <Ionicons name="bug-outline" size={16} color={mobileTheme.mutedText} />
+            <Text style={styles.diagTitle}>Diagnostics</Text>
+            <Text style={styles.diagCount}>{diagCount} entr{diagCount === 1 ? "y" : "ies"}</Text>
+          </View>
+          <Text style={styles.diagHelper}>Connection and sync errors are recorded here (never your password). Open, then share with HQ support when asked.</Text>
+          <View style={styles.diagRow}>
+            <TouchableOpacity style={styles.diagButton} onPress={openDiagnostics} disabled={diagBusy}>
+              {diagBusy ? <ActivityIndicator size="small" color={mobileTheme.primary} /> : <><Ionicons name="document-text-outline" size={16} color={mobileTheme.primary} /><Text style={styles.diagButtonText}>View</Text></>}
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.diagButton} onPress={shareDiagnostics}>
+              <Ionicons name="share-social-outline" size={16} color={mobileTheme.primary} />
+              <Text style={styles.diagButtonText}>Share</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.diagButton} onPress={clearDiagnostics}>
+              <Ionicons name="trash-outline" size={16} color={mobileTheme.mutedText} />
+              <Text style={styles.diagButtonMuted}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
         <TouchableOpacity style={styles.logoutButton} onPress={signOut}>
           <Ionicons name="log-out-outline" size={20} color={mobileTheme.danger} />
           <Text style={styles.logoutText}>Sign Out</Text>
         </TouchableOpacity>
       </ScrollView>
+      <Modal visible={diagVisible} transparent animationType="slide" onRequestClose={() => setDiagVisible(false)}>
+        <View style={styles.diagBackdrop}>
+          <View style={styles.diagModal}>
+            <View style={styles.diagModalHeader}>
+              <Text style={styles.diagModalTitle}>Error details for HQ support</Text>
+              <TouchableOpacity onPress={() => setDiagVisible(false)}>
+                <Ionicons name="close-circle" size={24} color={mobileTheme.neutralMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.diagHelper}>Long-press the text to copy it, or use Share to send it (e.g. WhatsApp or email).</Text>
+            <ScrollView style={styles.diagScroll}>
+              <Text selectable style={styles.diagPre}>{diagText || "No errors recorded yet."}</Text>
+            </ScrollView>
+            <View style={styles.diagRow}>
+              <TouchableOpacity style={styles.diagPrimary} onPress={shareDiagnostics}>
+                <Ionicons name="share-social-outline" size={18} color="#fff" />
+                <Text style={styles.diagPrimaryText}>Share</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.diagButton} onPress={() => setDiagVisible(false)}>
+                <Text style={styles.diagButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -208,4 +291,21 @@ const styles = StyleSheet.create({
   securityRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   cacheButton: { height: 46, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: mobileTheme.radiusMedium, borderWidth: 1, borderColor: mobileTheme.warning }, cacheText: { color: mobileTheme.warning, fontWeight: "800" },
   logoutButton: { height: 52, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: mobileTheme.radiusMedium, borderWidth: 1, borderColor: mobileTheme.danger }, logoutText: { color: mobileTheme.danger, fontWeight: "900" },
+  diagCard: { padding: 14, gap: 8, borderRadius: mobileTheme.radiusMedium, borderWidth: 1, borderColor: mobileTheme.borderColor, backgroundColor: mobileTheme.surfaceBackground },
+  diagHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  diagTitle: { fontSize: 13, fontWeight: "800", color: mobileTheme.mutedText, flex: 1 },
+  diagCount: { fontSize: 11, fontWeight: "700", color: mobileTheme.mutedText },
+  diagHelper: { fontSize: 11, color: mobileTheme.mutedText, lineHeight: 16 },
+  diagRow: { flexDirection: "row", gap: 8, marginTop: 2 },
+  diagButton: { flex: 1, height: 40, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, borderRadius: mobileTheme.radiusSmall, borderWidth: 1, borderColor: mobileTheme.borderColor },
+  diagButtonText: { color: mobileTheme.primary, fontWeight: "800", fontSize: 13 },
+  diagButtonMuted: { color: mobileTheme.mutedText, fontWeight: "800", fontSize: 13 },
+  diagBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.7)", justifyContent: "flex-end" },
+  diagModal: { maxHeight: "86%", backgroundColor: mobileTheme.surfaceBackground, borderTopLeftRadius: mobileTheme.radiusLarge, borderTopRightRadius: mobileTheme.radiusLarge, padding: 18, gap: 10 },
+  diagModalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  diagModalTitle: { fontSize: 16, fontWeight: "800", color: mobileTheme.textColor },
+  diagScroll: { maxHeight: 420, borderWidth: 1, borderColor: mobileTheme.borderColor, borderRadius: mobileTheme.radiusSmall, backgroundColor: "#020617" },
+  diagPre: { padding: 12, color: "#cbd5e1", fontSize: 11, fontFamily: "monospace" },
+  diagPrimary: { flex: 1, height: 44, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, borderRadius: mobileTheme.radiusSmall, backgroundColor: mobileTheme.primary },
+  diagPrimaryText: { color: "#fff", fontWeight: "800", fontSize: 14 },
 });

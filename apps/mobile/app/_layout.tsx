@@ -1,5 +1,5 @@
 import React, { Component, useEffect, useState, type ReactNode } from "react";
-import { AppState, View, Text, TouchableOpacity, StyleSheet, ScrollView } from "react-native";
+import { AppState, View, Text, TouchableOpacity, StyleSheet, ScrollView, Share } from "react-native";
 import { Stack } from "expo-router";
 import { mobileStorage } from "../lib/mobile-storage";
 import { readMobileSession, type MobileUserSession } from "../lib/mobile-session";
@@ -110,6 +110,18 @@ class FatalErrorBoundary extends Component<{ children: ReactNode }, { error: Err
           </ScrollView>
           <TouchableOpacity style={styles.fatalButton} onPress={this.handleRetry}>
             <Text style={styles.fatalButtonText}>Try Again</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.fatalShareButton}
+            onPress={() => {
+              const error = this.state.error;
+              Share.share({
+                title: "Flash ERP fatal error",
+                message: `Flash ERP fatal error\n${error?.message ?? "Unknown error"}\n\n${error?.stack ?? ""}`.slice(0, 20000),
+              }).catch(() => {});
+            }}
+          >
+            <Text style={styles.fatalShareText}>Share Error Details with HQ IT</Text>
           </TouchableOpacity>
           <Text style={styles.fatalHint}>
             If this keeps happening, close the app fully, reopen it, and report the text above
@@ -280,6 +292,18 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 15,
     fontWeight: "800"
+  },
+  fatalShareButton: {
+    borderWidth: 1,
+    borderColor: "#475569",
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: "center"
+  },
+  fatalShareText: {
+    color: "#e2e8f0",
+    fontSize: 13,
+    fontWeight: "700"
   },
   fatalHint: {
     color: "#94a3b8",
