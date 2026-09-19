@@ -141,8 +141,13 @@ async function getNativeDb() {
     const SQLite = await import("expo-sqlite");
     if (SQLite && typeof SQLite.openDatabaseAsync === "function") {
       const db = await SQLite.openDatabaseAsync("flash_erp_mobile_offline.db");
+      try {
+        await db.execAsync(`PRAGMA journal_mode = WAL;`);
+      } catch (walError) {
+        // WAL is an optimization; some storage configurations reject it.
+        console.warn("[flash-erp:mobile] WAL journal mode unavailable; using default journal.", walError);
+      }
       await db.execAsync(`
-        PRAGMA journal_mode = WAL;
         CREATE TABLE IF NOT EXISTS cached_products (
           id TEXT PRIMARY KEY,
           product_code TEXT NOT NULL UNIQUE,
@@ -175,8 +180,9 @@ async function getNativeDb() {
       nativeDb = db;
       return nativeDb;
     }
-  } catch {
-    // Dynamic import or open failed; fallback to memory
+  } catch (error) {
+    // Dynamic import or open failed; fallback to memory.
+    console.warn("[flash-erp:mobile] SQLite unavailable; using in-memory storage.", error);
   }
   return null;
 }
@@ -193,36 +199,41 @@ export const mobileOfflineDb = {
       return;
     }
 
-    await db.withTransactionAsync(async () => {
-      for (const p of products) {
-        await db.runAsync(
-          `INSERT INTO cached_products 
-             (id, product_code, product_name, barcode, unit_price, unit_of_measure, selling_units_json, stock_quantity, store_code, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(product_code) DO UPDATE SET
-             product_name = excluded.product_name,
-             barcode = excluded.barcode,
-             unit_price = excluded.unit_price,
-             unit_of_measure = excluded.unit_of_measure,
-             selling_units_json = excluded.selling_units_json,
-             stock_quantity = excluded.stock_quantity,
-             store_code = excluded.store_code,
-             updated_at = excluded.updated_at;`,
-          [
-            p.id || p.productCode,
-            p.productCode,
-            p.productName,
-            p.barcode || null,
-            p.unitPrice,
-            p.unitOfMeasure,
-            p.sellingUnitsJson || null,
-            p.stockQuantity,
-            p.storeCode || null,
-            p.updatedAt || new Date().toISOString()
-          ]
-        );
-      }
-    });
+    try {
+      await db.withTransactionAsync(async () => {
+        for (const p of products) {
+          await db.runAsync(
+            `INSERT INTO cached_products 
+               (id, product_code, product_name, barcode, unit_price, unit_of_measure, selling_units_json, stock_quantity, store_code, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(product_code) DO UPDATE SET
+               product_name = excluded.product_name,
+               barcode = excluded.barcode,
+               unit_price = excluded.unit_price,
+               unit_of_measure = excluded.unit_of_measure,
+               selling_units_json = excluded.selling_units_json,
+               stock_quantity = excluded.stock_quantity,
+               store_code = excluded.store_code,
+               updated_at = excluded.updated_at;`,
+            [
+              p.id || p.productCode,
+              p.productCode,
+              p.productName,
+              p.barcode || null,
+              p.unitPrice,
+              p.unitOfMeasure,
+              p.sellingUnitsJson || null,
+              p.stockQuantity,
+              p.storeCode || null,
+              p.updatedAt || new Date().toISOString()
+            ]
+          );
+        }
+      });
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite product cache write failed; cached in memory instead.", error);
+      await memoryStore.saveProducts(products);
+    }
   },
 
   async findProductByBarcode(barcode: string): Promise<CachedProduct | null> {
@@ -234,26 +245,31 @@ export const mobileOfflineDb = {
       return await memoryStore.findProductByBarcode(clean);
     }
 
-    const row: any = await db.getFirstAsync(
-      `SELECT * FROM cached_products 
-       WHERE UPPER(barcode) = UPPER(?) OR UPPER(product_code) = UPPER(?) 
-       LIMIT 1;`,
-      [clean, clean]
-    );
+    try {
+      const row: any = await db.getFirstAsync(
+        `SELECT * FROM cached_products 
+         WHERE UPPER(barcode) = UPPER(?) OR UPPER(product_code) = UPPER(?) 
+         LIMIT 1;`,
+        [clean, clean]
+      );
 
-    if (!row) return null;
-    return {
-      id: row.id,
-      productCode: row.product_code,
-      productName: row.product_name,
-      barcode: row.barcode,
-      unitPrice: row.unit_price,
-      unitOfMeasure: row.unit_of_measure,
-      sellingUnitsJson: row.selling_units_json,
-      stockQuantity: row.stock_quantity,
-      storeCode: row.store_code,
-      updatedAt: row.updated_at
-    };
+      if (!row) return null;
+      return {
+        id: row.id,
+        productCode: row.product_code,
+        productName: row.product_name,
+        barcode: row.barcode,
+        unitPrice: row.unit_price,
+        unitOfMeasure: row.unit_of_measure,
+        sellingUnitsJson: row.selling_units_json,
+        stockQuantity: row.stock_quantity,
+        storeCode: row.store_code,
+        updatedAt: row.updated_at
+      };
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite product lookup failed; using memory cache.", error);
+      return await memoryStore.findProductByBarcode(clean);
+    }
   },
 
   async searchProducts(query: string, limit = 50): Promise<CachedProduct[]> {
@@ -264,27 +280,32 @@ export const mobileOfflineDb = {
     }
 
     const term = `%${q}%`;
-    const rows: any[] = await db.getAllAsync(
-      `SELECT * FROM cached_products 
-       WHERE UPPER(product_code) LIKE UPPER(?) 
-          OR UPPER(product_name) LIKE UPPER(?) 
-          OR UPPER(barcode) LIKE UPPER(?)
-       LIMIT ?;`,
-      [term, term, term, limit]
-    );
+    try {
+      const rows: any[] = await db.getAllAsync(
+        `SELECT * FROM cached_products 
+         WHERE UPPER(product_code) LIKE UPPER(?) 
+            OR UPPER(product_name) LIKE UPPER(?) 
+            OR UPPER(barcode) LIKE UPPER(?)
+         LIMIT ?;`,
+        [term, term, term, limit]
+      );
 
-    return rows.map((row) => ({
-      id: row.id,
-      productCode: row.product_code,
-      productName: row.product_name,
-      barcode: row.barcode,
-      unitPrice: row.unit_price,
-      unitOfMeasure: row.unit_of_measure,
-      sellingUnitsJson: row.selling_units_json,
-      stockQuantity: row.stock_quantity,
-      storeCode: row.store_code,
-      updatedAt: row.updated_at
-    }));
+      return rows.map((row) => ({
+        id: row.id,
+        productCode: row.product_code,
+        productName: row.product_name,
+        barcode: row.barcode,
+        unitPrice: row.unit_price,
+        unitOfMeasure: row.unit_of_measure,
+        sellingUnitsJson: row.selling_units_json,
+        stockQuantity: row.stock_quantity,
+        storeCode: row.store_code,
+        updatedAt: row.updated_at
+      }));
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite product search failed; using memory cache.", error);
+      return await memoryStore.searchProducts(q, limit);
+    }
   },
 
   async enqueueMutation(input: {
@@ -312,23 +333,30 @@ export const mobileOfflineDb = {
       return mutation;
     }
 
-    await db.runAsync(
-      `INSERT INTO mobile_outbox 
-         (id, entity_type, action, endpoint, payload_json, status, attempts, error_message, created_at, synced_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-      [
-        mutation.id,
-        mutation.entityType,
-        mutation.action,
-        mutation.endpoint,
-        mutation.payloadJson,
-        mutation.status,
-        mutation.attempts,
-        mutation.errorMessage,
-        mutation.createdAt,
-        mutation.syncedAt
-      ]
-    );
+    try {
+      await db.runAsync(
+        `INSERT INTO mobile_outbox 
+           (id, entity_type, action, endpoint, payload_json, status, attempts, error_message, created_at, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+        [
+          mutation.id,
+          mutation.entityType,
+          mutation.action,
+          mutation.endpoint,
+          mutation.payloadJson,
+          mutation.status,
+          mutation.attempts,
+          mutation.errorMessage,
+          mutation.createdAt,
+          mutation.syncedAt
+        ]
+      );
+    } catch (error) {
+      // Persist in memory as a last resort so the mutation is never silently lost
+      // within this app session; the outbox screen still reflects the in-memory queue.
+      console.warn("[flash-erp:mobile] SQLite outbox insert failed; mutation held in memory only.", error);
+      await memoryStore.enqueueMutation(mutation);
+    }
 
     return mutation;
   },
@@ -339,24 +367,29 @@ export const mobileOfflineDb = {
       return await memoryStore.getPendingMutations();
     }
 
-    const rows: any[] = await db.getAllAsync(
-      `SELECT * FROM mobile_outbox 
-       WHERE status IN ('PENDING', 'FAILED') 
-       ORDER BY created_at ASC;`
-    );
+    try {
+      const rows: any[] = await db.getAllAsync(
+        `SELECT * FROM mobile_outbox 
+         WHERE status IN ('PENDING', 'FAILED') 
+         ORDER BY created_at ASC;`
+      );
 
-    return rows.map((r) => ({
-      id: r.id,
-      entityType: r.entity_type,
-      action: r.action,
-      endpoint: r.endpoint,
-      payloadJson: r.payload_json,
-      status: r.status,
-      attempts: r.attempts,
-      errorMessage: r.error_message,
-      createdAt: r.created_at,
-      syncedAt: r.synced_at
-    }));
+      return rows.map((r) => ({
+        id: r.id,
+        entityType: r.entity_type,
+        action: r.action,
+        endpoint: r.endpoint,
+        payloadJson: r.payload_json,
+        status: r.status,
+        attempts: r.attempts,
+        errorMessage: r.error_message,
+        createdAt: r.created_at,
+        syncedAt: r.synced_at
+      }));
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite outbox read failed; using memory queue.", error);
+      return await memoryStore.getPendingMutations();
+    }
   },
 
   async getOutboxStats(): Promise<{ pending: number; failed: number; synced: number; total: number }> {
@@ -365,24 +398,29 @@ export const mobileOfflineDb = {
       return await memoryStore.getOutboxStats();
     }
 
-    const rows: any[] = await db.getAllAsync(
-      `SELECT status, COUNT(*) as count FROM mobile_outbox GROUP BY status;`
-    );
+    try {
+      const rows: any[] = await db.getAllAsync(
+        `SELECT status, COUNT(*) as count FROM mobile_outbox GROUP BY status;`
+      );
 
-    let pending = 0;
-    let failed = 0;
-    let synced = 0;
-    let total = 0;
+      let pending = 0;
+      let failed = 0;
+      let synced = 0;
+      let total = 0;
 
-    for (const r of rows) {
-      const c = Number(r.count || 0);
-      total += c;
-      if (r.status === "PENDING" || r.status === "SYNCING") pending += c;
-      else if (r.status === "FAILED") failed += c;
-      else if (r.status === "SYNCED") synced += c;
+      for (const r of rows) {
+        const c = Number(r.count || 0);
+        total += c;
+        if (r.status === "PENDING" || r.status === "SYNCING") pending += c;
+        else if (r.status === "FAILED") failed += c;
+        else if (r.status === "SYNCED") synced += c;
+      }
+
+      return { pending, failed, synced, total };
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite outbox stats read failed; using memory queue.", error);
+      return await memoryStore.getOutboxStats();
     }
-
-    return { pending, failed, synced, total };
   },
 
   async markMutationStatus(
@@ -397,15 +435,20 @@ export const mobileOfflineDb = {
     }
 
     const syncedAt = status === "SYNCED" ? new Date().toISOString() : null;
-    await db.runAsync(
-      `UPDATE mobile_outbox 
-       SET status = ?, 
-           error_message = ?, 
-           synced_at = COALESCE(?, synced_at),
-           attempts = CASE WHEN ? = 'FAILED' THEN attempts + 1 ELSE attempts END
-       WHERE id = ?;`,
-      [status, errorMessage, syncedAt, status, id]
-    );
+    try {
+      await db.runAsync(
+        `UPDATE mobile_outbox 
+         SET status = ?, 
+             error_message = ?, 
+             synced_at = COALESCE(?, synced_at),
+             attempts = CASE WHEN ? = 'FAILED' THEN attempts + 1 ELSE attempts END
+         WHERE id = ?;`,
+        [status, errorMessage, syncedAt, status, id]
+      );
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite outbox status update failed; updated in memory.", error);
+      await memoryStore.markMutationStatus(id, status, errorMessage);
+    }
   },
 
   async clearSynced(): Promise<void> {
@@ -414,6 +457,11 @@ export const mobileOfflineDb = {
       await memoryStore.clearSynced();
       return;
     }
-    await db.runAsync(`DELETE FROM mobile_outbox WHERE status = 'SYNCED';`);
+    try {
+      await db.runAsync(`DELETE FROM mobile_outbox WHERE status = 'SYNCED';`);
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite synced-cleanup failed; cleaned in memory.", error);
+      await memoryStore.clearSynced();
+    }
   }
 };

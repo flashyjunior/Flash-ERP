@@ -23,23 +23,28 @@ export default function DashboardScreen() {
   const [outboxPendingCount, setOutboxPendingCount] = useState<number>(0);
 
   const loadDashboard = async () => {
-    const sessionRes = await mobileApi.fetchSession();
-    if (sessionRes.ok && sessionRes.data) {
-      setUser(sessionRes.data);
-    } else {
-      const cached = await mobileStorage.getUserSnapshot<MobileUserSession>();
-      setUser(cached);
+    try {
+      const sessionRes = await mobileApi.fetchSession();
+      if (sessionRes.ok && sessionRes.data) {
+        setUser(sessionRes.data);
+      } else {
+        const cached = await mobileStorage.getUserSnapshot<MobileUserSession>();
+        setUser(cached);
+      }
+
+      const stats = await mobileOfflineDb.getOutboxStats();
+      setOutboxPendingCount(stats.pending + stats.failed);
+
+      const prods = await mobileOfflineDb.searchProducts("", 1000);
+      setCachedProductsCount(prods.length);
+    } catch (error) {
+      // Mount-time failures must degrade gracefully, never crash the release app.
+      console.warn("[flash-erp:mobile] Dashboard refresh failed.", error);
     }
-
-    const stats = await mobileOfflineDb.getOutboxStats();
-    setOutboxPendingCount(stats.pending + stats.failed);
-
-    const prods = await mobileOfflineDb.searchProducts("", 1000);
-    setCachedProductsCount(prods.length);
   };
 
   useEffect(() => {
-    loadDashboard();
+    void loadDashboard();
   }, []);
 
   const onRefresh = async () => {
