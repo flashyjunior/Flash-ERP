@@ -22,6 +22,7 @@
     "start": "npm --workspace @flash-erp/enterprise-web run start",
     "start:enterprise:cluster": "node scripts/start-enterprise-web-cluster.mjs",
     "typecheck": "npm --workspaces --if-present run typecheck",
+    "acceptance:mobile-startup": "tsx scripts/mobile-startup-gate.ts",
     "prisma:validate": "prisma validate --schema=prisma/schema.prisma",
     "prisma:format": "prisma format --schema=prisma/schema.prisma",
     "prisma:generate": "prisma generate --schema=prisma/schema.prisma",

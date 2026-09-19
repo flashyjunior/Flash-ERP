@@ -1,10 +1,17 @@
 import React, { Component, type ReactNode } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, ErrorUtils } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { mobileTheme } from "../lib/mobile-theme";
 
 const LOG_TAG = "[flash-erp:mobile]";
+
+type ErrorHandler = (error: unknown, isFatal?: boolean) => void;
+
+interface RuntimeErrorUtils {
+  getGlobalHandler?: () => ErrorHandler;
+  setGlobalHandler?: (handler: ErrorHandler) => void;
+}
 
 /**
  * Release builds fail silently: an uncaught error just kills the process and the
@@ -12,31 +19,54 @@ const LOG_TAG = "[flash-erp:mobile]";
  * error visible (on screen via the boundary, in logcat under [flash-erp:mobile]).
  *
  * Filter logcat with: adb logcat -s ReactNativeJS
+ *
+ * IMPORTANT: `ErrorUtils` is NOT a runtime export of the "react-native" package
+ * (it is only a TypeScript type there); at runtime it exists solely as the
+ * global installed by React Native's error-guard polyfill. Importing it from
+ * "react-native" type-checks but evaluates to `undefined`, which crashed the
+ * root layout module before anything could render. Always read it from the
+ * global, and never let this bootstrap code itself throw.
  */
-function installCrashGuards() {
-  const previousHandler = ErrorUtils.getGlobalHandler();
-  ErrorUtils.setGlobalHandler((error, isFatal) => {
-    // eslint-disable-next-line no-console
-    console.error(
-      `${LOG_TAG} FATAL JS ERROR (isFatal=${isFatal}):`,
-      error instanceof Error ? (error.stack ?? error.message) : error
-    );
-    try {
-      previousHandler(error, isFatal);
-    } catch {
-      // Never let the handler itself throw.
+function installCrashGuards(): void {
+  try {
+    const errorUtils = (globalThis as { ErrorUtils?: RuntimeErrorUtils }).ErrorUtils;
+    if (
+      errorUtils &&
+      typeof errorUtils.getGlobalHandler === "function" &&
+      typeof errorUtils.setGlobalHandler === "function"
+    ) {
+      const previousHandler = errorUtils.getGlobalHandler();
+      errorUtils.setGlobalHandler((error, isFatal) => {
+        // eslint-disable-next-line no-console
+        console.error(
+          `${LOG_TAG} FATAL JS ERROR (isFatal=${String(isFatal)}):`,
+          error instanceof Error ? (error.stack ?? error.message) : error
+        );
+        try {
+          previousHandler?.(error, isFatal);
+        } catch {
+          // Never let the handler itself throw.
+        }
+      });
     }
-  });
 
-  if (typeof (globalThis as any).addEventListener === "function") {
-    (globalThis as any).addEventListener("unhandledrejection", (event: any) => {
-      const reason = event?.reason;
-      // eslint-disable-next-line no-console
-      console.error(
-        `${LOG_TAG} UNHANDLED PROMISE REJECTION:`,
-        reason instanceof Error ? (reason.stack ?? reason.message) : reason
-      );
-    });
+    const scope = globalThis as {
+      addEventListener?: (type: string, listener: (event: unknown) => void) => void;
+    };
+    if (typeof scope.addEventListener === "function") {
+      scope.addEventListener("unhandledrejection", (event: unknown) => {
+        const reason = (event as { reason?: unknown } | undefined)?.reason;
+        // eslint-disable-next-line no-console
+        console.error(
+          `${LOG_TAG} UNHANDLED PROMISE REJECTION:`,
+          reason instanceof Error ? (reason.stack ?? reason.message) : reason
+        );
+      });
+    }
+  } catch (error) {
+    // Diagnostics must never be the reason the app fails to boot.
+    // eslint-disable-next-line no-console
+    console.warn(`${LOG_TAG} Crash guards could not be installed.`, error);
   }
 }
 
@@ -58,6 +88,10 @@ class FatalErrorBoundary extends Component<{ children: ReactNode }, { error: Err
     );
   }
 
+  handleRetry = () => {
+    this.setState({ error: null });
+  };
+
   render() {
     if (this.state.error) {
       return (
@@ -66,16 +100,15 @@ class FatalErrorBoundary extends Component<{ children: ReactNode }, { error: Err
           <Text style={styles.fatalMessage}>
             {this.state.error.message || String(this.state.error)}
           </Text>
-          <Text style={styles.fatalStack}>{this.state.error.stack}</Text>
-          <TouchableOpacity
-            style={styles.fatalButton}
-            onPress={() => process.exit(0)}
-          >
-            <Text style={styles.fatalButtonText}>Close &amp; Restart App</Text>
+          <ScrollView style={styles.fatalStackBox}>
+            <Text style={styles.fatalStack}>{this.state.error.stack}</Text>
+          </ScrollView>
+          <TouchableOpacity style={styles.fatalButton} onPress={this.handleRetry}>
+            <Text style={styles.fatalButtonText}>Try Again</Text>
           </TouchableOpacity>
           <Text style={styles.fatalHint}>
-            If this keeps happening, report the text above (and the logcat tag{" "}
-            {LOG_TAG}) to HQ IT.
+            If this keeps happening, close the app fully, reopen it, and report the text above
+            (and the logcat tag {LOG_TAG}) to HQ IT.
           </Text>
         </View>
       );
@@ -87,7 +120,7 @@ class FatalErrorBoundary extends Component<{ children: ReactNode }, { error: Err
 export default function RootLayout() {
   return (
     <>
-      <StatusBar style="light" backgroundColor={mobileTheme.headerBackground} />
+      <StatusBar style="light" />
       <FatalErrorBoundary>
         <Stack
           screenOptions={{
@@ -117,13 +150,14 @@ export default function RootLayout() {
 const styles = StyleSheet.create({
   fatalContainer: {
     flex: 1,
-    backgroundColor: mobileTheme.screenBackground,
+    backgroundColor: mobileTheme.neutralDark,
     padding: 24,
+    paddingTop: 64,
     justifyContent: "center",
     gap: 14
   },
   fatalTitle: {
-    color: mobileTheme.danger,
+    color: "#fca5a5",
     fontSize: 20,
     fontWeight: "900"
   },
@@ -132,15 +166,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600"
   },
+  fatalStackBox: {
+    maxHeight: 220,
+    backgroundColor: "#020617",
+    borderRadius: 10,
+    padding: 12
+  },
   fatalStack: {
     color: "#94a3b8",
     fontSize: 11,
-    fontFamily: "monospace",
-    backgroundColor: "#0f172a",
-    padding: 12,
-    borderRadius: 10,
-    overflow: "hidden",
-    maxHeight: 220
+    fontFamily: "monospace"
   },
   fatalButton: {
     backgroundColor: mobileTheme.primary,
