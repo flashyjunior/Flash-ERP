@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -8,7 +8,8 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
-  Modal
+  Modal,
+  RefreshControl
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
@@ -18,7 +19,8 @@ import { mobileTheme } from "../lib/mobile-theme";
 import { mobileStorage } from "../lib/mobile-storage";
 import { mobileReceiptStore } from "../lib/mobile-receipt-store";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
-import { mobileApi, type MobileCustomer, type MobileTenderMethod } from "../lib/mobile-api";
+import { BottomNavBar } from "../components/BottomNavBar";
+import { mobileApi, type MobileCustomer, type MobileTenderMethod, type MobileUserSession } from "../lib/mobile-api";
 
 interface CartLine {
   id: string;
@@ -68,12 +70,26 @@ export default function MobileCartScreen() {
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(
     null
   );
+  const [session, setSession] = useState<MobileUserSession | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const goHome = () => { try { router.dismissTo("/"); } catch { router.replace("/"); } };
 
   useEffect(() => {
+    void mobileStorage.getUserSnapshot<MobileUserSession>().then(setSession);
     void mobileStorage.getPosCart<CartLine[]>().then((saved) => {
       if (Array.isArray(saved)) setLines(saved);
       setCartReady(true);
     });
+  }, []);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    void mobileStorage.getPosCart<CartLine[]>().then((saved) => { if (Array.isArray(saved)) setLines(saved); });
+    void mobileApi.fetchTenderMethods().then((response) => {
+      if (response.ok && response.data?.length) { setTenderMethods(response.data); setSelectedTenderCode((current) => current || response.data![0].code); setTenderError(null); }
+    });
+    setRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -237,6 +253,42 @@ export default function MobileCartScreen() {
     setFeedback(null);
   };
 
+  /** Offline sales never touch HQ, so no server receipt exists — build the
+   *  same receipt shape locally so the print/share screen still pops up. */
+  const buildOfflineReceipt = (queueId: string) => {
+    const tenderedTotal = splitTotal + (Number.isFinite(Number.parseFloat(tenderAmount)) ? Number.parseFloat(tenderAmount) : 0);
+    return {
+      retailOrgName: "Flash ERP",
+      storeName: session?.homeStoreName ?? "Mobile POS",
+      storeAddress: null,
+      transactionNo: `OFF-${queueId.slice(-8).toUpperCase()}`,
+      completedAt: new Date().toISOString(),
+      cashierCode: session?.loginId ?? "MOBILE",
+      currencyCode: "GHS",
+      customerName,
+      subtotalAmount: subtotal,
+      discountAmount: 0,
+      taxAmount: tax,
+      totalAmount: total,
+      paidAmount: tenderedTotal,
+      changeAmount: Math.max(0, tenderedTotal - total),
+      receiptHeader: null,
+      receiptFooter: "Offline sale — will sync to HQ when connection is restored.",
+      lines: lines.map((line) => ({
+        productCode: line.productCode,
+        productName: line.productName,
+        quantity: line.quantity,
+        sellingUnitOfMeasure: line.unitOfMeasure,
+        unitPrice: line.unitPrice,
+        lineTotal: line.unitPrice * line.quantity
+      })),
+      payments: [
+        ...splitPayments.map((payment) => ({ tenderMethodName: payment.tender.name, method: payment.tender.paymentMethod, amount: payment.amount, reference: payment.reference ?? null })),
+        ...(selectedTender && tenderedTotal - splitTotal > 0 ? [{ tenderMethodName: selectedTender.name, method: selectedTender.paymentMethod, amount: tenderedTotal - splitTotal, reference: tenderRef.trim() || null }] : [])
+      ]
+    };
+  };
+
   const handleCompleteSale = async () => {
     if (loading || lines.length === 0) return;
     const paid = Number.parseFloat(tenderAmount);
@@ -306,19 +358,26 @@ export default function MobileCartScreen() {
             ? "Sale completed offline! Queued for automatic sync."
             : "Sale posted to Enterprise HQ accounting and stock cleared!"
         });
+        // Offline sales still get a printable receipt immediately: build it
+        // locally and open the receipt screen (print popup) right away.
+        const offlineReceipt = res.isOffline ? buildOfflineReceipt(res.queuedMutationId ?? `MOB-${Date.now()}`) : null;
         setLines([]);
         setSplitPayments([]);
         setRecalledTransactionId(null);
         setRecalledTotal(null);
         await mobileStorage.clearPosCart();
         saleIdempotencyKey.current = `MOBILE-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-        if (!res.isOffline && (res.data as any)?.receipt) {
+        if (offlineReceipt) {
+          void mobileReceiptStore.saveLastReceipt(offlineReceipt);
+          await mobileStorage.setLastReceipt(offlineReceipt).catch(() => {});
+          router.replace({ pathname: "/receipt", params: { autoprint: "1" } } as any);
+        } else if ((res.data as any)?.receipt) {
           // Persist for re-printing later. The sale is already complete — a
           // print failure (or no printer) must never undo or block it.
           const receipt = (res.data as any).receipt;
           void mobileReceiptStore.saveLastReceipt(receipt);
           await mobileStorage.setLastReceipt(receipt).catch(() => {});
-          router.replace("/receipt");
+          router.replace({ pathname: "/receipt", params: { autoprint: "1" } } as any);
         }
       } else {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -338,14 +397,17 @@ export default function MobileCartScreen() {
 
       {/* Screen Header */}
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
+        <TouchableOpacity style={styles.backButton} onPress={goHome}>
+          <Ionicons name="home-outline" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Assisted Selling & Cart</Text>
-        <View style={styles.headerActions}><TouchableOpacity style={styles.iconButton} onPress={() => void loadHeldSales()}>{heldLoading ? <ActivityIndicator size="small" color={mobileTheme.primary} /> : <Ionicons name="pause-circle-outline" size={23} color={mobileTheme.primary} />}</TouchableOpacity><TouchableOpacity style={styles.iconButton} onPress={() => router.push("/scanner")}><Ionicons name="add-circle" size={24} color={mobileTheme.primary} /></TouchableOpacity></View>
+        <View style={styles.headerActions}><TouchableOpacity style={styles.iconButton} onPress={() => void loadHeldSales()}>{heldLoading ? <ActivityIndicator size="small" color={mobileTheme.primary} /> : <Ionicons name="pause-circle-outline" size={23} color={mobileTheme.primary} />}</TouchableOpacity></View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: 150 + Math.max(insets.bottom, 0) }]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      >
         {/* Customer Header */}
         <View style={styles.customerPill}>
           <Ionicons name="person-circle-outline" size={20} color={mobileTheme.primary} />
@@ -366,7 +428,7 @@ export default function MobileCartScreen() {
               <Text style={styles.emptyCartText}>Basket is empty</Text>
               <TouchableOpacity
                 style={styles.scanNowButton}
-                onPress={() => router.push("/scanner")}
+                onPress={() => router.navigate("/scanner" as any)}
               >
                 <Ionicons name="barcode-outline" size={18} color="#ffffff" />
                 <Text style={styles.scanNowText}>Scan Products</Text>
@@ -589,6 +651,19 @@ export default function MobileCartScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Big, unmissable "Add" control — clearly tappable while selling. */}
+      <TouchableOpacity
+        style={[styles.addFab, { bottom: 84 + Math.max(insets.bottom, 0) }]}
+        onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); router.navigate("/scanner" as any); }}
+        accessibilityRole="button"
+        accessibilityLabel="Add products to basket"
+      >
+        <View style={styles.addFabIcon}><Ionicons name="add" size={26} color="#ffffff" /></View>
+        <Text style={styles.addFabText}>Add Item</Text>
+      </TouchableOpacity>
+
+      <BottomNavBar session={session} active="sales" />
     </View>
   );
 }
@@ -936,5 +1011,31 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 15,
     fontWeight: "800"
+  },
+  addFab: {
+    position: "absolute",
+    right: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: mobileTheme.accent,
+    borderRadius: 32,
+    paddingVertical: 10,
+    paddingLeft: 10,
+    paddingRight: 20,
+    ...mobileTheme.shadowLarge
+  },
+  addFabIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: mobileTheme.accentDark,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  addFabText: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "900"
   }
 });

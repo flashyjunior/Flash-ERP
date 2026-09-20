@@ -9,10 +9,11 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import { router } from "expo-router";
+import { router, useNavigation } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
+import { BottomNavBar } from "../components/BottomNavBar";
 import { mobileStorage } from "../lib/mobile-storage";
 import { mobileOfflineDb } from "../lib/mobile-offline-db";
 import { mobileApi, type MobileUserSession } from "../lib/mobile-api";
@@ -28,6 +29,13 @@ export default function DashboardScreen() {
   const [cachedProductsCount, setCachedProductsCount] = useState<number>(0);
   const [outboxPendingCount, setOutboxPendingCount] = useState<number>(0);
   const [analytics, setAnalytics] = useState<{ salesTotal: number; transactionCount: number; averageBasket: number; pendingApprovals: number; trend: Array<{ date: string; total: number }>; topProducts: Array<{ productName: string; quantity: number; sales: number }> } | null>(null);
+  const [homeFeed, setHomeFeed] = useState<{
+    birthdays: Array<{ displayName: string; department: string | null; position: string | null; turns: number; daysUntil: number; dateLabel: string }>;
+    attendance: { checkInAt: string | null; checkOutAt: string | null; attendanceStatus: string } | null;
+    upcomingLeave: Array<{ requestNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; status: string }>;
+    recentClaims: Array<{ claimNo: string; purpose: string; totalAmount: number; currencyCode: string; status: string }>;
+    pendingApprovals: number;
+  } | null>(null);
 
   const loadDashboard = async () => {
     try {
@@ -49,15 +57,25 @@ export default function DashboardScreen() {
 
       const prods = await mobileOfflineDb.searchProducts("", 1000);
       setCachedProductsCount(prods.length);
+
+      const feed = await mobileApi.fetchMobileHome();
+      setHomeFeed(feed.ok && feed.data ? feed.data : null);
     } catch (error) {
       // Mount-time failures must degrade gracefully, never crash the release app.
       console.warn("[flash-erp:mobile] Dashboard refresh failed.", error);
     }
   };
 
+  const navigation = useNavigation();
   useEffect(() => {
     void loadDashboard();
-  }, []);
+    // Coming back from a completed sale (or any screen) must refresh the
+    // dashboard values immediately, not only on a full remount.
+    const unsubscribe = navigation.addListener("focus", () => {
+      void loadDashboard();
+    });
+    return unsubscribe;
+  }, [navigation]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -97,7 +115,7 @@ export default function DashboardScreen() {
                 {user?.displayName || "Guest Operator"}
               </Text>
               <Text style={styles.operatorStore}>
-                {user ? (user.homeStoreName || "No shop assigned") : "Sign in to continue"} • {user?.loginId || "Guest"}
+                {user ? (user.homeStoreName || "Head office & self-service") : "Sign in to continue"} • {user?.loginId || "Guest"}
               </Text>
             </View>
           </View>
@@ -124,7 +142,8 @@ export default function DashboardScreen() {
           {analytics.topProducts.length > 0 && <View style={styles.topProducts}><Text style={styles.analyticsEyebrow}>TOP PRODUCTS · 7 DAYS</Text>{analytics.topProducts.slice(0,3).map((product,index)=><View key={`${product.productName}-${index}`} style={styles.topProductRow}><Text style={styles.topRank}>{index+1}</Text><Text style={styles.topName} numberOfLines={1}>{product.productName}</Text><Text style={styles.topQty}>{product.quantity} sold</Text></View>)}</View>}
         </View>}
 
-        {/* Quick Metrics Bar */}
+        {/* Quick Metrics Bar — shop operators only; hidden for accounts without a shop. */}
+        {user?.homeStoreCode ? (
         <View style={styles.metricsRow}>
           <TouchableOpacity
             style={styles.metricCard}
@@ -155,6 +174,7 @@ export default function DashboardScreen() {
             <Text style={styles.metricLabel}>Outbox Pending</Text>
           </TouchableOpacity>
         </View>
+        ) : null}
 
         {user?.homeStoreCode ? (<>
         {/* Section 1: Warehouse & Store Floor */}
@@ -244,13 +264,56 @@ export default function DashboardScreen() {
         </View>
 
         </>) : user ? (
-          <View style={styles.noShopCard}>
-            <Ionicons name="information-circle-outline" size={24} color={mobileTheme.primary} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.noShopTitle}>No shop assigned</Text>
-              <Text style={styles.noShopText}>Shop operations are hidden. Ask an administrator to assign your home shop before selling, counting or moving stock.</Text>
+          /* Informative home feed for operators without a shop: company
+             birthdays, own leave & attendance — no shop-related empty card. */
+          <>
+            <Text style={styles.sectionTitle}>Company Pulse</Text>
+            {homeFeed?.birthdays && homeFeed.birthdays.length > 0 ? (
+              <View style={styles.feedCard}>
+                <View style={styles.feedHeader}><Ionicons name="gift-outline" size={18} color="#ec4899" /><Text style={styles.feedTitle}>Upcoming Birthdays</Text></View>
+                {homeFeed.birthdays.map((person, index) => (
+                  <View key={`${person.displayName}-${index}`} style={styles.feedRow}>
+                    <View style={styles.feedAvatar}><Text style={styles.feedAvatarText}>{person.displayName.slice(0, 1)}</Text></View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.feedRowTitle}>{person.displayName}</Text>
+                      <Text style={styles.feedRowMeta}>{[person.position, person.department].filter(Boolean).join(" · ") || "Team member"}</Text>
+                    </View>
+                    <Text style={styles.feedRowBadge}>{person.daysUntil === 0 ? "Today 🎂" : person.daysUntil === 1 ? "Tomorrow" : `in ${person.daysUntil} days`}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.feedCard}><View style={styles.feedHeader}><Ionicons name="gift-outline" size={18} color="#ec4899" /><Text style={styles.feedTitle}>Upcoming Birthdays</Text></View><Text style={styles.feedEmpty}>No birthdays in the next two weeks.</Text></View>
+            )}
+
+            <View style={styles.feedCard}>
+              <View style={styles.feedHeader}><Ionicons name="calendar-outline" size={18} color={mobileTheme.primary} /><Text style={styles.feedTitle}>My HR Snapshot</Text></View>
+              {homeFeed?.attendance ? (
+                <Text style={styles.feedRowTitle}>Today: {homeFeed.attendance.attendanceStatus}{homeFeed.attendance.checkInAt ? ` · in ${new Date(homeFeed.attendance.checkInAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}{homeFeed.attendance.checkOutAt ? ` · out ${new Date(homeFeed.attendance.checkOutAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</Text>
+              ) : (
+                <Text style={styles.feedEmpty}>You have not clocked in today. Use HR & Attendance to clock in.</Text>
+              )}
+              {homeFeed?.upcomingLeave && homeFeed.upcomingLeave.length > 0 && homeFeed.upcomingLeave.map((leave) => (
+                <View key={leave.requestNo} style={styles.feedRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.feedRowTitle}>{leave.leaveTypeName} · {leave.requestedDays} day(s)</Text>
+                    <Text style={styles.feedRowMeta}>{leave.startDate} → {leave.endDate}</Text>
+                  </View>
+                  <Text style={[styles.feedRowBadge, { color: leave.status === "APPROVED" ? mobileTheme.accent : mobileTheme.warning }]}>{leave.status}</Text>
+                </View>
+              ))}
+              {homeFeed?.recentClaims && homeFeed.recentClaims.length > 0 && homeFeed.recentClaims.map((claim) => (
+                <View key={claim.claimNo} style={styles.feedRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.feedRowTitle}>{claim.claimNo} · {claim.currencyCode} {claim.totalAmount.toFixed(2)}</Text>
+                    <Text style={styles.feedRowMeta} numberOfLines={1}>{claim.purpose}</Text>
+                  </View>
+                  <Text style={[styles.feedRowBadge, { color: claim.status === "APPROVED" ? mobileTheme.accent : claim.status === "REJECTED" ? mobileTheme.danger : mobileTheme.warning }]}>{claim.status}</Text>
+                </View>
+              ))}
+              {homeFeed?.pendingApprovals ? <Text style={styles.feedRowMeta}>{homeFeed.pendingApprovals} approval(s) waiting — open Approvals & KPIs.</Text> : null}
             </View>
-          </View>
+          </>
         ) : null}
 
         {/* Section 3: Management & Self-Service */}
@@ -304,15 +367,7 @@ export default function DashboardScreen() {
           </TouchableOpacity>
         </View>
       </ScrollView>
-      {user && (
-        <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-          <TouchableOpacity style={styles.bottomNavItem}><Ionicons name="home" size={22} color={mobileTheme.primary} /><Text style={styles.bottomNavActive}>Home</Text></TouchableOpacity>
-          {canOpenMobileRoute(user, "cart") && <TouchableOpacity style={styles.bottomNavItem} onPress={() => navigateTo("/cart")}><Ionicons name="cart-outline" size={22} color={mobileTheme.mutedText} /><Text style={styles.bottomNavText}>Sales</Text></TouchableOpacity>}
-          <TouchableOpacity style={styles.bottomNavItem} onPress={() => navigateTo("/self-service")}><Ionicons name="person-outline" size={22} color={mobileTheme.mutedText} /><Text style={styles.bottomNavText}>My HR</Text></TouchableOpacity>
-          <TouchableOpacity style={styles.bottomNavItem} onPress={() => navigateTo("/outbox")}><Ionicons name="sync-outline" size={22} color={mobileTheme.mutedText} /><Text style={styles.bottomNavText}>Sync</Text></TouchableOpacity>
-          <TouchableOpacity style={styles.bottomNavItem} onPress={() => navigateTo("/account")}><Ionicons name="person-circle-outline" size={22} color={mobileTheme.mutedText} /><Text style={styles.bottomNavText}>Account</Text></TouchableOpacity>
-        </View>
-      )}
+      {user && <BottomNavBar session={user} active="home" />}
     </View>
   );
 }
@@ -452,12 +507,19 @@ const styles = StyleSheet.create({
     color: mobileTheme.softText
   },
   hidden: { display: "none" },
-  noShopCard: {
-    flexDirection: "row", gap: 12, alignItems: "flex-start", padding: 16,
-    borderRadius: mobileTheme.radiusLarge, backgroundColor: mobileTheme.primaryLight
+  feedCard: {
+    backgroundColor: mobileTheme.surfaceBackground, borderRadius: mobileTheme.radiusLarge,
+    borderWidth: 1, borderColor: mobileTheme.borderColor, padding: 16, gap: 10, ...mobileTheme.shadowSmall
   },
-  noShopTitle: { fontSize: 15, fontWeight: "800", color: mobileTheme.textColor },
-  noShopText: { marginTop: 3, fontSize: 12, lineHeight: 18, color: mobileTheme.mutedText },
+  feedHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  feedTitle: { fontSize: 14, fontWeight: "800", color: mobileTheme.textColor },
+  feedRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6, borderTopWidth: 1, borderTopColor: mobileTheme.borderLight },
+  feedAvatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: "#fce7f3", alignItems: "center", justifyContent: "center" },
+  feedAvatarText: { color: "#db2777", fontWeight: "900", fontSize: 14 },
+  feedRowTitle: { fontSize: 13, fontWeight: "800", color: mobileTheme.textColor },
+  feedRowMeta: { marginTop: 2, fontSize: 11, color: mobileTheme.mutedText },
+  feedRowBadge: { fontSize: 11, fontWeight: "800", color: "#db2777" },
+  feedEmpty: { fontSize: 12, color: mobileTheme.mutedText },
   bottomNav: {
     position: "absolute", left: 0, right: 0, bottom: 0, minHeight: 64,
     flexDirection: "row", alignItems: "center", justifyContent: "space-around",

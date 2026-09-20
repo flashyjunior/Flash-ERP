@@ -14,6 +14,8 @@ import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
+import { BottomNavBar } from "../components/BottomNavBar";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileApi } from "../lib/mobile-api";
 import { mobileStorage } from "../lib/mobile-storage";
 
@@ -48,6 +50,8 @@ interface ExpenseItem {
 }
 
 export default function ApprovalsScreen() {
+  const insets = useSafeAreaInsets();
+  const goHome = () => { try { router.dismissTo("/"); } catch { router.replace("/"); } };
   const [tab, setTab] = useState<Tab>("leave");
   const [leave, setLeave] = useState<LeaveItem[]>([]);
   const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
@@ -145,8 +149,8 @@ export default function ApprovalsScreen() {
     <View style={styles.container}>
       <HeaderStatusBar />
       <View style={styles.header}>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Back" onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Back to dashboard" onPress={goHome}>
+          <Ionicons name="home-outline" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.title}>Manager Approvals & KPIs</Text>
       </View>
@@ -217,7 +221,7 @@ export default function ApprovalsScreen() {
         </ScrollView>
       ) : (
         <ScrollView
-          contentContainerStyle={styles.list}
+          contentContainerStyle={[styles.list, { paddingBottom: 110 + Math.max(insets.bottom, 0) }]}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         >
           {tab === "leave"
@@ -365,6 +369,7 @@ export default function ApprovalsScreen() {
               ))}
         </ScrollView>
       )}
+      <BottomNavBar active="home" />
     </View>
   );
 }

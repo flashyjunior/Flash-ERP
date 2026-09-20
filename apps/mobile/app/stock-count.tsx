@@ -8,16 +8,22 @@ import {
   ScrollView,
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform
+  Platform,
+  RefreshControl
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router, useLocalSearchParams } from "expo-router";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
+import { BottomNavBar } from "../components/BottomNavBar";
 import { mobileApi } from "../lib/mobile-api";
 
 export default function StockCountScreen() {
+  const insets = useSafeAreaInsets();
+  const [refreshing, setRefreshing] = useState(false);
+  const goHome = () => { try { router.dismissTo("/"); } catch { router.replace("/"); } };
   const params = useLocalSearchParams<{
     productId?: string;
     productName?: string;
@@ -94,7 +100,7 @@ export default function StockCountScreen() {
 
       {/* Header */}
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backButton} onPress={goHome}>
           <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Cycle Count & Audit</Text>
@@ -103,7 +109,11 @@ export default function StockCountScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: 110 + Math.max(insets.bottom, 0) }]}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setFeedback(null); setTimeout(() => setRefreshing(false), 400); }} />}
+      >
         {/* Product Card / Code Input */}
         <View style={styles.inputCard}>
           <Text style={styles.inputLabel}>Product Code / SKU</Text>
@@ -235,6 +245,7 @@ export default function StockCountScreen() {
           )}
         </TouchableOpacity>
       </ScrollView>
+      <BottomNavBar active="home" />
     </KeyboardAvoidingView>
   );
 }

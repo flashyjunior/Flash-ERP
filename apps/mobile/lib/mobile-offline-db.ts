@@ -21,6 +21,17 @@ export interface CachedProduct {
   updatedAt: string;
 }
 
+/** Master-data copy of an HQ customer for offline POS customer selection. */
+export interface CachedCustomer {
+  id: string;
+  customerNo: string;
+  fullName: string;
+  phone: string | null;
+  email: string | null;
+  customerType: string;
+  updatedAt: string;
+}
+
 export type OutboxEntityType =
   | "STOCK_COUNT"
   | "SALE"
@@ -49,6 +60,7 @@ export interface OutboxMutation {
 // In-memory fallback for web preview or environments where native SQLite is not linked
 class MemoryOfflineStorage {
   private products = new Map<string, CachedProduct>();
+  private customers = new Map<string, CachedCustomer>();
   private outbox = new Map<string, OutboxMutation>();
 
   async saveProducts(items: CachedProduct[]) {
@@ -88,6 +100,29 @@ class MemoryOfflineStorage {
   }
 
   async clearProducts() { this.products.clear(); }
+
+  async saveCustomers(items: CachedCustomer[]) {
+    for (const item of items) this.customers.set(item.id, item);
+  }
+
+  async searchCustomers(query: string, limit = 30): Promise<CachedCustomer[]> {
+    const q = query.trim().toLowerCase();
+    const results: CachedCustomer[] = [];
+    for (const customer of [...this.customers.values()].sort((a, b) => a.fullName.localeCompare(b.fullName))) {
+      if (!q || customer.fullName.toLowerCase().includes(q) || customer.customerNo.toLowerCase().includes(q) || (customer.phone ?? "").toLowerCase().includes(q) || (customer.email ?? "").toLowerCase().includes(q)) {
+        results.push(customer);
+        if (results.length >= limit) break;
+      }
+    }
+    return results;
+  }
+
+  async countCustomers(): Promise<number> { return this.customers.size; }
+
+  async pruneCustomers(validCustomerIds: string[]) {
+    const valid = new Set(validCustomerIds);
+    for (const [key] of this.customers) if (!valid.has(key)) this.customers.delete(key);
+  }
 
   async pruneProducts(validProductCodes: string[]) {
     const valid = new Set(validProductCodes);
@@ -186,6 +221,17 @@ async function getNativeDb() {
           synced_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_outbox_status ON mobile_outbox(status);
+
+        CREATE TABLE IF NOT EXISTS cached_customers (
+          id TEXT PRIMARY KEY,
+          customer_no TEXT NOT NULL,
+          full_name TEXT NOT NULL,
+          phone TEXT,
+          email TEXT,
+          customer_type TEXT NOT NULL DEFAULT 'WALK_IN',
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_customers_name ON cached_customers(full_name);
       `);
       for (const migration of [
         "ALTER TABLE cached_products ADD COLUMN tax_rate_percent REAL NOT NULL DEFAULT 0;",
@@ -272,6 +318,108 @@ export const mobileOfflineDb = {
       const placeholders = validProductCodes.map(() => "?").join(",");
       await db.runAsync(`DELETE FROM cached_products WHERE product_code NOT IN (${placeholders});`, validProductCodes);
     } catch (error) { console.warn("[flash-erp:mobile] Product cache pruning failed.", error); }
+  },
+
+  // ---- Offline customer master data (POS customer selection while offline) ----
+
+  async saveCustomers(customers: CachedCustomer[]): Promise<void> {
+    const db = await getNativeDb();
+    if (!db) {
+      await memoryStore.saveCustomers(customers);
+      return;
+    }
+    try {
+      await db.withTransactionAsync(async () => {
+        for (const customer of customers) {
+          await db.runAsync(
+            `INSERT INTO cached_customers
+               (id, customer_no, full_name, phone, email, customer_type, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               customer_no = excluded.customer_no,
+               full_name = excluded.full_name,
+               phone = excluded.phone,
+               email = excluded.email,
+               customer_type = excluded.customer_type,
+               updated_at = excluded.updated_at;`,
+            [
+              customer.id,
+              customer.customerNo,
+              customer.fullName,
+              customer.phone || null,
+              customer.email || null,
+              customer.customerType || "WALK_IN",
+              customer.updatedAt || new Date().toISOString()
+            ]
+          );
+        }
+      });
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite customer cache write failed; cached in memory instead.", error);
+      await memoryStore.saveCustomers(customers);
+    }
+  },
+
+  async searchCustomers(query: string, limit = 30): Promise<CachedCustomer[]> {
+    const q = query.trim();
+    const db = await getNativeDb();
+    if (!db) {
+      return await memoryStore.searchCustomers(q, limit);
+    }
+    const term = `%${q}%`;
+    try {
+      const rows: any[] = await db.getAllAsync(
+        `SELECT * FROM cached_customers
+         WHERE UPPER(full_name) LIKE UPPER(?)
+            OR UPPER(customer_no) LIKE UPPER(?)
+            OR UPPER(COALESCE(phone, '')) LIKE UPPER(?)
+            OR UPPER(COALESCE(email, '')) LIKE UPPER(?)
+         ORDER BY full_name ASC
+         LIMIT ?;`,
+        [term, term, term, term, limit]
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        customerNo: row.customer_no,
+        fullName: row.full_name,
+        phone: row.phone,
+        email: row.email,
+        customerType: row.customer_type,
+        updatedAt: row.updated_at
+      }));
+    } catch (error) {
+      console.warn("[flash-erp:mobile] SQLite customer search failed; using memory cache.", error);
+      return await memoryStore.searchCustomers(q, limit);
+    }
+  },
+
+  async countCustomers(): Promise<number> {
+    const db = await getNativeDb();
+    if (!db) return await memoryStore.countCustomers();
+    try {
+      const row: any = await db.getFirstAsync(`SELECT COUNT(*) AS count FROM cached_customers;`);
+      return Number(row?.count ?? 0);
+    } catch {
+      return await memoryStore.countCustomers();
+    }
+  },
+
+  async pruneCustomers(validCustomerIds: string[]): Promise<void> {
+    const db = await getNativeDb();
+    if (!db) {
+      await memoryStore.pruneCustomers(validCustomerIds);
+      return;
+    }
+    try {
+      if (validCustomerIds.length === 0) {
+        await db.runAsync("DELETE FROM cached_customers;");
+        return;
+      }
+      const placeholders = validCustomerIds.map(() => "?").join(",");
+      await db.runAsync(`DELETE FROM cached_customers WHERE id NOT IN (${placeholders});`, validCustomerIds);
+    } catch (error) {
+      console.warn("[flash-erp:mobile] Customer cache pruning failed.", error);
+    }
   },
 
   async findProductByBarcode(barcode: string): Promise<CachedProduct | null> {

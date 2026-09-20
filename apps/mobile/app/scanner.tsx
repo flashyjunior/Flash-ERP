@@ -8,15 +8,19 @@ import {
   ScrollView,
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform
+  Platform,
+  RefreshControl
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
-import { mobileApi, type InventoryLookupResult } from "../lib/mobile-api";
+import { BottomNavBar } from "../components/BottomNavBar";
+import { mobileStorage } from "../lib/mobile-storage";
+import { mobileApi, type InventoryLookupResult, type MobileUserSession } from "../lib/mobile-api";
 
 const GRID_PAGE_SIZE = 50;
 
@@ -52,8 +56,17 @@ export default function BarcodeScannerScreen() {
   const [gridLoadingMore, setGridLoadingMore] = useState<boolean>(false);
   const [gridError, setGridError] = useState<string | null>(null);
   const [gridIsOffline, setGridIsOffline] = useState<boolean>(false);
+  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [session, setSession] = useState<MobileUserSession | null>(null);
   const searchSeq = useRef(0);
   const gridEndRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    void mobileStorage.getUserSnapshot<MobileUserSession>().then(setSession);
+  }, []);
+
+  const insets = useSafeAreaInsets();
+  const goHome = () => { try { router.dismissTo("/"); } catch { router.replace("/"); } };
 
   const loadGridPage = useCallback(async (text: string, page: number, append: boolean, seq: number) => {
     if (page === 1) setGridLoading(true);
@@ -178,9 +191,9 @@ export default function BarcodeScannerScreen() {
       <View style={styles.topBar}>
         <TouchableOpacity
           style={styles.backButton}
-          onPress={() => router.back()}
+          onPress={goHome}
         >
-          <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
+          <Ionicons name="home-outline" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Stock & Barcode Lookup</Text>
         <TouchableOpacity
@@ -197,8 +210,18 @@ export default function BarcodeScannerScreen() {
 
       <ScrollView
         ref={gridEndRef}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: 120 + Math.max(insets.bottom, 0) }]}
         keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              setRefreshing(true);
+              searchSeq.current += 1;
+              void loadGridPage(query.trim(), 1, false, searchSeq.current).finally(() => setRefreshing(false));
+            }}
+          />
+        }
       >
         {/* Camera Viewport (Expandable) */}
         {cameraActive && (
@@ -399,7 +422,7 @@ export default function BarcodeScannerScreen() {
                 disabled={product.quantityOnHand <= 0}
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                  router.push({ pathname: "/cart", params: {
+                  router.navigate({ pathname: "/cart", params: {
                     addProductId: product.productId,
                     addProductCode: product.productCode,
                     addProductName: product.productName,
@@ -420,7 +443,7 @@ export default function BarcodeScannerScreen() {
                 style={styles.countActionButton}
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                  router.push({
+                  router.navigate({
                     pathname: "/stock-count",
                     params: {
                       productId: product.productCode,
@@ -515,6 +538,7 @@ export default function BarcodeScannerScreen() {
           </View>
         )}
       </ScrollView>
+      <BottomNavBar session={session} active="home" />
     </KeyboardAvoidingView>
   );
 }

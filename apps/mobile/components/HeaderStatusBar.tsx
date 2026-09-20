@@ -25,6 +25,7 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
   const [syncing, setSyncing] = useState<boolean>(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [catalogSyncedAt, setCatalogSyncedAt] = useState<string | null>(null);
+  const [customerCount, setCustomerCount] = useState<number>(0);
 
   const refreshState = async () => {
     try {
@@ -36,6 +37,7 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
       setMode(currentMode);
       setServerUrl(currentUrl);
       setPendingCount(stats.pending);
+      mobileOfflineDb.countCustomers().then(setCustomerCount).catch(() => {});
 
       if (currentMode !== "OFFLINE") {
         const ping = await mobileApi.checkServerHealth();
@@ -100,6 +102,28 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
     }
   };
 
+  const handleDownloadMasterData = async () => {
+    if (mode === "OFFLINE") {
+      setSyncMessage("Master data download needs a live HQ connection. Switch to AUTO or ONLINE above, then download.");
+      return;
+    }
+    setSyncing(true);
+    setSyncMessage("Downloading POS master data (products, customers, tenders)...");
+    try {
+      const res = await mobileApi.syncMasterDataToLocalDb((message) => setSyncMessage(message));
+      if (res.error) {
+        setSyncMessage(`Download failed: ${res.error}`);
+      } else {
+        setSyncMessage(`Cached ${res.products} products and ${res.customers} customers for offline selling.`);
+      }
+      await refreshState();
+    } catch (err: any) {
+      setSyncMessage(err.message || "Failed downloading master data.");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const handleDownloadCatalog = async () => {
     if (mode === "OFFLINE") {
       setSyncMessage("Catalog download needs a live HQ connection. Switch to AUTO or ONLINE above, then download.");
@@ -147,17 +171,22 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
           )}
         </View>
 
-        {pendingCount > 0 ? (
-          <View style={styles.outboxBadge}>
-            <Ionicons name="cloud-upload-outline" size={12} color="#ffffff" />
-            <Text style={styles.outboxCount}>{pendingCount} Outbox</Text>
+        {/* A real switch-looking control: the track/thumb communicates state at a
+            glance, and the whole pill is clearly a tappable toggle that opens
+            the network & sync dialog. */}
+        <View style={styles.switchControl} accessibilityRole="switch" accessibilityState={{ checked: mode !== "OFFLINE" }}>
+          {pendingCount > 0 && (
+            <View style={styles.outboxBadge}>
+              <Ionicons name="cloud-upload-outline" size={12} color="#ffffff" />
+              <Text style={styles.outboxCount}>{pendingCount}</Text>
+            </View>
+          )}
+          <Text style={styles.switchText}>{mode === "OFFLINE" ? "OFFLINE MODE" : "SYNC"}</Text>
+          <View style={[styles.switchTrack, { backgroundColor: mode === "OFFLINE" ? mobileTheme.warning : mobileTheme.accent }]}>
+            <View style={[styles.switchThumb, mode === "OFFLINE" ? styles.switchThumbOff : styles.switchThumbOn]} />
           </View>
-        ) : (
-          <View style={styles.syncedBadge}>
-            <Ionicons name="checkmark-circle-outline" size={12} color={mobileTheme.accent} />
-            <Text style={styles.syncedText}>Synced</Text>
-          </View>
-        )}
+          <Ionicons name="settings-outline" size={16} color="#94a3b8" />
+        </View>
       </TouchableOpacity>
 
       {/* Mode & Sync Modal */}
@@ -225,12 +254,26 @@ export function HeaderStatusBar({ onSyncComplete }: HeaderStatusBarProps) {
 
               <TouchableOpacity
                 style={[styles.catalogButton, syncing && styles.syncButtonDisabled]}
-                onPress={handleDownloadCatalog}
+                onPress={handleDownloadMasterData}
                 disabled={syncing}
               >
                 <Ionicons name="cloud-download-outline" size={18} color={mobileTheme.primary} />
                 <Text style={styles.catalogButtonText}>
-                  Download Catalog for Offline Use
+                  Download POS Master Data (Offline)
+                </Text>
+              </TouchableOpacity>
+              <Text style={styles.catalogSyncTime}>
+                Products, customers, taxes & tenders for offline selling. {customerCount > 0 ? `${customerCount} customers cached.` : ""}
+              </Text>
+
+              <TouchableOpacity
+                style={[styles.catalogButton, syncing && styles.syncButtonDisabled]}
+                onPress={handleDownloadCatalog}
+                disabled={syncing}
+              >
+                <Ionicons name="cube-outline" size={18} color={mobileTheme.primary} />
+                <Text style={styles.catalogButtonText}>
+                  Download Product Catalog Only
                 </Text>
               </TouchableOpacity>
               {catalogSyncedAt && <Text style={styles.catalogSyncTime}>Catalog last updated {new Date(catalogSyncedAt).toLocaleString()}</Text>}
@@ -318,6 +361,43 @@ const styles = StyleSheet.create({
     color: "#a7f3d0",
     fontSize: 11,
     fontWeight: "600"
+  },
+  switchControl: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#1e293b",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: mobileTheme.radiusPill,
+    borderWidth: 1,
+    borderColor: "#334155"
+  },
+  switchText: {
+    color: "#f8fafc",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5
+  },
+  switchTrack: {
+    width: 40,
+    height: 22,
+    borderRadius: 11,
+    justifyContent: "center",
+    paddingHorizontal: 2
+  },
+  switchThumb: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: "#ffffff",
+    ...mobileTheme.shadowSmall
+  },
+  switchThumbOn: {
+    alignSelf: "flex-end"
+  },
+  switchThumbOff: {
+    alignSelf: "flex-start"
   },
   modalOverlay: {
     flex: 1,

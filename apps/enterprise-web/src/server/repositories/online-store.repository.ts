@@ -7884,9 +7884,10 @@ async function prepareOnlineStoreBasketLines(
   const products = await tx.product.findMany({
     where: {
       retailOrgId,
-      id: {
-        in: productIds
-      },
+      // Mobile clients that cached products with an early build may have queued
+      // offline sales keyed by product CODE instead of the HQ product id.
+      // Resolve by either identifier so those outbox mutations can drain.
+      OR: [{ id: { in: productIds } }, { code: { in: productIds } }],
       status: RecordStatus.ACTIVE,
       deletedAt: null
     },
@@ -7993,7 +7994,10 @@ async function prepareOnlineStoreBasketLines(
       trackExpiry: true
     }
   });
-  const productById = new Map(products.map((product) => [product.id, product] as const));
+  const productById = new Map<string, (typeof products)[number]>(products.map((product) => [product.id, product] as const));
+  for (const product of products) {
+    if (!productById.has(product.code)) productById.set(product.code, product);
+  }
 
   return lineInputs.map((line) => {
     const product = productById.get(line.productId);
@@ -9197,9 +9201,8 @@ export async function createOnlineStoreSale(
   const products = await prisma.product.findMany({
     where: {
       retailOrgId: session.retailOrgId,
-      id: {
-        in: productIds
-      },
+      // Tolerate mobile outbox payloads keyed by product code (legacy caches).
+      OR: [{ id: { in: productIds } }, { code: { in: productIds } }],
       status: RecordStatus.ACTIVE,
       deletedAt: null
     },
@@ -9301,7 +9304,10 @@ export async function createOnlineStoreSale(
       trackExpiry: true
     }
   });
-  const productById = new Map(products.map((product) => [product.id, product] as const));
+  const productById = new Map<string, (typeof products)[number]>(products.map((product) => [product.id, product] as const));
+  for (const product of products) {
+    if (!productById.has(product.code)) productById.set(product.code, product);
+  }
   const managerPermissionCodes = new Set<string>();
   const overrideNotes: string[] = [];
   const loyaltyRedemptionRequested =
@@ -14179,9 +14185,8 @@ export async function createOnlineStoreGoodsReceipt(
   const products = await prisma.product.findMany({
     where: {
       retailOrgId: session.retailOrgId,
-      id: {
-        in: productIds
-      },
+      // Tolerate mobile outbox payloads keyed by product code (legacy caches).
+      OR: [{ id: { in: productIds } }, { code: { in: productIds } }],
       status: RecordStatus.ACTIVE,
       deletedAt: null
     },
@@ -14201,7 +14206,10 @@ export async function createOnlineStoreGoodsReceipt(
       shelfLifeDays: true
     }
   });
-  const productById = new Map(products.map((product) => [product.id, product] as const));
+  const productById = new Map<string, (typeof products)[number]>(products.map((product) => [product.id, product] as const));
+  for (const product of products) {
+    if (!productById.has(product.code)) productById.set(product.code, product);
+  }
   const purchaseOrderLineById = new Map((purchaseOrder?.lines ?? []).map((line) => [line.id, line] as const));
   const preparedLines = lineInputs.map((line, index) => {
     const product = productById.get(line.productId);

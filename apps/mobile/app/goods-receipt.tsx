@@ -8,13 +8,16 @@ import {
   ScrollView,
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform
+  Platform,
+  RefreshControl
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
+import { BottomNavBar } from "../components/BottomNavBar";
 import { mobileApi } from "../lib/mobile-api";
 
 interface ReceiptLine {
@@ -26,6 +29,9 @@ interface ReceiptLine {
 }
 
 export default function GoodsReceiptScreen() {
+  const insets = useSafeAreaInsets();
+  const [refreshing, setRefreshing] = useState(false);
+  const goHome = () => { try { router.dismissTo("/"); } catch { router.replace("/"); } };
   const [poNumber, setPoNumber] = useState<string>("");
   const [currentProductCode, setCurrentProductCode] = useState<string>("");
   const [currentQty, setCurrentQty] = useState<string>("1");
@@ -121,7 +127,7 @@ export default function GoodsReceiptScreen() {
 
       {/* Screen Header */}
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backButton} onPress={goHome}>
           <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Goods Receiving (GRN)</Text>
@@ -130,7 +136,11 @@ export default function GoodsReceiptScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: 110 + Math.max(insets.bottom, 0) }]}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setFeedback(null); setTimeout(() => setRefreshing(false), 400); }} />}
+      >
         {/* PO Reference Card */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Purchase Order Reference</Text>
@@ -267,6 +277,7 @@ export default function GoodsReceiptScreen() {
           )}
         </TouchableOpacity>
       </ScrollView>
+      <BottomNavBar active="home" />
     </KeyboardAvoidingView>
   );
 }

@@ -5,6 +5,7 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
+  RefreshControl,
   ScrollView,
   Share,
   StyleSheet,
@@ -21,6 +22,7 @@ import * as Haptics from "expo-haptics";
 import * as LocalAuthentication from "expo-local-authentication";
 
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
+import { BottomNavBar } from "../components/BottomNavBar";
 import { mobileApi, type MobileUserSession } from "../lib/mobile-api";
 import { mobileStorage } from "../lib/mobile-storage";
 import { mobileReceiptStore } from "../lib/mobile-receipt-store";
@@ -50,6 +52,16 @@ export default function AccountScreen() {
   const [diagVisible, setDiagVisible] = useState(false);
   const [diagText, setDiagText] = useState("");
   const [diagBusy, setDiagBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    void mobileApi.fetchProfile().then((response) => { if (response.ok && response.data) { setDisplayName(response.data.displayName); setEmail(response.data.email || ""); } });
+    void mobileApi.readErrorLog().then((entries) => setDiagCount(entries.length)).catch(() => setDiagCount(0));
+    const snapshot = await mobileStorage.getUserSnapshot<MobileUserSession>();
+    if (snapshot) setUser(snapshot);
+    setRefreshing(false);
+  };
 
   useEffect(() => {
     void Promise.all([
@@ -187,13 +199,18 @@ export default function AccountScreen() {
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === "ios" ? "padding" : "height"}>
       <HeaderStatusBar />
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.iconButton}>
-          <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
+        <TouchableOpacity onPress={() => { try { router.dismissTo("/"); } catch { router.replace("/"); } }} style={styles.iconButton}>
+          <Ionicons name="home-outline" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.title}>My Account</Text>
         <View style={styles.iconButton} />
       </View>
-      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 40 + Math.max(insets.bottom, 0) }]} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+      <ScrollView
+        contentContainerStyle={[styles.content, { paddingBottom: 110 + Math.max(insets.bottom, 0) }]}
+        keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      >
         <View style={styles.profileCard}>
           <View style={styles.avatar}><Text style={styles.initials}>{(user?.displayName || "U").slice(0, 2).toUpperCase()}</Text></View>
           <View style={styles.profileText}>
@@ -296,6 +313,7 @@ export default function AccountScreen() {
           <Text style={styles.logoutText}>Sign Out</Text>
         </TouchableOpacity>
       </ScrollView>
+      <BottomNavBar session={user} active="account" />
       <Modal visible={diagVisible} transparent animationType="slide" onRequestClose={() => setDiagVisible(false)}>
         <View style={styles.diagBackdrop}>
           <View style={[styles.diagModal, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
@@ -366,10 +384,10 @@ const styles = StyleSheet.create({
   diagButtonText: { color: mobileTheme.primary, fontWeight: "800", fontSize: 13 },
   diagButtonMuted: { color: mobileTheme.mutedText, fontWeight: "800", fontSize: 13 },
   diagBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.7)", justifyContent: "flex-end" },
-  diagModal: { maxHeight: "86%", backgroundColor: mobileTheme.surfaceBackground, borderTopLeftRadius: mobileTheme.radiusLarge, borderTopRightRadius: mobileTheme.radiusLarge, padding: 18, gap: 10 },
+  diagModal: { height: "92%", backgroundColor: mobileTheme.surfaceBackground, borderTopLeftRadius: mobileTheme.radiusLarge, borderTopRightRadius: mobileTheme.radiusLarge, padding: 18, gap: 10 },
   diagModalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   diagModalTitle: { fontSize: 16, fontWeight: "800", color: mobileTheme.textColor },
-  diagScroll: { maxHeight: 420, borderWidth: 1, borderColor: mobileTheme.borderColor, borderRadius: mobileTheme.radiusSmall, backgroundColor: "#020617" },
+  diagScroll: { flex: 1, borderWidth: 1, borderColor: mobileTheme.borderColor, borderRadius: mobileTheme.radiusSmall, backgroundColor: "#020617" },
   diagPre: { padding: 12, color: "#cbd5e1", fontSize: 11, fontFamily: "monospace" },
   diagPrimary: { flex: 1, height: 44, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, borderRadius: mobileTheme.radiusSmall, backgroundColor: mobileTheme.primary },
   diagPrimaryText: { color: "#fff", fontWeight: "800", fontSize: 14 },

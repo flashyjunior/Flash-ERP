@@ -409,6 +409,48 @@ export const mobileApi = {
     }
   },
 
+  /** Start self-service password recovery (sends the reset link by email). */
+  async requestPasswordReset(identifier: string): Promise<ApiResponse<{ resetLink?: string }>> {
+    try {
+      const { data } = await request<any>("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ identifier })
+      });
+      return { ok: true, data, message: data?.message || "If Flash ERP recognizes that account, recovery instructions are on the way." };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not start password recovery." };
+    }
+  },
+
+  /** Complete self-service password recovery with the token from the reset link. */
+  async resetPassword(token: string, password: string): Promise<ApiResponse> {
+    try {
+      const { data } = await request<any>("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ token, password })
+      });
+      return { ok: true, data, message: "Password updated. Sign in with your new password." };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Could not reset the password." };
+    }
+  },
+
+  /** Shop-independent home feed (birthdays, own leave/attendance, approvals). */
+  async fetchMobileHome(): Promise<ApiResponse<{
+    birthdays: Array<{ displayName: string; department: string | null; position: string | null; turns: number; daysUntil: number; dateLabel: string }>;
+    attendance: { checkInAt: string | null; checkOutAt: string | null; attendanceStatus: string } | null;
+    upcomingLeave: Array<{ requestNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; status: string }>;
+    recentClaims: Array<{ claimNo: string; purpose: string; totalAmount: number; currencyCode: string; status: string }>;
+    pendingApprovals: number;
+  }>> {
+    try {
+      const { data } = await request<any>("/api/mobile/home");
+      return { ok: true, data };
+    } catch (error: any) {
+      return { ok: false, error: error.message || "Home feed unavailable." };
+    }
+  },
+
   async signOut(): Promise<void> {
     const token = await mobileStorage.getAuthToken();
     // Revoke local access immediately. Late session responses cannot restore it.
@@ -421,13 +463,30 @@ export const mobileApi = {
   },
 
   async searchCustomers(query = ""): Promise<ApiResponse<MobileCustomer[]>> {
-    const offline = await requireOnlineMode("Customer search");
-    if (offline) return offline;
+    const mode = await mobileStorage.getOperationMode();
+    const clean = query.trim();
+
+    // Strictly offline: serve the locally synced customer master data.
+    if (mode === "OFFLINE") {
+      const cached = await mobileOfflineDb.searchCustomers(clean, 30);
+      return { ok: true, data: cached, isOffline: true };
+    }
+
     try {
-      const { data } = await request<any>(`/api/online-store/customers?query=${encodeURIComponent(query.trim())}`);
-      return { ok: true, data: Array.isArray(data?.customers) ? data.customers : [] };
+      const { data } = await request<any>(`/api/online-store/customers?query=${encodeURIComponent(clean)}`);
+      const customers: MobileCustomer[] = Array.isArray(data?.customers) ? data.customers : [];
+      // Keep the offline master-data copy warm with every successful search.
+      if (customers.length > 0) {
+        mobileOfflineDb.saveCustomers(customers.map((customer) => ({ ...customer, updatedAt: new Date().toISOString() }))).catch(() => {});
+      }
+      return { ok: true, data: customers };
     } catch (error: any) {
-      return { ok: false, error: error.message || "Customer search failed." };
+      if (mode === "ONLINE" || error instanceof MobileHttpError) {
+        return { ok: false, error: error.message || "Customer search failed." };
+      }
+      // AUTO mode with a dead connection: fall back to the synced customers.
+      const cached = await mobileOfflineDb.searchCustomers(clean, 30);
+      return { ok: true, data: cached, isOffline: true };
     }
   },
 
@@ -515,7 +574,9 @@ export const mobileApi = {
         // Update local SQLite cache in background for future offline use
         mobileOfflineDb.saveProducts([
           {
-            id: item.productCode,
+            // The HQ product id — offline sales must post this exact id, or
+            // HQ rejects the synced sale as "product no longer available".
+            id: item.productId,
             productCode: item.productCode,
             productName: item.productName,
             barcode: item.barcode || "",
@@ -591,7 +652,9 @@ export const mobileApi = {
       }> = [];
       for (const item of items) {
         cacheRows.push({
-          id: item.productCode,
+          // Cache the HQ product id (never the code) so offline sales built
+          // from the grid resolve on HQ when the outbox drains.
+          id: item.productId,
           productCode: item.productCode,
           productName: item.productName,
           barcode: item.barcode || "",
@@ -662,6 +725,50 @@ export const mobileApi = {
       return { count };
     } catch (err: any) {
       return { count: 0, error: err.message };
+    }
+  },
+
+  // 4b. Full POS master-data download for offline use: products (incl. taxes),
+  //     customers and tender methods. Everything a cashier needs to sell offline.
+  async syncMasterDataToLocalDb(onProgress?: (message: string) => void): Promise<{ products: number; customers: number; error?: string }> {
+    const offline = await requireOnlineMode("Master data download");
+    if (offline) return { products: 0, customers: 0, error: offline.error };
+    try {
+      onProgress?.("Downloading product catalog...");
+      const catalog = await this.syncCatalogToLocalDb((downloaded, total) => onProgress?.(`Downloading catalog... ${downloaded} of ${total} products`));
+      if (catalog.error) return { products: 0, customers: 0, error: catalog.error };
+
+      onProgress?.("Downloading customers...");
+      let page = 1;
+      let customerCount = 0;
+      const validCustomerIds: string[] = [];
+      for (;;) {
+        const { data } = await request<any>(`/api/online-store/customers?limit=200&page=${page}`);
+        const batch: any[] = Array.isArray(data?.customers) ? data.customers : [];
+        if (batch.length === 0) break;
+        await mobileOfflineDb.saveCustomers(batch.map((customer) => ({
+          id: customer.id,
+          customerNo: customer.customerNo,
+          fullName: customer.fullName,
+          phone: customer.phone ?? null,
+          email: customer.email ?? null,
+          customerType: customer.customerType ?? "WALK_IN",
+          updatedAt: new Date().toISOString()
+        })));
+        validCustomerIds.push(...batch.map((customer) => customer.id));
+        customerCount += batch.length;
+        onProgress?.(`Downloading customers... ${customerCount}`);
+        if (batch.length < 200 || customerCount >= 5000) break;
+        page += 1;
+      }
+      await mobileOfflineDb.pruneCustomers(validCustomerIds);
+
+      onProgress?.("Downloading tender methods...");
+      await this.fetchTenderMethods();
+      await mobileStorage.setCatalogSyncedAt(new Date().toISOString());
+      return { products: catalog.count, customers: customerCount };
+    } catch (err: any) {
+      return { products: 0, customers: 0, error: err.message };
     }
   },
 
@@ -929,10 +1036,14 @@ export const mobileApi = {
   },
 
   // 10. Held Sales & Layaway Orders
-  async searchReceipts(query: string): Promise<ApiResponse<any[]>> {
+  /** `date` (YYYY-MM-DD) lists that day's receipts; `query` narrows by number/customer. */
+  async searchReceipts(query: string, date?: string): Promise<ApiResponse<any[]>> {
     const offline = await requireOnlineMode("Receipt search");
     if (offline) return offline;
-    try { const { data } = await request<any>(`/api/online-store/receipts?query=${encodeURIComponent(query.trim())}`); return { ok: true, data: Array.isArray(data?.receipts) ? data.receipts : [] }; }
+    const qs = new URLSearchParams();
+    if (query.trim()) qs.set("query", query.trim());
+    if (date) qs.set("date", date);
+    try { const { data } = await request<any>(`/api/online-store/receipts?${qs.toString()}`); return { ok: true, data: Array.isArray(data?.receipts) ? data.receipts : [] }; }
     catch (error: any) { return { ok: false, error: error.message || "Receipt search failed." }; }
   },
 

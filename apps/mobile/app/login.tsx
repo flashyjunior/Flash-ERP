@@ -7,12 +7,14 @@ import {
   StyleSheet,
   ActivityIndicator,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { mobileStorage, DEFAULT_SERVER_URL } from "../lib/mobile-storage";
 import { mobileApi } from "../lib/mobile-api";
@@ -31,6 +33,48 @@ export default function LoginScreen() {
     null
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(() => mobileStorage.getSessionMessage());
+  const insets = useSafeAreaInsets();
+
+  // Self-service password recovery from the sign-in screen.
+  const [recoveryVisible, setRecoveryVisible] = useState(false);
+  const [recoveryIdentifier, setRecoveryIdentifier] = useState("");
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [resetToken, setResetToken] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+
+  const handleRequestReset = async () => {
+    if (!recoveryIdentifier.trim()) { setRecoveryMessage("Enter your Login ID or email address first."); return; }
+    setRecoveryBusy(true);
+    setRecoveryMessage(null);
+    const response = await mobileApi.requestPasswordReset(recoveryIdentifier.trim());
+    setRecoveryBusy(false);
+    setRecoveryMessage(response.error || response.message || "Recovery requested.");
+    // Development environments return the link directly — prefill its token.
+    const link = (response.data as any)?.resetLink;
+    if (typeof link === "string") {
+      try {
+        const token = new URL(link).searchParams.get("token");
+        if (token) setResetToken(token);
+      } catch { /* keep whatever the operator pastes */ }
+    }
+  };
+
+  const handleResetPassword = async () => {
+    if (!resetToken.trim()) { setRecoveryMessage("Paste the reset token from your recovery email link."); return; }
+    if (!resetPassword || resetPassword.length < 8) { setRecoveryMessage("New password must be at least 8 characters."); return; }
+    if (resetPassword !== resetConfirm) { setRecoveryMessage("Password confirmation does not match."); return; }
+    setRecoveryBusy(true);
+    setRecoveryMessage(null);
+    const response = await mobileApi.resetPassword(resetToken.trim(), resetPassword);
+    setRecoveryBusy(false);
+    if (!response.ok) { setRecoveryMessage(response.error || "Password reset failed."); return; }
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setRecoveryVisible(false);
+    setErrorMessage("Password updated — sign in with your new password.");
+    setPassword("");
+  };
 
   useEffect(() => {
     void Promise.all([
@@ -96,7 +140,7 @@ export default function LoginScreen() {
       keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 24}
       style={styles.container}
     >
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+      <ScrollView contentContainerStyle={[styles.scrollContent, { paddingTop: Math.max(insets.top, 20), paddingBottom: 30 + Math.max(insets.bottom, 0) }]} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
         {/* Brand Header */}
         <View style={styles.brandHero}>
           <View style={styles.logoBadge}>
@@ -155,12 +199,6 @@ export default function LoginScreen() {
                 </Text>
               </View>
             )}
-          </View>
-        ) : serverConfigured ? (
-          <View style={styles.serverSummary}>
-            <Ionicons name="server-outline" size={16} color={mobileTheme.primary} />
-            <Text style={styles.serverSummaryText} numberOfLines={1}>Signing in via {serverUrl}</Text>
-            <Text style={styles.serverSummaryLink}>Change in My Account</Text>
           </View>
         ) : null}
 
@@ -227,8 +265,51 @@ export default function LoginScreen() {
               </>
             )}
           </TouchableOpacity>
+
+          <TouchableOpacity style={styles.forgotRow} onPress={() => { setRecoveryVisible(true); setRecoveryMessage(null); }}>
+            <Ionicons name="key-outline" size={16} color={mobileTheme.primary} />
+            <Text style={styles.forgotText}>Forgot password? Change it here</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
+
+      {/* Self-service password recovery (works before signing in). */}
+      <Modal visible={recoveryVisible} transparent animationType="slide" onRequestClose={() => setRecoveryVisible(false)}>
+        <View style={styles.recoveryBackdrop}>
+          <View style={[styles.recoveryCard, { paddingBottom: Math.max(insets.bottom, 20) + 16 }]}>
+            <View style={styles.recoveryHeader}>
+              <Text style={styles.cardSectionTitle}>Reset your password</Text>
+              <TouchableOpacity onPress={() => setRecoveryVisible(false)}><Ionicons name="close-circle" size={24} color={mobileTheme.neutralMuted} /></TouchableOpacity>
+            </View>
+            <Text style={styles.serverHint}>Step 1 — enter your Login ID or email and we will send a recovery link. Step 2 — paste the token from that link and choose a new password.</Text>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Login ID or email</Text>
+              <TextInput style={styles.textInputSolo} value={recoveryIdentifier} onChangeText={setRecoveryIdentifier} placeholder="e.g. cashier01 or you@company.com" autoCapitalize="none" autoCorrect={false} />
+            </View>
+            <TouchableOpacity style={[styles.signInButton, recoveryBusy && styles.signInButtonDisabled]} onPress={handleRequestReset} disabled={recoveryBusy}>
+              {recoveryBusy ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.signInButtonText}>Send Recovery Email</Text>}
+            </TouchableOpacity>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Reset token (from the email link)</Text>
+              <TextInput style={styles.textInputSolo} value={resetToken} onChangeText={setResetToken} placeholder="Paste the token after ?token=" autoCapitalize="none" autoCorrect={false} />
+            </View>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>New password</Text>
+              <TextInput style={styles.textInputSolo} value={resetPassword} onChangeText={setResetPassword} secureTextEntry placeholder="At least 8 characters" />
+            </View>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Confirm new password</Text>
+              <TextInput style={styles.textInputSolo} value={resetConfirm} onChangeText={setResetConfirm} secureTextEntry placeholder="Repeat the new password" />
+            </View>
+            {recoveryMessage && (
+              <View style={styles.errorBox}><Ionicons name="information-circle-outline" size={18} color={mobileTheme.primary} /><Text style={styles.recoveryMessage}>{recoveryMessage}</Text></View>
+            )}
+            <TouchableOpacity style={[styles.signInButton, recoveryBusy && styles.signInButtonDisabled]} onPress={handleResetPassword} disabled={recoveryBusy}>
+              {recoveryBusy ? <ActivityIndicator color="#fff" size="small" /> : <><Ionicons name="key-outline" size={18} color="#fff" /><Text style={styles.signInButtonText}>Set New Password</Text></>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -409,5 +490,12 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 15,
     fontWeight: "800"
-  }
+  },
+  forgotRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 4 },
+  forgotText: { color: mobileTheme.primary, fontSize: 13, fontWeight: "800" },
+  recoveryBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.7)", justifyContent: "flex-end" },
+  recoveryCard: { backgroundColor: mobileTheme.surfaceBackground, borderTopLeftRadius: mobileTheme.radiusLarge, borderTopRightRadius: mobileTheme.radiusLarge, padding: 20, gap: 12, maxHeight: "92%" },
+  recoveryHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  textInputSolo: { borderWidth: 1, borderColor: mobileTheme.borderColor, borderRadius: mobileTheme.radiusMedium, paddingHorizontal: 12, height: 48, fontSize: 14, color: mobileTheme.textColor, backgroundColor: mobileTheme.neutralLight },
+  recoveryMessage: { flex: 1, color: mobileTheme.textColor, fontSize: 12, fontWeight: "600" }
 });
