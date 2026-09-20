@@ -16,6 +16,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { mobileStorage } from "../lib/mobile-storage";
+import { mobileReceiptStore } from "../lib/mobile-receipt-store";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileApi, type MobileCustomer, type MobileTenderMethod } from "../lib/mobile-api";
 
@@ -263,8 +264,11 @@ export default function MobileCartScreen() {
     setLoading(true);
     setFeedback(null);
     try {
+      // sourceTransactionId must ONLY be the real id of a recalled (parked)
+      // transaction. Sending an invented id makes HQ look for a parked basket
+      // by that id and reject the sale ("could not find that held sale").
       const res = await mobileApi.submitSale({
-        sourceTransactionId: recalledTransactionId ?? saleIdempotencyKey.current,
+        sourceTransactionId: recalledTransactionId || undefined,
         customerId: customerId || undefined,
         lines: lines.map((l) => ({
           productId: l.productId,
@@ -309,7 +313,11 @@ export default function MobileCartScreen() {
         await mobileStorage.clearPosCart();
         saleIdempotencyKey.current = `MOBILE-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         if (!res.isOffline && (res.data as any)?.receipt) {
-          await mobileStorage.setLastReceipt((res.data as any).receipt);
+          // Persist for re-printing later. The sale is already complete — a
+          // print failure (or no printer) must never undo or block it.
+          const receipt = (res.data as any).receipt;
+          void mobileReceiptStore.saveLastReceipt(receipt);
+          await mobileStorage.setLastReceipt(receipt).catch(() => {});
           router.replace("/receipt");
         }
       } else {
@@ -574,7 +582,7 @@ export default function MobileCartScreen() {
               ) : (
                 <>
                   <Ionicons name="checkmark-done" size={20} color="#ffffff" />
-                  <Text style={styles.confirmPayText}>Confirm Payment & Print Slip</Text>
+                  <Text style={styles.confirmPayText}>Complete Sale & Print Receipt</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -853,15 +861,18 @@ const styles = StyleSheet.create({
     color: mobileTheme.primary
   },
   tenderMethodGroup: {
+    // Up to six tender types flow into two rows of three tappable tiles.
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 10
   },
   tenderBtn: {
-    flex: 1,
+    flexBasis: "31.5%",
+    flexGrow: 0,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderRadius: mobileTheme.radiusMedium,
     backgroundColor: mobileTheme.neutralLight,
     borderWidth: 1,
@@ -875,7 +886,8 @@ const styles = StyleSheet.create({
   tenderBtnText: {
     fontSize: 13,
     fontWeight: "700",
-    color: mobileTheme.textColor
+    color: mobileTheme.textColor,
+    flexShrink: 1
   },
   tenderBtnTextActive: {
     color: "#ffffff"

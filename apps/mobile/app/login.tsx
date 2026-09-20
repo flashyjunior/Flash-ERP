@@ -19,6 +19,10 @@ import { mobileApi } from "../lib/mobile-api";
 
 export default function LoginScreen() {
   const [serverUrl, setServerUrl] = useState<string>(DEFAULT_SERVER_URL);
+  // The HQ server field is a first-run step: once the operator has configured
+  // and signed in with it, it moves to My Account (Enterprise server) and is
+  // no longer shown on every sign-in.
+  const [serverConfigured, setServerConfigured] = useState<boolean | null>(null);
   const [loginId, setLoginId] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -29,13 +33,16 @@ export default function LoginScreen() {
   const [errorMessage, setErrorMessage] = useState<string | null>(() => mobileStorage.getSessionMessage());
 
   useEffect(() => {
-    mobileStorage
-      .getServerUrl()
-      .then(setServerUrl)
-      .catch((error) => {
+    void Promise.all([
+      mobileStorage.getServerUrl().catch((error) => {
         console.warn("[flash-erp:mobile] Failed reading server URL; using default.", error);
-        setServerUrl(DEFAULT_SERVER_URL);
-      });
+        return DEFAULT_SERVER_URL;
+      }),
+      mobileStorage.hasSavedServerUrl().catch(() => false)
+    ]).then(([url, configured]) => {
+      setServerUrl(url);
+      setServerConfigured(configured);
+    });
   }, []);
 
   const handleTestConnection = async () => {
@@ -99,53 +106,63 @@ export default function LoginScreen() {
           <Text style={styles.brandSubtitle}>Mobile Operational Companion</Text>
         </View>
 
-        {/* Server Endpoint Configuration */}
-        <View style={styles.card}>
-          <Text style={styles.cardSectionTitle}>Enterprise Server Host</Text>
-          <View style={styles.serverRow}>
-            <TextInput
-              style={styles.serverInput}
-              value={serverUrl}
-              onChangeText={setServerUrl}
-              placeholder="http://your-vps:3000"
-              placeholderTextColor={mobileTheme.neutralMuted}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <TouchableOpacity
-              style={styles.pingButton}
-              onPress={handleTestConnection}
-              disabled={pingStatus?.testing}
-            >
-              {pingStatus?.testing ? (
-                <ActivityIndicator size="small" color="#ffffff" />
-              ) : (
-                <Text style={styles.pingButtonText}>Test</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-
-          {pingStatus && !pingStatus.testing && (
-            <View style={styles.pingResultRow}>
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: pingStatus.alive ? mobileTheme.accent : mobileTheme.danger }
-                ]}
+        {/* Server Endpoint Configuration — first run only. Once configured it
+            lives under My Account › Enterprise server. */}
+        {serverConfigured === false ? (
+          <View style={styles.card}>
+            <Text style={styles.cardSectionTitle}>Enterprise Server Host (First Run)</Text>
+            <Text style={styles.serverHint}>Point this device at your Flash ERP Enterprise API. You can change it any time from My Account.</Text>
+            <View style={styles.serverRow}>
+              <TextInput
+                style={styles.serverInput}
+                value={serverUrl}
+                onChangeText={setServerUrl}
+                placeholder="http://your-vps:3000"
+                placeholderTextColor={mobileTheme.neutralMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
               />
-              <Text
-                style={[
-                  styles.pingResultText,
-                  { color: pingStatus.alive ? mobileTheme.accentDark : mobileTheme.danger }
-                ]}
+              <TouchableOpacity
+                style={styles.pingButton}
+                onPress={handleTestConnection}
+                disabled={pingStatus?.testing}
               >
-                {pingStatus.alive
-                  ? `Enterprise API online (${pingStatus.latencyMs}ms)`
-                  : "Unreachable (Check URL / VPS firewall)"}
-              </Text>
+                {pingStatus?.testing ? (
+                  <ActivityIndicator size="small" color="#ffffff" />
+                ) : (
+                  <Text style={styles.pingButtonText}>Test</Text>
+                )}
+              </TouchableOpacity>
             </View>
-          )}
-        </View>
+
+            {pingStatus && !pingStatus.testing && (
+              <View style={styles.pingResultRow}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    { backgroundColor: pingStatus.alive ? mobileTheme.accent : mobileTheme.danger }
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.pingResultText,
+                    { color: pingStatus.alive ? mobileTheme.accentDark : mobileTheme.danger }
+                  ]}
+                >
+                  {pingStatus.alive
+                    ? `Enterprise API online (${pingStatus.latencyMs}ms)`
+                    : "Unreachable (Check URL / VPS firewall)"}
+                </Text>
+              </View>
+            )}
+          </View>
+        ) : serverConfigured ? (
+          <View style={styles.serverSummary}>
+            <Ionicons name="server-outline" size={16} color={mobileTheme.primary} />
+            <Text style={styles.serverSummaryText} numberOfLines={1}>Signing in via {serverUrl}</Text>
+            <Text style={styles.serverSummaryLink}>Change in My Account</Text>
+          </View>
+        ) : null}
 
         {/* Credentials Form */}
         <View style={styles.card}>
@@ -269,6 +286,31 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 0.8,
     color: mobileTheme.mutedText
+  },
+  serverHint: {
+    fontSize: 12,
+    color: mobileTheme.mutedText,
+    lineHeight: 16
+  },
+  serverSummary: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: mobileTheme.primaryLight,
+    borderRadius: mobileTheme.radiusMedium,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  serverSummaryText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "700",
+    color: mobileTheme.primaryDark
+  },
+  serverSummaryLink: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: mobileTheme.primary
   },
   serverRow: {
     flexDirection: "row",

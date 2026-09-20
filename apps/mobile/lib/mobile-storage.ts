@@ -91,6 +91,11 @@ export const mobileStorage = {
   async setServerUrl(url: string): Promise<void> {
     await setItem(KEYS.SERVER_URL, url.trim().replace(/\/+$/, ""));
   },
+  /** True once the operator has explicitly configured the HQ server (after first run). */
+  async hasSavedServerUrl(): Promise<boolean> {
+    const stored = await getItem(KEYS.SERVER_URL);
+    return Boolean(stored?.trim());
+  },
 
   // Auth Token
   async getAuthToken(): Promise<string | null> {
