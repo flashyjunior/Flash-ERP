@@ -23,11 +23,6 @@ function isValidReceipt(value: unknown): value is Receipt {
 export default function ReceiptScreen() {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [ready, setReady] = useState(false);
-  const [printState, setPrintState] = useState<{ printing: boolean; error: string | null }>({ printing: false, error: null });
-  const [sharing, setSharing] = useState(false);
-  const [session, setSession] = useState<MobileUserSession | null>(null);
-  const insets = useSafeAreaInsets();
-  useEffect(() => { void mobileStorage.getUserSnapshot<MobileUserSession>().then(setSession); }, []);
   useEffect(() => {
     // File store first (no size limit), then the legacy SecureStore copy so
     // receipts saved by earlier app versions are still re-printable.
@@ -45,6 +40,20 @@ export default function ReceiptScreen() {
   }, []);
   if (ready && !receipt) return <View style={styles.loading}><Text>No saved receipt is available.</Text><TouchableOpacity accessibilityRole="button" onPress={() => { try { router.dismissTo("/"); } catch { router.replace("/"); } }}><Text style={styles.doneText}>Back to dashboard</Text></TouchableOpacity></View>;
   if (!receipt) return <View style={styles.loading}><ActivityIndicator color={mobileTheme.primary} /><Text>Loading receipt…</Text></View>;
+  // The loaded receipt renders in its own component. Every hook in ReceiptView
+  // only ever runs once a receipt exists, so the asynchronous load cannot
+  // change this screen's hook order. React threw "Rendered more hooks than
+  // during the previous render" here, which replaced the receipt of a
+  // completed sale with the fatal-error screen.
+  return <ReceiptView receipt={receipt} />;
+}
+
+function ReceiptView({ receipt }: { receipt: Receipt }) {
+  const [printState, setPrintState] = useState<{ printing: boolean; error: string | null }>({ printing: false, error: null });
+  const [sharing, setSharing] = useState(false);
+  const [session, setSession] = useState<MobileUserSession | null>(null);
+  const insets = useSafeAreaInsets();
+  useEffect(() => { void mobileStorage.getUserSnapshot<MobileUserSession>().then(setSession); }, []);
   const money = (value: number) => `${receipt.currencyCode} ${Number(value).toFixed(2)}`;
   const buildReceiptHtml = () => {
     const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character] || character));
@@ -72,13 +81,13 @@ export default function ReceiptScreen() {
   const params = useLocalSearchParams<{ autoprint?: string }>();
   const autoPrinted = React.useRef(false);
   useEffect(() => {
-    if (ready && receipt && params.autoprint === "1" && !autoPrinted.current) {
+    if (receipt && params.autoprint === "1" && !autoPrinted.current) {
       autoPrinted.current = true;
       const timer = setTimeout(() => { void printReceipt(); }, 350);
       return () => clearTimeout(timer);
     }
     return undefined;
-  }, [ready, receipt, params.autoprint]);
+  }, [receipt, params.autoprint]);
 
   /** Sharing renders the receipt to a PDF file first, so recipients receive a
    *  proper document instead of plain text. */

@@ -12,10 +12,29 @@ const analytics = {
   salesTotal: 150, transactionCount: 2, averageBasket: 75, pendingApprovals: 0,
   trend: [{ date: "2026-09-19", total: 150 }], topProducts: [], generatedAt: new Date().toISOString(),
 };
+// Shape of GET /api/mobile/home (apps/enterprise-web/src/app/api/mobile/home/route.ts):
+// the shop-independent feed an operator without a home shop sees on the dashboard.
+const homeFeed = {
+  birthdays: [
+    { displayName: "Ama Serwaa", department: "Wholesale", position: "Floor Supervisor", turns: 31, daysUntil: 1, dateLabel: "2026-09-21" },
+  ],
+  attendance: { checkInAt: "2026-09-20T07:42:00.000Z", checkOutAt: null, attendanceStatus: "PRESENT" },
+  upcomingLeave: [
+    { requestNo: "LV-2026-010", leaveTypeName: "Annual Leave", startDate: "2026-10-05", endDate: "2026-10-09", requestedDays: 5, status: "APPROVED" },
+  ],
+  recentClaims: [
+    { claimNo: "EXP-2026-004", purpose: "Tema delivery fuel", totalAmount: 320, currencyCode: "GHS", status: "SUBMITTED" },
+  ],
+  pendingApprovals: 2,
+  generatedAt: new Date().toISOString(),
+};
 
 type Backend = {
-  session: any; dashboard: any; loginStatus: number; sessionStatus: number; dashboardStatus: number;
+  session: any; dashboard: any; homeFeed: any; loginStatus: number; sessionStatus: number; dashboardStatus: number;
   saleStatus: number; countStatus: number; offline: boolean; sessionDelay: number; requests: string[];
+  // Endpoints the app called that this spec has no fixture for. They must fail
+  // the test immediately instead of leaving the request pending.
+  unfixtured: string[];
 };
 const test = base.extend<{ backend: Backend; runtimeErrors: string[] }>({
   runtimeErrors: [async ({ page }, use) => {
@@ -26,7 +45,7 @@ const test = base.extend<{ backend: Backend; runtimeErrors: string[] }>({
     expect(errors, "No uncaught JS errors or fatal UI boundary errors").toEqual([]);
   }, { auto: true }],
   backend: [async ({ context, page }, use) => {
-    const state: Backend = { session: structuredClone(session), dashboard: structuredClone(analytics), loginStatus: 200, sessionStatus: 200, dashboardStatus: 200, saleStatus: 200, countStatus: 200, offline: false, sessionDelay: 0, requests: [] };
+    const state: Backend = { session: structuredClone(session), dashboard: structuredClone(analytics), homeFeed: structuredClone(homeFeed), loginStatus: 200, sessionStatus: 200, dashboardStatus: 200, saleStatus: 200, countStatus: 200, offline: false, sessionDelay: 0, requests: [], unfixtured: [] };
     // Expo's web-only QR worker loads this at module import time. Supply the
     // same library locally so CDN availability cannot affect screen tests.
     await context.route("https://cdn.jsdelivr.net/npm/jsqr@1.2.0/dist/jsQR.min.js", (route) => route.fulfill({ contentType: "application/javascript", body: readFileSync("node_modules/jsqr/dist/jsQR.js") }));
@@ -42,6 +61,7 @@ const test = base.extend<{ backend: Backend; runtimeErrors: string[] }>({
           status = route.request().headers().authorization === "Bearer test-token" ? state.sessionStatus : 401; data = status === 200 ? state.session : { message: "Your session has expired. Please sign in again." }; break;
         case "/api/auth/sign-out": data = { message: "Signed out." }; break;
         case "/api/mobile/dashboard": status = state.dashboardStatus; data = state.dashboard; break;
+        case "/api/mobile/home": data = state.homeFeed; break;
         case "/api/system/live": data = { service: "fixture" }; break;
         case "/api/auth/profile": data = { profile: { displayName: "Test Operator", email: "operator@example.invalid", loginId: "operator" } }; break;
         case "/api/online-store/tender-methods": data = { tenders: [{ id: "cash", code: "CASH", name: "Cash", paymentMethod: "CASH", requiresReference: false, allowChange: true, sortOrder: 1 }] }; break;
@@ -52,6 +72,12 @@ const test = base.extend<{ backend: Backend; runtimeErrors: string[] }>({
         } } : { message: "Insufficient stock. Sale rejected." }; break;
         case "/api/online-store/stock-counts": status = state.countStatus; data = status === 200 ? { message: "Count accepted." } : { message: "Count rejected by HQ." }; break;
         case "/api/online-store/customers": data = { customers: [] }; break;
+        case "/api/online-store/receipts": data = { receipts: [{
+          transactionId: "receipt-1", transactionNo: "TEST-SALE-001", customerName: "Walk-in Customer", totalAmount: 10,
+          completedAt: new Date().toISOString(), storeName: "Test Shop",
+          payments: [{ method: "CASH", tenderMethodCode: "CASH", tenderMethodName: "Cash", amount: 10, reference: null }],
+          lines: [{ sourceLineId: "line-1", productCode: "TEST-01", productName: "Test Product", soldQuantity: 1, returnedQuantity: 0, eligibleQuantity: 1, unitPrice: 10, lineTotal: 10, unitOfMeasure: "EA" }]
+        }] }; break;
         case "/api/catalog/products": data = { data: [{ id: "product-1", productCode: "TEST-01", productName: "Test Product", barcode: "123456789", unitPrice: 10, quantityOnHand: 20, unitOfMeasure: "EA" }], total: 1 }; break;
         case "/api/human-resources/attendance": data = { attendance: [] }; break;
         case "/api/human-resources/expense-claims": data = { claims: [] }; break;
@@ -63,12 +89,21 @@ const test = base.extend<{ backend: Backend; runtimeErrors: string[] }>({
         }; break;
         case "/api/human-resources/leave/requests/decision": data = { message: "Leave request approved." }; break;
         case "/api/human-resources/expense-claims/actions": data = { message: "Expense claim approved." }; break;
-        default: throw new Error(`Missing test HTTP fixture: ${route.request().method()} ${url.pathname}`);
+        // Every HQ endpoint the app calls during a walkthrough must be modelled
+        // here. Answering with an explicit 404 keeps the request settled: a
+        // handler that throws (or never responds) leaves the request pending,
+        // which used to hang the page's fetch queue and make one forgotten
+        // endpoint fail dozens of later assertions.
+        default: state.unfixtured.push(`${route.request().method()} ${url.pathname}`); status = 404; data = { message: `No mobile UI fixture is registered for ${url.pathname}.` }; break;
       }
       await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(data) });
     });
     await page.addInitScript(() => { if (location.protocol === "http:") localStorage.setItem("flash_erp_server_url", location.origin); });
     await use(state);
+    expect(
+      state.unfixtured,
+      "The mobile app requested an HQ endpoint this spec does not model. Add it to the fixture switch above so the gate stays deterministic.",
+    ).toEqual([]);
     await context.unrouteAll({ behavior: "ignoreErrors" });
   }, { auto: true }],
 });
@@ -190,6 +225,12 @@ test("shopless operator keeps HR/account access, not selling routes", async ({ p
   await login(page);
   await expect(page.getByText("My Account", { exact: true })).toBeVisible();
   await expect(page.getByText("Sales POS", { exact: true })).not.toBeVisible();
+  // Without a home shop the dashboard renders the HQ home feed (birthdays, own
+  // HR snapshot) instead of shop cards that would be empty for this operator.
+  await expect(page.getByText("Company Pulse", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ama Serwaa", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Annual Leave/)).toBeVisible();
+  expect(backend.requests).toContain("/api/mobile/home");
   await page.goto("/cart");
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByText("My Account", { exact: true })).toBeVisible();
@@ -204,7 +245,7 @@ for (const [tile, route, heading] of [
   ["Fuel Operations", "fuel-operations", "Fuel Station Operations"],
   ["HR & Attendance", "self-service", "HR & Employee Self-Service"],
   ["Approvals & KPIs", "approvals", "Manager Approvals & KPIs"],
-  ["Returns", "returns", "Returns & Exchanges"],
+  ["Returns", "returns", "Returns & Refunds"],
   ["Outbox Queue (0)", "outbox", "Mobile Outbox Queue"],
 ]) {
   test(`dashboard → ${route} → back`, async ({ page }) => {
@@ -222,9 +263,11 @@ async function addProductToCart(page: Page) {
   await login(page);
   await dashboard(page);
   await page.getByText("Stock & Barcode", { exact: true }).click();
-  await page.getByPlaceholder("Scan or type barcode / SKU...").fill("TEST-01");
+  await page.getByPlaceholder("Filter inventory — type a name, code or barcode...").fill("TEST-01");
   await page.getByText("Lookup", { exact: true }).click();
-  await expect(page.getByText("Test Product", { exact: true }).filter({ visible: true })).toBeVisible();
+  // The inventory grid and the exact-lookup card can both list the product, so
+  // anchor on the card's own action instead of the duplicated product name.
+  await expect(page.getByText("Add to Sales POS", { exact: true })).toBeVisible();
   await page.getByText("Add to Sales POS", { exact: true }).click();
   await expect(page).toHaveURL(/\/cart/);
   await expect(page.getByText("Test Product", { exact: true }).filter({ visible: true })).toBeVisible();
@@ -234,8 +277,10 @@ async function addProductToCart(page: Page) {
 
 test("manual product lookup → basket → cash payment → receipt → home", async ({ page, backend }) => {
   await addProductToCart(page);
-  await page.getByText("Confirm Payment & Print Slip", { exact: true }).click();
-  await expect(page).toHaveURL(/\/receipt$/);
+  await page.getByText("Complete Sale & Print Receipt", { exact: true }).click();
+  // The completed sale opens the receipt with ?autoprint=1 so the print dialog
+  // pops up as soon as the receipt is loaded.
+  await expect(page).toHaveURL(/\/receipt(\?|$)/);
   await expect(page.getByText("TEST-SALE-001", { exact: true })).toBeVisible();
   expect(backend.requests.filter((path) => path === "/api/online-store/sales")).toHaveLength(1);
   await page.getByText("Done", { exact: true }).click();
@@ -245,7 +290,7 @@ test("manual product lookup → basket → cash payment → receipt → home", a
 test("rejected sale stays in basket and does not become offline success", async ({ page, backend }) => {
   backend.saleStatus = 400;
   await addProductToCart(page);
-  await page.getByText("Confirm Payment & Print Slip", { exact: true }).click();
+  await page.getByText("Complete Sale & Print Receipt", { exact: true }).click();
   await expect(page.getByText("Insufficient stock. Sale rejected.", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(/\/cart/);
   expect(await page.evaluate(() => localStorage.getItem("flash_erp_last_receipt"))).toBeNull();
