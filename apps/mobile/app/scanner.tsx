@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -18,17 +18,103 @@ import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileApi, type InventoryLookupResult } from "../lib/mobile-api";
 
+const GRID_PAGE_SIZE = 50;
+
+function matchesQuery(product: InventoryLookupResult, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    product.productName?.toLowerCase().includes(q) ||
+    product.productCode?.toLowerCase().includes(q) ||
+    (product.barcode ?? "").toLowerCase().includes(q)
+  );
+}
+
 export default function BarcodeScannerScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [torch, setTorch] = useState<boolean>(false);
-  const [inputCode, setInputCode] = useState<string>("");
+  const [query, setQuery] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [product, setProduct] = useState<InventoryLookupResult | null>(null);
   const [selectedUnitCode, setSelectedUnitCode] = useState<string | null>(null);
   const [selectedVariantCode, setSelectedVariantCode] = useState<string | null>(null);
   const [isOfflineResult, setIsOfflineResult] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Inventory grid state: loaded automatically on mount, filtered live while
+  // typing, paginated with "Load more".
+  const [gridItems, setGridItems] = useState<InventoryLookupResult[]>([]);
+  const [gridPage, setGridPage] = useState<number>(1);
+  const [gridTotal, setGridTotal] = useState<number>(0);
+  const [gridHasMore, setGridHasMore] = useState<boolean>(false);
+  const [gridLoading, setGridLoading] = useState<boolean>(false);
+  const [gridLoadingMore, setGridLoadingMore] = useState<boolean>(false);
+  const [gridError, setGridError] = useState<string | null>(null);
+  const [gridIsOffline, setGridIsOffline] = useState<boolean>(false);
+  const searchSeq = useRef(0);
+  const gridEndRef = useRef<ScrollView>(null);
+
+  const loadGridPage = useCallback(async (text: string, page: number, append: boolean, seq: number) => {
+    if (page === 1) setGridLoading(true);
+    else setGridLoadingMore(true);
+    setGridError(null);
+    try {
+      const res = await mobileApi.fetchInventoryPage({ query: text, page, limit: GRID_PAGE_SIZE });
+      if (seq !== searchSeq.current) return; // a newer search superseded this page
+      if (!res.ok) {
+        setGridError(res.error || "Inventory could not be loaded.");
+        if (!append) setGridItems([]);
+        setGridHasMore(false);
+        return;
+      }
+      setGridIsOffline(Boolean(res.isOffline));
+      setGridItems((current) => (append ? [...current, ...res.items] : res.items));
+      setGridPage(page);
+      setGridTotal(res.total);
+      setGridHasMore(res.hasMore);
+    } catch (err: any) {
+      if (seq !== searchSeq.current) return;
+      setGridError(err.message || "Inventory could not be loaded.");
+      if (!append) setGridItems([]);
+      setGridHasMore(false);
+    } finally {
+      if (seq === searchSeq.current) {
+        setGridLoading(false);
+        setGridLoadingMore(false);
+      }
+    }
+  }, []);
+
+  // Initial load + live filter while typing: instant client-side narrowing of
+  // what is already loaded, then a debounced HQ query (or offline cache
+  // search) so results beyond the first page are still found.
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      searchSeq.current += 1;
+      void loadGridPage("", 1, false, searchSeq.current);
+      return;
+    }
+    const text = query.trim();
+    if (!text) {
+      // Filter cleared — restore the full listing from page 1.
+      searchSeq.current += 1;
+      void loadGridPage("", 1, false, searchSeq.current);
+      return;
+    }
+    // Instant narrowing of already-loaded rows for a responsive feel.
+    setGridItems((current) => current.filter((item) => matchesQuery(item, text)));
+    setGridHasMore(false);
+    const timer = setTimeout(() => {
+      // A fresh sequence per fired search, so a slow response for an older
+      // query can never land on top of a newer one.
+      searchSeq.current += 1;
+      void loadGridPage(text, 1, false, searchSeq.current);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [query, loadGridPage]);
 
   const handleLookup = async (codeToSearch: string) => {
     const clean = codeToSearch.trim();
@@ -45,6 +131,7 @@ export default function BarcodeScannerScreen() {
         setIsOfflineResult(Boolean(res.isOffline));
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setCameraActive(false); // Close camera upon successful scan
+        setQuery(""); // Reveal the full grid again after an exact lookup.
       } else {
         setProduct(null);
         setErrorMessage(res.error || `No product found for barcode '${clean}'.`);
@@ -61,8 +148,23 @@ export default function BarcodeScannerScreen() {
 
   const onBarcodeScanned = ({ data }: { data: string }) => {
     if (loading || !cameraActive) return;
-    setInputCode(data);
+    setQuery("");
     handleLookup(data);
+  };
+
+  const loadMore = () => {
+    if (gridLoading || gridLoadingMore || !gridHasMore) return;
+    void loadGridPage(query.trim(), gridPage + 1, true, searchSeq.current);
+  };
+
+  const openProduct = (item: InventoryLookupResult) => {
+    Haptics.selectionAsync();
+    setProduct(item);
+    setSelectedUnitCode(item.sellingUnits?.find((unit) => unit.isDefault)?.unitOfMeasureCode ?? null);
+    setSelectedVariantCode(null);
+    setIsOfflineResult(false);
+    setErrorMessage(null);
+    gridEndRef.current?.scrollTo({ y: 0, animated: true });
   };
 
   return (
@@ -93,7 +195,11 @@ export default function BarcodeScannerScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        ref={gridEndRef}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
         {/* Camera Viewport (Expandable) */}
         {cameraActive && (
           <View style={styles.cameraContainer}>
@@ -134,23 +240,23 @@ export default function BarcodeScannerScreen() {
           </View>
         )}
 
-        {/* Barcode Search Input */}
+        {/* Inventory Search / Filter */}
         <View style={styles.searchSection}>
           <View style={styles.searchBar}>
-            <Ionicons name="barcode-outline" size={22} color={mobileTheme.neutralMuted} />
+            <Ionicons name="search-outline" size={20} color={mobileTheme.neutralMuted} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Scan or type barcode / SKU..."
+              placeholder="Filter inventory — type a name, code or barcode..."
               placeholderTextColor={mobileTheme.neutralMuted}
-              value={inputCode}
-              onChangeText={setInputCode}
-              onSubmitEditing={() => handleLookup(inputCode)}
+              value={query}
+              onChangeText={setQuery}
+              onSubmitEditing={() => handleLookup(query)}
               returnKeyType="search"
               autoCapitalize="characters"
               autoCorrect={false}
             />
-            {inputCode.length > 0 && (
-              <TouchableOpacity onPress={() => setInputCode("")}>
+            {query.length > 0 && (
+              <TouchableOpacity onPress={() => setQuery("")}>
                 <Ionicons name="close-circle" size={18} color={mobileTheme.neutralMuted} />
               </TouchableOpacity>
             )}
@@ -158,7 +264,7 @@ export default function BarcodeScannerScreen() {
 
           <TouchableOpacity
             style={[styles.searchButton, loading && styles.searchButtonDisabled]}
-            onPress={() => handleLookup(inputCode)}
+            onPress={() => handleLookup(query)}
             disabled={loading}
           >
             {loading ? (
@@ -169,7 +275,14 @@ export default function BarcodeScannerScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Error Notification */}
+        {gridIsOffline && !gridError && (
+          <View style={styles.offlineStrip}>
+            <Ionicons name="cloud-offline" size={14} color="#b45309" />
+            <Text style={styles.offlineStripText}>Showing offline catalog cache</Text>
+          </View>
+        )}
+
+        {/* Error Notification (exact lookup) */}
         {errorMessage && (
           <View style={styles.errorCard}>
             <Ionicons name="alert-circle" size={20} color={mobileTheme.danger} />
@@ -177,7 +290,7 @@ export default function BarcodeScannerScreen() {
           </View>
         )}
 
-        {/* Product Details Display Card */}
+        {/* Product Details Display Card (exact scan/lookup or tapped grid row) */}
         {product && (
           <View style={styles.productCard}>
             {/* Card Header & Badges */}
@@ -197,6 +310,9 @@ export default function BarcodeScannerScreen() {
                     <Text style={styles.onlineBadgeText}>HQ Live</Text>
                   </View>
                 )}
+                <TouchableOpacity onPress={() => setProduct(null)}>
+                  <Ionicons name="close-circle" size={20} color={mobileTheme.neutralMuted} />
+                </TouchableOpacity>
               </View>
 
               <Text style={styles.productName}>{product.productName}</Text>
@@ -318,6 +434,84 @@ export default function BarcodeScannerScreen() {
                 <Text style={styles.actionButtonText}>Audit / Count Item</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        )}
+
+        {/* Inventory Grid */}
+        <View style={styles.gridHeader}>
+          <Text style={styles.sectionHeader}>
+            Inventory{query.trim() ? " — filtered" : ""}{gridTotal > 0 ? ` (${gridTotal})` : ""}
+          </Text>
+          {gridError && <Text style={styles.gridErrorText}>{gridError}</Text>}
+        </View>
+
+        {gridLoading && gridItems.length === 0 ? (
+          <View style={styles.gridLoadingBox}>
+            <ActivityIndicator color={mobileTheme.primary} />
+            <Text style={styles.gridLoadingText}>Loading inventory…</Text>
+          </View>
+        ) : gridItems.length === 0 ? (
+          <View style={styles.gridEmptyBox}>
+            <Ionicons name="cube-outline" size={34} color={mobileTheme.neutralMuted} />
+            <Text style={styles.gridEmptyText}>
+              {gridError ? "Inventory could not be loaded." : "No products match. Download the catalog from the status bar or check HQ for active products."}
+            </Text>
+            {gridError && (
+              <TouchableOpacity
+                style={styles.gridRetryButton}
+                onPress={() => {
+                  searchSeq.current += 1;
+                  void loadGridPage(query.trim(), 1, false, searchSeq.current);
+                }}
+              >
+                <Ionicons name="refresh" size={16} color="#ffffff" />
+                <Text style={styles.gridRetryText}>Retry</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        ) : (
+          <View style={styles.gridList}>
+            {gridItems.map((item) => (
+              <TouchableOpacity key={item.productId} style={styles.gridRow} onPress={() => openProduct(item)} activeOpacity={0.75}>
+                <View style={styles.gridRowMain}>
+                  <Text style={styles.gridRowName} numberOfLines={1}>{item.productName}</Text>
+                  <Text style={styles.gridRowMeta} numberOfLines={1}>
+                    {item.productCode}{item.barcode ? ` · ${item.barcode}` : ""}
+                  </Text>
+                </View>
+                <View style={styles.gridRowSide}>
+                  <Text style={styles.gridRowPrice}>GHS {item.unitPrice.toFixed(2)}</Text>
+                  <Text
+                    style={[
+                      styles.gridRowStock,
+                      {
+                        color:
+                          item.quantityOnHand > 5
+                            ? mobileTheme.accent
+                            : item.quantityOnHand > 0
+                            ? mobileTheme.warning
+                            : mobileTheme.danger
+                      }
+                    ]}
+                  >
+                    {item.quantityOnHand > 0 ? `${item.quantityOnHand} ${item.unitOfMeasure}` : "Out of stock"}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+
+            {gridLoadingMore && (
+              <View style={styles.gridLoadMoreRow}>
+                <ActivityIndicator size="small" color={mobileTheme.primary} />
+                <Text style={styles.gridLoadingText}>Loading more…</Text>
+              </View>
+            )}
+            {!gridLoadingMore && gridHasMore && (
+              <TouchableOpacity style={styles.gridLoadMoreRow} onPress={loadMore}>
+                <Ionicons name="chevron-down-circle-outline" size={18} color={mobileTheme.primary} />
+                <Text style={styles.gridLoadMoreText}>Load more ({gridItems.length} of {gridTotal})</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
       </ScrollView>
@@ -454,6 +648,19 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontSize: 14
   },
+  offlineStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: mobileTheme.warningLight,
+    borderRadius: mobileTheme.radiusSmall,
+    padding: 8
+  },
+  offlineStripText: {
+    color: "#b45309",
+    fontSize: 12,
+    fontWeight: "700"
+  },
   errorCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -483,7 +690,8 @@ const styles = StyleSheet.create({
   badgeRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center"
+    alignItems: "center",
+    gap: 6
   },
   skuBadge: {
     backgroundColor: mobileTheme.neutralLight,
@@ -645,5 +853,100 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 14,
     fontWeight: "700"
+  },
+  gridHeader: {
+    gap: 4
+  },
+  gridErrorText: {
+    fontSize: 12,
+    color: mobileTheme.danger,
+    fontWeight: "600"
+  },
+  gridLoadingBox: {
+    alignItems: "center",
+    paddingVertical: 36,
+    gap: 10
+  },
+  gridLoadingText: {
+    fontSize: 13,
+    color: mobileTheme.mutedText,
+    fontWeight: "600"
+  },
+  gridEmptyBox: {
+    alignItems: "center",
+    paddingVertical: 30,
+    gap: 10
+  },
+  gridEmptyText: {
+    fontSize: 13,
+    color: mobileTheme.mutedText,
+    textAlign: "center",
+    lineHeight: 18
+  },
+  gridRetryButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: mobileTheme.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: mobileTheme.radiusMedium
+  },
+  gridRetryText: {
+    color: "#ffffff",
+    fontWeight: "700",
+    fontSize: 13
+  },
+  gridList: {
+    gap: 8
+  },
+  gridRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    backgroundColor: mobileTheme.surfaceBackground,
+    borderWidth: 1,
+    borderColor: mobileTheme.borderColor,
+    borderRadius: mobileTheme.radiusMedium,
+    padding: 12
+  },
+  gridRowMain: {
+    flex: 1,
+    gap: 2
+  },
+  gridRowName: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: mobileTheme.textColor
+  },
+  gridRowMeta: {
+    fontSize: 11,
+    color: mobileTheme.mutedText
+  },
+  gridRowSide: {
+    alignItems: "flex-end",
+    gap: 2
+  },
+  gridRowPrice: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: mobileTheme.primary
+  },
+  gridRowStock: {
+    fontSize: 11,
+    fontWeight: "700"
+  },
+  gridLoadMoreRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 12
+  },
+  gridLoadMoreText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: mobileTheme.primary
   }
 });

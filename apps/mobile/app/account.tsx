@@ -16,18 +16,24 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import * as LocalAuthentication from "expo-local-authentication";
 
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileApi, type MobileUserSession } from "../lib/mobile-api";
 import { mobileStorage } from "../lib/mobile-storage";
+import { mobileReceiptStore } from "../lib/mobile-receipt-store";
 import { mobileTheme } from "../lib/mobile-theme";
 import { mobileOfflineDb } from "../lib/mobile-offline-db";
 
 export default function AccountScreen() {
+  const insets = useSafeAreaInsets();
   const [user, setUser] = useState<MobileUserSession | null>(null);
   const [serverUrl, setServerUrl] = useState("");
+  const [serverDraft, setServerDraft] = useState("");
+  const [serverTesting, setServerTesting] = useState(false);
+  const [serverPing, setServerPing] = useState<{ testing: boolean; alive?: boolean; latencyMs?: number } | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
@@ -49,10 +55,13 @@ export default function AccountScreen() {
     void Promise.all([
       mobileStorage.getUserSnapshot<MobileUserSession>(),
       mobileStorage.getServerUrl(),
-    ]).then(([snapshot, url]) => {
+    ]).then(async ([snapshot, url]) => {
       setUser(snapshot);
       setServerUrl(url);
-      void mobileStorage.getLastReceipt().then((receipt) => setHasLastReceipt(Boolean(receipt)));
+      setServerDraft(url);
+      const fileReceipt = await mobileReceiptStore.loadLastReceipt();
+      const legacyReceipt = fileReceipt ? null : await mobileStorage.getLastReceipt();
+      setHasLastReceipt(Boolean(fileReceipt || legacyReceipt));
       void Promise.all([mobileStorage.getBiometricLockEnabled(), LocalAuthentication.hasHardwareAsync(), LocalAuthentication.isEnrolledAsync()]).then(([enabled, hardware, enrolled]) => { setBiometricEnabled(enabled); setBiometricAvailable(hardware && enrolled); });
       void mobileApi.fetchProfile().then((response) => { if (response.ok && response.data) { setDisplayName(response.data.displayName); setEmail(response.data.email || ""); } });
       void mobileApi.readErrorLog().then((entries) => setDiagCount(entries.length)).catch(() => setDiagCount(0));
@@ -68,6 +77,27 @@ export default function AccountScreen() {
     const refreshed = await mobileApi.fetchSession();
     if (refreshed.data) setUser(refreshed.data);
     setFeedback({ type: "success", message: "Your profile was updated successfully." });
+  };
+
+  const handleTestServer = async () => {
+    const candidate = serverDraft.trim();
+    if (!candidate) { setFeedback({ type: "error", message: "Enter the Enterprise server address first." }); return; }
+    setServerTesting(true);
+    setServerPing({ testing: true });
+    try {
+      await mobileStorage.setServerUrl(candidate);
+      setServerUrl(candidate);
+      const result = await mobileApi.checkServerHealth();
+      setServerPing({ testing: false, alive: result.ok, latencyMs: result.latencyMs });
+      setFeedback(result.ok
+        ? { type: "success", message: `Enterprise API online (${result.latencyMs}ms).` }
+        : { type: "error", message: "Server unreachable — check the URL and VPS firewall." });
+    } catch (error: any) {
+      setServerPing({ testing: false, alive: false });
+      setFeedback({ type: "error", message: error.message || "Connection test failed." });
+    } finally {
+      setServerTesting(false);
+    }
   };
 
   const changePassword = async () => {
@@ -163,7 +193,7 @@ export default function AccountScreen() {
         <Text style={styles.title}>My Account</Text>
         <View style={styles.iconButton} />
       </View>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 40 + Math.max(insets.bottom, 0) }]} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
         <View style={styles.profileCard}>
           <View style={styles.avatar}><Text style={styles.initials}>{(user?.displayName || "U").slice(0, 2).toUpperCase()}</Text></View>
           <View style={styles.profileText}>
@@ -178,8 +208,38 @@ export default function AccountScreen() {
           <Text style={styles.cardTitle}>Account access</Text>
           <InfoRow icon="shield-checkmark-outline" label="Roles" value={user?.roleCodes?.join(", ") || "No role assigned"} />
           <InfoRow icon="storefront-outline" label="Home shop" value={user?.homeStoreName || "Not assigned"} />
-          <InfoRow icon="server-outline" label="Connected server" value={serverUrl} />
           <InfoRow icon="time-outline" label="Session expires" value={user?.expiresAt ? new Date(user.expiresAt).toLocaleString() : "Unknown"} />
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Enterprise server</Text>
+          <Text style={styles.helper}>HQ connection address. Update it here after the first run — it is hidden on the sign-in screen once configured.</Text>
+          <View style={styles.serverRow}>
+            <TextInput
+              style={styles.input}
+              value={serverDraft}
+              onChangeText={setServerDraft}
+              placeholder="http://your-vps:3000"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+            <TouchableOpacity
+              style={[styles.testServerButton, serverTesting && styles.disabled]}
+              onPress={handleTestServer}
+              disabled={serverTesting}
+            >
+              {serverTesting ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.testServerText}>Test & Save</Text>}
+            </TouchableOpacity>
+          </View>
+          {serverPing && !serverPing.testing && (
+            <View style={styles.pingRow}>
+              <View style={[styles.pingDot, { backgroundColor: serverPing.alive ? mobileTheme.accent : mobileTheme.danger }]} />
+              <Text style={{ fontSize: 12, fontWeight: "700", color: serverPing.alive ? mobileTheme.accentDark : mobileTheme.danger }}>
+                {serverPing.alive ? `Enterprise API online (${serverPing.latencyMs}ms)` : "Unreachable (check URL / VPS firewall)"}
+              </Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.card}>
@@ -238,7 +298,7 @@ export default function AccountScreen() {
       </ScrollView>
       <Modal visible={diagVisible} transparent animationType="slide" onRequestClose={() => setDiagVisible(false)}>
         <View style={styles.diagBackdrop}>
-          <View style={styles.diagModal}>
+          <View style={[styles.diagModal, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
             <View style={styles.diagModalHeader}>
               <Text style={styles.diagModalTitle}>Error details for HQ support</Text>
               <TouchableOpacity onPress={() => setDiagVisible(false)}>
@@ -288,6 +348,11 @@ const styles = StyleSheet.create({
   input: { height: 46, borderWidth: 1, borderColor: mobileTheme.borderColor, borderRadius: mobileTheme.radiusMedium, paddingHorizontal: 12, color: mobileTheme.textColor },
   feedback: { padding: 10, borderRadius: 8 }, success: { backgroundColor: mobileTheme.accentLight }, error: { backgroundColor: mobileTheme.dangerLight }, successText: { color: mobileTheme.accentDark, fontWeight: "700" }, errorText: { color: mobileTheme.danger, fontWeight: "700" },
   saveButton: { height: 48, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: mobileTheme.radiusMedium, backgroundColor: mobileTheme.primary }, saveText: { color: "#fff", fontWeight: "800" }, disabled: { opacity: 0.6 },
+  serverRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+  testServerButton: { height: 46, paddingHorizontal: 16, borderRadius: mobileTheme.radiusMedium, backgroundColor: mobileTheme.neutralDark, alignItems: "center", justifyContent: "center" },
+  testServerText: { color: "#fff", fontWeight: "800", fontSize: 13 },
+  pingRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  pingDot: { width: 8, height: 8, borderRadius: 4 },
   securityRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   cacheButton: { height: 46, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: mobileTheme.radiusMedium, borderWidth: 1, borderColor: mobileTheme.warning }, cacheText: { color: mobileTheme.warning, fontWeight: "800" },
   logoutButton: { height: 52, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: mobileTheme.radiusMedium, borderWidth: 1, borderColor: mobileTheme.danger }, logoutText: { color: mobileTheme.danger, fontWeight: "900" },

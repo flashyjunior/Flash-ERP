@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform
 } from "react-native";
@@ -22,13 +23,31 @@ import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileApi } from "../lib/mobile-api";
 
 
+/**
+ * Copy camera / library evidence into the app's document directory so the OS
+ * cannot garbage-collect the temporary capture before sync. If the copy fails
+ * for any reason we fall back to the original URI (with a warning) rather than
+ * silently dropping the photo the operator just took.
+ */
 async function preserveEvidenceFile(uri: string, prefix: string): Promise<string> {
-  if (!FileSystem.documentDirectory) return uri;
-  const directory = `${FileSystem.documentDirectory}pending-evidence/`;
-  await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
-  const destination = `${directory}${prefix}-${Date.now()}.jpg`;
-  await FileSystem.copyAsync({ from: uri, to: destination });
-  return destination;
+  try {
+    if (!FileSystem.documentDirectory || !uri) return uri;
+    const sourceInfo = await FileSystem.getInfoAsync(uri);
+    if (!sourceInfo.exists) {
+      console.warn("[flash-erp:mobile] Captured evidence file is missing at:", uri);
+      return uri;
+    }
+    const directory = `${FileSystem.documentDirectory}pending-evidence/`;
+    await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+    const destination = `${directory}${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+    await FileSystem.copyAsync({ from: uri, to: destination });
+    const copied = await FileSystem.getInfoAsync(destination);
+    if (copied.exists) return destination;
+    console.warn("[flash-erp:mobile] Evidence copy did not land; using the original capture URI.");
+  } catch (error) {
+    console.warn("[flash-erp:mobile] Failed preserving evidence file; using original URI.", error);
+  }
+  return uri;
 }
 
 type HrTab = "ATTENDANCE" | "EXPENSE" | "LEAVE";
@@ -88,6 +107,58 @@ export default function SelfServiceScreen() {
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  const captureExpenseReceipt = async () => {
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        setFeedback({ type: "error", message: "Camera permission is required to photograph a receipt." });
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ["images"],
+        quality: 0.75,
+        allowsEditing: true
+      });
+      if (result.canceled) return;
+      const assetUri = result.assets?.[0]?.uri;
+      if (!assetUri) {
+        setFeedback({ type: "error", message: "The camera did not return a photo. Tap the button and try again." });
+        return;
+      }
+      const stored = await preserveEvidenceFile(assetUri, "expense");
+      setReceiptImageUri(stored);
+      setFeedback({ type: "success", message: "Receipt photo attached to this claim." });
+    } catch (error: any) {
+      console.warn("[flash-erp:mobile] Expense receipt capture failed.", error);
+      setFeedback({ type: "error", message: error?.message || "The receipt photo could not be attached. Try again." });
+    }
+  };
+
+  const pickLeaveDocument = async () => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        setFeedback({ type: "error", message: "Photo-library permission is required to attach a leave document." });
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        quality: 0.8
+      });
+      if (result.canceled) return;
+      const assetUri = result.assets?.[0]?.uri;
+      if (!assetUri) {
+        setFeedback({ type: "error", message: "No photo was selected. Try again." });
+        return;
+      }
+      setLeaveDocumentUri(await preserveEvidenceFile(assetUri, "leave"));
+      setFeedback({ type: "success", message: "Supporting document attached." });
+    } catch (error: any) {
+      console.warn("[flash-erp:mobile] Leave document attach failed.", error);
+      setFeedback({ type: "error", message: error?.message || "The document could not be attached. Try again." });
+    }
+  };
 
   const handleClockToggle = async () => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -333,16 +404,21 @@ export default function SelfServiceScreen() {
 
               <TouchableOpacity
                 style={styles.photoReceiptButton}
-                onPress={async () => {
-                  const permission = await ImagePicker.requestCameraPermissionsAsync();
-                  if (!permission.granted) { setFeedback({ type: "error", message: "Camera permission is required to photograph a receipt." }); return; }
-                  const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.75, allowsEditing: true });
-                  if (!result.canceled && result.assets[0]?.uri) { setReceiptImageUri(await preserveEvidenceFile(result.assets[0].uri, "expense")); setFeedback({ type: "success", message: "Receipt photo attached to this claim." }); }
-                }}
+                onPress={() => void captureExpenseReceipt()}
               >
                 <Ionicons name="camera-outline" size={20} color={mobileTheme.primary} />
                 <Text style={styles.photoReceiptText}>{receiptImageUri ? "Receipt Photo Attached · Retake" : "Attach Receipt Photo"}</Text>
               </TouchableOpacity>
+
+              {receiptImageUri ? (
+                <View style={styles.photoPreviewBox}>
+                  <Image source={{ uri: receiptImageUri }} style={styles.photoPreview} resizeMode="contain" />
+                  <TouchableOpacity style={styles.photoRemove} onPress={() => setReceiptImageUri(null)}>
+                    <Ionicons name="trash-outline" size={14} color={mobileTheme.danger} />
+                    <Text style={styles.photoRemoveText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
             </View>
 
             <TouchableOpacity
@@ -393,7 +469,16 @@ export default function SelfServiceScreen() {
 
               {requestedLeaveDays > 0 && <View style={styles.requestedDaysRow}><Text style={styles.requestedDaysLabel}>Requested duration</Text><Text style={styles.requestedDaysValue}>{requestedLeaveDays} day(s)</Text></View>}
 
-              <TouchableOpacity style={styles.photoReceiptButton} onPress={async () => { const permission = await ImagePicker.requestMediaLibraryPermissionsAsync(); if (!permission.granted) { setFeedback({ type: "error", message: "Photo-library permission is required to attach a leave document." }); return; } const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 }); if (!result.canceled && result.assets[0]?.uri) setLeaveDocumentUri(await preserveEvidenceFile(result.assets[0].uri, "leave")); }}><Ionicons name="document-attach-outline" size={20} color={mobileTheme.primary}/><Text style={styles.photoReceiptText}>{leaveDocumentUri ? "Supporting Document Attached · Change" : selectedLeaveType?.requiresAttachment ? "Attach Required Supporting Document" : "Attach Supporting Document (Optional)"}</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.photoReceiptButton} onPress={() => void pickLeaveDocument()}><Ionicons name="document-attach-outline" size={20} color={mobileTheme.primary}/><Text style={styles.photoReceiptText}>{leaveDocumentUri ? "Supporting Document Attached · Change" : selectedLeaveType?.requiresAttachment ? "Attach Required Supporting Document" : "Attach Supporting Document (Optional)"}</Text></TouchableOpacity>
+              {leaveDocumentUri ? (
+                <View style={styles.photoPreviewBox}>
+                  <Image source={{ uri: leaveDocumentUri }} style={styles.photoPreview} resizeMode="contain" />
+                  <TouchableOpacity style={styles.photoRemove} onPress={() => setLeaveDocumentUri(null)}>
+                    <Ionicons name="trash-outline" size={14} color={mobileTheme.danger} />
+                    <Text style={styles.photoRemoveText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
 
               <Text style={styles.inputLabel}>Reason for Leave</Text>
               <TextInput
@@ -667,6 +752,31 @@ const styles = StyleSheet.create({
   photoReceiptText: {
     color: mobileTheme.primary,
     fontSize: 14,
+    fontWeight: "700"
+  },
+  photoPreviewBox: {
+    borderRadius: mobileTheme.radiusMedium,
+    borderWidth: 1,
+    borderColor: mobileTheme.borderColor,
+    backgroundColor: mobileTheme.neutralLight,
+    overflow: "hidden"
+  },
+  photoPreview: {
+    width: "100%",
+    height: 160
+  },
+  photoRemove: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderColor: mobileTheme.borderColor
+  },
+  photoRemoveText: {
+    color: mobileTheme.danger,
+    fontSize: 12,
     fontWeight: "700"
   },
   feedbackBanner: {

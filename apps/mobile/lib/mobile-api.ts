@@ -67,6 +67,52 @@ function readCachedProductOptions(product: CachedProduct): Pick<InventoryLookupR
   catch { return {}; }
 }
 
+/** Map one /api/catalog/products row (HQ only returns ACTIVE, non-deleted products). */
+function mapCatalogProductRow(row: any): InventoryLookupResult {
+  return {
+    productId: row.productId || row.id,
+    productCode: row.productCode || row.code,
+    productName: row.productName || row.name,
+    barcode: row.barcode || null,
+    unitPrice: Number(row.unitPrice || row.price || 0),
+    unitOfMeasure: row.unitOfMeasure || row.uom || "EA",
+    taxRatePercent: Number(row.taxRatePercent || 0),
+    isTaxInclusive: Boolean(row.isTaxInclusive),
+    quantityOnHand: Number(row.quantityOnHand || row.stock || 0),
+    storeCode: row.storeCode,
+    locations: row.locations,
+    sellingUnits: row.sellingUnits,
+    variants: row.variants
+  };
+}
+
+function mapCachedProductRow(product: CachedProduct): InventoryLookupResult {
+  return {
+    productId: product.id,
+    productCode: product.productCode,
+    productName: product.productName,
+    barcode: product.barcode || null,
+    unitPrice: product.unitPrice,
+    unitOfMeasure: product.unitOfMeasure,
+    taxRatePercent: product.taxRatePercent ?? 0,
+    isTaxInclusive: product.isTaxInclusive ?? false,
+    quantityOnHand: product.stockQuantity,
+    storeCode: product.storeCode || undefined,
+    ...readCachedProductOptions(product)
+  };
+}
+
+export interface InventoryPageResult {
+  ok: boolean;
+  items: InventoryLookupResult[];
+  page: number;
+  pageSize: number;
+  total: number;
+  hasMore: boolean;
+  isOffline?: boolean;
+  error?: string;
+}
+
 export interface ApiResponse<T = unknown> {
   ok: boolean;
   data?: T;
@@ -515,6 +561,67 @@ export const mobileApi = {
     }
 
     return { ok: false, error: `Product '${clean}' not found.` };
+  },
+
+  // 3b. Resilient inventory grid: paginated ACTIVE products with name/code/barcode filter.
+  //     Online/AUTO hit HQ (which only returns active, non-deleted products); OFFLINE
+  //     or a network failure in AUTO mode falls back to the local catalog cache.
+  async fetchInventoryPage(params: { page?: number; limit?: number; query?: string } = {}): Promise<InventoryPageResult> {
+    const page = Math.max(1, Math.trunc(Number(params.page ?? 1) || 1));
+    const limit = Math.min(200, Math.max(1, Math.trunc(Number(params.limit ?? 50) || 50)));
+    const query = (params.query ?? "").trim();
+    const mode = await mobileStorage.getOperationMode();
+
+    if (mode === "OFFLINE") {
+      const rows = await mobileOfflineDb.searchProducts(query, limit);
+      return { ok: true, items: rows.map(mapCachedProductRow), page: 1, pageSize: limit, total: rows.length, hasMore: false, isOffline: true };
+    }
+
+    try {
+      const qs = new URLSearchParams({ limit: String(limit), page: String(page) });
+      if (query) qs.set("query", query);
+      const { data } = await request<any>(`/api/catalog/products?${qs.toString()}`);
+      const list = Array.isArray(data?.data) ? data.data : [];
+      const items = list.map(mapCatalogProductRow);
+      // Keep the offline cache warm with every page the cashier browses.
+      const cacheRows: Array<{
+        id: string; productCode: string; productName: string; barcode: string; unitPrice: number;
+        unitOfMeasure: string; taxRatePercent: number; isTaxInclusive: boolean; stockQuantity: number;
+        storeCode: string | null; sellingUnitsJson: string; updatedAt: string;
+      }> = [];
+      for (const item of items) {
+        cacheRows.push({
+          id: item.productCode,
+          productCode: item.productCode,
+          productName: item.productName,
+          barcode: item.barcode || "",
+          unitPrice: item.unitPrice,
+          unitOfMeasure: item.unitOfMeasure,
+          taxRatePercent: item.taxRatePercent,
+          isTaxInclusive: item.isTaxInclusive,
+          stockQuantity: item.quantityOnHand,
+          storeCode: item.storeCode ?? null,
+          sellingUnitsJson: JSON.stringify({ sellingUnits: item.sellingUnits ?? [], variants: item.variants ?? [] }),
+          updatedAt: new Date().toISOString()
+        });
+      }
+      if (cacheRows.length > 0) mobileOfflineDb.saveProducts(cacheRows).catch(() => {});
+      return {
+        ok: true,
+        items,
+        page: Number(data?.page ?? page),
+        pageSize: Number(data?.pageSize ?? limit),
+        total: Number(data?.total ?? items.length),
+        hasMore: Boolean(data?.hasMore) && items.length > 0
+      };
+    } catch (onlineError: any) {
+      if (mode === "ONLINE" || onlineError instanceof MobileHttpError) {
+        return { ok: false, items: [], page, pageSize: limit, total: 0, hasMore: false, error: onlineError.message };
+      }
+      // AUTO mode: transparently fall back to the offline cache.
+      const rows = await mobileOfflineDb.searchProducts(query, limit);
+      return { ok: true, items: rows.map(mapCachedProductRow), page: 1, pageSize: limit, total: rows.length, hasMore: false, isOffline: true };
+    }
   },
 
   // 4. Download / Refresh Full Catalog into Offline SQLite
