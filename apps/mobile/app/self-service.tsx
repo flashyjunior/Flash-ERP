@@ -9,7 +9,8 @@ import {
   ActivityIndicator,
   Image,
   KeyboardAvoidingView,
-  Platform
+  Platform,
+  RefreshControl
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
@@ -20,6 +21,8 @@ import * as FileSystem from "expo-file-system/legacy";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
+import { BottomNavBar } from "../components/BottomNavBar";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileApi } from "../lib/mobile-api";
 
 
@@ -55,6 +58,9 @@ type LeaveTypeOption = { id: string; code: string; name: string; isPaid: boolean
 type LeaveHistoryItem = { id: string; requestNo: string; leaveTypeName: string; startDate: string; endDate: string; requestedDays: number; reason: string | null; status: string; attachmentUrl?: string | null };
 
 export default function SelfServiceScreen() {
+  const insets = useSafeAreaInsets();
+  const [refreshing, setRefreshing] = useState(false);
+  const goHome = () => { try { router.dismissTo("/"); } catch { router.replace("/"); } };
   const [activeTab, setActiveTab] = useState<HrTab>("ATTENDANCE");
   const [clockedIn, setClockedIn] = useState<boolean>(false);
   const [clockInTime, setClockInTime] = useState<string | null>(null);
@@ -89,7 +95,7 @@ export default function SelfServiceScreen() {
     null
   );
 
-  useEffect(() => {
+  const loadWorkspace = () => {
     void mobileApi.fetchMyExpenseClaims().then((response) => { if (response.ok && response.data) setExpenseHistory(response.data); });
     void mobileApi.fetchMyLeaveWorkspace().then((response) => {
       if (!response.ok || !response.data) return;
@@ -102,6 +108,10 @@ export default function SelfServiceScreen() {
       setClockInTime(response.data.checkInAt ? new Date(response.data.checkInAt).toLocaleTimeString() : null);
       setClockedIn(Boolean(response.data.checkInAt && !response.data.checkOutAt));
     });
+  };
+
+  useEffect(() => {
+    loadWorkspace();
     const update = () => setCurrentTime(new Date().toLocaleTimeString());
     update();
     const interval = setInterval(update, 1000);
@@ -288,7 +298,7 @@ export default function SelfServiceScreen() {
 
       {/* Screen Header */}
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backButton} onPress={goHome}>
           <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>HR & Employee Self-Service</Text>
@@ -325,7 +335,11 @@ export default function SelfServiceScreen() {
         ))}
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: 110 + Math.max(insets.bottom, 0) }]}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadWorkspace(); setRefreshing(false); }} />}
+      >
         {/* 1. ATTENDANCE CLOCK IN/OUT */}
         {activeTab === "ATTENDANCE" && (
           <View style={styles.tabContent}>
@@ -542,6 +556,7 @@ export default function SelfServiceScreen() {
           </View>
         )}
       </ScrollView>
+      <BottomNavBar active="hr" />
     </KeyboardAvoidingView>
   );
 }

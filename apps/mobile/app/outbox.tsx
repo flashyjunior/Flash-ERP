@@ -7,7 +7,8 @@ import {
   FlatList,
   ActivityIndicator,
   Alert,
-  Platform
+  Platform,
+  RefreshControl
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
@@ -16,7 +17,9 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { mobileTheme } from "../lib/mobile-theme";
 import { HeaderStatusBar } from "../components/HeaderStatusBar";
 import { mobileOfflineDb, type OutboxMutation } from "../lib/mobile-offline-db";
-import { mobileApi } from "../lib/mobile-api";
+import { mobileApi, type MobileUserSession } from "../lib/mobile-api";
+import { mobileStorage } from "../lib/mobile-storage";
+import { BottomNavBar, BOTTOM_NAV_HEIGHT } from "../components/BottomNavBar";
 
 export default function OutboxManagerScreen() {
   const insets = useSafeAreaInsets();
@@ -29,6 +32,8 @@ export default function OutboxManagerScreen() {
   });
   const [syncing, setSyncing] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [session, setSession] = useState<MobileUserSession | null>(null);
 
   const loadData = async () => {
     try {
@@ -43,6 +48,7 @@ export default function OutboxManagerScreen() {
 
   useEffect(() => {
     void loadData();
+    void mobileStorage.getUserSnapshot<MobileUserSession>().then(setSession);
   }, []);
 
   const handleSyncAll = async () => {
@@ -145,8 +151,8 @@ export default function OutboxManagerScreen() {
 
       {/* Top Header */}
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={22} color={mobileTheme.textColor} />
+        <TouchableOpacity style={styles.backButton} onPress={() => { try { router.dismissTo("/"); } catch { router.replace("/"); } }}>
+          <Ionicons name="home-outline" size={22} color={mobileTheme.textColor} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Mobile Outbox Queue</Text>
         <TouchableOpacity style={styles.iconButton} onPress={loadData}>
@@ -182,6 +188,7 @@ export default function OutboxManagerScreen() {
         data={mutations}
         keyExtractor={(item) => item.id}
         renderItem={renderMutation}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await loadData(); setRefreshing(false); }} />}
         contentContainerStyle={[styles.listContent, { paddingBottom: 24 }]}
         ListEmptyComponent={
           <View style={styles.emptyState}>
@@ -193,7 +200,7 @@ export default function OutboxManagerScreen() {
       />
 
       {/* Bottom Floating Actions */}
-      <View style={[styles.footerActions, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+      <View style={[styles.footerActions, { paddingBottom: BOTTOM_NAV_HEIGHT + Math.max(insets.bottom, 16) }]}>
         <TouchableOpacity
           style={[styles.syncAllButton, syncing && styles.syncAllButtonDisabled]}
           onPress={handleSyncAll}
@@ -217,6 +224,7 @@ export default function OutboxManagerScreen() {
           </TouchableOpacity>
         )}
       </View>
+      <BottomNavBar session={session} active="sync" />
     </View>
   );
 }
