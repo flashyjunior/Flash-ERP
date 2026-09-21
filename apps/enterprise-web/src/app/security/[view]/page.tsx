@@ -33,7 +33,8 @@ export default async function SecuritySubmenuPage({
     "audit-logs": "security.audit-log.view",
     "online-users": "security.online-user.view",
     "password-policy": "security.password-policy.manage",
-    "security-logs": "security.log.view"
+    "security-logs": "security.log.view",
+    "data-purge": "security.data-purge.execute"
   };
 
   const required = permissionByView[view];
