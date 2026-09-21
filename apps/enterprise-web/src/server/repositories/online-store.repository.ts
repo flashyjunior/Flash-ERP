@@ -10160,6 +10160,39 @@ export async function createOnlineStoreSale(
       }
     }
 
+    for (const line of pricedLines) {
+      if (!line.product.isSerialized || line.serialNumbers.length === 0) {
+        continue;
+      }
+
+      const serialUpdate = await tx.inventorySerialUnit.updateMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          storeId: store.id,
+          inventoryLocationId: salesLocation.id,
+          productId: line.product.id,
+          serialNumber: {
+            in: line.serialNumbers
+          },
+          status: SerialInventoryStatus.AVAILABLE
+        },
+        data: {
+          status: SerialInventoryStatus.SOLD,
+          sourceReferenceType: "POS_TRANSACTION",
+          sourceReferenceId: transaction.id,
+          sourceReferenceLabel: transaction.transactionNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          lastOccurredAt: transaction.completedAt ?? new Date()
+        }
+      });
+
+      if (serialUpdate.count !== line.serialNumbers.length) {
+        throw new Error(
+          `Serial numbers for ${line.product.name} changed during checkout. Refresh the basket and choose currently available serials.`
+        );
+      }
+    }
+
     const inventoryMovements = pricedLines.flatMap((line, lineIndex) => {
       if (!tracksInventoryForSale(line.product)) {
         return [];

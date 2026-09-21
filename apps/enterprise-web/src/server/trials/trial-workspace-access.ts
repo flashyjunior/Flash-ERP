@@ -1,4 +1,8 @@
-import { SecurityLogKind, SecurityLogSeverity } from "@flash-erp/domain";
+import {
+  SecurityLogKind,
+  SecurityLogSeverity,
+  trialSupportLoginId
+} from "@flash-erp/domain";
 
 import { prisma } from "@/lib/db/prisma";
 
@@ -8,6 +12,56 @@ export type TrialWorkspaceAccessState = {
   expiresAt: Date;
   blocked: boolean;
 };
+
+export type TrialSupportIdentity = {
+  requestId: string;
+  workspaceSlug: string;
+  loginId: string;
+  status: string;
+  trialExpiresAt: Date;
+};
+
+/**
+ * Resolve the Flash support account identity for this workspace, if this
+ * deployment is a trial workspace. The support account is the dedicated
+ * `support.{slug}` user provisioned for every trial so Flash ERP staff can
+ * assist the customer; its presence (and only its presence) is what makes a
+ * signed-in session a "support session".
+ */
+export async function getTrialSupportIdentity(): Promise<TrialSupportIdentity | null> {
+  if (process.env.FLASH_ERP_TRIAL_WORKSPACE_MODE !== "true") {
+    return null;
+  }
+
+  const runtime = await prisma.trialWorkspaceRuntime.findFirst({
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      workspaceSlug: true,
+      status: true,
+      trialExpiresAt: true
+    }
+  });
+
+  if (!runtime) return null;
+
+  return {
+    requestId: runtime.id,
+    workspaceSlug: runtime.workspaceSlug,
+    loginId: trialSupportLoginId(runtime.workspaceSlug),
+    status: runtime.status,
+    trialExpiresAt: runtime.trialExpiresAt
+  };
+}
+
+export async function isTrialSupportUser(
+  loginId: string | null | undefined
+): Promise<boolean> {
+  if (!loginId) return false;
+  const identity = await getTrialSupportIdentity();
+  if (!identity) return false;
+  return identity.loginId.toLowerCase() === loginId.trim().toLowerCase();
+}
 
 async function expireWorkspace(requestId: string, now: Date) {
   await prisma.$transaction(async (tx) => {

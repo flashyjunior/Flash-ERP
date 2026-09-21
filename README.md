@@ -68,6 +68,31 @@ Before enabling a storefront:
 4. Configure Paystack or Flutterwave tenders and provide the matching server-side secret environment variables.
 5. Sign in as an Online Store supervisor and open `/online-store/ecommerce` to publish products and enable the storefront.
 
+## Trial workspaces and support access
+
+Each provisioned trial gets, in addition to the customer's owner and Online Store
+accounts, a dedicated **Flash support account** (`support.{workspace-slug}`) so
+Flash ERP staff can sign into the new workspace and help the customer set up
+products and configuration.
+
+- The support password is derived deterministically from
+  `FLASH_ERP_TRIAL_PROVISIONER_SECRET` and the trial request id — nothing is
+  stored in plaintext, and a password from one trial never works in another.
+- Retrieve credentials for any trial (requires `DATABASE_URL` for the control
+  plane and `FLASH_ERP_TRIAL_PROVISIONER_SECRET`):
+
+  ```powershell
+  npm run trial:support -- <workspace-slug | request-no | owner-email>
+  ```
+
+- The support account cannot be modified, disabled, or have its password
+  changed from inside the workspace (including by the customer's owner), and
+  self-service password recovery never targets it. Every support sign-in is
+  recorded in the workspace security log as `TRIAL_SUPPORT_SIGN_IN`, and the
+  app shows a "Flash ERP support session" banner while it is in use.
+- When a trial expires, the provisioner sweep disables the support account
+  along with the rest of the workspace; extending a trial re-enables it.
+
 ## Important note
 
 This workspace is now the Flash ERP fork. Keep `D:\DEVELOPMENTS\FLASH_DEVS\RMS` untouched unless an RMS-specific task explicitly asks for changes there.

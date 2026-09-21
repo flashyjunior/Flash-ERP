@@ -55,6 +55,7 @@
     "acceptance:ecommerce-multi-branch": "node --import tsx scripts/ecommerce-multi-branch-fulfillment-gate.ts && tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/ecommerce-network-allocation-gate.ts && tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/ecommerce-storefront-regression-gate.ts && tsx scripts/ecommerce-payment-reconciliation-gate.ts",
     "acceptance:ecommerce-performance": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/ecommerce-performance-gate.ts",
     "acceptance:ecommerce-auth": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/ecommerce-oauth-regression-gate.ts",
+    "trial:support": "tsx scripts/trial-workspace-support-credentials.ts",
     "acceptance:trial-signup": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/trial-signup-gate.ts",
     "acceptance:trial-lifecycle": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/trial-workspace-lifecycle-gate.ts && tsc -p scripts/tsconfig.trial-provisioner.json --noEmit",
     "acceptance:trial-sample-data": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/trial-sample-data-gate.ts",

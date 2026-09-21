@@ -17,6 +17,35 @@ import { readJsonObject, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
 import { ensurePermissionCatalogSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
+import { getTrialSupportIdentity } from "@/server/trials/trial-workspace-access";
+
+/**
+ * The per-trial Flash support account (`support.{slug}`) is managed by the
+ * trial provisioner, not by workspace users. Throw if a user-management
+ * mutation targets it or tries to claim its login id.
+ */
+async function assertTrialSupportAccountUntouched(
+  targetLoginId: string | null | undefined,
+  nextLoginId?: string | null
+): Promise<void> {
+  const support = await getTrialSupportIdentity();
+  if (!support) return;
+
+  const normalizedTarget = targetLoginId?.trim().toLowerCase();
+  const normalizedNext = nextLoginId?.trim().toLowerCase();
+
+  if (normalizedTarget && normalizedTarget === support.loginId.toLowerCase()) {
+    throw new Error(
+      "The Flash support account is managed by Flash ERP and cannot be modified from the workspace."
+    );
+  }
+
+  if (normalizedNext && normalizedNext === support.loginId.toLowerCase()) {
+    throw new Error(
+      "That login ID is reserved for the Flash support account managed by Flash ERP."
+    );
+  }
+}
 
 function formatRelativeTime(value: Date | null) {
   if (!value) {
@@ -1694,6 +1723,7 @@ export async function createEnterpriseRetailUser(
   const passwordPolicy = readPasswordPolicy(enterpriseContext.retailOrg.passwordPolicyJson);
   validatePasswordPolicy(password, passwordPolicy);
   const passwordHash = await bcrypt.hash(password, 12);
+  await assertTrialSupportAccountUntouched(null, loginId);
 
   try {
     return await prisma.$transaction(async (tx) => {
@@ -1919,6 +1949,8 @@ export async function updateEnterpriseRetailUser(
         throw new Error("Flash ERP could not find that retail user.");
       }
 
+      await assertTrialSupportAccountUntouched(user.loginId, loginId);
+
       if (homeStoreCode && !homeStore) {
         throw new Error(`Flash ERP could not find store "${homeStoreCode}" for this user.`);
       }
@@ -2067,6 +2099,8 @@ export async function unlockEnterpriseRetailUser(
       if (!user) {
         throw new Error("Flash ERP could not find that retail user.");
       }
+
+      await assertTrialSupportAccountUntouched(user.loginId);
 
       await tx.retailUser.update({
         where: {

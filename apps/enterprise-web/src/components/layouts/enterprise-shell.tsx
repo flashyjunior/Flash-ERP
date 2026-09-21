@@ -109,6 +109,7 @@ type EnterpriseSessionSnapshot = {
   homeStoreName: string | null;
   homeStoreMode: string | null;
   isOnlineStoreUser: boolean;
+  isFlashSupportUser: boolean;
   roleCodes: string[];
   permissionCount: number;
   permissionCodes: string[];
@@ -463,6 +464,7 @@ export function EnterpriseShell({
   const pathname = usePathname();
   const router = useRouter();
   const isOnlineStoreSession = Boolean(sessionSnapshot?.isOnlineStoreUser);
+  const isFlashSupportSession = Boolean(sessionSnapshot?.isFlashSupportUser);
   const sessionPermissionCodes = useMemo(
     () => new Set(sessionSnapshot?.permissionCodes ?? []),
     [sessionSnapshot?.permissionCodes]
@@ -1681,6 +1683,26 @@ export function EnterpriseShell({
           </header>
 
           <main className="shell-theme-main min-w-0 flex-1 overflow-x-hidden px-3 py-3 text-slate-950 sm:px-4 sm:py-4 lg:px-5 lg:py-5">
+            {isFlashSupportSession ? (
+              <div
+                className="mb-4 flex items-start gap-3 rounded-2xl border border-violet-300/60 bg-violet-50 px-4 py-3"
+                role="status"
+              >
+                <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+                  <ShieldCheck className="h-4 w-4" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-violet-900">
+                    Flash ERP support session
+                  </p>
+                  <p className="mt-0.5 text-xs leading-5 text-violet-800">
+                    You are signed in to this trial workspace with the Flash support
+                    account to assist the customer. Every action you take here is
+                    recorded in the workspace security log.
+                  </p>
+                </div>
+              </div>
+            ) : null}
             <div className="space-y-4">
               <section className="px-1 pt-1">
                 <div className="min-w-0">

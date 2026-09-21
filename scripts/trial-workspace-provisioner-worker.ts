@@ -6,6 +6,12 @@ import { spawn } from "node:child_process";
 import { PrismaMssql } from "@prisma/adapter-mssql";
 import { PrismaClient } from "@prisma/client";
 import {
+  DEFAULT_TRIAL_SUPPORT_EMAIL,
+  TRIAL_SUPPORT_ROLE_CODE,
+  TRIAL_SUPPORT_ROLE_NAME,
+  trialSupportLoginId,
+} from "../packages/domain/src/trial-support.js";
+import {
   RecordStatus,
   SecurityLogKind,
   SecurityLogSeverity,
@@ -16,7 +22,9 @@ import { securityPermissionCatalog } from "../packages/domain/src/security-permi
 import dotenv from "dotenv";
 import sql from "mssql";
 import nodemailer from "nodemailer";
+import bcrypt from "bcryptjs";
 
+import { deriveTrialSupportPassword } from "./trial-support-credentials-core";
 import { createTrialOwnerActivationToken } from "../apps/enterprise-web/src/server/trials/trial-owner-token";
 import {
   provisionTrialSampleData,
@@ -388,6 +396,171 @@ function workspaceSecret(requestId: string, purpose: string) {
     )
     .update(`${purpose}:${requestId}`)
     .digest("base64url");
+}
+
+function trialSupportEmail(): string {
+  return (
+    process.env.FLASH_ERP_TRIAL_SUPPORT_EMAIL?.trim() ||
+    DEFAULT_TRIAL_SUPPORT_EMAIL
+  );
+}
+
+/**
+ * Ensure the per-trial Flash support account exists in a workspace database.
+ *
+ * The account (loginId `support.{slug}`) lets Flash ERP staff sign into a
+ * trial workspace to assist the customer with setup. Its password is derived
+ * deterministically from the provisioner secret, so it can be recomputed by
+ * staff at any time (see scripts/trial-workspace-support-credentials.ts).
+ * Returns true when the account was missing or repaired.
+ */
+async function ensureTrialSupportAccount(
+  workspace: PrismaClient,
+  input: {
+    requestId: string;
+    slug: string;
+    storeId: string;
+    nodeCode: string;
+    retailOrgId: string;
+  },
+): Promise<boolean> {
+  const supportLoginId = trialSupportLoginId(input.slug);
+  const existing = await workspace.retailUser.findFirst({
+    where: {
+      retailOrgId: input.retailOrgId,
+      loginId: supportLoginId,
+      deletedAt: null,
+    },
+    select: {
+      id: true,
+      userRoles: {
+        select: {
+          role: { select: { code: true, status: true } },
+        },
+      },
+    },
+  });
+
+  const role = await workspace.role.upsert({
+    where: {
+      retailOrgId_code: {
+        retailOrgId: input.retailOrgId,
+        code: TRIAL_SUPPORT_ROLE_CODE,
+      },
+    },
+    update: {
+      name: TRIAL_SUPPORT_ROLE_NAME,
+      description:
+        "Dedicated Flash ERP onboarding access for this trial workspace.",
+      status: RecordStatus.ACTIVE,
+    },
+    create: {
+      retailOrgId: input.retailOrgId,
+      code: TRIAL_SUPPORT_ROLE_CODE,
+      name: TRIAL_SUPPORT_ROLE_NAME,
+      description:
+        "Dedicated Flash ERP onboarding access for this trial workspace.",
+      status: RecordStatus.ACTIVE,
+    },
+  });
+
+  const permissions = await workspace.permission.findMany({
+    where: {
+      code: { in: securityPermissionCatalog.map((entry) => entry.code) },
+    },
+    select: { id: true },
+  });
+  await workspace.rolePermission.deleteMany({ where: { roleId: role.id } });
+  await workspace.rolePermission.createMany({
+    data: permissions.map((permission) => ({
+      roleId: role.id,
+      permissionId: permission.id,
+    })),
+  });
+
+  const passwordHash = await bcrypt.hash(
+    deriveTrialSupportPassword(
+      requiredEnvironment("FLASH_ERP_TRIAL_PROVISIONER_SECRET"),
+      input.requestId,
+    ),
+    12,
+  );
+
+  let repaired = !existing;
+  const user = existing
+    ? await workspace.retailUser.update({
+        where: { id: existing.id },
+        data: {
+          displayName: TRIAL_SUPPORT_ROLE_NAME,
+          email: trialSupportEmail(),
+          passwordHash,
+          passwordUpdatedAt: new Date(),
+          accountStatus: UserAccountStatus.ACTIVE,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          homeStoreId: input.storeId,
+          deletedAt: null,
+        },
+        select: { id: true, loginId: true },
+      })
+    : await workspace.retailUser.create({
+        data: {
+          retailOrgId: input.retailOrgId,
+          homeStoreId: input.storeId,
+          loginId: supportLoginId,
+          email: trialSupportEmail(),
+          displayName: TRIAL_SUPPORT_ROLE_NAME,
+          passwordHash,
+          passwordUpdatedAt: new Date(),
+          accountStatus: UserAccountStatus.ACTIVE,
+          originNodeCode: input.nodeCode,
+          lastModifiedByNodeCode: input.nodeCode,
+        },
+        select: { id: true, loginId: true },
+      });
+
+  const hasRole = existing?.userRoles.some(
+    (assignment) =>
+      assignment.role.code === TRIAL_SUPPORT_ROLE_CODE &&
+      assignment.role.status === RecordStatus.ACTIVE,
+  );
+  if (!hasRole) {
+    repaired = true;
+    await workspace.retailUserRole.upsert({
+      where: {
+        retailUserId_roleId: {
+          retailUserId: user.id,
+          roleId: role.id,
+        },
+      },
+      update: {},
+      create: {
+        retailUserId: user.id,
+        roleId: role.id,
+      },
+    });
+  }
+
+  await workspace.securityLog.create({
+    data: {
+      retailOrgId: input.retailOrgId,
+      kind: SecurityLogKind.AUDIT,
+      severity: SecurityLogSeverity.INFO,
+      category: "TRIAL",
+      action: repaired
+        ? "TRIAL_SUPPORT_ACCOUNT_PROVISIONED"
+        : "TRIAL_SUPPORT_ACCOUNT_RECONCILED",
+      actorLabel: "Trial provisioner",
+      targetType: "Retail user",
+      targetRef: user.loginId,
+      sourceNodeCode: input.nodeCode,
+      message: `Flash support account ${user.loginId} ${
+        repaired ? "was created" : "was verified"
+      } in trial workspace ${input.slug}.`,
+    },
+  });
+
+  return repaired;
 }
 
 async function bootstrapWorkspace(
@@ -800,6 +973,13 @@ async function bootstrapWorkspace(
         roleId: onlineStoreRole.id,
       },
     });
+    await ensureTrialSupportAccount(workspace, {
+      requestId: request.requestId,
+      slug: allocation.slug,
+      storeId: store.id,
+      nodeCode: node.code,
+      retailOrgId: org.id,
+    });
     const currentRuntime = await workspace.trialWorkspaceRuntime.findUnique({
       where: { id: request.requestId },
     });
@@ -838,7 +1018,7 @@ async function bootstrapWorkspace(
         targetType: "Trial workspace",
         targetRef: request.requestNo,
         sourceNodeCode: node.code,
-        message: `Trial workspace ${request.requestNo} was bootstrapped with invited Enterprise owner and Online Store operator accounts.`,
+        message: `Trial workspace ${request.requestNo} was bootstrapped with invited Enterprise owner, Online Store operator, and Flash support accounts.`,
       },
     });
     await provisionTrialSampleData({
@@ -1860,6 +2040,70 @@ async function recoverFailedProvisioning() {
   }
 }
 
+async function reconcileWorkspaceSupportUser(input: {
+  requestId: string;
+  requestNo: string;
+  workspaceSlug: string;
+  workspaceDatabaseName: string;
+}) {
+  const workspace = new PrismaClient({
+    adapter: new PrismaMssql(childDatabaseUrl(input.workspaceDatabaseName)),
+  });
+  try {
+    const runtime = await workspace.trialWorkspaceRuntime.findUnique({
+      where: { id: input.requestId },
+      select: { ownerUserId: true },
+    });
+    if (!runtime) {
+      throw new Error(
+        `Trial runtime ${input.requestNo} is missing from its workspace database.`,
+      );
+    }
+    const owner = await workspace.retailUser.findUnique({
+      where: { id: runtime.ownerUserId },
+      select: { retailOrgId: true },
+    });
+    if (!owner) {
+      throw new Error(
+        `Trial owner ${runtime.ownerUserId} is missing from ${input.requestNo}.`,
+      );
+    }
+    const [node, mainStore] = await Promise.all([
+      workspace.syncNode.findFirst({
+        where: {
+          retailOrgId: owner.retailOrgId,
+          nodeType: SyncNodeType.ENTERPRISE,
+          isPrimary: true,
+        },
+        select: { code: true },
+      }),
+      workspace.store.findUnique({
+        where: {
+          retailOrgId_code: {
+            retailOrgId: owner.retailOrgId,
+            code: "MAIN",
+          },
+        },
+        select: { id: true },
+      }),
+    ]);
+    if (!node || !mainStore) {
+      throw new Error(
+        `Trial workspace ${input.requestNo} is missing its enterprise node or main store.`,
+      );
+    }
+    return await ensureTrialSupportAccount(workspace, {
+      requestId: input.requestId,
+      slug: input.workspaceSlug,
+      storeId: mainStore.id,
+      nodeCode: node.code,
+      retailOrgId: owner.retailOrgId,
+    });
+  } finally {
+    await workspace.$disconnect();
+  }
+}
+
 async function reconcileActiveWorkspaces() {
   assertProvisioningEnabled();
   const active = await control.trialSignupRequest.findMany({
@@ -1940,6 +2184,26 @@ async function reconcileActiveWorkspaces() {
           },
         });
       }
+      const supportAccountRepaired = await reconcileWorkspaceSupportUser({
+        requestId: row.id,
+        requestNo: row.requestNo,
+        workspaceSlug: row.workspaceSlug,
+        workspaceDatabaseName: row.workspaceDatabaseName,
+      });
+      if (supportAccountRepaired) {
+        await control.trialLifecycleEvent.create({
+          data: {
+            trialSignupRequestId: row.id,
+            eventType: "SUPPORT_ACCOUNT_RECONCILED",
+            outcome: "SUCCEEDED",
+            actorType: "PROVISIONER",
+            actorRef: `trial:${row.requestNo}`,
+            previousStatus: "ACTIVE",
+            newStatus: "ACTIVE",
+            detailsJson: JSON.stringify({ workspaceSlug: row.workspaceSlug }),
+          },
+        });
+      }
       const allocation = allocationFromRow({
         workspaceSlug: row.workspaceSlug,
         workspaceDatabaseName: row.workspaceDatabaseName,
@@ -1986,6 +2250,7 @@ async function reconcileActiveWorkspaces() {
 async function expireChild(request: {
   id: string;
   requestNo: string;
+  workspaceSlug: string;
   workspaceDatabaseName: string;
   trialExpiresAt: Date;
 }) {
@@ -2001,6 +2266,18 @@ async function expireChild(request: {
       await tx.retailUserSession.updateMany({
         where: { revokedAt: null },
         data: { revokedAt: now },
+      });
+      await tx.retailUser.updateMany({
+        where: {
+          loginId: trialSupportLoginId(request.workspaceSlug),
+          accountStatus: UserAccountStatus.ACTIVE,
+          deletedAt: null,
+        },
+        data: {
+          accountStatus: UserAccountStatus.DISABLED,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
       });
       await tx.store.updateMany({
         where: { licenseStatus: "TRIAL" },
@@ -2075,6 +2352,7 @@ async function sweepExpired() {
     await expireChild({
       id: row.id,
       requestNo: row.requestNo,
+      workspaceSlug: row.workspaceSlug,
       workspaceDatabaseName: row.workspaceDatabaseName,
       trialExpiresAt: row.trialExpiresAt,
     });
@@ -2158,6 +2436,14 @@ async function extendTrial(input: ExtensionRequest) {
     });
     await manageRuntime("Start", allocation);
     await waitForRuntime(allocation.port);
+    // Re-activate (or create) the Flash support account so staff access
+    // resumes together with the extended trial.
+    await reconcileWorkspaceSupportUser({
+      requestId: row.id,
+      requestNo: row.requestNo,
+      workspaceSlug: row.workspaceSlug,
+      workspaceDatabaseName: row.workspaceDatabaseName,
+    });
 
     if (!runtime.activatedAt) {
       const owner = await workspace.retailUser.findUniqueOrThrow({
