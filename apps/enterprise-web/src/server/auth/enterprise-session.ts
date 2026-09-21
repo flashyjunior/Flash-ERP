@@ -22,7 +22,11 @@ import {
   deliverEnterpriseMfaCode,
   deliverEnterprisePasswordResetLink
 } from "@/server/services/enterprise-mfa-delivery";
-import { enforceTrialWorkspaceAccess } from "@/server/trials/trial-workspace-access";
+import {
+  enforceTrialWorkspaceAccess,
+  getTrialSupportIdentity,
+  isTrialSupportUser
+} from "@/server/trials/trial-workspace-access";
 
 const sessionCookieName = "flash_rms_session";
 const sessionTokenBytes = 48;
@@ -148,6 +152,7 @@ type EnterpriseSession = {
   homeStoreName: string | null;
   homeStoreMode: string | null;
   isOnlineStoreUser: boolean;
+  isFlashSupportUser: boolean;
   permissionCodes: string[];
   roleCodes: string[];
   lastActiveAt: Date;
@@ -163,6 +168,7 @@ export type EnterpriseSessionSnapshot = {
   homeStoreName: string | null;
   homeStoreMode: string | null;
   isOnlineStoreUser: boolean;
+  isFlashSupportUser: boolean;
   roleCodes: string[];
   permissionCount: number;
   permissionCodes: string[];
@@ -643,7 +649,14 @@ export async function requestEnterprisePasswordReset(
       "If Flash ERP recognizes that account, password recovery instructions are now available."
   };
 
-  const recoverableUsers = users.filter(canRecoverEnterprisePassword);
+  // The per-trial Flash support account keeps a derived password and is never
+  // a self-service recovery target, even when its email matches the request.
+  const supportIdentity = await getTrialSupportIdentity();
+  const recoverableUsers = users.filter(
+    (user) =>
+      canRecoverEnterprisePassword(user) &&
+      supportIdentity?.loginId.toLowerCase() !== user.loginId.toLowerCase()
+  );
   const normalizedComparison = normalizedIdentifier.toLowerCase();
   const loginMatch = recoverableUsers.find(
     (user) => user.loginId.toLowerCase() === normalizedComparison
@@ -771,6 +784,10 @@ async function verifyEnterprisePasswordResetToken(token: string) {
   });
 
   if (!user || !canRecoverEnterprisePassword(user)) {
+    throw new EnterpriseAuthError("This password reset link is no longer valid.", 400);
+  }
+
+  if (await isTrialSupportUser(user.loginId)) {
     throw new EnterpriseAuthError("This password reset link is no longer valid.", 400);
   }
 
@@ -924,6 +941,7 @@ async function issueEnterpriseSession(input: {
   ipAddress: string | null;
   userAgent: string | null;
   action: string;
+  supportSignIn?: boolean;
 }) {
   const token = crypto.randomBytes(sessionTokenBytes).toString("hex");
   const tokenHash = hashSessionToken(token);
@@ -985,6 +1003,27 @@ async function issueEnterpriseSession(input: {
       expiresAt: expiresAt.toISOString()
     }
   });
+
+  if (input.supportSignIn) {
+    await writeSecurityLog({
+      retailOrgId: input.retailOrgId,
+      kind: SecurityLogKind.SECURITY,
+      severity: SecurityLogSeverity.WARNING,
+      category: "TRIAL",
+      action: "TRIAL_SUPPORT_SIGN_IN",
+      actorLabel: input.loginId,
+      targetType: "Retail user session",
+      targetRef: session.id,
+      sourceNodeCode: input.sourceNodeCode,
+      message: `Flash support account ${input.loginId} signed into this trial workspace.`,
+      details: {
+        loginId: input.loginId,
+        ipAddress: input.ipAddress,
+        userAgent: input.userAgent,
+        expiresAt: expiresAt.toISOString()
+      }
+    });
+  }
 
   return {
     sessionId: session.id,
@@ -1171,6 +1210,7 @@ export async function createEnterpriseSession(
         )
     )
   ];
+  const isSupportSignIn = await isTrialSupportUser(user.loginId);
 
   if (isMfaRequiredForUser(passwordPolicy, expandGrantedPermissionCodes(permissionCodes))) {
     const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
@@ -1258,7 +1298,8 @@ export async function createEnterpriseSession(
     sessionTimeoutMinutes: passwordPolicy.sessionTimeoutMinutes,
     ipAddress,
     userAgent,
-    action: "auth.sign-in.succeeded"
+    action: "auth.sign-in.succeeded",
+    supportSignIn: isSupportSignIn
   });
 
   return {
@@ -1375,7 +1416,8 @@ export async function verifyEnterpriseMfaChallenge(
     sessionTimeoutMinutes: passwordPolicy.sessionTimeoutMinutes,
     ipAddress,
     userAgent,
-    action: "auth.mfa.succeeded"
+    action: "auth.mfa.succeeded",
+    supportSignIn: await isTrialSupportUser(user.loginId)
   });
 
   return {
@@ -1646,6 +1688,13 @@ export async function changeEnterprisePassword(
 
   if (!user || !user.passwordHash || user.accountStatus !== "ACTIVE") {
     throw new EnterpriseAuthError("Flash ERP could not validate the signed-in account.", 403);
+  }
+
+  if (await isTrialSupportUser(user.loginId)) {
+    throw new EnterpriseAuthError(
+      "The Flash support account is managed by Flash ERP and cannot change its password from this workspace.",
+      403
+    );
   }
 
   const currentPasswordMatches = await bcrypt.compare(normalizedCurrentPassword, user.passwordHash);
@@ -1930,6 +1979,7 @@ export async function getEnterpriseSession(
     session.retailUser.homeStore.status === RecordStatus.ACTIVE &&
     (roles.some((role) => onlineStoreRoleCodes.has(role.code)) ||
       permissions.permissionCodes.includes("ecommerce.console.access"));
+  const isFlashSupportUser = await isTrialSupportUser(session.retailUser.loginId);
   const refreshedExpiresAt = options.refreshExpiresAt
     ? new Date(
         now.getTime() +
@@ -1999,6 +2049,7 @@ export async function getEnterpriseSession(
     homeStoreName: session.retailUser.homeStore?.name ?? null,
     homeStoreMode: session.retailUser.homeStore?.storeMode ?? null,
     isOnlineStoreUser,
+    isFlashSupportUser,
     permissionCodes: permissions.permissionCodes,
     roleCodes: permissions.roleCodes,
     lastActiveAt: previousLastActiveAt,
@@ -2024,6 +2075,7 @@ export async function getEnterpriseSessionSnapshot(
     homeStoreName: session.homeStoreName,
     homeStoreMode: session.homeStoreMode,
     isOnlineStoreUser: session.isOnlineStoreUser,
+    isFlashSupportUser: session.isFlashSupportUser,
     roleCodes: session.roleCodes,
     permissionCount: session.permissionCodes.length,
     permissionCodes: session.permissionCodes,

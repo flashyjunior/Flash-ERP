@@ -11,6 +11,8 @@
   },
   "include": [
     "trial-sqlserver-url.ts",
+    "trial-support-credentials-core.ts",
+    "trial-workspace-support-credentials.ts",
     "trial-workspace-provisioner-worker.ts",
     "trial-workspace-disposable-test.ts",
     "trial-owner-activation-test-worker.ts",

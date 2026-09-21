@@ -6,3 +6,4 @@ export * from "./inventory-expiry.js";
 export * from "./layaway-settings.js";
 export * from "./layaway.js";
 export * from "./pos-selling-uom.js";
+export * from "./trial-support.js";
