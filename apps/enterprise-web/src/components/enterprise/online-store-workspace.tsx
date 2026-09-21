@@ -216,6 +216,7 @@ type BasketLine = {
   variantColor: string | null;
   lineNote: string | null;
   preferredBatchId: string | null;
+  serialNumbers: string[];
 };
 
 const supplierReturnReasonOptions: SupplierReturnReason[] = [
@@ -245,6 +246,11 @@ type OpenPriceDraft = {
   expressChargeRate: string;
   lineNote: string;
   preferredBatchId: string;
+  serialNumbers: string;
+  serialEntry: string;
+  serialRangeStart: string;
+  serialRangeEnd: string;
+  serialValidationMessage: string | null;
 };
 type PaymentDraft = {
   id: string;
@@ -318,7 +324,7 @@ function paymentDraftId() {
   return `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "sellingUnitOfMeasure" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId">) {
+function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "sellingUnitOfMeasure" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId" | "serialNumbers">) {
   return [
     line.product.productId,
     line.productVariantCode ?? "",
@@ -326,7 +332,8 @@ function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" |
     line.variantSize ?? "",
     line.variantColor ?? "",
     line.lineNote ?? "",
-    line.preferredBatchId ?? ""
+    line.preferredBatchId ?? "",
+    (line.serialNumbers ?? []).join("|")
   ].join(":");
 }
 
@@ -2885,6 +2892,51 @@ export function OnlineStoreWorkspace({
     Boolean(openPriceDraft?.product.trackExpiry) &&
     saleMode === "SALE" &&
     openPriceAvailableBatches.length === 0;
+  const basketSerialNumbersInUse = new Set(basket.flatMap((line) => line.serialNumbers));
+  const openPriceAvailableSerialNumbers = openPriceDraft?.product.isSerialized
+    ? workspace.inventorySerialUnits
+        .filter(
+          (serialUnit) =>
+            serialUnit.productId === openPriceDraft.product.productId &&
+            serialUnit.status.toUpperCase() === "AVAILABLE" &&
+            (!defaultSalesLocationId ||
+              !serialUnit.locationId ||
+              serialUnit.locationId === defaultSalesLocationId) &&
+            !basketSerialNumbersInUse.has(serialUnit.serialNumber.toUpperCase())
+        )
+        .map((serialUnit) => serialUnit.serialNumber)
+        .sort((left, right) => left.localeCompare(right))
+    : [];
+  const openPriceSerialUnavailable =
+    Boolean(openPriceDraft?.product.isSerialized) &&
+    saleMode === "SALE" &&
+    openPriceAvailableSerialNumbers.length === 0;
+  const openPriceSelectedSerialNumbers = openPriceDraft
+    ? parseSerialDraft(openPriceDraft.serialNumbers)
+    : [];
+  const openPriceSelectedSerialKeys = new Set(
+    openPriceSelectedSerialNumbers.map((serialNumber) => serialNumber.toUpperCase())
+  );
+  const openPriceRequiredSerialCount = (() => {
+    if (!openPriceDraft?.product.isSerialized) {
+      return 0;
+    }
+
+    const sellingUnit = resolveProductSellingUnit(
+      openPriceDraft.product,
+      openPriceDraft.productVariantCode || null,
+      openPriceDraft.sellingUnitOfMeasure
+    );
+
+    try {
+      return calculatePosBaseQuantity(
+        parseAmount(openPriceDraft.quantity),
+        sellingUnit.conversionFactor
+      );
+    } catch {
+      return 0;
+    }
+  })();
   const configuredProductSizes = workspace.optionSettings?.productSizes ?? [];
   const configuredPosDiscountRates = workspace.optionSettings?.posDiscountRates ?? [];
   const configuredPosExpressChargeRates = workspace.optionSettings?.posExpressChargeRates ?? [];
@@ -4309,7 +4361,8 @@ export function OnlineStoreWorkspace({
       variantSize: line.variantSize,
       variantColor: line.variantColor,
       lineNote: line.lineNote,
-      preferredBatchId: line.preferredBatchId
+      preferredBatchId: line.preferredBatchId,
+      serialNumbers: line.serialNumbers
     }));
   }
 
@@ -4332,6 +4385,7 @@ export function OnlineStoreWorkspace({
     discountAmount?: number | null;
     appliedPromotionName?: string | null;
     configuredDiscountRate?: number | null;
+    serialNumbers?: string[] | null;
   }>) {
     const nextBasket = lines.flatMap((line) => {
       const product =
@@ -4378,7 +4432,8 @@ export function OnlineStoreWorkspace({
           variantSize: line.variantSize ?? null,
           variantColor: line.variantColor ?? null,
           lineNote: line.lineNote ?? null,
-          preferredBatchId: null
+          preferredBatchId: null,
+          serialNumbers: Array.isArray(line.serialNumbers) ? line.serialNumbers : []
         }
       ];
     });
@@ -5422,7 +5477,8 @@ export function OnlineStoreWorkspace({
     variantColor?: string | null,
     lineNote?: string | null,
     preferredBatchId?: string | null,
-    sellingUnitOfMeasure?: string | null
+    sellingUnitOfMeasure?: string | null,
+    serialNumbers?: string[] | null
   ) {
     if (isRecalledBasket) {
       setCheckoutMessage("Complete or clear the recalled basket before adding new items.");
@@ -5443,16 +5499,27 @@ export function OnlineStoreWorkspace({
     const requiresMatrixSelection = product.productType === "MATRIX" && product.matrixVariants.length > 0;
     const requiresTrackedOptionSelection = !requiresMatrixSelection && (product.trackSize || product.trackColor);
     const requiresBatchSelection = product.trackExpiry && saleMode === "SALE";
+    const requiresSerialSelection = product.isSerialized && saleMode === "SALE";
     const requiresSellingUnitSelection = sellingUnitsForProduct(
       product,
       matrixVariant?.code ?? productVariantCode ?? null
     ).length > 0;
-    const requiresLineOptions = product.mustEnterPriceAtPos || requiresMatrixSelection || requiresTrackedOptionSelection || requiresBatchSelection || requiresSellingUnitSelection;
+    const requiresLineOptions =
+      product.mustEnterPriceAtPos ||
+      requiresMatrixSelection ||
+      requiresTrackedOptionSelection ||
+      requiresBatchSelection ||
+      requiresSerialSelection ||
+      requiresSellingUnitSelection;
 
     if (
       requiresLineOptions &&
-      unitPrice === undefined &&
-      (!productVariantCode || requiresBatchSelection || requiresSellingUnitSelection)
+      (serialNumbers === undefined || serialNumbers === null) &&
+      (unitPrice === undefined || requiresSerialSelection) &&
+      (!productVariantCode ||
+        requiresBatchSelection ||
+        requiresSerialSelection ||
+        requiresSellingUnitSelection)
     ) {
       setOpenPriceDraft({
         product,
@@ -5466,7 +5533,12 @@ export function OnlineStoreWorkspace({
         expressChargeSelected: false,
         expressChargeRate: "",
         lineNote: "",
-        preferredBatchId: ""
+        preferredBatchId: "",
+        serialNumbers: "",
+        serialEntry: "",
+        serialRangeStart: "",
+        serialRangeEnd: "",
+        serialValidationMessage: null
       });
       return;
     }
@@ -5516,17 +5588,52 @@ export function OnlineStoreWorkspace({
       return;
     }
 
-    setBasket((lines) => {
-      const currentLine = lines.find(
-        (line) =>
-          line.product.productId === product.productId &&
-          line.productVariantCode === (matrixVariant?.code ?? null) &&
-          line.sellingUnitOfMeasure === selectedSellingUnit.unitOfMeasureCode &&
-          line.variantSize === (normalizedVariantSize || null) &&
-          line.variantColor === (normalizedVariantColor || null) &&
-          line.lineNote === (normalizedLineNote || null) &&
-          line.preferredBatchId === (normalizedPreferredBatchId || null)
+    const normalizedSerialNumbers = product.isSerialized
+      ? [
+          ...new Set(
+            (serialNumbers ?? [])
+              .map((serialNumber) => serialNumber.trim().toUpperCase())
+              .filter(Boolean)
+          )
+        ]
+      : [];
+
+    if (product.isSerialized && saleMode === "SALE") {
+      if (normalizedSerialNumbers.length !== baseQuantity) {
+        setCheckoutMessage(
+          `${product.productName} is serialized, so choose exactly ${formatNumber.format(baseQuantity)} serial number(s).`
+        );
+        return;
+      }
+
+      const basketSerialKeys = new Set(
+        basket.flatMap((line) => line.serialNumbers)
       );
+      const duplicateSerialNumbers = normalizedSerialNumbers.filter((serialNumber) =>
+        basketSerialKeys.has(serialNumber)
+      );
+
+      if (duplicateSerialNumbers.length > 0) {
+        setCheckoutMessage(
+          `Serial number(s) ${duplicateSerialNumbers.join(", ")} are already in the basket.`
+        );
+        return;
+      }
+    }
+
+    setBasket((lines) => {
+      const currentLine = product.isSerialized
+        ? undefined
+        : lines.find(
+            (line) =>
+              line.product.productId === product.productId &&
+              line.productVariantCode === (matrixVariant?.code ?? null) &&
+              line.sellingUnitOfMeasure === selectedSellingUnit.unitOfMeasureCode &&
+              line.variantSize === (normalizedVariantSize || null) &&
+              line.variantColor === (normalizedVariantColor || null) &&
+              line.lineNote === (normalizedLineNote || null) &&
+              line.preferredBatchId === (normalizedPreferredBatchId || null)
+          );
 
       if (currentLine) {
         return lines.map((line) =>
@@ -5566,7 +5673,8 @@ export function OnlineStoreWorkspace({
           variantSize: normalizedVariantSize || null,
           variantColor: normalizedVariantColor || null,
           lineNote: normalizedLineNote || null,
-          preferredBatchId: normalizedPreferredBatchId || null
+          preferredBatchId: normalizedPreferredBatchId || null,
+          serialNumbers: normalizedSerialNumbers
         }
       ];
     });
@@ -5652,6 +5760,50 @@ export function OnlineStoreWorkspace({
     }
 
     const draft = openPriceDraft;
+    const draftSelectedSellingUnit = resolveProductSellingUnit(
+      draft.product,
+      draft.productVariantCode || null,
+      draft.sellingUnitOfMeasure
+    );
+    let draftBaseQuantity: number;
+
+    try {
+      draftBaseQuantity = calculatePosBaseQuantity(
+        quantity,
+        draftSelectedSellingUnit.conversionFactor
+      );
+    } catch (error) {
+      setCheckoutMessage(
+        error instanceof Error ? error.message : "Enter a valid selling quantity."
+      );
+      return;
+    }
+
+    const draftSerialNumbers = parseSerialDraft(draft.serialNumbers);
+
+    if (draft.product.isSerialized && saleMode === "SALE") {
+      if (draftSerialNumbers.length !== draftBaseQuantity) {
+        setCheckoutMessage(
+          `Choose exactly ${formatNumber.format(draftBaseQuantity)} serial number(s) before adding ${draft.product.productName}.`
+        );
+        return;
+      }
+
+      const availableSerialKeys = new Set(
+        openPriceAvailableSerialNumbers.map((serialNumber) => serialNumber.toUpperCase())
+      );
+      const invalidSerialNumbers = draftSerialNumbers.filter(
+        (serialNumber) => !availableSerialKeys.has(serialNumber.toUpperCase())
+      );
+
+      if (invalidSerialNumbers.length > 0) {
+        setCheckoutMessage(
+          `Serial number(s) ${invalidSerialNumbers.join(", ")} are not available for sale at this store.`
+        );
+        return;
+      }
+    }
+
     const isMatrixDraft = draft.product.productType === "MATRIX" && draft.product.matrixVariants.length > 0;
     const variantSize = !isMatrixDraft && draft.product.trackSize ? draft.variantSize.trim() || null : null;
     const variantColor = !isMatrixDraft && draft.product.trackColor ? draft.variantColor.trim() || null : null;
@@ -5689,7 +5841,8 @@ export function OnlineStoreWorkspace({
       variantColor,
       lineNote,
       draft.preferredBatchId || null,
-      draft.sellingUnitOfMeasure
+      draft.sellingUnitOfMeasure,
+      draft.product.isSerialized ? draftSerialNumbers : null
     );
   }
 
@@ -6415,6 +6568,95 @@ export function OnlineStoreWorkspace({
     setSupplierReturnGoodsReceiptLineId(receipt?.lines[0]?.goodsReceiptLineId ?? "");
     setSupplierReturnQuantity("1");
     setSupplierReturnSerialNumbers("");
+  }
+
+  function addSaleSerialCandidates(candidates: string[]) {
+    setOpenPriceDraft((draft) => {
+      if (!draft) {
+        return draft;
+      }
+
+      const availableKeys = new Map(
+        openPriceAvailableSerialNumbers.map((serialNumber) => [
+          serialNumber.toUpperCase(),
+          serialNumber
+        ])
+      );
+      const current = parseSerialDraft(draft.serialNumbers);
+      const currentKeys = new Set(current.map((serialNumber) => serialNumber.toUpperCase()));
+      const accepted: string[] = [];
+      const rejected: string[] = [];
+
+      for (const candidate of candidates.map((value) => value.trim()).filter(Boolean)) {
+        const availableSerial = availableKeys.get(candidate.toUpperCase());
+
+        if (!availableSerial) {
+          rejected.push(candidate);
+          continue;
+        }
+
+        if (!currentKeys.has(availableSerial.toUpperCase())) {
+          currentKeys.add(availableSerial.toUpperCase());
+          accepted.push(availableSerial);
+        }
+      }
+
+      return {
+        ...draft,
+        serialNumbers: [...current, ...accepted].join("\n"),
+        serialEntry: "",
+        serialRangeStart: "",
+        serialRangeEnd: "",
+        serialValidationMessage: rejected.length
+          ? `Not available for sale here: ${rejected.join(", ")}.`
+          : accepted.length
+            ? `${accepted.length} serial number(s) added.`
+            : null
+      };
+    });
+  }
+
+  function addSaleSerialRange() {
+    const draft = openPriceDraft;
+
+    if (!draft?.serialRangeStart.trim() || !draft.serialRangeEnd.trim()) {
+      setOpenPriceDraft((current) =>
+        current
+          ? {
+              ...current,
+              serialValidationMessage: "Enter both a start and end serial number for the range."
+            }
+          : current
+      );
+      return;
+    }
+
+    const start = draft.serialRangeStart.trim().toUpperCase();
+    const end = draft.serialRangeEnd.trim().toUpperCase();
+    const [low, high] = start <= end ? [start, end] : [end, start];
+    const expanded = expandSerialRange(draft.serialRangeStart, draft.serialRangeEnd);
+    const candidates = expanded.length
+      ? expanded
+      : openPriceAvailableSerialNumbers.filter((serialNumber) => {
+          const key = serialNumber.toUpperCase();
+          return key >= low && key <= high;
+        });
+
+    addSaleSerialCandidates(candidates);
+  }
+
+  function removeSaleSerialNumber(serialNumber: string) {
+    setOpenPriceDraft((draft) =>
+      draft
+        ? {
+            ...draft,
+            serialNumbers: parseSerialDraft(draft.serialNumbers)
+              .filter((value) => value.toUpperCase() !== serialNumber.toUpperCase())
+              .join("\n"),
+            serialValidationMessage: null
+          }
+        : draft
+    );
   }
 
   function addInventorySerialCandidates(candidates: string[]) {
@@ -8929,6 +9171,9 @@ export function OnlineStoreWorkspace({
                       <div className="rms-cart-item">
                         <strong>{line.product.productName}</strong>
                         <small>{line.product.productCode}{variantLabel ? ` · ${variantLabel}` : ""} · {line.sellingUnitOfMeasure}{line.uomConversionFactor !== 1 ? ` × ${formatNumber.format(line.uomConversionFactor)} = ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}` : ""}{preferredBatch ? ` · Batch ${preferredBatch.batchNo}` : line.product.trackExpiry ? " · Batch FEFO" : ""}{promotionLabel ? ` · ${promotionLabel}` : ""}</small>
+                        {line.serialNumbers.length ? (
+                          <small className="rms-cart-serials">Serials: {line.serialNumbers.join(", ")}</small>
+                        ) : null}
                         <label className="rms-pos-discount-select is-line">
                           <span>Disc</span>
                           <select
@@ -8957,7 +9202,7 @@ export function OnlineStoreWorkspace({
                       </div>
                       <input
                         className="rms-qty-input"
-                        disabled={isRecalledBasket}
+                        disabled={isRecalledBasket || line.serialNumbers.length > 0}
                         min="0.001"
                         onChange={(event) => {
                           const nextQuantity = Math.max(0.001, Number(event.target.value) || 1);
@@ -9925,9 +10170,95 @@ export function OnlineStoreWorkspace({
                   {openPriceBatchUnavailable ? <small className="rms-inline-message">No active, non-expired batch is available for this item.</small> : null}
                 </div>
               ) : null}
+              {openPriceDraft.product.isSerialized && saleMode === "SALE" ? (
+                <div className="rms-serial-picker">
+                  <div className="rms-batch-picker-title">
+                    <div>
+                      <strong>Serial numbers</strong>
+                      <span>Scan, type, or pick the exact serial number(s) leaving the shop.</span>
+                    </div>
+                    <small>{formatNumber.format(openPriceSelectedSerialNumbers.length)} of {formatNumber.format(openPriceRequiredSerialCount)} selected</small>
+                  </div>
+                  <div className="rms-serial-entry-row">
+                    <input
+                      autoFocus={!openPriceDraft.product.mustEnterPriceAtPos}
+                      onChange={(event) =>
+                        setOpenPriceDraft((draft) => (draft ? { ...draft, serialEntry: event.target.value } : draft))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          addSaleSerialCandidates([openPriceDraft.serialEntry]);
+                        }
+                      }}
+                      placeholder="Scan or type a serial number"
+                      value={openPriceDraft.serialEntry}
+                    />
+                    <button
+                      className="rms-button"
+                      onClick={() => addSaleSerialCandidates([openPriceDraft.serialEntry])}
+                      type="button"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="rms-serial-entry-row is-range">
+                    <input
+                      onChange={(event) =>
+                        setOpenPriceDraft((draft) => (draft ? { ...draft, serialRangeStart: event.target.value } : draft))
+                      }
+                      placeholder="Range start"
+                      value={openPriceDraft.serialRangeStart}
+                    />
+                    <input
+                      onChange={(event) =>
+                        setOpenPriceDraft((draft) => (draft ? { ...draft, serialRangeEnd: event.target.value } : draft))
+                      }
+                      placeholder="Range end"
+                      value={openPriceDraft.serialRangeEnd}
+                    />
+                    <button className="rms-button" onClick={addSaleSerialRange} type="button">Add range</button>
+                  </div>
+                  {openPriceSelectedSerialNumbers.length ? (
+                    <div className="rms-serial-chip-row">
+                      {openPriceSelectedSerialNumbers.map((serialNumber) => (
+                        <button
+                          className="rms-serial-chip"
+                          key={serialNumber}
+                          onClick={() => removeSaleSerialNumber(serialNumber)}
+                          title="Remove serial number"
+                          type="button"
+                        >
+                          {serialNumber} ×
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="rms-serial-available-list">
+                    {openPriceAvailableSerialNumbers.length ? (
+                      openPriceAvailableSerialNumbers.slice(0, 60).map((serialNumber) => (
+                        <button
+                          className="rms-button is-ghost"
+                          disabled={openPriceSelectedSerialKeys.has(serialNumber.toUpperCase())}
+                          key={serialNumber}
+                          onClick={() => addSaleSerialCandidates([serialNumber])}
+                          type="button"
+                        >
+                          {serialNumber}
+                        </button>
+                      ))
+                    ) : (
+                      <small className="rms-inline-message">No available serial numbers are in stock for this item at this store.</small>
+                    )}
+                  </div>
+                  {openPriceDraft.serialValidationMessage ? (
+                    <small className="rms-inline-message">{openPriceDraft.serialValidationMessage}</small>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="rms-dialog-actions">
                 <button className="rms-button" onClick={() => setOpenPriceDraft(null)} type="button">Cancel</button>
-                <button className="rms-button is-primary" disabled={openPriceBatchUnavailable} onClick={submitOpenPriceDraft} type="button">Add item</button>
+                <button className="rms-button is-primary" disabled={openPriceBatchUnavailable || openPriceSerialUnavailable} onClick={submitOpenPriceDraft} type="button">Add item</button>
               </div>
             </section>
           </div>

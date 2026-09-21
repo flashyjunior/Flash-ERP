@@ -2835,6 +2835,50 @@ option {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
 }
 
+.rms-online-desktop .rms-cart-serials {
+  color: #1b4a68;
+  font-weight: 800;
+  word-break: break-word;
+}
+
+.rms-online-desktop .rms-serial-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rms-online-desktop .rms-serial-chip {
+  border: 1px solid #245f84;
+  border-radius: 999px;
+  background: #e8f1f7;
+  color: #1b4a68;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-serial-chip:hover {
+  background: #d5e6f1;
+}
+
+.rms-online-desktop .rms-serial-available-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 150px;
+  overflow: auto;
+  border: 1px solid #dce5dc;
+  border-radius: 7px;
+  background: #fff;
+  padding: 8px;
+}
+
+.rms-online-desktop .rms-serial-available-list .rms-button {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
 .rms-online-desktop .rms-serial-status {
   display: grid;
   gap: 2px;

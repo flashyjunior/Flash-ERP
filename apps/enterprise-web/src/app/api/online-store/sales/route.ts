@@ -9,7 +9,17 @@ export async function POST(request: Request) {
       sourceTransactionId: body?.sourceTransactionId ?? null,
       salesOrderId: body?.salesOrderId ?? null,
       customerId: body?.customerId ?? null,
-      lines: Array.isArray(body?.lines) ? body.lines : [],
+      lines: Array.isArray(body?.lines)
+        ? body.lines.map((line: Record<string, unknown>) => ({
+            ...line,
+            serialNumbers: Array.isArray(line?.serialNumbers)
+              ? line.serialNumbers.filter(
+                  (serialNumber: unknown): serialNumber is string =>
+                    typeof serialNumber === "string"
+                )
+              : null
+          }))
+        : [],
       payments: Array.isArray(body?.payments) ? body.payments : null,
       paymentMethod: body?.paymentMethod ?? null,
       paymentReference: body?.paymentReference ?? null,

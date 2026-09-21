@@ -1080,6 +1080,59 @@ function normalizeSerialNumbers(value: unknown) {
   ];
 }
 
+function validateOnlineSerializedSaleLine(input: {
+  isSerialized: boolean;
+  productName: string;
+  baseQuantity: number;
+  serialNumbers: unknown;
+}) {
+  const normalizedSerialNumbers = normalizeSerialNumbers(input.serialNumbers);
+
+  if (!input.isSerialized) {
+    if (normalizedSerialNumbers.length > 0) {
+      throw new Error(
+        `${input.productName} is not configured as a serialized item, so Flash ERP cannot accept serial numbers for it.`
+      );
+    }
+
+    return [];
+  }
+
+  if (!Number.isInteger(input.baseQuantity)) {
+    throw new Error(
+      `${input.productName} is serialized, so Flash ERP requires a whole-number quantity.`
+    );
+  }
+
+  if (normalizedSerialNumbers.length !== input.baseQuantity) {
+    throw new Error(
+      `${input.productName} is serialized, so Flash ERP needs exactly ${formatNumberForMessage(
+        input.baseQuantity
+      )} serial number(s). Scan or select them before completing the sale.`
+    );
+  }
+
+  return normalizedSerialNumbers;
+}
+
+function assertNoDuplicateOnlineSaleSerials(
+  lines: Array<{ product: { name: string }; serialNumbers: string[] }>
+) {
+  const seen = new Set<string>();
+
+  for (const line of lines) {
+    for (const serialNumber of line.serialNumbers) {
+      if (seen.has(serialNumber)) {
+        throw new Error(
+          `Serial number ${serialNumber} appears more than once in this basket for ${line.product.name}.`
+        );
+      }
+
+      seen.add(serialNumber);
+    }
+  }
+}
+
 function toSupplierReturnReason(value: unknown) {
   return value === SupplierReturnReason.DAMAGED ||
     value === SupplierReturnReason.REJECTED_AT_RECEIPT ||
@@ -2194,6 +2247,22 @@ export type OnlineStoreWorkspaceData = {
     quantityOnHand: number;
     status: string;
   }>;
+  inventorySerialUnits: Array<{
+    serialUnitId: string;
+    productId: string;
+    productCode: string;
+    productName: string;
+    locationId: string | null;
+    locationCode: string | null;
+    locationName: string | null;
+    serialNumber: string;
+    status: string;
+    sourceReferenceType: string | null;
+    sourceReferenceId: string | null;
+    sourceReferenceLabel: string | null;
+    lastOccurredAt: string | null;
+    updatedAt: string;
+  }>;
   inventoryLocations: Array<{
     locationId: string;
     locationCode: string;
@@ -2501,6 +2570,7 @@ export type OnlineStoreWorkspaceData = {
       taxAmount: number;
       lineTotal: number;
       appliedPromotionName: string | null;
+      serialNumbers: string[];
     }>;
   }>;
   salesOrders: Array<{
@@ -2758,6 +2828,7 @@ const emptyOnlineStoreCollections = {
   purchaseOrderSuppliers: [],
   inventoryRows: [],
   inventoryBatches: [],
+  inventorySerialUnits: [],
   inventoryLocations: [],
   transferStores: [],
   tenderMethods: [],
@@ -4106,6 +4177,23 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             status: true
           }
         },
+        inventorySerialUnits: {
+          where: {
+            storeId: assignment.store.id
+          },
+          orderBy: [{ status: "asc" }, { serialNumber: "asc" }],
+          select: {
+            id: true,
+            inventoryLocationId: true,
+            serialNumber: true,
+            status: true,
+            sourceReferenceType: true,
+            sourceReferenceId: true,
+            sourceReferenceLabel: true,
+            lastOccurredAt: true,
+            updatedAt: true
+          }
+        },
         matrixVariants: {
           where: {
             status: RecordStatus.ACTIVE
@@ -4351,7 +4439,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             appliedPromotionNameSnapshot: true,
             taxAmount: true,
             lineTotal: true,
-            lineNote: true
+            lineNote: true,
+            serialNumbersSnapshot: true
           }
         }
       }
@@ -5719,7 +5808,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         discountAmount: Number(line.discountAmount),
         taxAmount: Number(line.taxAmount),
         lineTotal: Number(line.lineTotal),
-        appliedPromotionName: line.appliedPromotionNameSnapshot
+        appliedPromotionName: line.appliedPromotionNameSnapshot,
+        serialNumbers: readStringArrayJson(line.serialNumbersSnapshot) ?? []
       }))
     }));
   const mappedSalesOrders: OnlineStoreWorkspaceData["salesOrders"] = salesOrders.map((order) => {
@@ -6185,6 +6275,30 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           quantityOnHand: toQuantity(batch.quantityOnHand),
           status: batch.status
         }];
+      })
+    ),
+    inventorySerialUnits: products.flatMap((product) =>
+      product.inventorySerialUnits.map((serialUnit) => {
+        const location = serialUnit.inventoryLocationId
+          ? locationById.get(serialUnit.inventoryLocationId)
+          : null;
+
+        return {
+          serialUnitId: serialUnit.id,
+          productId: product.id,
+          productCode: product.code,
+          productName: product.name,
+          locationId: location?.id ?? null,
+          locationCode: location?.code ?? null,
+          locationName: location?.name ?? null,
+          serialNumber: serialUnit.serialNumber,
+          status: serialUnit.status,
+          sourceReferenceType: serialUnit.sourceReferenceType,
+          sourceReferenceId: serialUnit.sourceReferenceId,
+          sourceReferenceLabel: serialUnit.sourceReferenceLabel,
+          lastOccurredAt: serialUnit.lastOccurredAt?.toISOString() ?? null,
+          updatedAt: serialUnit.updatedAt.toISOString()
+        };
       })
     ),
     inventoryLocations: inventoryLocations.map((location) => ({
@@ -7035,6 +7149,7 @@ export type CreateOnlineStoreSaleRequest = {
     variantColor?: string | null;
     lineNote?: string | null;
     preferredBatchId?: string | null;
+    serialNumbers?: string[] | null;
     sellingUnitOfMeasure?: string | null;
   }>;
   payments?: OnlinePaymentRequest[] | null;
@@ -8074,6 +8189,12 @@ async function prepareOnlineStoreBasketLines(
       variantSize: product.trackSize ? optionalText(line.variantSize) : null,
       variantColor: product.trackColor ? optionalText(line.variantColor) : null,
       lineNote: optionalText(line.lineNote),
+      serialNumbers: validateOnlineSerializedSaleLine({
+        isSerialized: product.isSerialized && tracksInventoryForSale(product),
+        productName: product.name,
+        baseQuantity: sellingUom.baseQuantity,
+        serialNumbers: line.serialNumbers
+      }),
       unitPrice,
       appliedPromotionCode: null as string | null,
       appliedPromotionName: null as string | null,
@@ -8494,6 +8615,7 @@ async function completeOnlineStoreParkedTransaction(
           taxAmount: true,
           lineTotal: true,
           lineNote: true,
+          serialNumbersSnapshot: true,
           productVariant: {
             select: {
               id: true,
@@ -8516,6 +8638,7 @@ async function completeOnlineStoreParkedTransaction(
               baseCostPrice: true,
               trackInventory: true,
               trackExpiry: true,
+              isSerialized: true,
               taxProfile: {
                 select: {
                   ratePercent: true,
@@ -8552,8 +8675,10 @@ async function completeOnlineStoreParkedTransaction(
       baseCostPrice: line.product.baseCostPrice,
       trackInventory: line.product.trackInventory,
       trackExpiry: line.product.trackExpiry,
+      isSerialized: line.product.isSerialized,
       taxProfile: line.product.taxProfile
     },
+    serialNumbers: readStringArrayJson(line.serialNumbersSnapshot) ?? [],
     sourceLineId: line.id,
     productVariant: line.productVariant,
     productId: line.productId,
@@ -8836,6 +8961,39 @@ async function completeOnlineStoreParkedTransaction(
       inventoryLocationId: salesLocation.id
     }
   });
+
+  assertNoDuplicateOnlineSaleSerials(persistedLines);
+
+  for (const line of persistedLines) {
+    if (line.serialNumbers.length === 0) {
+      continue;
+    }
+
+    const serialUpdate = await tx.inventorySerialUnit.updateMany({
+      where: {
+        retailOrgId: session.retailOrgId,
+        productId: line.product.id,
+        serialNumber: { in: line.serialNumbers },
+        status: SerialInventoryStatus.AVAILABLE
+      },
+      data: {
+        status: SerialInventoryStatus.SOLD,
+        storeId: store.id,
+        inventoryLocationId: salesLocation.id,
+        sourceReferenceType: "POS_TRANSACTION",
+        sourceReferenceId: transaction.id,
+        sourceReferenceLabel: transaction.transactionNo,
+        sourceNodeCode: "ONLINE_DIRECT",
+        lastOccurredAt: transaction.completedAt ?? completedAt
+      }
+    });
+
+    if (serialUpdate.count !== line.serialNumbers.length) {
+      throw new Error(
+        `Serial availability for ${line.product.name} changed before this held sale was completed. Recall the basket, re-scan the serial numbers, and retry.`
+      );
+    }
+  }
 
   for (const [sourceLineId, allocations] of batchAllocationsBySourceLineId) {
     await tx.posTransactionLine.update({
@@ -9429,6 +9587,12 @@ export async function createOnlineStoreSale(
       variantColor,
       lineNote,
       preferredBatchId: optionalText(line.preferredBatchId),
+      serialNumbers: validateOnlineSerializedSaleLine({
+        isSerialized: product.isSerialized && tracksInventoryForSale(product),
+        productName: product.name,
+        baseQuantity: sellingUom.baseQuantity,
+        serialNumbers: line.serialNumbers
+      }),
       unitPrice,
       discountAmount: amounts.discountAmount,
       appliedPromotionCode: null as string | null,
@@ -9643,6 +9807,58 @@ export async function createOnlineStoreSale(
       }
     });
 
+    assertNoDuplicateOnlineSaleSerials(pricedLines);
+
+    const serializedSaleLines = pricedLines.filter((line) => line.serialNumbers.length > 0);
+
+    if (serializedSaleLines.length > 0) {
+      const serialUnits = await tx.inventorySerialUnit.findMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          productId: { in: [...new Set(serializedSaleLines.map((line) => line.product.id))] },
+          serialNumber: {
+            in: [...new Set(serializedSaleLines.flatMap((line) => line.serialNumbers))]
+          }
+        },
+        select: {
+          id: true,
+          productId: true,
+          serialNumber: true,
+          status: true,
+          inventoryLocationId: true
+        }
+      });
+      const serialUnitByKey = new Map(
+        serialUnits.map(
+          (unit) => [`${unit.productId}:${unit.serialNumber.toUpperCase()}`, unit] as const
+        )
+      );
+
+      for (const line of serializedSaleLines) {
+        for (const serialNumber of line.serialNumbers) {
+          const unit = serialUnitByKey.get(`${line.product.id}:${serialNumber}`);
+
+          if (!unit) {
+            throw new Error(
+              `Serial number ${serialNumber} is not registered for ${line.product.name} in this organisation.`
+            );
+          }
+
+          if (unit.status !== SerialInventoryStatus.AVAILABLE) {
+            throw new Error(
+              `Serial number ${serialNumber} for ${line.product.name} is ${unit.status.toLowerCase().replace(/_/g, " ")} and cannot be sold.`
+            );
+          }
+
+          if (unit.inventoryLocationId && unit.inventoryLocationId !== salesLocation.id) {
+            throw new Error(
+              `Serial number ${serialNumber} for ${line.product.name} is not held in the ${salesLocation.code} sales location.`
+            );
+          }
+        }
+      }
+    }
+
     const { terminal, shift } = await ensureOnlineRegisterShift(tx, {
       session,
       user,
@@ -9698,6 +9914,8 @@ export async function createOnlineStoreSale(
             batchAllocationsSnapshot: batchAllocationsByLineIndex.has(lineIndex)
               ? serializeJsonField(batchAllocationsByLineIndex.get(lineIndex) ?? [])
               : null,
+            serialNumbersSnapshot:
+              line.serialNumbers.length > 0 ? serializeJsonField(line.serialNumbers) : null,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -9741,6 +9959,37 @@ export async function createOnlineStoreSale(
       loyaltyPointsRedeemed: loyaltyRedemption.points,
       loyaltyRedemptionAmount: loyaltyRedemption.amount
     });
+
+    for (const line of pricedLines) {
+      if (line.serialNumbers.length === 0) {
+        continue;
+      }
+
+      const serialUpdate = await tx.inventorySerialUnit.updateMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          productId: line.product.id,
+          serialNumber: { in: line.serialNumbers },
+          status: SerialInventoryStatus.AVAILABLE
+        },
+        data: {
+          status: SerialInventoryStatus.SOLD,
+          storeId: store.id,
+          inventoryLocationId: salesLocation.id,
+          sourceReferenceType: "POS_TRANSACTION",
+          sourceReferenceId: transaction.id,
+          sourceReferenceLabel: transaction.transactionNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          lastOccurredAt: transaction.completedAt ?? new Date()
+        }
+      });
+
+      if (serialUpdate.count !== line.serialNumbers.length) {
+        throw new Error(
+          `Serial availability for ${line.product.name} changed during checkout. Refresh the basket and retry the sale.`
+        );
+      }
+    }
 
     for (const allocations of batchAllocationsByLineIndex.values()) {
       for (const allocation of allocations) {
@@ -10057,7 +10306,9 @@ export async function createOnlineStoreHeldSale(
             appliedPromotionNameSnapshot: line.appliedPromotionName,
             taxAmount: line.taxAmount,
             lineTotal: line.lineTotal,
-            lineNote: line.lineNote
+            lineNote: line.lineNote,
+            serialNumbersSnapshot:
+              line.serialNumbers.length > 0 ? serializeJsonField(line.serialNumbers) : null
           }))
         }
       },
@@ -10118,7 +10369,8 @@ export async function createOnlineStoreHeldSale(
           discountAmount: line.discountAmount,
           taxAmount: line.taxAmount,
           lineTotal: line.lineTotal,
-          appliedPromotionName: line.appliedPromotionName
+          appliedPromotionName: line.appliedPromotionName,
+          serialNumbers: line.serialNumbers
         }))
       },
       message: `${transaction.transactionNo} was held for later recall.`,
