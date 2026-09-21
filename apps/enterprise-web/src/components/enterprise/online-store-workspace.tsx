@@ -59,6 +59,7 @@ type ManagerTab = "shift" | "eod" | "banking" | "summary";
 type ReportId =
   | "sales"
   | "products"
+  | "serialsBatches"
   | "orders"
   | "layaways"
   | "layawayPayments"
@@ -2401,7 +2402,7 @@ export function OnlineStoreWorkspace({
     quantityOnHand: number;
   } | null>(null);
   const [inventoryDrillDownTab, setInventoryDrillDownTab] = useState<"serials" | "batches">("serials");
-  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("ALL");
+  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("AVAILABLE");
   const [activeReceivingSection, setActiveReceivingSection] = useState<InventoryReceivingSection>("purchase-orders");
   const [inventoryStartupAlertOpen, setInventoryStartupAlertOpen] = useState(false);
   const inventoryStartupAlertCheckedRef = useRef(false);
@@ -3460,6 +3461,7 @@ export function OnlineStoreWorkspace({
   );
   const reportSalesRows = activeReportBundle.salesRows;
   const reportProductRows = activeReportBundle.productRows;
+  const reportSerialBatchRows = activeReportBundle.serialBatchRows;
   const reportSalesOrderRows = activeReportBundle.salesOrderRows;
   const reportLayawayRows = activeReportBundle.layawayRows;
   const reportLayawayPaymentRows = activeReportBundle.layawayPaymentRows;
@@ -3472,6 +3474,8 @@ export function OnlineStoreWorkspace({
       ? reportSalesRows.length
       : activeReport === "products"
         ? reportProductRows.length
+        : activeReport === "serialsBatches"
+          ? reportSerialBatchRows.length
         : activeReport === "orders"
           ? reportSalesOrderRows.length
           : activeReport === "layaways"
@@ -5248,6 +5252,26 @@ export function OnlineStoreWorkspace({
       return;
     }
 
+    if (activeReport === "serialsBatches") {
+      downloadCsv(baseName, [
+        ["Receipt", "Completed", "Cashier", "Product", "Code", "Location", "Tracking", "Serial", "Batch", "Expiry", "Quantity"],
+        ...reportSerialBatchRows.map((row) => [
+          row.transactionNo,
+          row.completedAt,
+          row.cashierCode,
+          row.productName,
+          row.productCode,
+          row.locationName,
+          row.trackingType,
+          row.serialNumber,
+          row.batchNo,
+          row.expiryDate,
+          row.quantity
+        ])
+      ]);
+      return;
+    }
+
     if (activeReport === "orders") {
       downloadCsv(baseName, [
         ["Order", "Status", "Customer", "Total", "Deposit", "Balance", "Tender", "Reference", "Created", "Fulfilled"],
@@ -5406,7 +5430,21 @@ export function OnlineStoreWorkspace({
                   formatMoney(row.netAmount, currencyCode)
                 ])
               }
-            : activeReport === "orders"
+            : activeReport === "serialsBatches"
+              ? {
+                  headers: ["Receipt", "Item", "Location", "Tracking", "Serial / batch", "Expiry", "Qty", "Sold"],
+                  rows: reportSerialBatchRows.map((row) => [
+                    row.transactionNo,
+                    `${row.productName} (${row.productCode})`,
+                    row.locationName,
+                    row.trackingType,
+                    row.serialNumber ?? row.batchNo,
+                    row.expiryDate?.slice(0, 10) ?? "-",
+                    formatNumber.format(row.quantity),
+                    row.completedAt ? new Date(row.completedAt).toLocaleString() : "-"
+                  ])
+                }
+              : activeReport === "orders"
               ? {
                   headers: ["Order", "Status", "Customer", "Total", "Deposit", "Balance"],
                   rows: reportSalesOrderRows.map((row) => [
@@ -10400,7 +10438,7 @@ export function OnlineStoreWorkspace({
                           }
 
                           setInventoryDrillDownTab(row.isSerialized ? "serials" : "batches");
-                          setInventoryDrillDownSerialStatus("ALL");
+                          setInventoryDrillDownSerialStatus("AVAILABLE");
                           setInventoryDrillDown({
                             productId: row.productId,
                             productCode: row.productCode,
@@ -11467,6 +11505,21 @@ export function OnlineStoreWorkspace({
                     <div className="rms-table-row" key={`${row.productCode}:${row.sellingUnitOfMeasure}`}><strong>{row.productName}<small>{row.productCode} · {row.sellingUnitOfMeasure} · base {formatNumber.format(row.baseQuantity)} {row.baseUnitOfMeasure}</small></strong><span>{formatNumber.format(row.quantity)}</span><span>{formatMoney(row.grossAmount, currencyCode)}</span><span>{formatMoney(row.taxAmount, currencyCode)}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
                   ))}
                   {!reportProductRows.length ? <EmptyState title="No product rows" detail="No product movement matches the current search." /> : null}
+                </div>
+              ) : null}
+              {activeReport === "serialsBatches" ? (
+                <div className="rms-table rms-report-table">
+                  <div className="rms-table-head"><span>Receipt</span><span>Item</span><span>Tracking</span><span>Serial / batch</span><span>Qty</span></div>
+                  {reportSerialBatchRows.map((row) => (
+                    <div className="rms-table-row" key={row.traceId}>
+                      <strong>{row.transactionNo}<small>{row.completedAt ? new Date(row.completedAt).toLocaleString() : "Not dated"}</small></strong>
+                      <span>{row.productName}<small>{row.productCode} · {row.locationName ?? "Unassigned"}</small></span>
+                      <span>{row.trackingType}</span>
+                      <strong>{row.serialNumber ?? row.batchNo ?? "-"}<small>{row.expiryDate ? `Expires ${row.expiryDate.slice(0, 10)}` : ""}</small></strong>
+                      <span>{formatNumber.format(row.quantity)}</span>
+                    </div>
+                  ))}
+                  {!reportSerialBatchRows.length ? <EmptyState title="No sold serials or batches" detail="Tracked serial and batch allocations appear here after completed sales." /> : null}
                 </div>
               ) : null}
               {activeReport === "orders" ? (

@@ -466,7 +466,7 @@ export function EnterpriseInventoryWorkspace({
   const [inventoryDrillDownTab, setInventoryDrillDownTab] = useState<"serials" | "batches">(
     "serials"
   );
-  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("ALL");
+  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("AVAILABLE");
   const [inventoryDrillDownDetail, setInventoryDrillDownDetail] =
     useState<EnterpriseInventorySerialDetailResponse | null>(null);
   const [inventoryDrillDownLoading, setInventoryDrillDownLoading] = useState(false);
@@ -538,7 +538,7 @@ export function EnterpriseInventoryWorkspace({
       // resets so a reopened panel never inherits a stale narrowing.
       setInventoryDrillDown(target);
       setInventoryDrillDownTab(target.isSerialized ? "serials" : "batches");
-      setInventoryDrillDownSerialStatus("ALL");
+      setInventoryDrillDownSerialStatus("AVAILABLE");
       setInventoryDrillDownDetail(null);
       void loadInventoryDrillDownDetail(target);
     },

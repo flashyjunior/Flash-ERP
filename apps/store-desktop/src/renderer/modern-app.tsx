@@ -117,6 +117,7 @@ type ReportKind =
   | "products"
   | "orders"
   | "inventory"
+  | "serials-batches"
   | "shifts"
   | "account-payments"
   | "banking";
@@ -127,6 +128,7 @@ type ReportWorkspace =
   | "report-products"
   | "report-orders"
   | "report-inventory"
+  | "report-serials-batches"
   | "report-shifts"
   | "report-account-payments"
   | "report-banking";
@@ -514,6 +516,13 @@ const reportWorkspaceItems: Array<{
     detail: "Stock position",
     scope: "STORE",
     reportKind: "inventory",
+  },
+  {
+    id: "report-serials-batches",
+    label: "Sold Serials & Batches",
+    detail: "Tracked sale history",
+    scope: "STORE",
+    reportKind: "serials-batches",
   },
   {
     id: "report-shifts",
@@ -19328,6 +19337,7 @@ function InventoryStartupAlertsDialog({
 function reportCategory(item: (typeof reportWorkspaceItems)[number]) {
   switch (item.reportKind) {
     case "inventory":
+    case "serials-batches":
       return "Inventory";
     case "banking":
     case "account-payments":
@@ -20454,7 +20464,7 @@ function InventoryWorkspace(props: {
     "serials" | "batches"
   >("serials");
   const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] =
-    useState("ALL");
+    useState("AVAILABLE");
   const [inventoryDrillDownSerials, setInventoryDrillDownSerials] = useState<
     StoreSerialRegistryBrowseItem[]
   >([]);
@@ -22502,7 +22512,7 @@ function InventoryWorkspace(props: {
   async function openInventoryDrillDown(item: StoreInventoryBrowseItem) {
     setInventoryDrillDown(item);
     setInventoryDrillDownTab(item.isSerialized ? "serials" : "batches");
-    setInventoryDrillDownSerialStatus("ALL");
+    setInventoryDrillDownSerialStatus("AVAILABLE");
     setInventoryDrillDownSerials([]);
     setInventoryDrillDownError(null);
 
@@ -25847,6 +25857,20 @@ function reportRowsForExport(report: StoreReportResult, kind: ReportKind) {
         "Unit Price": row.unitPrice,
         "Stock Value": row.stockValue,
         Updated: formatDate(row.updatedAt),
+      }));
+    case "serials-batches":
+      return report.serialBatchRows.map((row) => ({
+        "Transaction No": row.transactionNo,
+        Date: formatDate(row.completedAt),
+        Cashier: row.cashierCode ?? "",
+        "Product Code": row.productCode,
+        Product: row.productName,
+        Location: row.locationCode ?? "",
+        Type: row.trackingType,
+        Serial: row.serialNumber ?? "",
+        Batch: row.batchNo ?? "",
+        Expiry: row.expiryDate ? formatDate(row.expiryDate) : "",
+        Quantity: row.quantity,
       }));
     case "shifts":
       return report.shiftRows.map((row) => ({

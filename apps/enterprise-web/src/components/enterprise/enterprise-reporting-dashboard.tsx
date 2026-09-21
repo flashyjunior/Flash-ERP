@@ -41,6 +41,7 @@ type TenderReportRow = EnterpriseReportingDashboardData["tenderReportRows"][numb
 type ReceiptReportRow = EnterpriseReportingDashboardData["receiptReportRows"][number];
 type CashierSalesRow = EnterpriseReportingDashboardData["cashierSalesRows"][number];
 type ItemSalesRow = EnterpriseReportingDashboardData["itemSalesRows"][number];
+type SoldInventoryTraceRow = EnterpriseReportingDashboardData["soldInventoryTraceRows"][number];
 type PromotionPerformanceRow = EnterpriseReportingDashboardData["promotionPerformanceRows"][number];
 type StockValuationRow = EnterpriseReportingDashboardData["stockValuationRows"][number];
 type CogsReportRow = EnterpriseReportingDashboardData["cogsReportRows"][number];
@@ -73,6 +74,7 @@ type ReportId =
   | "receipts"
   | "cashierSales"
   | "itemSales"
+  | "soldInventoryTrace"
   | "promotionPerformance"
   | "kpiScorecard"
   | "profitAndLoss"
@@ -139,6 +141,7 @@ const reportIds: ReportId[] = [
   "receipts",
   "cashierSales",
   "itemSales",
+  "soldInventoryTrace",
   "promotionPerformance",
   "kpiScorecard",
   "profitAndLoss",
@@ -188,6 +191,7 @@ const reportsWithStoreScope = new Set<ReportId>([
   "receipts",
   "cashierSales",
   "itemSales",
+  "soldInventoryTrace",
   "promotionPerformance",
   "kpiScorecard",
   "profitAndLoss",
@@ -446,6 +450,28 @@ const itemSalesFilter: FilterFn<ItemSalesRow> = (row, _columnId, filterValue) =>
       row.original.category,
       row.original.store,
       row.original.storeCode
+    ],
+    filterValue
+  );
+
+const soldInventoryTraceFilter: FilterFn<SoldInventoryTraceRow> = (
+  row,
+  _columnId,
+  filterValue
+) =>
+  matchesReportQuery(
+    [
+      row.original.transactionNo,
+      row.original.trackingType,
+      row.original.serialNumber,
+      row.original.batchNo,
+      row.original.productCode,
+      row.original.productName,
+      row.original.store,
+      row.original.storeCode,
+      row.original.locationCode,
+      row.original.locationName,
+      row.original.cashierCode
     ],
     filterValue
   );
@@ -2215,6 +2241,63 @@ export function EnterpriseReportingDashboard({
     [currencyFormatter]
   );
 
+  const soldInventoryTraceColumns = useMemo<ColumnDef<SoldInventoryTraceRow>[]>(
+    () => [
+      {
+        accessorKey: "transactionNo",
+        header: "Receipt",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.transactionNo}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.storeCode} · {row.original.cashierCode ?? "Unassigned cashier"}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "productName",
+        header: "Item",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.productName}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.productCode}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      { accessorKey: "trackingType", header: "Tracking" },
+      {
+        id: "serialOrBatch",
+        header: "Serial / batch",
+        cell: ({ row }) => row.original.serialNumber ?? row.original.batchNo ?? "-"
+      },
+      {
+        accessorKey: "expiryDate",
+        header: "Expiry",
+        cell: ({ row }) => row.original.expiryDate?.slice(0, 10) ?? "-"
+      },
+      {
+        accessorKey: "quantity",
+        header: "Qty",
+        cell: ({ row }) => numberFormatter.format(row.original.quantity)
+      },
+      {
+        accessorKey: "locationName",
+        header: "Location",
+        cell: ({ row }) => row.original.locationName ?? row.original.locationCode ?? "Unassigned"
+      },
+      {
+        accessorKey: "soldAtLabel",
+        header: "Sold",
+        cell: ({ row }) => renderTimestamp(row.original.soldAt, row.original.soldAtLabel),
+        meta: { disableTruncate: true }
+      }
+    ],
+    []
+  );
+
   const promotionPerformanceColumns = useMemo<ColumnDef<PromotionPerformanceRow>[]>(
     () => [
       {
@@ -3063,6 +3146,12 @@ export function EnterpriseReportingDashboard({
             rowCount: dashboard.itemSalesRows.length,
           },
           {
+            id: "soldInventoryTrace",
+            label: "Sold serials and batches",
+            description: "Receipt-level serial numbers and batch allocations captured when tracked items were sold.",
+            rowCount: dashboard.soldInventoryTraceRows.length,
+          },
+          {
             id: "promotionPerformance",
             label: "Promotion performance",
             description: "Promotion discounts, lines, receipts, and sales impact.",
@@ -3304,6 +3393,15 @@ export function EnterpriseReportingDashboard({
 
   function getLocationOptions(reportId: ReportId) {
     switch (reportId) {
+      case "soldInventoryTrace":
+        return buildChoiceOptions(
+          dashboard.soldInventoryTraceRows.flatMap((row) => [
+            row.locationCode,
+            row.locationName,
+            row.storeCode,
+            row.store
+          ])
+        );
       case "shopPnlComparison":
         return buildChoiceOptions(
           dashboard.shopPnlComparisonRows.flatMap((row) => [row.storeCode, row.storeName])
@@ -3421,6 +3519,8 @@ export function EnterpriseReportingDashboard({
 
   function getCashierOptions(reportId: ReportId) {
     switch (reportId) {
+      case "soldInventoryTrace":
+        return buildChoiceOptions(dashboard.soldInventoryTraceRows.map((row) => row.cashierCode));
       case "cashierSales":
         return buildChoiceOptions(dashboard.cashierSalesRows.map((row) => row.cashierCode));
       case "receipts":
@@ -3442,6 +3542,10 @@ export function EnterpriseReportingDashboard({
 
   function getProductOptions(reportId: ReportId) {
     switch (reportId) {
+      case "soldInventoryTrace":
+        return buildChoiceOptions(
+          dashboard.soldInventoryTraceRows.flatMap((row) => [row.productCode, row.productName])
+        );
       case "itemSales":
         return buildChoiceOptions(
           dashboard.itemSalesRows.flatMap((row) => [
@@ -4083,6 +4187,32 @@ export function EnterpriseReportingDashboard({
             initialPageSize={12}
             initialSorting={[{ id: "transactionNo", desc: true }]}
             searchPlaceholder="Search receipts, service type, customers, items, departments, categories, or stores"
+          />
+        );
+      case "soldInventoryTrace":
+        return (
+          <SharedDataGrid
+            columns={soldInventoryTraceColumns}
+            data={dashboard.soldInventoryTraceRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeCode, row.store]) &&
+                matchesDate(row.soldAt) &&
+                matchesChoice(filters.product, [row.productCode, row.productName]) &&
+                matchesChoice(filters.location, [
+                  row.locationCode,
+                  row.locationName,
+                  row.storeCode,
+                  row.store
+                ]) &&
+                matchesChoice(filters.cashier, [row.cashierCode])
+            )}
+            emptyLabel="No sold serial or batch allocations are available for this report."
+            exportFileName="flash-erp-sold-serials-batches"
+            getRowHref={(row) => `/pos/transactions/${encodeURIComponent(row.transactionNo)}`}
+            globalFilterFn={soldInventoryTraceFilter}
+            initialPageSize={20}
+            initialSorting={[{ id: "soldAtLabel", desc: true }]}
+            searchPlaceholder="Search receipts, serials, batches, items, locations, or cashiers"
           />
         );
       case "promotionPerformance":

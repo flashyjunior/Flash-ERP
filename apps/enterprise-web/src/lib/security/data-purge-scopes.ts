@@ -34,8 +34,6 @@ export type EnterpriseDataPurgeScope = {
   label: string;
   description: string;
   group: "Transactional" | "Master data";
-  /** Transactional scopes are always included and cannot be unticked. */
-  alwaysIncluded: boolean;
   /** Scope keys that must also be selected before this one can run. */
   requires: EnterpriseDataPurgeScopeKey[];
 };
@@ -47,7 +45,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Sales, returns, exchanges, held baskets, payments, shifts, and saved transaction references.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -55,7 +52,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Sales orders & layaways",
     description: "Sales orders, layaways, order lines, and their stock reservations.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -63,7 +59,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Purchasing & receiving",
     description: "Purchase orders, goods receipts, supplier returns, and supplier claims.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -71,7 +66,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Transfers & stock counts",
     description: "Inter-store transfer requests and stock count sessions.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -80,7 +74,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Inventory ledger entries (Item Dynamic stock), serial units, and batch/expiry records.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -89,7 +82,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "EOD reconciliations, banking deposits, operating expenses, and customer account ledgers.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -98,7 +90,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Storefront orders, fulfilments, payments, refund requests, reviews, and status history.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -106,7 +97,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Sync queues",
     description: "Outbox, inbound, checkpoint, and operator-action sync records for every node.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -114,7 +104,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Finance journals",
     description: "General-ledger journal batches, entries, and lines.",
     group: "Transactional",
-    alwaysIncluded: true,
     requires: []
   },
   {
@@ -123,7 +112,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Product records with their barcodes, matrix variants, selling units, shop prices, and supplier links.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -131,7 +119,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Product categories",
     description: "Category master records. Requires products to be purged as well.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: ["products"]
   },
   {
@@ -139,7 +126,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Product departments",
     description: "Department master records. Requires products to be purged as well.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: ["products"]
   },
   {
@@ -147,7 +133,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Price lists & catalogues",
     description: "Price lists, price list entries, and inventory catalogue assignments.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -155,7 +140,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Customers",
     description: "Customer master records, loyalty balances, and their account ledgers.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -163,7 +147,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Suppliers",
     description: "Supplier master records and product-supplier links.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -171,7 +154,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Promotions & gift certificates",
     description: "Promotion campaigns and issued gift certificates.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -180,7 +162,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Unit-of-measure records and conversion schedules. Requires products to be purged as well.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: ["products"]
   },
   {
@@ -188,7 +169,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Tax profiles",
     description: "Tax profile master records. Requires products to be purged as well.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: ["products"]
   },
   {
@@ -196,7 +176,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     label: "Tender methods",
     description: "Payment tender method master records and their ecommerce mappings.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -205,7 +184,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Stock location topology and warehouse records. Shops and terminals are kept.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   },
   {
@@ -214,7 +192,6 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
     description:
       "Storefront shopper logins, saved addresses, sessions, and one-time-password challenges.",
     group: "Master data",
-    alwaysIncluded: false,
     requires: []
   }
 ];
@@ -222,8 +199,8 @@ export const enterpriseDataPurgeScopes: EnterpriseDataPurgeScope[] = [
 
 export const enterpriseDataPurgeConfirmationText = "PURGE";
 
-export const alwaysIncludedPurgeScopeKeys = enterpriseDataPurgeScopes
-  .filter((scope) => scope.alwaysIncluded)
+export const transactionalPurgeScopeKeys = enterpriseDataPurgeScopes
+  .filter((scope) => scope.group === "Transactional")
   .map((scope) => scope.key);
 
 export const enterpriseDataPurgeScopeByKey = new Map(
