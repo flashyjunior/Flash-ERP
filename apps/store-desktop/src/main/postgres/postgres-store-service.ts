@@ -7577,7 +7577,7 @@ export class PostgresStoreService {
     );
     const normalizedCategoryCode = normalizeCatalogCode(input?.categoryCode);
     const normalizedStatus = input?.status?.trim().toUpperCase() || null;
-    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 40);
+    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 500);
     const result = await this.pool.query<SerialRegistryBrowseRow>(
       `SELECT
         registry.product_code,
