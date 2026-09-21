@@ -518,6 +518,10 @@ export function EnterpriseSecurityWorkspace({
     }
   })();
   const pageStatusMessage = (() => {
+    if (workspace.loadError) {
+      return `Enterprise security policy could not be read: ${workspace.loadError} The counts and lists on this page are unavailable because the query failed, not because nothing is configured.`;
+    }
+
     switch (selectedView) {
       case "users":
         return `${workspace.metrics.activeUsers} active retail user(s) are currently managed here, with ${workspace.metrics.cashierEligibleUsers} cashier-ready and ${workspace.metrics.supervisorEligibleUsers} supervisor-ready account(s).`;
