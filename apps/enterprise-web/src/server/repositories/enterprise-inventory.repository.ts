@@ -9,7 +9,11 @@ import {
   type EnterprisePageInfo,
   type EnterprisePageInput
 } from "@/server/performance/enterprise-pagination";
-import { RecordStatus, SyncNodeType } from "@flash-erp/domain";
+import {
+  RecordStatus,
+  SyncNodeType,
+  inventoryBatchDaysUntilExpiry
+} from "@flash-erp/domain";
 
 
 function formatRelativeTime(value: Date | null) {
@@ -251,6 +255,43 @@ type InventoryProductRollup = {
   lastMovementAt: Date | null;
 };
 
+/**
+ * Payload field names are shared with the store desktop and the Online POS
+ * inventory drill-down, so one panel implementation can serve all three.
+ */
+export type EnterpriseInventorySerialUnitRow = {
+  serialUnitId: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  locationId: string | null;
+  locationCode: string | null;
+  locationName: string | null;
+  serialNumber: string;
+  status: string;
+  sourceReferenceType: string | null;
+  sourceReferenceId: string | null;
+  sourceReferenceLabel: string | null;
+  lastOccurredAt: string | null;
+  updatedAt: string;
+};
+
+export type EnterpriseInventoryBatchRow = {
+  batchId: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  locationId: string;
+  locationCode: string;
+  locationName: string;
+  batchNo: string;
+  manufacturedAt: string | null;
+  expiryDate: string;
+  daysUntilExpiry: number;
+  quantityOnHand: number;
+  status: string;
+};
+
 export type EnterpriseInventoryWorkspaceData = {
   currencyCode: string;
   productPage: EnterprisePageInfo;
@@ -287,6 +328,8 @@ export type EnterpriseInventoryWorkspaceData = {
     locationCount: number;
     onHandQuantity: number;
     estimatedRetailValue: number;
+    isSerialized: boolean;
+    trackExpiry: boolean;
     lastMovementAt: string | null;
     lastMovementAtLabel: string;
   }>;
@@ -327,6 +370,8 @@ export type EnterpriseInventoryWorkspaceData = {
     ecommerceDeliveryEligible: boolean;
     ecommerceEligibilityLabel: string;
     estimatedRetailValue: number;
+    isSerialized: boolean;
+    trackExpiry: boolean;
     lastMovementAt: string | null;
     lastMovementAtLabel: string;
   }>;
@@ -682,6 +727,7 @@ export async function getEnterpriseInventoryWorkspace(
         status: true,
         trackInventory: true,
         isSerialized: true,
+        trackExpiry: true,
         safetyStockLevel: true,
         baseUnitPrice: true,
         unitOfMeasure: true,
@@ -1242,6 +1288,8 @@ export async function getEnterpriseInventoryWorkspace(
         locationCount: rollup?.locationIds.size ?? 0,
         onHandQuantity,
         estimatedRetailValue: Number((onHandQuantity * Number(product.baseUnitPrice)).toFixed(2)),
+        isSerialized: product.isSerialized,
+        trackExpiry: product.trackExpiry,
         lastMovementAt: toIsoString(rollup?.lastMovementAt ?? null),
         lastMovementAtLabel: formatRelativeTime(rollup?.lastMovementAt ?? null)
       };
@@ -1388,6 +1436,8 @@ export async function getEnterpriseInventoryWorkspace(
           ecommerceEligibilityLabel:
             ecommerceEligibility?.labels.join("; ") ?? "Not configured for ecommerce fulfilment",
           estimatedRetailValue: Number((onHandQuantity * Number(product.baseUnitPrice)).toFixed(2)),
+          isSerialized: product.isSerialized,
+          trackExpiry: product.trackExpiry,
           lastMovementAt: toIsoString(balance?.lastMovementAt ?? null),
           lastMovementAtLabel: formatRelativeTime(balance?.lastMovementAt ?? null)
         };
@@ -1923,6 +1973,231 @@ export async function getEnterpriseInventoryWorkspace(
     priorities,
     statusMessage: `Flash ERP inventory is reading ${balanceGroups.length} active stock positions across ${locations.length} locations and ${recentEntries.length} recent canonical ledger movements.`,
     refreshedAt: new Date().toISOString()
+  };
+}
+
+export type EnterpriseInventorySerialDetailRequest = {
+  productCode: string;
+  locationCode?: string | null;
+};
+
+export type EnterpriseInventorySerialDetailResponse = {
+  productCode: string;
+  productName: string;
+  locationCode: string | null;
+  locationName: string | null;
+  isSerialized: boolean;
+  trackExpiry: boolean;
+  serialUnits: EnterpriseInventorySerialUnitRow[];
+  batches: EnterpriseInventoryBatchRow[];
+  serialUnitTotal: number;
+  batchTotal: number;
+  expiryAlertLeadDays: number;
+  statusMessage: string;
+};
+
+/**
+ * Matches the Online POS option default so the HQ inventory drill-down and the
+ * store screens flag the same batches as expiring.
+ */
+const ENTERPRISE_INVENTORY_EXPIRY_ALERT_LEAD_DAYS = 30;
+const ENTERPRISE_INVENTORY_SERIAL_DETAIL_ROW_LIMIT = 2_000;
+const ENTERPRISE_INVENTORY_BATCH_DETAIL_ROW_LIMIT = 1_000;
+
+/**
+ * Serial-unit and batch/expiry detail for a single inventory record.
+ *
+ * This is read on demand when a drill-down opens rather than riding along on
+ * `getEnterpriseInventoryWorkspace`: the inventory page is rendered for every
+ * HQ navigation, while the detail is only wanted once a specific product and
+ * shop is clicked. Row limits keep one click bounded, and the totals travel
+ * with the rows so the panel can say when a window was truncated.
+ */
+export async function getEnterpriseInventorySerialDetail(
+  input: EnterpriseInventorySerialDetailRequest
+): Promise<EnterpriseInventorySerialDetailResponse> {
+  const productCode = String(input.productCode ?? "").trim();
+  const requestedLocationCode = String(input.locationCode ?? "").trim() || null;
+
+  if (!productCode) {
+    throw new Error("Flash ERP needs a product code before it can read serial and batch detail.");
+  }
+
+  const enterpriseNode = await getEnterpriseContext();
+
+  if (!enterpriseNode) {
+    throw new Error(
+      "No primary enterprise node is available yet, so Flash ERP cannot read canonical serial posture."
+    );
+  }
+
+  const product = await prisma.product.findFirst({
+    where: {
+      retailOrgId: enterpriseNode.retailOrgId,
+      code: productCode
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      isSerialized: true,
+      trackExpiry: true
+    }
+  });
+
+  if (!product) {
+    throw new Error(
+      `Flash ERP could not find product "${productCode}" in this organisation, so it cannot read serial and batch detail.`
+    );
+  }
+
+  const location = requestedLocationCode
+    ? await prisma.inventoryLocation.findFirst({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          code: requestedLocationCode
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true
+        }
+      })
+    : null;
+
+  if (requestedLocationCode && !location) {
+    throw new Error(
+      `Flash ERP could not find inventory location "${requestedLocationCode}" in this organisation.`
+    );
+  }
+
+  // Serial units that have not been placed against a location yet stay visible
+  // in a location-scoped drill-down, matching the store and Online POS panels.
+  const serialUnitWhere = {
+    retailOrgId: enterpriseNode.retailOrgId,
+    productId: product.id,
+    ...(location
+      ? {
+          OR: [{ inventoryLocationId: location.id }, { inventoryLocationId: null }]
+        }
+      : {})
+  } as const;
+  const batchWhere = {
+    retailOrgId: enterpriseNode.retailOrgId,
+    productId: product.id,
+    quantityOnHand: {
+      gt: 0
+    },
+    ...(location ? { inventoryLocationId: location.id } : {})
+  } as const;
+
+  const [serialUnitRows, batchRows, serialUnitTotal, batchTotal, locations] = await Promise.all([
+    prisma.inventorySerialUnit.findMany({
+      where: serialUnitWhere,
+      orderBy: [{ status: "asc" }, { serialNumber: "asc" }],
+      take: ENTERPRISE_INVENTORY_SERIAL_DETAIL_ROW_LIMIT,
+      select: {
+        id: true,
+        productId: true,
+        inventoryLocationId: true,
+        serialNumber: true,
+        status: true,
+        sourceReferenceType: true,
+        sourceReferenceId: true,
+        sourceReferenceLabel: true,
+        lastOccurredAt: true,
+        updatedAt: true
+      }
+    }),
+    prisma.inventoryBatch.findMany({
+      where: batchWhere,
+      orderBy: [{ expiryDate: "asc" }, { batchNo: "asc" }],
+      take: ENTERPRISE_INVENTORY_BATCH_DETAIL_ROW_LIMIT,
+      select: {
+        id: true,
+        productId: true,
+        inventoryLocationId: true,
+        batchNo: true,
+        manufacturedAt: true,
+        expiryDate: true,
+        quantityOnHand: true,
+        status: true
+      }
+    }),
+    prisma.inventorySerialUnit.count({ where: serialUnitWhere }),
+    prisma.inventoryBatch.count({ where: batchWhere }),
+    prisma.inventoryLocation.findMany({
+      where: {
+        retailOrgId: enterpriseNode.retailOrgId
+      },
+      select: {
+        id: true,
+        code: true,
+        name: true
+      }
+    })
+  ]);
+
+  const locationById = new Map(locations.map((entry) => [entry.id, entry] as const));
+  const serialUnits = serialUnitRows.map((serialUnit) => {
+    const serialLocation = serialUnit.inventoryLocationId
+      ? locationById.get(serialUnit.inventoryLocationId)
+      : null;
+
+    return {
+      serialUnitId: serialUnit.id,
+      productId: serialUnit.productId,
+      productCode: product.code,
+      productName: product.name,
+      locationId: serialLocation?.id ?? null,
+      locationCode: serialLocation?.code ?? null,
+      locationName: serialLocation?.name ?? null,
+      serialNumber: serialUnit.serialNumber,
+      status: serialUnit.status,
+      sourceReferenceType: serialUnit.sourceReferenceType,
+      sourceReferenceId: serialUnit.sourceReferenceId,
+      sourceReferenceLabel: serialUnit.sourceReferenceLabel,
+      lastOccurredAt: toIsoString(serialUnit.lastOccurredAt ?? null),
+      updatedAt: serialUnit.updatedAt.toISOString()
+    };
+  });
+  const batches = batchRows.map((batch) => {
+    const batchLocation = locationById.get(batch.inventoryLocationId);
+
+    return {
+      batchId: batch.id,
+      productId: batch.productId,
+      productCode: product.code,
+      productName: product.name,
+      locationId: batch.inventoryLocationId,
+      locationCode: batchLocation?.code ?? "",
+      locationName: batchLocation?.name ?? "Unassigned",
+      batchNo: batch.batchNo,
+      manufacturedAt: toIsoString(batch.manufacturedAt ?? null),
+      expiryDate: batch.expiryDate.toISOString(),
+      daysUntilExpiry: inventoryBatchDaysUntilExpiry(batch.expiryDate),
+      quantityOnHand: Number(batch.quantityOnHand),
+      status: batch.status
+    };
+  });
+
+  const detailScopeLabel = location ? `${location.name} (${location.code})` : "every shop and warehouse";
+
+  return {
+    productCode: product.code,
+    productName: product.name,
+    locationCode: location?.code ?? null,
+    locationName: location?.name ?? null,
+    isSerialized: product.isSerialized,
+    trackExpiry: product.trackExpiry,
+    serialUnits,
+    batches,
+    serialUnitTotal,
+    batchTotal,
+    expiryAlertLeadDays: ENTERPRISE_INVENTORY_EXPIRY_ALERT_LEAD_DAYS,
+    statusMessage:
+      `${serialUnitTotal} serial unit(s) and ${batchTotal} active batch(es) are recorded for ` +
+      `${product.name} across ${detailScopeLabel}.`
   };
 }
 
