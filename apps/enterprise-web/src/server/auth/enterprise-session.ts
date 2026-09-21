@@ -1506,7 +1506,10 @@ export async function createEnterpriseStepUpVerification(
   };
 }
 
-export async function assertEnterpriseStepUp(actionLabel = "this sensitive action") {
+export async function assertEnterpriseStepUp(
+  actionLabel = "this sensitive action",
+  options?: { force?: boolean }
+) {
   const session = await getEnterpriseSession();
 
   if (!session) {
@@ -1521,7 +1524,7 @@ export async function assertEnterpriseStepUp(actionLabel = "this sensitive actio
 
   const passwordPolicy = readPasswordPolicy(enterpriseContext.retailOrg.passwordPolicyJson);
 
-  if (!passwordPolicy.stepUpForSensitiveActions) {
+  if (!passwordPolicy.stepUpForSensitiveActions && !options?.force) {
     return session;
   }
 
@@ -2140,7 +2143,7 @@ export async function assertEnterprisePermission(
   }
 
   if (session.isOnlineStoreUser) {
-    throw new EnterpriseAuthError("Flash ERP online store users cannot access HQ features.", 403);
+    throw new EnterpriseAuthError("Flash ERP Online POS users cannot access HQ features.", 403);
   }
 
   const required = requiredPermissions.filter(Boolean);

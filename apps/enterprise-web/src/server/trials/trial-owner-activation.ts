@@ -95,7 +95,7 @@ async function resolveTrialAccount(token: string) {
 export async function getTrialOwnerActivationContext(token: string) {
   const { accountType, user } = await resolveTrialAccount(token);
   return {
-    accountLabel: accountType === "ENTERPRISE" ? "Enterprise owner" : "Online Store operator",
+    accountLabel: accountType === "ENTERPRISE" ? "Enterprise owner" : "Online POS operator",
     accountType,
     landingPath: accountType === "ENTERPRISE" ? "/" : "/online-store",
     loginId: user.loginId
@@ -148,19 +148,19 @@ export async function activateTrialOwner(token: string, password: string) {
         message:
           accountType === "ENTERPRISE"
             ? `Trial owner ${user.loginId} activated the Enterprise account.`
-            : `Trial operator ${user.loginId} activated the Online Store account.`
+            : `Trial operator ${user.loginId} activated the Online POS account.`
       }
     });
   });
 
   return {
-    accountLabel: accountType === "ENTERPRISE" ? "Enterprise owner" : "Online Store operator",
+    accountLabel: accountType === "ENTERPRISE" ? "Enterprise owner" : "Online POS operator",
     accountType,
     landingPath: accountType === "ENTERPRISE" ? "/" : "/online-store",
     loginId: user.loginId,
     message:
       accountType === "ENTERPRISE"
         ? "Your Flash ERP Enterprise owner account is active. You can sign in now."
-        : "Your Flash ERP Online Store operator account is active. You can sign in now."
+        : "Your Flash ERP Online POS operator account is active. You can sign in now."
   };
 }

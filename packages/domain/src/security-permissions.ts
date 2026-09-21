@@ -248,6 +248,16 @@ const catalog: SecurityPermissionDefinition[] = [
     sortOrder: 210
   },
   {
+    code: "security.data-purge.execute",
+    name: "Purge enterprise data",
+    description:
+      "Irreversibly delete transactional and selected master data for the whole organisation.",
+    domain: "Security",
+    group: "Data purge",
+    surface: "enterprise",
+    sortOrder: 215
+  },
+  {
     code: "inventory.view",
     name: "View inventory",
     description: "View inventory posture, balances, counts, and serial state.",

@@ -2835,6 +2835,50 @@ option {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
 }
 
+.rms-online-desktop .rms-cart-serials {
+  color: #1b4a68;
+  font-weight: 800;
+  word-break: break-word;
+}
+
+.rms-online-desktop .rms-serial-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rms-online-desktop .rms-serial-chip {
+  border: 1px solid #245f84;
+  border-radius: 999px;
+  background: #e8f1f7;
+  color: #1b4a68;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-serial-chip:hover {
+  background: #d5e6f1;
+}
+
+.rms-online-desktop .rms-serial-available-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 150px;
+  overflow: auto;
+  border: 1px solid #dce5dc;
+  border-radius: 7px;
+  background: #fff;
+  padding: 8px;
+}
+
+.rms-online-desktop .rms-serial-available-list .rms-button {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
 .rms-online-desktop .rms-serial-status {
   display: grid;
   gap: 2px;
@@ -3300,6 +3344,31 @@ option {
 .rms-online-desktop .rms-inventory-batch-table .rms-table-head,
 .rms-online-desktop .rms-inventory-batch-table .rms-table-row {
   grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.65fr) minmax(130px, 0.75fr) 112px 76px 112px;
+}
+
+.rms-online-desktop .rms-inventory-table .rms-table-row.is-drillable {
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-inventory-table .rms-table-row.is-drillable:hover {
+  background: #eef5fa;
+}
+
+.rms-online-desktop .rms-inventory-drilldown-dialog {
+  display: grid;
+  gap: 10px;
+  max-height: 86vh;
+  overflow: auto;
+}
+
+.rms-online-desktop .rms-inventory-serial-table .rms-table-head,
+.rms-online-desktop .rms-inventory-serial-table .rms-table-row {
+  grid-template-columns: minmax(160px, 1fr) 132px minmax(130px, 0.8fr) minmax(140px, 0.9fr) minmax(150px, 0.9fr);
+}
+
+.rms-online-desktop .rms-inventory-drilldown-dialog .rms-inventory-batch-table .rms-table-head,
+.rms-online-desktop .rms-inventory-drilldown-dialog .rms-inventory-batch-table .rms-table-row {
+  grid-template-columns: minmax(130px, 0.9fr) minmax(130px, 0.8fr) 118px 118px 96px 112px;
 }
 
 .rms-online-desktop .rms-expiry-receive-cell {

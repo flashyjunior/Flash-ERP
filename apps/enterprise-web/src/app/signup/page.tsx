@@ -11,7 +11,7 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "Start a 14-Day Flash ERP Trial",
   description:
-    "Experience Flash ERP across HQ, Online Store, ecommerce and offline-first Store Desktop operations."
+    "Experience Flash ERP across HQ, Online POS, ecommerce and offline-first Store Desktop operations."
 };
 
 export const dynamic = "force-dynamic";

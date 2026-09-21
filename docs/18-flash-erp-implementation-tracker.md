@@ -1898,6 +1898,47 @@ Verified:
 - Prisma validation, seed, enterprise typecheck, production build, and route manifest checks passed.
 - Production routes include `/human-resources/travel`, `/api/human-resources/travel`, and `/api/human-resources/travel/actions`.
 
+### 051. Serialized Sales, Serial/Batch Visibility, Data Purge, Online POS Rename
+
+Status: Done
+
+Implemented:
+
+- Fixed the critical serialized-sale bug in the Online POS. Enabling `isSerialized`
+  previously only took effect on purchase-order receipt; selling the item never asked
+  for serial numbers and left `InventorySerialUnit` rows `AVAILABLE` after the sale.
+  The POS item dialog now forces a serial picker (scan, range expand, pick from
+  available, removable chips) for serialized products in SALE mode, serials flow
+  through the basket, held-sale hold/recall, and the sales API, and the server
+  validates count, duplicates, registration, `AVAILABLE` status, and sales location
+  before flipping each unit to `SOLD` under an optimistic-concurrency guard.
+  `serialNumbersSnapshot` is persisted on POS lines for direct and held sales.
+  Batch/expiry tracking was audited and was already correct (FEFO allocation on sale);
+  the store-desktop build already validated serials and batches at checkout, so the
+  defect was web-only.
+- Added serial and batch drill-down to the inventory browser in **both** the Online POS
+  and store-desktop. Clicking a serialised or batch-tracked stock row opens a detail
+  dialog listing every serial unit with status counts (available / sold / in transit /
+  adjusted out), a status filter, holding location, and originating document, plus every
+  batch with manufactured date, expiry, quantity, and days-to-expiry. Raised the
+  desktop `browseSerialRegistry` page cap from 40 to 500 across the offline, MSSQL, and
+  Postgres store services.
+- Added a guarded **Security > Data Purge** page. Transactional scopes always run;
+  master data is opt-in per checkbox with automatic prerequisite selection. Guards are a
+  new `security.data-purge.execute` permission, a typed `PURGE` confirmation, a forced
+  password re-entry, one all-or-nothing transaction, and a CRITICAL security log entry
+  capturing the scopes and per-table row counts.
+- Renamed user-facing "Online Store" wording to "Online POS" across 32 files. Routes,
+  API paths, database enums, role codes, and code identifiers are unchanged.
+
+Verified:
+
+- Store-desktop typecheck passes clean.
+- Enterprise-web typecheck introduces no new errors beyond the sandbox's pre-existing
+  missing-Prisma-client baseline; the new purge, scope, and workspace files are clean.
+- The 51-step purge delete plan was machine-validated to be ordered child-before-parent
+  with no restrict-mode foreign key from a surviving row into a deleted row.
+
 ## Tracker Rules
 
 - Update this tracker before starting a new major slice and again after verification.

@@ -6527,7 +6527,7 @@ export class LocalStoreService {
     const normalizedCategoryCode =
       input?.categoryCode?.trim().toUpperCase() || null;
     const normalizedStatus = input?.status?.trim().toUpperCase() || null;
-    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 40);
+    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 500);
     const rows = this.db
       .prepare(
         `SELECT

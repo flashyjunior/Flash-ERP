@@ -30,7 +30,8 @@ export type EnterpriseSecurityView =
   | "audit-logs"
   | "online-users"
   | "password-policy"
-  | "security-logs";
+  | "security-logs"
+  | "data-purge";
 
 export type EnterpriseNavigationMenuItem = {
   key: string;
@@ -319,7 +320,8 @@ export const enterpriseSecurityMenuItems = [
   { key: "audit-logs", label: "Audit Logs", href: "/security/audit-logs" },
   { key: "online-users", label: "Online Users", href: "/security/online-users" },
   { key: "password-policy", label: "Password Policy", href: "/security/password-policy" },
-  { key: "security-logs", label: "Security Logs", href: "/security/security-logs" }
+  { key: "security-logs", label: "Security Logs", href: "/security/security-logs" },
+  { key: "data-purge", label: "Data Purge", href: "/security/data-purge" }
 ] as const;
 
 export const enterpriseMasterPageMeta: Record<
@@ -538,6 +540,13 @@ export const enterpriseSecurityPageMeta: Record<
     description:
       "Review security warnings, alerts, recovery events, and policy-sensitive security activity.",
     href: "/security/security-logs"
+  },
+  "data-purge": {
+    label: "Data Purge",
+    heading: "Data Purge",
+    description:
+      "Irreversibly delete transactional history and selected master data for this organisation.",
+    href: "/security/data-purge"
   }
 };
 
