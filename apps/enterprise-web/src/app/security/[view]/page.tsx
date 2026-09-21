@@ -47,13 +47,19 @@ export default async function SecuritySubmenuPage({
   const workspace = await runEnterpriseOperation(
     "AUTHENTICATED_READ",
     getEnterpriseSecurityWorkspace
-  ).catch((error: unknown) =>
-    buildUnavailableEnterpriseSecurityWorkspace(
+  ).catch((error: unknown) => {
+    console.error("Flash ERP could not load the enterprise security workspace.", error);
+
+    return buildUnavailableEnterpriseSecurityWorkspace(
       error instanceof Error
         ? `Unable to load live Flash ERP security policy: ${error.message}`
-        : "Unable to load live Flash ERP security policy."
-    )
-  );
+        : "Unable to load live Flash ERP security policy.",
+      {
+        loadError:
+          error instanceof Error ? error.message : "The security policy query failed without a message."
+      }
+    );
+  });
 
   return (
     <EnterpriseSecurityWorkspace view={view as EnterpriseSecurityView} workspace={workspace} />
