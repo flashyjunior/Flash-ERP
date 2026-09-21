@@ -3346,6 +3346,31 @@ option {
   grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.65fr) minmax(130px, 0.75fr) 112px 76px 112px;
 }
 
+.rms-online-desktop .rms-inventory-table .rms-table-row.is-drillable {
+  cursor: pointer;
+}
+
+.rms-online-desktop .rms-inventory-table .rms-table-row.is-drillable:hover {
+  background: #eef5fa;
+}
+
+.rms-online-desktop .rms-inventory-drilldown-dialog {
+  display: grid;
+  gap: 10px;
+  max-height: 86vh;
+  overflow: auto;
+}
+
+.rms-online-desktop .rms-inventory-serial-table .rms-table-head,
+.rms-online-desktop .rms-inventory-serial-table .rms-table-row {
+  grid-template-columns: minmax(160px, 1fr) 132px minmax(130px, 0.8fr) minmax(140px, 0.9fr) minmax(150px, 0.9fr);
+}
+
+.rms-online-desktop .rms-inventory-drilldown-dialog .rms-inventory-batch-table .rms-table-head,
+.rms-online-desktop .rms-inventory-drilldown-dialog .rms-inventory-batch-table .rms-table-row {
+  grid-template-columns: minmax(130px, 0.9fr) minmax(130px, 0.8fr) 118px 118px 96px 112px;
+}
+
 .rms-online-desktop .rms-expiry-receive-cell {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) 132px 132px minmax(76px, 0.55fr) auto;

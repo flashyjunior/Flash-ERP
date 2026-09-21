@@ -2390,6 +2390,18 @@ export function OnlineStoreWorkspace({
   const [activeReport, setActiveReport] = useState<ReportId>("sales");
   const [inventoryTab, setInventoryTab] = useState<InventoryTab>("stock");
   const [activeStockSection, setActiveStockSection] = useState<InventoryStockSection>("inventory-browser");
+  const [inventoryDrillDown, setInventoryDrillDown] = useState<{
+    productId: string;
+    productCode: string;
+    productName: string;
+    locationId: string;
+    locationName: string;
+    isSerialized: boolean;
+    trackExpiry: boolean;
+    quantityOnHand: number;
+  } | null>(null);
+  const [inventoryDrillDownTab, setInventoryDrillDownTab] = useState<"serials" | "batches">("serials");
+  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("ALL");
   const [activeReceivingSection, setActiveReceivingSection] = useState<InventoryReceivingSection>("purchase-orders");
   const [inventoryStartupAlertOpen, setInventoryStartupAlertOpen] = useState(false);
   const inventoryStartupAlertCheckedRef = useRef(false);
@@ -3258,6 +3270,50 @@ export function OnlineStoreWorkspace({
       return !query || `${batch.productName} ${batch.productCode} ${batch.batchNo} ${batch.locationName}`.toLowerCase().includes(query);
     })
     .sort((left, right) => left.expiryDate.localeCompare(right.expiryDate));
+  const inventoryDrillDownSerialRows = inventoryDrillDown
+    ? workspace.inventorySerialUnits
+        .filter((serialUnit) => serialUnit.productId === inventoryDrillDown.productId)
+        .filter(
+          (serialUnit) =>
+            !inventoryDrillDown.locationId ||
+            !serialUnit.locationId ||
+            serialUnit.locationId === inventoryDrillDown.locationId
+        )
+        .filter(
+          (serialUnit) =>
+            inventoryDrillDownSerialStatus === "ALL" ||
+            serialUnit.status.toUpperCase() === inventoryDrillDownSerialStatus
+        )
+        .sort(
+          (left, right) =>
+            left.status.localeCompare(right.status) ||
+            left.serialNumber.localeCompare(right.serialNumber)
+        )
+    : [];
+  const inventoryDrillDownSerialCounts = inventoryDrillDown
+    ? workspace.inventorySerialUnits
+        .filter(
+          (serialUnit) =>
+            serialUnit.productId === inventoryDrillDown.productId &&
+            (!inventoryDrillDown.locationId ||
+              !serialUnit.locationId ||
+              serialUnit.locationId === inventoryDrillDown.locationId)
+        )
+        .reduce<Record<string, number>>((counts, serialUnit) => {
+          const status = serialUnit.status.toUpperCase();
+
+          return { ...counts, [status]: (counts[status] ?? 0) + 1 };
+        }, {})
+    : {};
+  const inventoryDrillDownBatchRows = inventoryDrillDown
+    ? workspace.inventoryBatches
+        .filter(
+          (batch) =>
+            batch.productId === inventoryDrillDown.productId &&
+            (!inventoryDrillDown.locationId || batch.locationId === inventoryDrillDown.locationId)
+        )
+        .sort((left, right) => left.expiryDate.localeCompare(right.expiryDate))
+    : [];
   const stockAlertRows = allInventoryBrowserRows
     .filter((row) => {
       const alertFloor = getOnlineCriticalStockFloor(row);
@@ -10335,8 +10391,36 @@ export function OnlineStoreWorkspace({
                   <div className="rms-table rms-inventory-table rms-stock-section-grid">
                     <div className="rms-table-head"><span>Product</span><span>Location</span><span>On hand</span><span>Reserved</span><span>Safety</span><span>Web sellable</span><span>Ecommerce</span><span>Expiry</span><span>Price</span></div>
                     {inventoryBrowserRows.map((row) => (
-                      <div className="rms-table-row" key={`${row.productId}:${row.locationId}`}>
-                        <strong>{row.productName}<small>{row.productCode}{row.trackExpiry ? " · Batch controlled" : ""}</small></strong>
+                      <div
+                        className={`rms-table-row${row.isSerialized || row.trackExpiry ? " is-drillable" : ""}`}
+                        key={`${row.productId}:${row.locationId}`}
+                        onClick={() => {
+                          if (!row.isSerialized && !row.trackExpiry) {
+                            return;
+                          }
+
+                          setInventoryDrillDownTab(row.isSerialized ? "serials" : "batches");
+                          setInventoryDrillDownSerialStatus("ALL");
+                          setInventoryDrillDown({
+                            productId: row.productId,
+                            productCode: row.productCode,
+                            productName: row.productName,
+                            locationId: row.locationId,
+                            locationName: row.locationName,
+                            isSerialized: row.isSerialized,
+                            trackExpiry: row.trackExpiry,
+                            quantityOnHand: row.quantityOnHand
+                          });
+                        }}
+                        role={row.isSerialized || row.trackExpiry ? "button" : undefined}
+                        tabIndex={row.isSerialized || row.trackExpiry ? 0 : undefined}
+                        title={
+                          row.isSerialized || row.trackExpiry
+                            ? "Open serial and batch details for this item"
+                            : undefined
+                        }
+                      >
+                        <strong>{row.productName}<small>{row.productCode}{[row.isSerialized ? "Serialised" : null, row.trackExpiry ? "Batch controlled" : null].filter(Boolean).map((label) => ` · ${label}`).join("")}</small></strong>
                         <span>{row.locationName}</span>
                         <b className={row.quantityOnHand <= 0 ? "is-empty-stock" : ""}>{formatNumber.format(row.quantityOnHand)}</b>
                         <b>{formatNumber.format(row.activeReservedQuantity)}</b>
@@ -10376,6 +10460,114 @@ export function OnlineStoreWorkspace({
                           ))}
                         {!visibleInventoryBatchRows.length ? <EmptyState title="No active batches" detail="No batch or expiry records match the current filters." /> : null}
                       </div>
+                  ) : null}
+                  {inventoryDrillDown ? (
+                    <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
+                      <section className="rms-dialog rms-wide-dialog rms-inventory-drilldown-dialog">
+                        <div className="rms-panel-title">
+                          <div>
+                            <span>Inventory detail · {inventoryDrillDown.locationName}</span>
+                            <h2>{inventoryDrillDown.productName}</h2>
+                          </div>
+                          <button className="rms-button" onClick={() => setInventoryDrillDown(null)} type="button">Close</button>
+                        </div>
+                        <div className="rms-filter-row">
+                          <StatusPill>{inventoryDrillDown.productCode}</StatusPill>
+                          <StatusPill tone={inventoryDrillDown.quantityOnHand > 0 ? "good" : "warning"}>
+                            {`On hand ${formatNumber.format(inventoryDrillDown.quantityOnHand)}`}
+                          </StatusPill>
+                          {inventoryDrillDown.isSerialized ? <StatusPill>Serialised</StatusPill> : null}
+                          {inventoryDrillDown.trackExpiry ? <StatusPill>Batch / expiry tracked</StatusPill> : null}
+                        </div>
+                        <div className="rms-workspace-tabs rms-inventory-subtabs" role="tablist" aria-label="Inventory detail views">
+                          {inventoryDrillDown.isSerialized ? (
+                            <button
+                              className={inventoryDrillDownTab === "serials" ? "is-active" : ""}
+                              onClick={() => setInventoryDrillDownTab("serials")}
+                              role="tab"
+                              type="button"
+                            >
+                              Serial numbers
+                            </button>
+                          ) : null}
+                          {inventoryDrillDown.trackExpiry ? (
+                            <button
+                              className={inventoryDrillDownTab === "batches" ? "is-active" : ""}
+                              onClick={() => setInventoryDrillDownTab("batches")}
+                              role="tab"
+                              type="button"
+                            >
+                              Batches &amp; expiry
+                            </button>
+                          ) : null}
+                        </div>
+                        {inventoryDrillDown.isSerialized && inventoryDrillDownTab === "serials" ? (
+                          <>
+                            <div className="rms-filter-row">
+                              <select
+                                onChange={(event) => setInventoryDrillDownSerialStatus(event.target.value)}
+                                value={inventoryDrillDownSerialStatus}
+                              >
+                                <option value="ALL">All statuses</option>
+                                <option value="AVAILABLE">Available</option>
+                                <option value="SOLD">Sold</option>
+                                <option value="IN_TRANSIT">In transit</option>
+                                <option value="ADJUSTED_OUT">Adjusted out</option>
+                              </select>
+                              <StatusPill tone="good">{`Available ${formatNumber.format(inventoryDrillDownSerialCounts.AVAILABLE ?? 0)}`}</StatusPill>
+                              <StatusPill>{`Sold ${formatNumber.format(inventoryDrillDownSerialCounts.SOLD ?? 0)}`}</StatusPill>
+                              <StatusPill>{`In transit ${formatNumber.format(inventoryDrillDownSerialCounts.IN_TRANSIT ?? 0)}`}</StatusPill>
+                              <StatusPill tone="warning">{`Adjusted out ${formatNumber.format(inventoryDrillDownSerialCounts.ADJUSTED_OUT ?? 0)}`}</StatusPill>
+                            </div>
+                            <div className="rms-table rms-inventory-serial-table">
+                              <div className="rms-table-head"><span>Serial number</span><span>Status</span><span>Location</span><span>Last document</span><span>Last movement</span></div>
+                              {inventoryDrillDownSerialRows.map((serialUnit) => (
+                                <div className="rms-table-row" key={serialUnit.serialUnitId}>
+                                  <strong>{serialUnit.serialNumber}</strong>
+                                  <StatusPill
+                                    tone={
+                                      serialUnit.status.toUpperCase() === "AVAILABLE"
+                                        ? "good"
+                                        : serialUnit.status.toUpperCase() === "ADJUSTED_OUT"
+                                          ? "warning"
+                                          : "neutral"
+                                    }
+                                  >
+                                    {serialUnit.status.replace(/_/g, " ")}
+                                  </StatusPill>
+                                  <span>{serialUnit.locationName ?? "Unassigned"}</span>
+                                  <span>{serialUnit.sourceReferenceLabel ?? "-"}</span>
+                                  <span>{serialUnit.lastOccurredAt ? new Date(serialUnit.lastOccurredAt).toLocaleString("en-GB") : new Date(serialUnit.updatedAt).toLocaleString("en-GB")}</span>
+                                </div>
+                              ))}
+                              {!inventoryDrillDownSerialRows.length ? (
+                                <EmptyState title="No serial numbers" detail="No serial units match this item, location, and status filter." />
+                              ) : null}
+                            </div>
+                          </>
+                        ) : null}
+                        {inventoryDrillDown.trackExpiry && inventoryDrillDownTab === "batches" ? (
+                          <div className="rms-table rms-inventory-batch-table">
+                            <div className="rms-table-head"><span>Batch</span><span>Location</span><span>Manufactured</span><span>Expiry</span><span>Qty on hand</span><span>Status</span></div>
+                            {inventoryDrillDownBatchRows.map((batch) => (
+                              <div className="rms-table-row" key={batch.batchId}>
+                                <strong>{batch.batchNo}</strong>
+                                <span>{batch.locationName}</span>
+                                <span>{batch.manufacturedAt ? new Date(batch.manufacturedAt).toLocaleDateString("en-GB") : "-"}</span>
+                                <span>{new Date(batch.expiryDate).toLocaleDateString("en-GB")}</span>
+                                <strong>{formatNumber.format(batch.quantityOnHand)}</strong>
+                                <StatusPill tone={batch.daysUntilExpiry < 0 ? "warning" : batch.daysUntilExpiry <= workspace.optionSettings.expiryAlertLeadDays ? "warning" : "good"}>
+                                  {batch.daysUntilExpiry < 0 ? "Expired" : batch.daysUntilExpiry === 0 ? "Expires today" : `${batch.daysUntilExpiry} days`}
+                                </StatusPill>
+                              </div>
+                            ))}
+                            {!inventoryDrillDownBatchRows.length ? (
+                              <EmptyState title="No batches" detail="No batch or expiry records exist for this item at this location." />
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </section>
+                    </div>
                   ) : null}
                 </>
               ) : null}
