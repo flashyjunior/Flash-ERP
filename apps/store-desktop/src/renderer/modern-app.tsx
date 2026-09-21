@@ -7019,7 +7019,9 @@ export function ModernDesktopApp() {
     locationCode: string | null,
   ) {
     if (!runtime) {
-      return [];
+      throw new Error(
+        "The store runtime is not ready yet, so the serial registry cannot be read.",
+      );
     }
 
     const rows = await runtime.browseSerialRegistry({
@@ -20458,6 +20460,9 @@ function InventoryWorkspace(props: {
   >([]);
   const [inventoryDrillDownLoading, setInventoryDrillDownLoading] =
     useState(false);
+  const [inventoryDrillDownError, setInventoryDrillDownError] = useState<
+    string | null
+  >(null);
   const [activeReceivingSection, setActiveReceivingSection] = useState<
     "purchase-orders" | "goods-receipts" | "supplier-returns"
   >("purchase-orders");
@@ -22499,6 +22504,7 @@ function InventoryWorkspace(props: {
     setInventoryDrillDownTab(item.isSerialized ? "serials" : "batches");
     setInventoryDrillDownSerialStatus("ALL");
     setInventoryDrillDownSerials([]);
+    setInventoryDrillDownError(null);
 
     if (!item.isSerialized) {
       return;
@@ -22513,8 +22519,13 @@ function InventoryWorkspace(props: {
           item.locationCode || null,
         ),
       );
-    } catch {
+    } catch (error) {
       setInventoryDrillDownSerials([]);
+      setInventoryDrillDownError(
+        error instanceof Error
+          ? error.message
+          : "The local serial registry could not be read.",
+      );
     } finally {
       setInventoryDrillDownLoading(false);
     }
@@ -22881,6 +22892,19 @@ function InventoryWorkspace(props: {
                       </span>
                     </div>
                   ))
+                ) : inventoryDrillDownError ? (
+                  <div className="rms-inventory-drilldown-error" role="alert">
+                    <span>
+                      {`Serial numbers could not be read: ${inventoryDrillDownError}`}
+                    </span>
+                    <button
+                      className="rms-button"
+                      onClick={() => void openInventoryDrillDown(item)}
+                      type="button"
+                    >
+                      Retry
+                    </button>
+                  </div>
                 ) : (
                   <EmptyState
                     title="No serial numbers"

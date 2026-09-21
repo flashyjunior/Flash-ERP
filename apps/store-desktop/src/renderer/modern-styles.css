@@ -3147,6 +3147,25 @@ p {
   min-width: 0;
 }
 
+.rms-inventory-drilldown-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #e5a7a1;
+  border-radius: 6px;
+  background: #fff4f2;
+  color: #9f2d25;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rms-inventory-drilldown-error .rms-button {
+  flex: none;
+}
+
 .rms-inventory-serial-table .rms-table-head,
 .rms-inventory-serial-table .rms-table-row {
   grid-template-columns:
