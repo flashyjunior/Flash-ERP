@@ -7036,6 +7036,7 @@ export type CreateOnlineStoreSaleRequest = {
     lineNote?: string | null;
     preferredBatchId?: string | null;
     sellingUnitOfMeasure?: string | null;
+    serialNumbers?: string[] | null;
   }>;
   payments?: OnlinePaymentRequest[] | null;
   paymentMethod?: string | null;
@@ -9429,6 +9430,7 @@ export async function createOnlineStoreSale(
       variantColor,
       lineNote,
       preferredBatchId: optionalText(line.preferredBatchId),
+      serialNumbers: normalizeSerialNumbers(line.serialNumbers),
       unitPrice,
       discountAmount: amounts.discountAmount,
       appliedPromotionCode: null as string | null,
@@ -9439,6 +9441,18 @@ export async function createOnlineStoreSale(
       overrideNote: optionalText(line.overrideNote)
     };
   });
+  for (const line of preparedLines) {
+    if (line.product.isSerialized) {
+      if (line.serialNumbers.length !== line.baseQuantity) {
+        throw new Error(
+          `${line.product.name} is serialized. Enter ${line.baseQuantity} serial number(s) before completing the sale.`
+        );
+      }
+    } else if (line.serialNumbers.length > 0) {
+      throw new Error(`${line.product.name} is not serialized, so the sale should not include serial numbers.`);
+    }
+  }
+
   const managerOverrideRequiresSupervisor = [...managerPermissionCodes].some((permissionCode) =>
     permissionCode.startsWith("pos.override.")
   );
@@ -9698,6 +9712,9 @@ export async function createOnlineStoreSale(
             batchAllocationsSnapshot: batchAllocationsByLineIndex.has(lineIndex)
               ? serializeJsonField(batchAllocationsByLineIndex.get(lineIndex) ?? [])
               : null,
+            ...(line.serialNumbers.length > 0
+              ? { serialNumbersSnapshot: serializeJsonField(line.serialNumbers) }
+              : {}),
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             discountAmount: line.discountAmount,
@@ -9768,6 +9785,39 @@ export async function createOnlineStoreSale(
             `${allocation.batchNo} changed during checkout. Refresh the basket and retry the sale.`
           );
         }
+      }
+    }
+
+    for (const line of pricedLines) {
+      if (!line.product.isSerialized || line.serialNumbers.length === 0) {
+        continue;
+      }
+
+      const serialUpdate = await tx.inventorySerialUnit.updateMany({
+        where: {
+          retailOrgId: session.retailOrgId,
+          storeId: store.id,
+          inventoryLocationId: salesLocation.id,
+          productId: line.product.id,
+          serialNumber: {
+            in: line.serialNumbers
+          },
+          status: SerialInventoryStatus.AVAILABLE
+        },
+        data: {
+          status: SerialInventoryStatus.SOLD,
+          sourceReferenceType: "POS_TRANSACTION",
+          sourceReferenceId: transaction.id,
+          sourceReferenceLabel: transaction.transactionNo,
+          sourceNodeCode: "ONLINE_DIRECT",
+          lastOccurredAt: transaction.completedAt ?? new Date()
+        }
+      });
+
+      if (serialUpdate.count !== line.serialNumbers.length) {
+        throw new Error(
+          `Serial numbers for ${line.product.name} changed during checkout. Refresh the basket and choose currently available serials.`
+        );
       }
     }
 

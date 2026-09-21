@@ -11246,6 +11246,98 @@ async function projectStorePosTransaction(
     },
   });
 
+  const serializedLineProducts = new Set(
+    payload.lines
+      .filter((line) => line.lineIntent === "SALE" || line.serialNumbers.length > 0)
+      .map((line) => productsByCode.get(line.productCode)?.id)
+      .filter((productId): productId is string => Boolean(productId)),
+  );
+  if (serializedLineProducts.size > 0) {
+    const serializedProductIds = new Set(
+      (
+        await tx.product.findMany({
+          where: {
+            id: { in: [...serializedLineProducts] },
+            isSerialized: true,
+          },
+          select: { id: true },
+        })
+      ).map((product) => product.id),
+    );
+
+    for (const line of payload.lines) {
+      const product = productsByCode.get(line.productCode);
+      if (!product || !serializedProductIds.has(product.id)) {
+        continue;
+      }
+
+      if (line.lineIntent === "SALE") {
+        if (!Number.isInteger(line.quantity) || line.serialNumbers.length !== line.quantity) {
+          throw new StoreProjectionError(
+            "INVALID_PAYLOAD",
+            `Store transaction line "${line.lineId}" for serialized product "${line.productName}" must carry exactly ${Math.max(0, Math.floor(line.quantity))} available serial number(s).`,
+            false,
+          );
+        }
+
+        const serialUpdate = await tx.inventorySerialUnit.updateMany({
+          where: {
+            retailOrgId: target.storeNode.retailOrgId,
+            storeId: target.storeNode.store.id,
+            productId: product.id,
+            serialNumber: {
+              in: line.serialNumbers,
+            },
+            status: SerialInventoryStatus.AVAILABLE,
+          },
+          data: {
+            status: SerialInventoryStatus.SOLD,
+            sourceReferenceType: "POS_TRANSACTION",
+            sourceReferenceId: payload.transactionId,
+            sourceReferenceLabel: payload.transactionNo,
+            sourceNodeCode: target.storeNode.code,
+            lastOccurredAt: completedAt,
+          },
+        });
+
+        if (serialUpdate.count !== line.serialNumbers.length) {
+          throw new StoreProjectionError(
+            "INVALID_PAYLOAD",
+            `Some serial numbers for "${line.productName}" on store transaction "${payload.transactionNo}" are no longer available. Refresh store data on the desktop and re-enter the sale with currently available serials.`,
+            false,
+          );
+        }
+      } else if (line.serialNumbers.length > 0) {
+        // Returns make the serials available again (idempotent: no-op when the
+        // serials were already available in the enterprise copy).
+        await tx.inventorySerialUnit.updateMany({
+          where: {
+            retailOrgId: target.storeNode.retailOrgId,
+            storeId: target.storeNode.store.id,
+            productId: product.id,
+            serialNumber: {
+              in: line.serialNumbers,
+            },
+            status: {
+              in: [
+                SerialInventoryStatus.SOLD,
+                SerialInventoryStatus.ADJUSTED_OUT,
+              ],
+            },
+          },
+          data: {
+            status: SerialInventoryStatus.AVAILABLE,
+            sourceReferenceType: "POS_TRANSACTION",
+            sourceReferenceId: payload.transactionId,
+            sourceReferenceLabel: payload.transactionNo,
+            sourceNodeCode: target.storeNode.code,
+            lastOccurredAt: completedAt,
+          },
+        });
+      }
+    }
+  }
+
   for (const line of payload.lines) {
     if (!line.productVariantCode) {
       continue;
