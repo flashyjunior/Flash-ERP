@@ -17,7 +17,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not unlock the online store."
+            : "Flash ERP could not unlock the Online POS."
       },
       { status: 400 }
     );

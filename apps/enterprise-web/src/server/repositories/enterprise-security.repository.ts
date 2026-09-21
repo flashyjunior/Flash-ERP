@@ -328,7 +328,30 @@ async function assertMfaPolicyDeliveryReadiness(
   }
 }
 
+/**
+ * Permission codes that must stay visible in enterprise security even when the
+ * compiled `@flash-erp/domain` bundle an already-running server resolves to is
+ * older than `packages/domain/src/security-permissions.ts`.
+ *
+ * TypeScript resolves `@flash-erp/domain` to the workspace `src` through the
+ * repo `paths` mapping, while the Next.js server resolves it to
+ * `packages/domain/dist` at runtime. A server started before `npm run
+ * build:domain` therefore keeps serving the previous catalog, and a newly
+ * added code silently disappears from the privilege checklist and from the
+ * permission rows the catalog sync writes to the database. Codes added to the
+ * domain catalog must be listed here until that build has been picked up.
+ */
 const explicitSecurityPermissionFallbacks: SecurityPermissionDefinition[] = [
+  {
+    code: "security.data-purge.execute",
+    name: "Purge enterprise data",
+    description:
+      "Irreversibly delete transactional and selected master data for the whole organisation.",
+    domain: "Security",
+    group: "Data purge",
+    surface: "enterprise",
+    sortOrder: 215
+  },
   {
     code: "pos.layaway.create",
     name: "Create layaways",
@@ -917,11 +940,18 @@ export type EnterpriseSecurityWorkspaceData = {
   postureMessages: string[];
   priorities: string[];
   statusMessage: string;
+  /**
+   * Set when loading live security posture threw an error. Distinguishes a
+   * genuine "nothing to show yet" state from a degraded read, which previously
+   * looked identical because both rendered as empty lists.
+   */
+  loadError: string | null;
   refreshedAt: string;
 };
 
 export function buildUnavailableEnterpriseSecurityWorkspace(
-  reason: string
+  reason: string,
+  options?: { loadError?: string | null }
 ): EnterpriseSecurityWorkspaceData {
   return {
     metrics: {
@@ -955,6 +985,7 @@ export function buildUnavailableEnterpriseSecurityWorkspace(
       "Seed or create at least one role with POS permissions before onboarding branch cashiers."
     ],
     statusMessage: reason,
+    loadError: options?.loadError?.trim() ? options.loadError.trim() : null,
     refreshedAt: new Date().toISOString()
   };
 }
@@ -1327,7 +1358,7 @@ export async function getEnterpriseSecurityWorkspace(): Promise<EnterpriseSecuri
 
   if (activeOnlineDirectStores.length > 0 && onlineStoreEligibleUsers === 0) {
     priorities.push(
-      "Create active online store cashier or supervisor users with an ONLINE_DIRECT home store before browser POS sign-in is expected to work."
+      "Create active Online POS cashier or supervisor users with an ONLINE_DIRECT home store before browser POS sign-in is expected to work."
     );
   }
 
@@ -1422,6 +1453,7 @@ export async function getEnterpriseSecurityWorkspace(): Promise<EnterpriseSecuri
     ],
     priorities,
     statusMessage: `Flash ERP enterprise is showing centrally managed roles, permissions, and retail users from ${enterpriseNode.name}. Use this workspace to control who stores can validate locally on their next pull.`,
+    loadError: null,
     refreshedAt: new Date().toISOString()
   };
 }
@@ -1739,7 +1771,7 @@ export async function createEnterpriseRetailUser(
 
       if (hasOnlineStoreRole && !canUseOnlineStoreRole(homeStore)) {
         throw new Error(
-          "Assign online store roles only to users whose home store is an active ONLINE_DIRECT store."
+          "Assign Online POS roles only to users whose home store is an active ONLINE_DIRECT store."
         );
       }
 
@@ -1811,7 +1843,7 @@ export async function createEnterpriseRetailUser(
         loginId: user.loginId,
         message:
           hasOnlineStoreRole && homeStore?.storeMode === "ONLINE_DIRECT"
-            ? `Flash ERP created online store user ${user.loginId}. This operator can sign into ${homeStore.code} through the online store.`
+            ? `Flash ERP created Online POS user ${user.loginId}. This operator can sign into ${homeStore.code} through the Online POS.`
             : `Flash ERP created retail user ${user.loginId}. Store desktops will receive the operator on their next pull.`,
         serverProcessedAt: new Date().toISOString()
       };
@@ -1933,7 +1965,7 @@ export async function updateEnterpriseRetailUser(
 
       if (hasOnlineStoreRole && !canUseOnlineStoreRole(homeStore)) {
         throw new Error(
-          "Assign online store roles only to users whose home store is an active ONLINE_DIRECT store."
+          "Assign Online POS roles only to users whose home store is an active ONLINE_DIRECT store."
         );
       }
 
@@ -2032,7 +2064,7 @@ export async function updateEnterpriseRetailUser(
         loginId: updatedUser.loginId,
         message:
           hasOnlineStoreRole && homeStore?.storeMode === "ONLINE_DIRECT"
-            ? `Flash ERP updated online store user ${updatedUser.loginId}. This operator can sign into ${homeStore.code} through the online store.`
+            ? `Flash ERP updated Online POS user ${updatedUser.loginId}. This operator can sign into ${homeStore.code} through the Online POS.`
             : `Flash ERP updated retail user ${updatedUser.loginId}. Store desktops will consume the operator delta on their next pull.`,
         serverProcessedAt: new Date().toISOString()
       };

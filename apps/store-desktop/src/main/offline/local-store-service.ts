@@ -214,6 +214,7 @@ import type {
   StoreReportBrowseRequest,
   StoreReportResult,
   StoreSalesReportRow,
+  StoreSerialBatchSalesReportRow,
   StoreRemoteInterStoreStockRequestInput,
   StoreRemoteInventoryLookupInput,
   StoreRemoteInventoryLookupResult,
@@ -633,6 +634,18 @@ type ReportInventoryRow = {
   quantity_on_hand: number | string;
   unit_price: number | string;
   updated_at: string;
+};
+
+type ReportSerialBatchRow = {
+  line_id: string;
+  transaction_no: string;
+  completed_at: string;
+  cashier_code: string | null;
+  product_code: string;
+  product_name: string;
+  inventory_location_code: string | null;
+  serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
 };
 
 type ReportBankingRow = {
@@ -6527,7 +6540,7 @@ export class LocalStoreService {
     const normalizedCategoryCode =
       input?.categoryCode?.trim().toUpperCase() || null;
     const normalizedStatus = input?.status?.trim().toUpperCase() || null;
-    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 40);
+    const limit = Math.min(Math.max(input?.limit ?? 16, 1), 500);
     const rows = this.db
       .prepare(
         `SELECT
@@ -7764,6 +7777,36 @@ export class LocalStoreService {
       )
       .all(...salesParams, limit) as ReportProductRow[];
 
+    const serialBatchSourceRows = this.db
+      .prepare(
+        `SELECT
+          line.id AS line_id,
+          txn.transaction_no AS transaction_no,
+          txn.completed_at AS completed_at,
+          COALESCE(txn.cashier_code, shift.cashier_code) AS cashier_code,
+          line.product_code_snapshot AS product_code,
+          line.product_name_snapshot AS product_name,
+          line.inventory_location_code AS inventory_location_code,
+          line.serial_numbers_json AS serial_numbers_json,
+          line.batch_allocations_json AS batch_allocations_json
+        FROM pos_transaction_line AS line
+        INNER JOIN pos_transaction AS txn
+          ON txn.id = line.pos_transaction_id
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = txn.shift_id
+        WHERE ${salesWhere.join(" AND ")}
+          AND line.line_intent = 'SALE'
+          AND (
+            COALESCE(NULLIF(TRIM(line.serial_numbers_json), ''), '[]') <> '[]'
+            OR COALESCE(NULLIF(TRIM(line.batch_allocations_json), ''), '[]') <> '[]'
+          )
+        ORDER BY txn.completed_at DESC, txn.transaction_no DESC, line.product_name_snapshot ASC
+        LIMIT ?`,
+      )
+      .all(...salesParams, limit) as ReportSerialBatchRow[];
+
     const shiftWhere = ["1 = 1"];
     const shiftParams: SQLInputValue[] = [];
 
@@ -7972,6 +8015,42 @@ export class LocalStoreService {
         };
       },
     );
+    const mappedSerialBatchRows = serialBatchSourceRows
+      .flatMap<StoreSerialBatchSalesReportRow>((row) => [
+        ...readSerializedLineNumbers(row.serial_numbers_json).map(
+          (serialNumber, index) => ({
+            traceId: `${row.line_id}:serial:${index}:${serialNumber}`,
+            transactionNo: row.transaction_no,
+            completedAt: row.completed_at,
+            cashierCode: row.cashier_code,
+            productCode: row.product_code,
+            productName: row.product_name,
+            locationCode: row.inventory_location_code,
+            trackingType: "Serial" as const,
+            serialNumber,
+            batchNo: null,
+            expiryDate: null,
+            quantity: 1,
+          }),
+        ),
+        ...readInventoryBatchAllocations(row.batch_allocations_json).map(
+          (batch, index) => ({
+            traceId: `${row.line_id}:batch:${index}:${batch.batchNo}`,
+            transactionNo: row.transaction_no,
+            completedAt: row.completed_at,
+            cashierCode: row.cashier_code,
+            productCode: row.product_code,
+            productName: row.product_name,
+            locationCode: row.inventory_location_code,
+            trackingType: "Batch" as const,
+            serialNumber: null,
+            batchNo: batch.batchNo,
+            expiryDate: batch.expiryDate,
+            quantity: batch.quantity,
+          }),
+        ),
+      ])
+      .slice(0, limit);
     const mappedBankingRows = bankingRows.map<StoreBankingReportRow>((row) => ({
       depositNo: row.deposit_no,
       reconciliationNo: row.reconciliation_no,
@@ -8080,6 +8159,7 @@ export class LocalStoreService {
       salesOrderRows: mappedSalesOrderRows,
       shiftRows: mappedShiftRows,
       inventoryRows: mappedInventoryRows,
+      serialBatchRows: mappedSerialBatchRows,
       bankingRows: mappedBankingRows,
     };
   }

@@ -17,11 +17,26 @@ import type {
   EnterpriseSecurityWorkspaceData,
   UpdateEnterprisePasswordPolicyRequest
 } from "@/server/repositories/enterprise-security.repository";
+import {
+  enterpriseDataPurgeConfirmationText,
+  enterpriseDataPurgeScopeByKey as purgeScopeByKey,
+  enterpriseDataPurgeScopes,
+  transactionalPurgeScopeKeys,
+  type EnterpriseDataPurgeResponse,
+  type EnterpriseDataPurgeScopeKey
+} from "@/lib/security/data-purge-scopes";
 
 type MutationState = {
   status: "idle" | "submitting" | "success" | "error";
   message: string;
 };
+
+const transactionalPurgeScopes = enterpriseDataPurgeScopes.filter(
+  (scope) => scope.group === "Transactional"
+);
+const masterDataPurgeScopes = enterpriseDataPurgeScopes.filter(
+  (scope) => scope.group === "Master data"
+);
 
 type AuditLogRow = EnterpriseSecurityWorkspaceData["auditLogRows"][number];
 type SecurityLogRow = EnterpriseSecurityWorkspaceData["securityLogRows"][number];
@@ -376,6 +391,16 @@ export function EnterpriseSecurityWorkspace({
     message: ""
   });
   const [stepUpPassword, setStepUpPassword] = useState("");
+  const [purgeScopes, setPurgeScopes] = useState<Set<EnterpriseDataPurgeScopeKey>>(
+    () => new Set()
+  );
+  const [purgeConfirmationText, setPurgeConfirmationText] = useState("");
+  const [purgePassword, setPurgePassword] = useState("");
+  const [purgeState, setPurgeState] = useState<MutationState>({
+    status: "idle",
+    message: ""
+  });
+  const [purgeResult, setPurgeResult] = useState<EnterpriseDataPurgeResponse | null>(null);
   const [selectedLog, setSelectedLog] = useState<LogRow | null>(null);
   const selectedView = forcedView;
   const pageMeta = enterpriseSecurityPageMeta[selectedView];
@@ -494,6 +519,10 @@ export function EnterpriseSecurityWorkspace({
     }
   })();
   const pageStatusMessage = (() => {
+    if (workspace.loadError) {
+      return `Enterprise security policy could not be read: ${workspace.loadError} The counts and lists on this page are unavailable because the query failed, not because nothing is configured.`;
+    }
+
     switch (selectedView) {
       case "users":
         return `${workspace.metrics.activeUsers} active retail user(s) are currently managed here, with ${workspace.metrics.cashierEligibleUsers} cashier-ready and ${workspace.metrics.supervisorEligibleUsers} supervisor-ready account(s).`;
@@ -715,6 +744,109 @@ export function EnterpriseSecurityWorkspace({
     }
   }
 
+  function togglePurgeScope(key: EnterpriseDataPurgeScopeKey, checked: boolean) {
+    setPurgeScopes((current) => {
+      const next = new Set(current);
+
+      if (checked) {
+        next.add(key);
+
+        if (purgeScopeByKey.get(key)?.group === "Master data") {
+          for (const transactionalKey of transactionalPurgeScopeKeys) {
+            next.add(transactionalKey);
+          }
+        }
+
+        for (const dependency of purgeScopeByKey.get(key)?.requires ?? []) {
+          next.add(dependency);
+        }
+      } else {
+        next.delete(key);
+
+        // Drop anything that depended on the scope just removed.
+        for (const scope of enterpriseDataPurgeScopes) {
+          if (scope.requires.includes(key)) {
+            next.delete(scope.key);
+          }
+        }
+      }
+
+      return next;
+    });
+  }
+
+  function toggleTransactionalPurge(checked: boolean) {
+    setPurgeScopes((current) => {
+      const next = new Set(current);
+
+      if (checked) {
+        for (const key of transactionalPurgeScopeKeys) {
+          next.add(key);
+        }
+      } else {
+        next.clear();
+      }
+
+      return next;
+    });
+  }
+
+  async function runDataPurge() {
+    setPurgeState({ status: "submitting", message: "" });
+    setPurgeResult(null);
+
+    try {
+      const stepUpResponse = await fetch("/api/auth/step-up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: purgePassword })
+      });
+      const stepUpPayload = (await stepUpResponse.json()) as { message?: string };
+
+      if (!stepUpResponse.ok) {
+        throw new Error(
+          stepUpPayload.message ?? "Flash ERP could not verify your password."
+        );
+      }
+
+      const response = await fetch("/api/security/data-purge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scopes: [...purgeScopes],
+          confirmationText: purgeConfirmationText
+        })
+      });
+      const data = (await response.json()) as Partial<EnterpriseDataPurgeResponse> & {
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.message ?? "Flash ERP could not purge enterprise data.");
+      }
+
+      setPurgeResult(data as EnterpriseDataPurgeResponse);
+      setPurgeState({
+        status: "success",
+        message: data.message ?? "Flash ERP purged the selected data."
+      });
+      setPurgeScopes(new Set());
+      setPurgeConfirmationText("");
+      setPurgePassword("");
+      startTransition(() => {
+        window.setTimeout(() => router.refresh(), 900);
+      });
+    } catch (error) {
+      setPurgeState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not purge enterprise data."
+      });
+    }
+  }
+
   const renderSecurityContent = (currentView: EnterpriseSecurityView) => {
     switch (currentView) {
       case "users":
@@ -928,6 +1060,158 @@ export function EnterpriseSecurityWorkspace({
             exportFileName="flash-erp-security-logs"
             searchPlaceholder="Search security logs"
           />
+        );
+      case "data-purge":
+        return (
+          <article className="glass-panel rounded-[1.35rem] p-5">
+            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700">
+              <p className="font-semibold">This permanently deletes data. There is no undo.</p>
+              <p className="mt-1">
+                Only the data groups selected below are removed. Master-data selections also select
+                transactional data so related documents, stock, and financial records cannot be
+                orphaned. Take a database backup first. Shops, terminals, users, roles, and security
+                logs are always kept.
+              </p>
+            </div>
+
+            <section className="mt-5">
+              <h3 className="text-sm font-semibold text-stone-900">
+                Transactional data
+              </h3>
+              <div className="mt-3 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm">
+                <label className="inline-flex items-center gap-3 font-semibold text-stone-800">
+                  <input
+                    checked={transactionalPurgeScopeKeys.every((key) => purgeScopes.has(key))}
+                    onChange={(event) => toggleTransactionalPurge(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Clear all transactional data
+                </label>
+                <p className="mt-1 pl-7 text-xs leading-5 text-stone-500">
+                  Sales, orders, purchasing, transfers, stock balances, serials, batches, cash,
+                  ecommerce orders, sync queues, and finance journals.
+                </p>
+                <details className="mt-2 pl-7 text-xs text-stone-500">
+                  <summary className="cursor-pointer font-semibold text-stone-600">View included records</summary>
+                  <ul className="mt-2 grid gap-1 md:grid-cols-2">
+                    {transactionalPurgeScopes.map((scope) => (
+                      <li key={scope.key}>{scope.label}</li>
+                    ))}
+                  </ul>
+                </details>
+              </div>
+            </section>
+
+            <section className="mt-6">
+              <h3 className="text-sm font-semibold text-stone-900">
+                Optional — master data
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-stone-500">
+                Tick only what you want removed. Some scopes depend on others and are ticked
+                automatically.
+              </p>
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {masterDataPurgeScopes.map((scope) => {
+                  const unmetRequirement = scope.requires.find((key) => !purgeScopes.has(key));
+
+                  return (
+                    <div
+                      className="rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm"
+                      key={scope.key}
+                    >
+                      <label className="inline-flex items-center gap-3 font-semibold text-stone-800">
+                        <input
+                          checked={purgeScopes.has(scope.key)}
+                          onChange={(event) =>
+                            togglePurgeScope(scope.key, event.target.checked)
+                          }
+                          type="checkbox"
+                        />
+                        {scope.label}
+                      </label>
+                      <p className="mt-1 pl-7 text-xs leading-5 text-stone-500">
+                        {scope.description}
+                      </p>
+                      {unmetRequirement && purgeScopes.has(scope.key) ? (
+                        <p className="mt-1 pl-7 text-xs font-semibold text-amber-700">
+                          Also selects {purgeScopeByKey.get(unmetRequirement)?.label}.
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="mt-6 grid gap-4 md:grid-cols-2">
+              <TextField
+                label={`Type ${enterpriseDataPurgeConfirmationText} to confirm`}
+                onChange={setPurgeConfirmationText}
+                value={purgeConfirmationText}
+              />
+              <TextField
+                label="Re-enter your password"
+                onChange={setPurgePassword}
+                type="password"
+                value={purgePassword}
+              />
+            </section>
+
+            <div className="mt-5 flex flex-wrap items-center justify-end gap-3">
+              <span className="text-xs text-stone-500">
+                {`${transactionalPurgeScopeKeys.every((key) => purgeScopes.has(key)) ? "Transactional data selected" : "Transactional data not selected"}; ${[...purgeScopes].filter((key) => purgeScopeByKey.get(key)?.group === "Master data").length} master-data scope(s) selected.`}
+              </span>
+              <button
+                className="inline-flex items-center justify-center rounded-full bg-rose-600 px-5 py-2.5 text-sm font-semibold text-white shadow-[0_18px_34px_rgba(225,29,72,0.22)] transition hover:brightness-[1.05] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={
+                  purgeState.status === "submitting" ||
+                  purgeScopes.size === 0 ||
+                  purgeConfirmationText.trim().toUpperCase() !==
+                    enterpriseDataPurgeConfirmationText ||
+                  purgePassword.trim().length === 0
+                }
+                onClick={() => void runDataPurge()}
+                type="button"
+              >
+                {purgeState.status === "submitting"
+                  ? "Purging..."
+                  : "Purge data permanently"}
+              </button>
+            </div>
+
+            <div className="mt-4">
+              <Feedback state={purgeState} />
+            </div>
+
+            {purgeResult?.deletedCounts.length ? (
+              <div className="mt-4 overflow-hidden rounded-2xl border border-stone-200">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-stone-50 text-xs uppercase tracking-wide text-stone-500">
+                    <tr>
+                      <th className="px-4 py-2 font-semibold">Table</th>
+                      <th className="px-4 py-2 text-right font-semibold">Rows deleted</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purgeResult.deletedCounts.map((entry) => (
+                      <tr className="border-t border-stone-100" key={entry.model}>
+                        <td className="px-4 py-2 text-stone-700">{entry.model}</td>
+                        <td className="px-4 py-2 text-right font-semibold text-stone-900">
+                          {entry.count.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="border-t border-stone-200 bg-stone-50">
+                      <td className="px-4 py-2 font-semibold text-stone-900">Total</td>
+                      <td className="px-4 py-2 text-right font-semibold text-stone-900">
+                        {purgeResult.totalDeleted.toLocaleString()}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </article>
         );
       default:
         return null;

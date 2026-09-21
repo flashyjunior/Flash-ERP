@@ -63,7 +63,7 @@ function getOperatingCapabilities(mode: StoreOperatingMode) {
 }
 
 function getStoreModeLabel(mode: StoreExecutionMode) {
-  return mode === "ONLINE_DIRECT" ? "Online store" : "Offline-first";
+  return mode === "ONLINE_DIRECT" ? "Online POS" : "Offline-first";
 }
 
 function getStoreModeDescription(mode: StoreExecutionMode) {
@@ -528,7 +528,7 @@ export function EnterpriseStoresWorkspace({
                         value={storeMode}
                       >
                         <option value="OFFLINE_FIRST">Offline-first desktop</option>
-                        <option value="ONLINE_DIRECT">Online store</option>
+                        <option value="ONLINE_DIRECT">Online POS</option>
                       </select>
                     </label>
                     <label className="space-y-2 text-sm text-stone-700">

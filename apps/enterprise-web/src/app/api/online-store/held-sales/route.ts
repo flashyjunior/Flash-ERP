@@ -29,7 +29,17 @@ export async function POST(request: Request) {
     const body = await request.json();
     const response = await createOnlineStoreHeldSale({
       customerId: body?.customerId ?? null,
-      lines: Array.isArray(body?.lines) ? body.lines : [],
+      lines: Array.isArray(body?.lines)
+        ? body.lines.map((line: Record<string, unknown>) => ({
+            ...line,
+            serialNumbers: Array.isArray(line?.serialNumbers)
+              ? line.serialNumbers.filter(
+                  (serialNumber: unknown): serialNumber is string =>
+                    typeof serialNumber === "string"
+                )
+              : null
+          }))
+        : [],
       note: body?.note ?? null
     });
 
@@ -40,7 +50,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not hold that online store sale."
+            : "Flash ERP could not hold that Online POS sale."
       },
       { status: 400 }
     );

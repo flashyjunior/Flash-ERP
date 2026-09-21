@@ -141,6 +141,37 @@ function readStringArray(value: unknown) {
   return readJsonStringArray(value);
 }
 
+function readBatchAllocations(value: unknown) {
+  if (!value) {
+    return [] as Array<{ batchNo: string; expiryDate: string; quantity: number }>;
+  }
+
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return [];
+      }
+
+      const record = entry as Record<string, unknown>;
+      const batchNo = typeof record.batchNo === "string" ? record.batchNo.trim() : "";
+      const expiryDate = typeof record.expiryDate === "string" ? record.expiryDate : "";
+      const quantity = Number(record.quantity);
+
+      return batchNo && Number.isFinite(quantity) && quantity > 0
+        ? [{ batchNo, expiryDate, quantity: roundQuantity(quantity) }]
+        : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
 function roundMoney(value: number) {
   return Number(value.toFixed(2));
 }
@@ -388,6 +419,24 @@ export type EnterpriseReportingDashboardData = {
     taxAmount: number;
     lastSoldAt: string | null;
     lastSoldAtLabel: string;
+  }>;
+  soldInventoryTraceRows: Array<{
+    traceId: string;
+    transactionNo: string;
+    trackingType: "Serial" | "Batch";
+    serialNumber: string | null;
+    batchNo: string | null;
+    expiryDate: string | null;
+    quantity: number;
+    productCode: string;
+    productName: string;
+    store: string;
+    storeCode: string;
+    locationCode: string | null;
+    locationName: string | null;
+    cashierCode: string | null;
+    soldAt: string | null;
+    soldAtLabel: string;
   }>;
   promotionPerformanceRows: Array<{
     promotionCode: string;
@@ -777,6 +826,7 @@ export type EnterpriseReportingDashboardFilters = EnterpriseOperationsDashboardF
 type ReportingFactRows = Pick<
   EnterpriseReportingDashboardData,
   | "itemSalesRows"
+  | "soldInventoryTraceRows"
   | "promotionPerformanceRows"
   | "stockValuationRows"
   | "cogsReportRows"
@@ -850,6 +900,7 @@ export function buildUnavailableEnterpriseReportingDashboard(
     receiptReportRows: [],
     cashierSalesRows: [],
     itemSalesRows: [],
+    soldInventoryTraceRows: [],
     promotionPerformanceRows: [],
     stockValuationRows: [],
     cogsReportRows: [],
@@ -1907,6 +1958,7 @@ async function getReportingFactRows(
   if (!enterpriseContext) {
     return {
       itemSalesRows: [],
+      soldInventoryTraceRows: [],
       promotionPerformanceRows: [],
       stockValuationRows: [],
       cogsReportRows: [],
@@ -1952,6 +2004,8 @@ async function getReportingFactRows(
         posTransactionId: true,
         productCodeSnapshot: true,
         productNameSnapshot: true,
+        serialNumbersSnapshot: true,
+        batchAllocationsSnapshot: true,
         appliedPromotionCodeSnapshot: true,
         appliedPromotionNameSnapshot: true,
         quantity: true,
@@ -1964,9 +2018,16 @@ async function getReportingFactRows(
             category: true
           }
         },
+        inventoryLocation: {
+          select: {
+            code: true,
+            name: true
+          }
+        },
         posTransaction: {
           select: {
             transactionNo: true,
+            cashierCodeSnapshot: true,
             customerNameSnapshot: true,
             notes: true,
             completedAt: true,
@@ -2412,6 +2473,42 @@ async function getReportingFactRows(
         lastSoldAt: line.posTransaction.completedAt?.toISOString() ?? null,
         lastSoldAtLabel: formatRelativeTime(line.posTransaction.completedAt)
       })),
+    soldInventoryTraceRows: saleLines
+      .flatMap((line) => {
+        const common = {
+          transactionNo: line.posTransaction.transactionNo,
+          productCode: line.productCodeSnapshot,
+          productName: line.productNameSnapshot,
+          store: line.posTransaction.store.name,
+          storeCode: line.posTransaction.store.code,
+          locationCode: line.inventoryLocation?.code ?? null,
+          locationName: line.inventoryLocation?.name ?? null,
+          cashierCode: line.posTransaction.cashierCodeSnapshot,
+          soldAt: line.posTransaction.completedAt?.toISOString() ?? null,
+          soldAtLabel: formatRelativeTime(line.posTransaction.completedAt)
+        };
+        const serialRows = (readStringArray(line.serialNumbersSnapshot) ?? []).map((serialNumber) => ({
+          traceId: `${line.id}:SERIAL:${serialNumber}`,
+          ...common,
+          trackingType: "Serial" as const,
+          serialNumber,
+          batchNo: null,
+          expiryDate: null,
+          quantity: 1
+        }));
+        const batchRows = readBatchAllocations(line.batchAllocationsSnapshot).map((batch) => ({
+          traceId: `${line.id}:BATCH:${batch.batchNo}:${batch.expiryDate}`,
+          ...common,
+          trackingType: "Batch" as const,
+          serialNumber: null,
+          batchNo: batch.batchNo,
+          expiryDate: batch.expiryDate || null,
+          quantity: batch.quantity
+        }));
+
+        return [...serialRows, ...batchRows];
+      })
+      .slice(0, 1_000),
     promotionPerformanceRows: [...promotionAggregates.values()]
       .sort((left, right) => right.discountAmount - left.discountAmount)
       .slice(0, 100)
@@ -3326,6 +3423,7 @@ export async function getEnterpriseReportingDashboard(
     receiptReportRows,
     cashierSalesRows: cashierSalesReportRows,
     itemSalesRows: reportingFacts.itemSalesRows,
+    soldInventoryTraceRows: reportingFacts.soldInventoryTraceRows,
     promotionPerformanceRows: reportingFacts.promotionPerformanceRows,
     stockValuationRows: reportingFacts.stockValuationRows,
     cogsReportRows: reportingFacts.cogsReportRows,

@@ -8,6 +8,6 @@ export default async function OnlineStoreFuelOverviewPage() {
     defaultView: "tanks",
     pageDescription:
       "Station-side fuel controls for tanks, dips, meter readings, supplier receipts, and reconciliation.",
-    pageHeading: "Online Store Fuel"
+    pageHeading: "Online POS Fuel"
   });
 }

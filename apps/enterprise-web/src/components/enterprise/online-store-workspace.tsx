@@ -59,6 +59,7 @@ type ManagerTab = "shift" | "eod" | "banking" | "summary";
 type ReportId =
   | "sales"
   | "products"
+  | "serialsBatches"
   | "orders"
   | "layaways"
   | "layawayPayments"
@@ -216,6 +217,7 @@ type BasketLine = {
   variantColor: string | null;
   lineNote: string | null;
   preferredBatchId: string | null;
+  serialNumbers: string[];
 };
 
 const supplierReturnReasonOptions: SupplierReturnReason[] = [
@@ -245,6 +247,11 @@ type OpenPriceDraft = {
   expressChargeRate: string;
   lineNote: string;
   preferredBatchId: string;
+  serialNumbers: string;
+  serialEntry: string;
+  serialRangeStart: string;
+  serialRangeEnd: string;
+  serialValidationMessage: string | null;
 };
 type PaymentDraft = {
   id: string;
@@ -318,7 +325,7 @@ function paymentDraftId() {
   return `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "sellingUnitOfMeasure" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId">) {
+function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" | "sellingUnitOfMeasure" | "variantSize" | "variantColor" | "lineNote" | "preferredBatchId" | "serialNumbers">) {
   return [
     line.product.productId,
     line.productVariantCode ?? "",
@@ -326,7 +333,8 @@ function basketLineKey(line: Pick<BasketLine, "product" | "productVariantCode" |
     line.variantSize ?? "",
     line.variantColor ?? "",
     line.lineNote ?? "",
-    line.preferredBatchId ?? ""
+    line.preferredBatchId ?? "",
+    (line.serialNumbers ?? []).join("|")
   ].join(":");
 }
 
@@ -1536,7 +1544,7 @@ function buildShiftReportWindowHtml(input: {
       </div>`
     )
     .join("");
-  const storeName = input.workspace.store?.name ?? "Online store";
+  const storeName = input.workspace.store?.name ?? "Online POS";
   const storeCode = input.workspace.store?.code ?? "online";
   const operatorLabel = `${input.workspace.operator.displayName} (${input.workspace.operator.loginId})`;
 
@@ -1956,7 +1964,7 @@ function OnlineStorePosSettingsWorkspace({
       <section className="rms-panel rms-tab-panel">
         <div className="rms-panel-title">
           <div>
-            <span>{workspace.store?.name ?? "Online store"}</span>
+            <span>{workspace.store?.name ?? "Online POS"}</span>
             <h2>{onlinePosSettingsTabs.find((tab) => tab.id === activeTab)?.label ?? "Settings"}</h2>
           </div>
           <div className="rms-settings-title-pills">
@@ -2383,6 +2391,18 @@ export function OnlineStoreWorkspace({
   const [activeReport, setActiveReport] = useState<ReportId>("sales");
   const [inventoryTab, setInventoryTab] = useState<InventoryTab>("stock");
   const [activeStockSection, setActiveStockSection] = useState<InventoryStockSection>("inventory-browser");
+  const [inventoryDrillDown, setInventoryDrillDown] = useState<{
+    productId: string;
+    productCode: string;
+    productName: string;
+    locationId: string;
+    locationName: string;
+    isSerialized: boolean;
+    trackExpiry: boolean;
+    quantityOnHand: number;
+  } | null>(null);
+  const [inventoryDrillDownTab, setInventoryDrillDownTab] = useState<"serials" | "batches">("serials");
+  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("AVAILABLE");
   const [activeReceivingSection, setActiveReceivingSection] = useState<InventoryReceivingSection>("purchase-orders");
   const [inventoryStartupAlertOpen, setInventoryStartupAlertOpen] = useState(false);
   const inventoryStartupAlertCheckedRef = useRef(false);
@@ -2885,6 +2905,51 @@ export function OnlineStoreWorkspace({
     Boolean(openPriceDraft?.product.trackExpiry) &&
     saleMode === "SALE" &&
     openPriceAvailableBatches.length === 0;
+  const basketSerialNumbersInUse = new Set(basket.flatMap((line) => line.serialNumbers));
+  const openPriceAvailableSerialNumbers = openPriceDraft?.product.isSerialized
+    ? workspace.inventorySerialUnits
+        .filter(
+          (serialUnit) =>
+            serialUnit.productId === openPriceDraft.product.productId &&
+            serialUnit.status.toUpperCase() === "AVAILABLE" &&
+            (!defaultSalesLocationId ||
+              !serialUnit.locationId ||
+              serialUnit.locationId === defaultSalesLocationId) &&
+            !basketSerialNumbersInUse.has(serialUnit.serialNumber.toUpperCase())
+        )
+        .map((serialUnit) => serialUnit.serialNumber)
+        .sort((left, right) => left.localeCompare(right))
+    : [];
+  const openPriceSerialUnavailable =
+    Boolean(openPriceDraft?.product.isSerialized) &&
+    saleMode === "SALE" &&
+    openPriceAvailableSerialNumbers.length === 0;
+  const openPriceSelectedSerialNumbers = openPriceDraft
+    ? parseSerialDraft(openPriceDraft.serialNumbers)
+    : [];
+  const openPriceSelectedSerialKeys = new Set(
+    openPriceSelectedSerialNumbers.map((serialNumber) => serialNumber.toUpperCase())
+  );
+  const openPriceRequiredSerialCount = (() => {
+    if (!openPriceDraft?.product.isSerialized) {
+      return 0;
+    }
+
+    const sellingUnit = resolveProductSellingUnit(
+      openPriceDraft.product,
+      openPriceDraft.productVariantCode || null,
+      openPriceDraft.sellingUnitOfMeasure
+    );
+
+    try {
+      return calculatePosBaseQuantity(
+        parseAmount(openPriceDraft.quantity),
+        sellingUnit.conversionFactor
+      );
+    } catch {
+      return 0;
+    }
+  })();
   const configuredProductSizes = workspace.optionSettings?.productSizes ?? [];
   const configuredPosDiscountRates = workspace.optionSettings?.posDiscountRates ?? [];
   const configuredPosExpressChargeRates = workspace.optionSettings?.posExpressChargeRates ?? [];
@@ -3206,6 +3271,50 @@ export function OnlineStoreWorkspace({
       return !query || `${batch.productName} ${batch.productCode} ${batch.batchNo} ${batch.locationName}`.toLowerCase().includes(query);
     })
     .sort((left, right) => left.expiryDate.localeCompare(right.expiryDate));
+  const inventoryDrillDownSerialRows = inventoryDrillDown
+    ? workspace.inventorySerialUnits
+        .filter((serialUnit) => serialUnit.productId === inventoryDrillDown.productId)
+        .filter(
+          (serialUnit) =>
+            !inventoryDrillDown.locationId ||
+            !serialUnit.locationId ||
+            serialUnit.locationId === inventoryDrillDown.locationId
+        )
+        .filter(
+          (serialUnit) =>
+            inventoryDrillDownSerialStatus === "ALL" ||
+            serialUnit.status.toUpperCase() === inventoryDrillDownSerialStatus
+        )
+        .sort(
+          (left, right) =>
+            left.status.localeCompare(right.status) ||
+            left.serialNumber.localeCompare(right.serialNumber)
+        )
+    : [];
+  const inventoryDrillDownSerialCounts = inventoryDrillDown
+    ? workspace.inventorySerialUnits
+        .filter(
+          (serialUnit) =>
+            serialUnit.productId === inventoryDrillDown.productId &&
+            (!inventoryDrillDown.locationId ||
+              !serialUnit.locationId ||
+              serialUnit.locationId === inventoryDrillDown.locationId)
+        )
+        .reduce<Record<string, number>>((counts, serialUnit) => {
+          const status = serialUnit.status.toUpperCase();
+
+          return { ...counts, [status]: (counts[status] ?? 0) + 1 };
+        }, {})
+    : {};
+  const inventoryDrillDownBatchRows = inventoryDrillDown
+    ? workspace.inventoryBatches
+        .filter(
+          (batch) =>
+            batch.productId === inventoryDrillDown.productId &&
+            (!inventoryDrillDown.locationId || batch.locationId === inventoryDrillDown.locationId)
+        )
+        .sort((left, right) => left.expiryDate.localeCompare(right.expiryDate))
+    : [];
   const stockAlertRows = allInventoryBrowserRows
     .filter((row) => {
       const alertFloor = getOnlineCriticalStockFloor(row);
@@ -3352,6 +3461,7 @@ export function OnlineStoreWorkspace({
   );
   const reportSalesRows = activeReportBundle.salesRows;
   const reportProductRows = activeReportBundle.productRows;
+  const reportSerialBatchRows = activeReportBundle.serialBatchRows;
   const reportSalesOrderRows = activeReportBundle.salesOrderRows;
   const reportLayawayRows = activeReportBundle.layawayRows;
   const reportLayawayPaymentRows = activeReportBundle.layawayPaymentRows;
@@ -3364,6 +3474,8 @@ export function OnlineStoreWorkspace({
       ? reportSalesRows.length
       : activeReport === "products"
         ? reportProductRows.length
+        : activeReport === "serialsBatches"
+          ? reportSerialBatchRows.length
         : activeReport === "orders"
           ? reportSalesOrderRows.length
           : activeReport === "layaways"
@@ -3991,15 +4103,15 @@ export function OnlineStoreWorkspace({
       };
 
       if (!response.ok) {
-        throw new Error(payload.message ?? "Flash ERP could not unlock this online store.");
+        throw new Error(payload.message ?? "Flash ERP could not unlock this Online POS.");
       }
 
       setLockPassword("");
-      setLockMessage(payload.message ?? "Flash ERP unlocked the online store.");
+      setLockMessage(payload.message ?? "Flash ERP unlocked the Online POS.");
       setIsScreenLocked(false);
       setActiveWorkspace("dashboard");
     } catch (error) {
-      setLockMessage(error instanceof Error ? error.message : "Flash ERP could not unlock this online store.");
+      setLockMessage(error instanceof Error ? error.message : "Flash ERP could not unlock this Online POS.");
     } finally {
       setIsUnlocking(false);
     }
@@ -4309,7 +4421,8 @@ export function OnlineStoreWorkspace({
       variantSize: line.variantSize,
       variantColor: line.variantColor,
       lineNote: line.lineNote,
-      preferredBatchId: line.preferredBatchId
+      preferredBatchId: line.preferredBatchId,
+      serialNumbers: line.serialNumbers
     }));
   }
 
@@ -4332,6 +4445,7 @@ export function OnlineStoreWorkspace({
     discountAmount?: number | null;
     appliedPromotionName?: string | null;
     configuredDiscountRate?: number | null;
+    serialNumbers?: string[] | null;
   }>) {
     const nextBasket = lines.flatMap((line) => {
       const product =
@@ -4378,7 +4492,8 @@ export function OnlineStoreWorkspace({
           variantSize: line.variantSize ?? null,
           variantColor: line.variantColor ?? null,
           lineNote: line.lineNote ?? null,
-          preferredBatchId: null
+          preferredBatchId: null,
+          serialNumbers: Array.isArray(line.serialNumbers) ? line.serialNumbers : []
         }
       ];
     });
@@ -4805,7 +4920,7 @@ export function OnlineStoreWorkspace({
       retailOrgName: workspace.branding.tradingName,
       companyLogoUrl: workspace.branding.companyLogoUrl,
       storeCode: workspace.store?.code ?? "ONLINE",
-      storeName: workspace.store?.name ?? "Online store",
+      storeName: workspace.store?.name ?? "Online POS",
       storePhone: workspace.store?.phone ?? null,
       storeLocation: workspace.store?.location ?? null,
       storeAddress: workspace.store?.addressLine1 ?? null,
@@ -4868,7 +4983,7 @@ export function OnlineStoreWorkspace({
       retailOrgName: workspace.branding.tradingName,
       companyLogoUrl: workspace.branding.companyLogoUrl,
       storeCode: workspace.store?.code ?? "ONLINE",
-      storeName: workspace.store?.name ?? "Online store",
+      storeName: workspace.store?.name ?? "Online POS",
       storePhone: workspace.store?.phone ?? null,
       storeLocation: workspace.store?.location ?? null,
       storeAddress: workspace.store?.addressLine1 ?? null,
@@ -4934,7 +5049,7 @@ export function OnlineStoreWorkspace({
       retailOrgName: workspace.branding.tradingName,
       companyLogoUrl: localReceiptLogoUrl ?? workspace.branding.companyLogoUrl,
       storeCode: workspace.store?.code ?? "ONLINE",
-      storeName: workspace.store?.name ?? "Online store",
+      storeName: workspace.store?.name ?? "Online POS",
       storePhone: workspace.store?.phone ?? null,
       storeLocation: workspace.store?.location ?? null,
       storeAddress: workspace.store?.addressLine1 ?? null,
@@ -5137,6 +5252,26 @@ export function OnlineStoreWorkspace({
       return;
     }
 
+    if (activeReport === "serialsBatches") {
+      downloadCsv(baseName, [
+        ["Receipt", "Completed", "Cashier", "Product", "Code", "Location", "Tracking", "Serial", "Batch", "Expiry", "Quantity"],
+        ...reportSerialBatchRows.map((row) => [
+          row.transactionNo,
+          row.completedAt,
+          row.cashierCode,
+          row.productName,
+          row.productCode,
+          row.locationName,
+          row.trackingType,
+          row.serialNumber,
+          row.batchNo,
+          row.expiryDate,
+          row.quantity
+        ])
+      ]);
+      return;
+    }
+
     if (activeReport === "orders") {
       downloadCsv(baseName, [
         ["Order", "Status", "Customer", "Total", "Deposit", "Balance", "Tender", "Reference", "Created", "Fulfilled"],
@@ -5295,7 +5430,21 @@ export function OnlineStoreWorkspace({
                   formatMoney(row.netAmount, currencyCode)
                 ])
               }
-            : activeReport === "orders"
+            : activeReport === "serialsBatches"
+              ? {
+                  headers: ["Receipt", "Item", "Location", "Tracking", "Serial / batch", "Expiry", "Qty", "Sold"],
+                  rows: reportSerialBatchRows.map((row) => [
+                    row.transactionNo,
+                    `${row.productName} (${row.productCode})`,
+                    row.locationName,
+                    row.trackingType,
+                    row.serialNumber ?? row.batchNo,
+                    row.expiryDate?.slice(0, 10) ?? "-",
+                    formatNumber.format(row.quantity),
+                    row.completedAt ? new Date(row.completedAt).toLocaleString() : "-"
+                  ])
+                }
+              : activeReport === "orders"
               ? {
                   headers: ["Order", "Status", "Customer", "Total", "Deposit", "Balance"],
                   rows: reportSalesOrderRows.map((row) => [
@@ -5401,7 +5550,7 @@ export function OnlineStoreWorkspace({
         <body>
           <main>
             <header>
-              <div><h1>${escapeHtml(reportTitle)}</h1><h2>${escapeHtml(workspace.store?.name ?? "Online store")} • ${escapeHtml(criteriaLabel)}</h2></div>
+              <div><h1>${escapeHtml(reportTitle)}</h1><h2>${escapeHtml(workspace.store?.name ?? "Online POS")} • ${escapeHtml(criteriaLabel)}</h2></div>
               <div><strong>${escapeHtml(workspace.operator.loginId)}</strong><br />${escapeHtml(new Date().toLocaleString())}</div>
             </header>
             <table><thead><tr>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table>
@@ -5422,7 +5571,8 @@ export function OnlineStoreWorkspace({
     variantColor?: string | null,
     lineNote?: string | null,
     preferredBatchId?: string | null,
-    sellingUnitOfMeasure?: string | null
+    sellingUnitOfMeasure?: string | null,
+    serialNumbers?: string[] | null
   ) {
     if (isRecalledBasket) {
       setCheckoutMessage("Complete or clear the recalled basket before adding new items.");
@@ -5443,16 +5593,27 @@ export function OnlineStoreWorkspace({
     const requiresMatrixSelection = product.productType === "MATRIX" && product.matrixVariants.length > 0;
     const requiresTrackedOptionSelection = !requiresMatrixSelection && (product.trackSize || product.trackColor);
     const requiresBatchSelection = product.trackExpiry && saleMode === "SALE";
+    const requiresSerialSelection = product.isSerialized && saleMode === "SALE";
     const requiresSellingUnitSelection = sellingUnitsForProduct(
       product,
       matrixVariant?.code ?? productVariantCode ?? null
     ).length > 0;
-    const requiresLineOptions = product.mustEnterPriceAtPos || requiresMatrixSelection || requiresTrackedOptionSelection || requiresBatchSelection || requiresSellingUnitSelection;
+    const requiresLineOptions =
+      product.mustEnterPriceAtPos ||
+      requiresMatrixSelection ||
+      requiresTrackedOptionSelection ||
+      requiresBatchSelection ||
+      requiresSerialSelection ||
+      requiresSellingUnitSelection;
 
     if (
       requiresLineOptions &&
-      unitPrice === undefined &&
-      (!productVariantCode || requiresBatchSelection || requiresSellingUnitSelection)
+      (serialNumbers === undefined || serialNumbers === null) &&
+      (unitPrice === undefined || requiresSerialSelection) &&
+      (!productVariantCode ||
+        requiresBatchSelection ||
+        requiresSerialSelection ||
+        requiresSellingUnitSelection)
     ) {
       setOpenPriceDraft({
         product,
@@ -5466,7 +5627,12 @@ export function OnlineStoreWorkspace({
         expressChargeSelected: false,
         expressChargeRate: "",
         lineNote: "",
-        preferredBatchId: ""
+        preferredBatchId: "",
+        serialNumbers: "",
+        serialEntry: "",
+        serialRangeStart: "",
+        serialRangeEnd: "",
+        serialValidationMessage: null
       });
       return;
     }
@@ -5516,17 +5682,52 @@ export function OnlineStoreWorkspace({
       return;
     }
 
-    setBasket((lines) => {
-      const currentLine = lines.find(
-        (line) =>
-          line.product.productId === product.productId &&
-          line.productVariantCode === (matrixVariant?.code ?? null) &&
-          line.sellingUnitOfMeasure === selectedSellingUnit.unitOfMeasureCode &&
-          line.variantSize === (normalizedVariantSize || null) &&
-          line.variantColor === (normalizedVariantColor || null) &&
-          line.lineNote === (normalizedLineNote || null) &&
-          line.preferredBatchId === (normalizedPreferredBatchId || null)
+    const normalizedSerialNumbers = product.isSerialized
+      ? [
+          ...new Set(
+            (serialNumbers ?? [])
+              .map((serialNumber) => serialNumber.trim().toUpperCase())
+              .filter(Boolean)
+          )
+        ]
+      : [];
+
+    if (product.isSerialized && saleMode === "SALE") {
+      if (normalizedSerialNumbers.length !== baseQuantity) {
+        setCheckoutMessage(
+          `${product.productName} is serialized, so choose exactly ${formatNumber.format(baseQuantity)} serial number(s).`
+        );
+        return;
+      }
+
+      const basketSerialKeys = new Set(
+        basket.flatMap((line) => line.serialNumbers)
       );
+      const duplicateSerialNumbers = normalizedSerialNumbers.filter((serialNumber) =>
+        basketSerialKeys.has(serialNumber)
+      );
+
+      if (duplicateSerialNumbers.length > 0) {
+        setCheckoutMessage(
+          `Serial number(s) ${duplicateSerialNumbers.join(", ")} are already in the basket.`
+        );
+        return;
+      }
+    }
+
+    setBasket((lines) => {
+      const currentLine = product.isSerialized
+        ? undefined
+        : lines.find(
+            (line) =>
+              line.product.productId === product.productId &&
+              line.productVariantCode === (matrixVariant?.code ?? null) &&
+              line.sellingUnitOfMeasure === selectedSellingUnit.unitOfMeasureCode &&
+              line.variantSize === (normalizedVariantSize || null) &&
+              line.variantColor === (normalizedVariantColor || null) &&
+              line.lineNote === (normalizedLineNote || null) &&
+              line.preferredBatchId === (normalizedPreferredBatchId || null)
+          );
 
       if (currentLine) {
         return lines.map((line) =>
@@ -5566,7 +5767,8 @@ export function OnlineStoreWorkspace({
           variantSize: normalizedVariantSize || null,
           variantColor: normalizedVariantColor || null,
           lineNote: normalizedLineNote || null,
-          preferredBatchId: normalizedPreferredBatchId || null
+          preferredBatchId: normalizedPreferredBatchId || null,
+          serialNumbers: normalizedSerialNumbers
         }
       ];
     });
@@ -5652,6 +5854,50 @@ export function OnlineStoreWorkspace({
     }
 
     const draft = openPriceDraft;
+    const draftSelectedSellingUnit = resolveProductSellingUnit(
+      draft.product,
+      draft.productVariantCode || null,
+      draft.sellingUnitOfMeasure
+    );
+    let draftBaseQuantity: number;
+
+    try {
+      draftBaseQuantity = calculatePosBaseQuantity(
+        quantity,
+        draftSelectedSellingUnit.conversionFactor
+      );
+    } catch (error) {
+      setCheckoutMessage(
+        error instanceof Error ? error.message : "Enter a valid selling quantity."
+      );
+      return;
+    }
+
+    const draftSerialNumbers = parseSerialDraft(draft.serialNumbers);
+
+    if (draft.product.isSerialized && saleMode === "SALE") {
+      if (draftSerialNumbers.length !== draftBaseQuantity) {
+        setCheckoutMessage(
+          `Choose exactly ${formatNumber.format(draftBaseQuantity)} serial number(s) before adding ${draft.product.productName}.`
+        );
+        return;
+      }
+
+      const availableSerialKeys = new Set(
+        openPriceAvailableSerialNumbers.map((serialNumber) => serialNumber.toUpperCase())
+      );
+      const invalidSerialNumbers = draftSerialNumbers.filter(
+        (serialNumber) => !availableSerialKeys.has(serialNumber.toUpperCase())
+      );
+
+      if (invalidSerialNumbers.length > 0) {
+        setCheckoutMessage(
+          `Serial number(s) ${invalidSerialNumbers.join(", ")} are not available for sale at this store.`
+        );
+        return;
+      }
+    }
+
     const isMatrixDraft = draft.product.productType === "MATRIX" && draft.product.matrixVariants.length > 0;
     const variantSize = !isMatrixDraft && draft.product.trackSize ? draft.variantSize.trim() || null : null;
     const variantColor = !isMatrixDraft && draft.product.trackColor ? draft.variantColor.trim() || null : null;
@@ -5689,7 +5935,8 @@ export function OnlineStoreWorkspace({
       variantColor,
       lineNote,
       draft.preferredBatchId || null,
-      draft.sellingUnitOfMeasure
+      draft.sellingUnitOfMeasure,
+      draft.product.isSerialized ? draftSerialNumbers : null
     );
   }
 
@@ -6146,7 +6393,7 @@ export function OnlineStoreWorkspace({
             supplierNo: purchaseOrderCreateSupplierNo,
             externalReference: purchaseOrderCreateReference.trim() || null,
             note: purchaseOrderCreateNote.trim() || null,
-            operatorName: "Online store",
+            operatorName: "Online POS",
             autoCommit: true,
             lines: purchaseOrderCreateLines.map((line) => ({
               productCode: line.productCode,
@@ -6417,6 +6664,95 @@ export function OnlineStoreWorkspace({
     setSupplierReturnSerialNumbers("");
   }
 
+  function addSaleSerialCandidates(candidates: string[]) {
+    setOpenPriceDraft((draft) => {
+      if (!draft) {
+        return draft;
+      }
+
+      const availableKeys = new Map(
+        openPriceAvailableSerialNumbers.map((serialNumber) => [
+          serialNumber.toUpperCase(),
+          serialNumber
+        ])
+      );
+      const current = parseSerialDraft(draft.serialNumbers);
+      const currentKeys = new Set(current.map((serialNumber) => serialNumber.toUpperCase()));
+      const accepted: string[] = [];
+      const rejected: string[] = [];
+
+      for (const candidate of candidates.map((value) => value.trim()).filter(Boolean)) {
+        const availableSerial = availableKeys.get(candidate.toUpperCase());
+
+        if (!availableSerial) {
+          rejected.push(candidate);
+          continue;
+        }
+
+        if (!currentKeys.has(availableSerial.toUpperCase())) {
+          currentKeys.add(availableSerial.toUpperCase());
+          accepted.push(availableSerial);
+        }
+      }
+
+      return {
+        ...draft,
+        serialNumbers: [...current, ...accepted].join("\n"),
+        serialEntry: "",
+        serialRangeStart: "",
+        serialRangeEnd: "",
+        serialValidationMessage: rejected.length
+          ? `Not available for sale here: ${rejected.join(", ")}.`
+          : accepted.length
+            ? `${accepted.length} serial number(s) added.`
+            : null
+      };
+    });
+  }
+
+  function addSaleSerialRange() {
+    const draft = openPriceDraft;
+
+    if (!draft?.serialRangeStart.trim() || !draft.serialRangeEnd.trim()) {
+      setOpenPriceDraft((current) =>
+        current
+          ? {
+              ...current,
+              serialValidationMessage: "Enter both a start and end serial number for the range."
+            }
+          : current
+      );
+      return;
+    }
+
+    const start = draft.serialRangeStart.trim().toUpperCase();
+    const end = draft.serialRangeEnd.trim().toUpperCase();
+    const [low, high] = start <= end ? [start, end] : [end, start];
+    const expanded = expandSerialRange(draft.serialRangeStart, draft.serialRangeEnd);
+    const candidates = expanded.length
+      ? expanded
+      : openPriceAvailableSerialNumbers.filter((serialNumber) => {
+          const key = serialNumber.toUpperCase();
+          return key >= low && key <= high;
+        });
+
+    addSaleSerialCandidates(candidates);
+  }
+
+  function removeSaleSerialNumber(serialNumber: string) {
+    setOpenPriceDraft((draft) =>
+      draft
+        ? {
+            ...draft,
+            serialNumbers: parseSerialDraft(draft.serialNumbers)
+              .filter((value) => value.toUpperCase() !== serialNumber.toUpperCase())
+              .join("\n"),
+            serialValidationMessage: null
+          }
+        : draft
+    );
+  }
+
   function addInventorySerialCandidates(candidates: string[]) {
     setInventorySerialDraft((draft) => {
       if (!draft) {
@@ -6551,7 +6887,7 @@ export function OnlineStoreWorkspace({
     receiptWindow.document.write(
       buildGoodsReceiptWindowHtml({
         receipt,
-        storeName: workspace.store?.name ?? "Online store",
+        storeName: workspace.store?.name ?? "Online POS",
         currencyCode
       })
     );
@@ -6571,7 +6907,7 @@ export function OnlineStoreWorkspace({
     transferWindow.document.write(
       buildTransferDocumentWindowHtml({
         transfer,
-        storeName: workspace.store?.name ?? "Online store",
+        storeName: workspace.store?.name ?? "Online POS",
         companyLogoUrl: localReceiptLogoUrl ?? workspace.branding.companyLogoUrl
       })
     );
@@ -8536,7 +8872,7 @@ export function OnlineStoreWorkspace({
     return (
       <main className="rms-online-unavailable">
         <section className="rms-panel">
-          <span className="rms-kicker">Online store</span>
+          <span className="rms-kicker">Online POS</span>
           <h1>Workspace unavailable</h1>
           <p>{workspace.unavailableReason}</p>
         </section>
@@ -8670,7 +9006,7 @@ export function OnlineStoreWorkspace({
             <StatusPill>{`Expected cash ${formatMoney(currentShift?.expectedCashAmount ?? workspace.metrics.expectedCash, currencyCode)}`}</StatusPill>
             <StatusPill>{`Account pay ${formatMoney(workspace.metrics.accountPayments, currencyCode)}`}</StatusPill>
             <StatusPill>{`Open orders ${formatNumber.format(workspace.metrics.openOrders)}`}</StatusPill>
-            <StatusPill tone="good">Online Store</StatusPill>
+            <StatusPill tone="good">Online POS</StatusPill>
             <StatusPill>{workspace.store?.code ?? "online-store"}</StatusPill>
             <StatusPill>{localClock}</StatusPill>
             {trialSampleDataEnabled && workspace.products.length === 0 ? (
@@ -8929,6 +9265,9 @@ export function OnlineStoreWorkspace({
                       <div className="rms-cart-item">
                         <strong>{line.product.productName}</strong>
                         <small>{line.product.productCode}{variantLabel ? ` · ${variantLabel}` : ""} · {line.sellingUnitOfMeasure}{line.uomConversionFactor !== 1 ? ` × ${formatNumber.format(line.uomConversionFactor)} = ${formatNumber.format(line.baseQuantity)} ${line.baseUnitOfMeasure}` : ""}{preferredBatch ? ` · Batch ${preferredBatch.batchNo}` : line.product.trackExpiry ? " · Batch FEFO" : ""}{promotionLabel ? ` · ${promotionLabel}` : ""}</small>
+                        {line.serialNumbers.length ? (
+                          <small className="rms-cart-serials">Serials: {line.serialNumbers.join(", ")}</small>
+                        ) : null}
                         <label className="rms-pos-discount-select is-line">
                           <span>Disc</span>
                           <select
@@ -8957,7 +9296,7 @@ export function OnlineStoreWorkspace({
                       </div>
                       <input
                         className="rms-qty-input"
-                        disabled={isRecalledBasket}
+                        disabled={isRecalledBasket || line.serialNumbers.length > 0}
                         min="0.001"
                         onChange={(event) => {
                           const nextQuantity = Math.max(0.001, Number(event.target.value) || 1);
@@ -9241,8 +9580,8 @@ export function OnlineStoreWorkspace({
                 )) : (
                   <div className="rms-empty-catalog">
                     {saleMode !== "SALE"
-                      ? "No active catalog items are available for this online store."
-                      : "No stock or service items are available for this online store location."}
+                      ? "No active catalog items are available for this Online POS."
+                      : "No stock or service items are available for this Online POS location."}
                   </div>
                 )}
               </div>
@@ -9925,9 +10264,95 @@ export function OnlineStoreWorkspace({
                   {openPriceBatchUnavailable ? <small className="rms-inline-message">No active, non-expired batch is available for this item.</small> : null}
                 </div>
               ) : null}
+              {openPriceDraft.product.isSerialized && saleMode === "SALE" ? (
+                <div className="rms-serial-picker">
+                  <div className="rms-batch-picker-title">
+                    <div>
+                      <strong>Serial numbers</strong>
+                      <span>Scan, type, or pick the exact serial number(s) leaving the shop.</span>
+                    </div>
+                    <small>{formatNumber.format(openPriceSelectedSerialNumbers.length)} of {formatNumber.format(openPriceRequiredSerialCount)} selected</small>
+                  </div>
+                  <div className="rms-serial-entry-row">
+                    <input
+                      autoFocus={!openPriceDraft.product.mustEnterPriceAtPos}
+                      onChange={(event) =>
+                        setOpenPriceDraft((draft) => (draft ? { ...draft, serialEntry: event.target.value } : draft))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          addSaleSerialCandidates([openPriceDraft.serialEntry]);
+                        }
+                      }}
+                      placeholder="Scan or type a serial number"
+                      value={openPriceDraft.serialEntry}
+                    />
+                    <button
+                      className="rms-button"
+                      onClick={() => addSaleSerialCandidates([openPriceDraft.serialEntry])}
+                      type="button"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="rms-serial-entry-row is-range">
+                    <input
+                      onChange={(event) =>
+                        setOpenPriceDraft((draft) => (draft ? { ...draft, serialRangeStart: event.target.value } : draft))
+                      }
+                      placeholder="Range start"
+                      value={openPriceDraft.serialRangeStart}
+                    />
+                    <input
+                      onChange={(event) =>
+                        setOpenPriceDraft((draft) => (draft ? { ...draft, serialRangeEnd: event.target.value } : draft))
+                      }
+                      placeholder="Range end"
+                      value={openPriceDraft.serialRangeEnd}
+                    />
+                    <button className="rms-button" onClick={addSaleSerialRange} type="button">Add range</button>
+                  </div>
+                  {openPriceSelectedSerialNumbers.length ? (
+                    <div className="rms-serial-chip-row">
+                      {openPriceSelectedSerialNumbers.map((serialNumber) => (
+                        <button
+                          className="rms-serial-chip"
+                          key={serialNumber}
+                          onClick={() => removeSaleSerialNumber(serialNumber)}
+                          title="Remove serial number"
+                          type="button"
+                        >
+                          {serialNumber} ×
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="rms-serial-available-list">
+                    {openPriceAvailableSerialNumbers.length ? (
+                      openPriceAvailableSerialNumbers.slice(0, 60).map((serialNumber) => (
+                        <button
+                          className="rms-button is-ghost"
+                          disabled={openPriceSelectedSerialKeys.has(serialNumber.toUpperCase())}
+                          key={serialNumber}
+                          onClick={() => addSaleSerialCandidates([serialNumber])}
+                          type="button"
+                        >
+                          {serialNumber}
+                        </button>
+                      ))
+                    ) : (
+                      <small className="rms-inline-message">No available serial numbers are in stock for this item at this store.</small>
+                    )}
+                  </div>
+                  {openPriceDraft.serialValidationMessage ? (
+                    <small className="rms-inline-message">{openPriceDraft.serialValidationMessage}</small>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="rms-dialog-actions">
                 <button className="rms-button" onClick={() => setOpenPriceDraft(null)} type="button">Cancel</button>
-                <button className="rms-button is-primary" disabled={openPriceBatchUnavailable} onClick={submitOpenPriceDraft} type="button">Add item</button>
+                <button className="rms-button is-primary" disabled={openPriceBatchUnavailable || openPriceSerialUnavailable} onClick={submitOpenPriceDraft} type="button">Add item</button>
               </div>
             </section>
           </div>
@@ -10004,8 +10429,36 @@ export function OnlineStoreWorkspace({
                   <div className="rms-table rms-inventory-table rms-stock-section-grid">
                     <div className="rms-table-head"><span>Product</span><span>Location</span><span>On hand</span><span>Reserved</span><span>Safety</span><span>Web sellable</span><span>Ecommerce</span><span>Expiry</span><span>Price</span></div>
                     {inventoryBrowserRows.map((row) => (
-                      <div className="rms-table-row" key={`${row.productId}:${row.locationId}`}>
-                        <strong>{row.productName}<small>{row.productCode}{row.trackExpiry ? " · Batch controlled" : ""}</small></strong>
+                      <div
+                        className={`rms-table-row${row.isSerialized || row.trackExpiry ? " is-drillable" : ""}`}
+                        key={`${row.productId}:${row.locationId}`}
+                        onClick={() => {
+                          if (!row.isSerialized && !row.trackExpiry) {
+                            return;
+                          }
+
+                          setInventoryDrillDownTab(row.isSerialized ? "serials" : "batches");
+                          setInventoryDrillDownSerialStatus("AVAILABLE");
+                          setInventoryDrillDown({
+                            productId: row.productId,
+                            productCode: row.productCode,
+                            productName: row.productName,
+                            locationId: row.locationId,
+                            locationName: row.locationName,
+                            isSerialized: row.isSerialized,
+                            trackExpiry: row.trackExpiry,
+                            quantityOnHand: row.quantityOnHand
+                          });
+                        }}
+                        role={row.isSerialized || row.trackExpiry ? "button" : undefined}
+                        tabIndex={row.isSerialized || row.trackExpiry ? 0 : undefined}
+                        title={
+                          row.isSerialized || row.trackExpiry
+                            ? "Open serial and batch details for this item"
+                            : undefined
+                        }
+                      >
+                        <strong>{row.productName}<small>{row.productCode}{[row.isSerialized ? "Serialised" : null, row.trackExpiry ? "Batch controlled" : null].filter(Boolean).map((label) => ` · ${label}`).join("")}</small></strong>
                         <span>{row.locationName}</span>
                         <b className={row.quantityOnHand <= 0 ? "is-empty-stock" : ""}>{formatNumber.format(row.quantityOnHand)}</b>
                         <b>{formatNumber.format(row.activeReservedQuantity)}</b>
@@ -10045,6 +10498,114 @@ export function OnlineStoreWorkspace({
                           ))}
                         {!visibleInventoryBatchRows.length ? <EmptyState title="No active batches" detail="No batch or expiry records match the current filters." /> : null}
                       </div>
+                  ) : null}
+                  {inventoryDrillDown ? (
+                    <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
+                      <section className="rms-dialog rms-wide-dialog rms-inventory-drilldown-dialog">
+                        <div className="rms-panel-title">
+                          <div>
+                            <span>Inventory detail · {inventoryDrillDown.locationName}</span>
+                            <h2>{inventoryDrillDown.productName}</h2>
+                          </div>
+                          <button className="rms-button" onClick={() => setInventoryDrillDown(null)} type="button">Close</button>
+                        </div>
+                        <div className="rms-filter-row">
+                          <StatusPill>{inventoryDrillDown.productCode}</StatusPill>
+                          <StatusPill tone={inventoryDrillDown.quantityOnHand > 0 ? "good" : "warning"}>
+                            {`On hand ${formatNumber.format(inventoryDrillDown.quantityOnHand)}`}
+                          </StatusPill>
+                          {inventoryDrillDown.isSerialized ? <StatusPill>Serialised</StatusPill> : null}
+                          {inventoryDrillDown.trackExpiry ? <StatusPill>Batch / expiry tracked</StatusPill> : null}
+                        </div>
+                        <div className="rms-workspace-tabs rms-inventory-subtabs" role="tablist" aria-label="Inventory detail views">
+                          {inventoryDrillDown.isSerialized ? (
+                            <button
+                              className={inventoryDrillDownTab === "serials" ? "is-active" : ""}
+                              onClick={() => setInventoryDrillDownTab("serials")}
+                              role="tab"
+                              type="button"
+                            >
+                              Serial numbers
+                            </button>
+                          ) : null}
+                          {inventoryDrillDown.trackExpiry ? (
+                            <button
+                              className={inventoryDrillDownTab === "batches" ? "is-active" : ""}
+                              onClick={() => setInventoryDrillDownTab("batches")}
+                              role="tab"
+                              type="button"
+                            >
+                              Batches &amp; expiry
+                            </button>
+                          ) : null}
+                        </div>
+                        {inventoryDrillDown.isSerialized && inventoryDrillDownTab === "serials" ? (
+                          <>
+                            <div className="rms-filter-row">
+                              <select
+                                onChange={(event) => setInventoryDrillDownSerialStatus(event.target.value)}
+                                value={inventoryDrillDownSerialStatus}
+                              >
+                                <option value="ALL">All statuses</option>
+                                <option value="AVAILABLE">Available</option>
+                                <option value="SOLD">Sold</option>
+                                <option value="IN_TRANSIT">In transit</option>
+                                <option value="ADJUSTED_OUT">Adjusted out</option>
+                              </select>
+                              <StatusPill tone="good">{`Available ${formatNumber.format(inventoryDrillDownSerialCounts.AVAILABLE ?? 0)}`}</StatusPill>
+                              <StatusPill>{`Sold ${formatNumber.format(inventoryDrillDownSerialCounts.SOLD ?? 0)}`}</StatusPill>
+                              <StatusPill>{`In transit ${formatNumber.format(inventoryDrillDownSerialCounts.IN_TRANSIT ?? 0)}`}</StatusPill>
+                              <StatusPill tone="warning">{`Adjusted out ${formatNumber.format(inventoryDrillDownSerialCounts.ADJUSTED_OUT ?? 0)}`}</StatusPill>
+                            </div>
+                            <div className="rms-table rms-inventory-serial-table">
+                              <div className="rms-table-head"><span>Serial number</span><span>Status</span><span>Location</span><span>Last document</span><span>Last movement</span></div>
+                              {inventoryDrillDownSerialRows.map((serialUnit) => (
+                                <div className="rms-table-row" key={serialUnit.serialUnitId}>
+                                  <strong>{serialUnit.serialNumber}</strong>
+                                  <StatusPill
+                                    tone={
+                                      serialUnit.status.toUpperCase() === "AVAILABLE"
+                                        ? "good"
+                                        : serialUnit.status.toUpperCase() === "ADJUSTED_OUT"
+                                          ? "warning"
+                                          : "neutral"
+                                    }
+                                  >
+                                    {serialUnit.status.replace(/_/g, " ")}
+                                  </StatusPill>
+                                  <span>{serialUnit.locationName ?? "Unassigned"}</span>
+                                  <span>{serialUnit.sourceReferenceLabel ?? "-"}</span>
+                                  <span>{serialUnit.lastOccurredAt ? new Date(serialUnit.lastOccurredAt).toLocaleString("en-GB") : new Date(serialUnit.updatedAt).toLocaleString("en-GB")}</span>
+                                </div>
+                              ))}
+                              {!inventoryDrillDownSerialRows.length ? (
+                                <EmptyState title="No serial numbers" detail="No serial units match this item, location, and status filter." />
+                              ) : null}
+                            </div>
+                          </>
+                        ) : null}
+                        {inventoryDrillDown.trackExpiry && inventoryDrillDownTab === "batches" ? (
+                          <div className="rms-table rms-inventory-batch-table">
+                            <div className="rms-table-head"><span>Batch</span><span>Location</span><span>Manufactured</span><span>Expiry</span><span>Qty on hand</span><span>Status</span></div>
+                            {inventoryDrillDownBatchRows.map((batch) => (
+                              <div className="rms-table-row" key={batch.batchId}>
+                                <strong>{batch.batchNo}</strong>
+                                <span>{batch.locationName}</span>
+                                <span>{batch.manufacturedAt ? new Date(batch.manufacturedAt).toLocaleDateString("en-GB") : "-"}</span>
+                                <span>{new Date(batch.expiryDate).toLocaleDateString("en-GB")}</span>
+                                <strong>{formatNumber.format(batch.quantityOnHand)}</strong>
+                                <StatusPill tone={batch.daysUntilExpiry < 0 ? "warning" : batch.daysUntilExpiry <= workspace.optionSettings.expiryAlertLeadDays ? "warning" : "good"}>
+                                  {batch.daysUntilExpiry < 0 ? "Expired" : batch.daysUntilExpiry === 0 ? "Expires today" : `${batch.daysUntilExpiry} days`}
+                                </StatusPill>
+                              </div>
+                            ))}
+                            {!inventoryDrillDownBatchRows.length ? (
+                              <EmptyState title="No batches" detail="No batch or expiry records exist for this item at this location." />
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </section>
+                    </div>
                   ) : null}
                 </>
               ) : null}
@@ -10403,7 +10964,7 @@ export function OnlineStoreWorkspace({
                         </div>
                       );
                     })}
-                    {!transferDocumentGroups.length ? <EmptyState title="No transfer requests" detail="Transfer requests posted from this online store will appear here." /> : null}
+                    {!transferDocumentGroups.length ? <EmptyState title="No transfer requests" detail="Transfer requests posted from this Online POS will appear here." /> : null}
                   </div>
                 </div>
               ) : null}
@@ -10946,6 +11507,21 @@ export function OnlineStoreWorkspace({
                   {!reportProductRows.length ? <EmptyState title="No product rows" detail="No product movement matches the current search." /> : null}
                 </div>
               ) : null}
+              {activeReport === "serialsBatches" ? (
+                <div className="rms-table rms-report-table">
+                  <div className="rms-table-head"><span>Receipt</span><span>Item</span><span>Tracking</span><span>Serial / batch</span><span>Qty</span></div>
+                  {reportSerialBatchRows.map((row) => (
+                    <div className="rms-table-row" key={row.traceId}>
+                      <strong>{row.transactionNo}<small>{row.completedAt ? new Date(row.completedAt).toLocaleString() : "Not dated"}</small></strong>
+                      <span>{row.productName}<small>{row.productCode} · {row.locationName ?? "Unassigned"}</small></span>
+                      <span>{row.trackingType}</span>
+                      <strong>{row.serialNumber ?? row.batchNo ?? "-"}<small>{row.expiryDate ? `Expires ${row.expiryDate.slice(0, 10)}` : ""}</small></strong>
+                      <span>{formatNumber.format(row.quantity)}</span>
+                    </div>
+                  ))}
+                  {!reportSerialBatchRows.length ? <EmptyState title="No sold serials or batches" detail="Tracked serial and batch allocations appear here after completed sales." /> : null}
+                </div>
+              ) : null}
               {activeReport === "orders" ? (
                 <div className="rms-table rms-report-table">
                   <div className="rms-table-head"><span>Order</span><span>Status</span><span>Total</span><span>Deposit</span><span>Balance</span></div>
@@ -11131,7 +11707,7 @@ export function OnlineStoreWorkspace({
         <div className="rms-lock-overlay" role="dialog" aria-modal="true">
           <section className="rms-login-card rms-lock-card">
             <div className="rms-panel-title">
-              <div><span>Screen locked</span><h2>Unlock online store</h2></div>
+              <div><span>Screen locked</span><h2>Unlock Online POS</h2></div>
               <StatusPill tone="warning">Preserved</StatusPill>
             </div>
             <form

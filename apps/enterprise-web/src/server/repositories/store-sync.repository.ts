@@ -20543,7 +20543,7 @@ export async function publishStoreInventoryLocations(
     if (!targetStoreNode && store.storeMode === "ONLINE_DIRECT") {
       const audit = toOperatorAuditInput(
         input,
-        `Publishing ${locations.length} active inventory location(s) for online store ${store.code}.`,
+        `Publishing ${locations.length} active inventory location(s) for Online POS ${store.code}.`,
       );
       const now = new Date();
 
@@ -20553,7 +20553,7 @@ export async function publishStoreInventoryLocations(
         publishedCount: locations.length,
         note: audit.note,
         operatorName: audit.operatorName,
-        message: `Flash ERP confirmed ${locations.length} active inventory location(s) for online store ${store.name}. Online shops read this topology directly from enterprise, so no desktop sync packet was queued.`,
+        message: `Flash ERP confirmed ${locations.length} active inventory location(s) for Online POS ${store.name}. Online shops read this topology directly from enterprise, so no desktop sync packet was queued.`,
         serverProcessedAt: now.toISOString(),
       };
     }

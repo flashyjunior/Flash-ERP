@@ -79,6 +79,8 @@
     "capacity:ecommerce-contention": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/ecommerce-checkout-contention-test.ts",
     "audit:query-budgets": "tsx scripts/enterprise-query-budget-audit.ts",
     "audit:write-guards": "tsx scripts/enterprise-write-guard-audit.ts",
+    "audit:domain-catalog": "node scripts/enterprise-domain-catalog-audit.mjs",
+    "acceptance:inventory-drilldown": "node scripts/enterprise-inventory-drilldown-gate.mjs",
     "acceptance:e2e": "tsx scripts/rms-e2e-certification-gates.ts",
     "e2e:browser": "playwright test --project=enterprise-browser",
     "e2e:electron": "playwright test --project=store-electron",

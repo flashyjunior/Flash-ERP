@@ -2632,7 +2632,7 @@ export async function requireOnlineStoreStaff() {
   });
 
   if (!store) {
-    throw new EcommerceAuthError("Your assigned online store could not be found.", 404);
+    throw new EcommerceAuthError("Your assigned Online POS could not be found.", 404);
   }
   if (!session.permissionCodes.includes("ecommerce.console.access")) {
     throw new EcommerceAuthError("Your role does not have access to the ecommerce staff console.", 403);

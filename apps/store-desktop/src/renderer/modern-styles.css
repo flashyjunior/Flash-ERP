@@ -3128,6 +3128,66 @@ p {
   grid-template-columns: minmax(180px, 1.2fr) minmax(110px, 0.7fr) 110px 110px 80px 96px;
 }
 
+.rms-inventory-table .rms-table-row.is-drillable {
+  cursor: pointer;
+}
+
+.rms-inventory-table .rms-table-row.is-drillable:hover {
+  background: #eef5fa;
+}
+
+.rms-inventory-drilldown-dialog {
+  display: grid;
+  gap: 10px;
+  max-height: 86vh;
+  overflow: auto;
+}
+
+.rms-inventory-drilldown-dialog .rms-table {
+  min-width: 0;
+}
+
+.rms-inventory-drilldown-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #e5a7a1;
+  border-radius: 6px;
+  background: #fff4f2;
+  color: #9f2d25;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rms-inventory-drilldown-error .rms-button {
+  flex: none;
+}
+
+.rms-inventory-serial-table .rms-table-head,
+.rms-inventory-serial-table .rms-table-row {
+  grid-template-columns:
+    minmax(160px, 1fr)
+    132px
+    minmax(130px, 0.8fr)
+    minmax(140px, 0.9fr)
+    minmax(150px, 0.9fr);
+}
+
+.rms-inventory-drilldown-dialog .rms-batch-register-table .rms-table-head,
+.rms-inventory-drilldown-dialog .rms-batch-register-table .rms-table-row {
+  grid-template-columns:
+    minmax(130px, 0.9fr)
+    112px
+    112px
+    92px
+    104px
+    minmax(120px, 0.8fr);
+  min-width: 0;
+}
+
 .rms-remote-inventory-table {
   min-height: 0;
   overflow: auto;

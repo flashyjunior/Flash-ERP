@@ -952,7 +952,7 @@ export function OnlineStoreEcommerceWorkspace({
     <EnterpriseShell
       activeSection="online-store"
       description="Publish products, process customer orders, and manage the public storefront without changing the staff POS."
-      eyebrow="Online Store"
+      eyebrow="Online POS"
       heading="Ecommerce"
     >
       {content}

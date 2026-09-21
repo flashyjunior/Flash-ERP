@@ -135,7 +135,7 @@ function getOperatingCapabilities(mode: StoreOperatingMode) {
 }
 
 function getStoreModeLabel(mode: StoreExecutionMode) {
-  return mode === "ONLINE_DIRECT" ? "Online store" : "Offline-first";
+  return mode === "ONLINE_DIRECT" ? "Online POS" : "Offline-first";
 }
 
 function getStoreModeDescription(mode: StoreExecutionMode) {
@@ -463,13 +463,13 @@ export function EnterpriseStoreDetail({
     !isOnlineDirectStore && !hasCompletePrimaryTopology;
   const canPublishLocations = Boolean(primaryNode) || isOnlineDirectStore;
   const locationPublishTargetLabel =
-    primaryNode?.nodeCode ?? "Online store (enterprise direct)";
+    primaryNode?.nodeCode ?? "Online POS (enterprise direct)";
   const topologyRequiredTitle =
     "Provision topology first to create the primary desktop sync node for this shop.";
   const locationPublishDescription = primaryNode
     ? "Queue a fresh inventory-location publication set for the store desktop so Flash ERP can hydrate local location topology from enterprise."
     : isOnlineDirectStore
-      ? "Confirm the active inventory-location topology for the online store. Online shops read these locations directly from enterprise."
+      ? "Confirm the active inventory-location topology for the Online POS. Online shops read these locations directly from enterprise."
       : topologyRequiredTitle;
 
   const nodeColumns = useMemo<ColumnDef<NodeRow>[]>(
@@ -1348,7 +1348,7 @@ export function EnterpriseStoreDetail({
                         value={storeMode}
                       >
                         <option value="OFFLINE_FIRST">Offline-first desktop</option>
-                        <option value="ONLINE_DIRECT">Online store</option>
+                        <option value="ONLINE_DIRECT">Online POS</option>
                       </select>
                     </label>
                     <label className="space-y-2 text-sm text-stone-700">
@@ -1988,7 +1988,7 @@ export function EnterpriseStoreDetail({
                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm leading-6 text-emerald-900">
                   {primaryNode
                     ? "Flash ERP will queue fresh inventory-location packets for the primary store node so the desktop can rehydrate local location names, defaults, and status from enterprise."
-                    : "Flash ERP will confirm the active inventory locations used by this online store. No desktop sync node is required because the online POS reads location topology directly from enterprise."}
+                    : "Flash ERP will confirm the active inventory locations used by this Online POS. No desktop sync node is required because the online POS reads location topology directly from enterprise."}
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="space-y-2 text-sm text-stone-700">

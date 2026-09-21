@@ -158,7 +158,7 @@ export async function deliverTrialPasswordResetFromWorkspace(rawBody: string, he
     displayName:
       loginId === trial.ownerLoginId?.toLowerCase()
         ? trial.contactName
-        : `${trial.contactName} Online Store Operator`,
+        : `${trial.contactName} Online POS Operator`,
     email,
     resetLink,
     expiresAt

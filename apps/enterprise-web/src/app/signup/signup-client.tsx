@@ -437,7 +437,7 @@ export function TrialSignupPage({
             </div>
             <div className={styles.surfaceList}>
               <article><Building2 /><div><strong>HQ Enterprise</strong><span>Finance, people, purchasing, stock, security and cross-branch reporting.</span></div></article>
-              <article><Store /><div><strong>Online Store</strong><span>Browser-based store operations, ecommerce handoff and daily controls.</span></div></article>
+              <article><Store /><div><strong>Online POS</strong><span>Browser-based store operations, ecommerce handoff and daily controls.</span></div></article>
               <article><Laptop /><div><strong>Store Desktop</strong><span>Offline-first checkout and inventory with governed synchronization.</span></div></article>
               <article><Globe2 /><div><strong>Ecommerce storefront</strong><span>Customer accounts, catalog, pickup, delivery and order visibility.</span></div></article>
             </div>
@@ -523,7 +523,7 @@ export function TrialSignupPage({
         <ol>
           <li><span className={styles.journeyIcon}><MailCheck /></span><div><span className={styles.journeyNumber}>01</span><strong>Verify your email</strong><p>We confirm the business owner before any environment is created.</p></div><ChevronRight className={styles.journeyArrow} /></li>
           <li><span className={styles.journeyIcon}><KeyRound /></span><div><span className={styles.journeyNumber}>02</span><strong>Activate securely</strong><p>One-time links let you set credentials without passwords travelling by email.</p></div><ChevronRight className={styles.journeyArrow} /></li>
-          <li><span className={styles.journeyIcon}><Building2 /></span><div><span className={styles.journeyNumber}>03</span><strong>Enter your workspace</strong><p>Open HQ Enterprise, Online Store and your ecommerce storefront.</p></div><ChevronRight className={styles.journeyArrow} /></li>
+          <li><span className={styles.journeyIcon}><Building2 /></span><div><span className={styles.journeyNumber}>03</span><strong>Enter your workspace</strong><p>Open HQ Enterprise, Online POS and your ecommerce storefront.</p></div><ChevronRight className={styles.journeyArrow} /></li>
           <li><span className={styles.journeyIcon}><HeartHandshake /></span><div><span className={styles.journeyNumber}>04</span><strong>Test with support</strong><p>Use the 14 days to validate the workflows that matter to your team.</p></div></li>
         </ol>
       </section>
@@ -538,7 +538,7 @@ export function TrialSignupPage({
           </p>
           <ul>
             <li><Check /> HQ Enterprise owner access</li>
-            <li><Check /> Online Store operator access</li>
+            <li><Check /> Online POS operator access</li>
             <li><Check /> Public ecommerce storefront</li>
             <li><Check /> Store Desktop trial access</li>
           </ul>
@@ -597,7 +597,7 @@ export function TrialSignupPage({
               {trialStatus?.status === "ACTIVE" ? (
                 <div className={styles.workspaceLinks}>
                   {trialStatus.workspaceUrl ? <a href={trialStatus.workspaceUrl}>Open HQ Enterprise <ArrowRight /></a> : null}
-                  {trialStatus.onlineStoreUrl ? <a href={trialStatus.onlineStoreUrl}>Open Online Store <ArrowRight /></a> : null}
+                  {trialStatus.onlineStoreUrl ? <a href={trialStatus.onlineStoreUrl}>Open Online POS <ArrowRight /></a> : null}
                   {trialStatus.storefrontUrl ? <a href={trialStatus.storefrontUrl}>View ecommerce storefront <ArrowRight /></a> : null}
                 </div>
               ) : null}

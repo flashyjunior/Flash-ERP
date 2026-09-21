@@ -825,7 +825,7 @@ export function EnterpriseSecurityPanel({
     if (hasOnlineStoreDraftConflict) {
       setUserState({
         status: "error",
-        message: "Choose an active ONLINE_DIRECT home store before saving online store roles."
+        message: "Choose an active ONLINE_DIRECT home store before saving Online POS roles."
       });
       return;
     }
@@ -935,6 +935,23 @@ export function EnterpriseSecurityPanel({
           value={String(workspace.metrics.onlineStoreEligibleUsers)}
         />
       </section>
+
+      {workspace.loadError ? (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700">
+          <p className="font-semibold">
+            Enterprise security policy could not be read, so the roles and privilege lists on this
+            page are unavailable rather than empty.
+          </p>
+          <p className="mt-1 break-words">{workspace.loadError}</p>
+          <button
+            className="mt-3 inline-flex items-center gap-2 rounded-full border border-rose-300 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-rose-700 transition hover:border-rose-400"
+            onClick={() => router.refresh()}
+            type="button"
+          >
+            Try loading again
+          </button>
+        </div>
+      ) : null}
 
       {mode === "roles" ? (
         <>
@@ -1284,7 +1301,7 @@ export function EnterpriseSecurityPanel({
                 </p>
                 <p className="mt-1">
                   {hasOnlineStoreDraftConflict
-                    ? "Online store roles require an active ONLINE_DIRECT home store."
+                    ? "Online POS roles require an active ONLINE_DIRECT home store."
                     : selectedHasOnlineStoreRole && selectedHomeStore
                       ? `${selectedHomeStore.name} is ready for online-store sign-in.`
                       : selectedHasOnlineStoreRole
@@ -1300,7 +1317,7 @@ export function EnterpriseSecurityPanel({
                 value: role.roleCode,
                 label: `${role.name} (${role.roleCode})`,
                 helper: `${role.permissionCount} permission(s) • ${role.status}${
-                  onlineStoreRoleCodes.has(role.roleCode) ? " • online store login role" : ""
+                  onlineStoreRoleCodes.has(role.roleCode) ? " • Online POS login role" : ""
                 }`
               }))}
               onToggle={(value, nextChecked) =>

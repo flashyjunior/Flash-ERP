@@ -2124,6 +2124,21 @@ export type StoreInventoryReportRow = {
   updatedAt: string;
 };
 
+export type StoreSerialBatchSalesReportRow = {
+  traceId: string;
+  transactionNo: string;
+  completedAt: string;
+  cashierCode: string | null;
+  productCode: string;
+  productName: string;
+  locationCode: string | null;
+  trackingType: "Serial" | "Batch";
+  serialNumber: string | null;
+  batchNo: string | null;
+  expiryDate: string | null;
+  quantity: number;
+};
+
 export type StoreBankingReportRow = {
   depositNo: string;
   reconciliationNo: string;
@@ -2161,6 +2176,7 @@ export type StoreReportResult = {
   salesOrderRows: StoreSalesOrderSummary[];
   shiftRows: StoreShiftReportRow[];
   inventoryRows: StoreInventoryReportRow[];
+  serialBatchRows: StoreSerialBatchSalesReportRow[];
   bankingRows: StoreBankingReportRow[];
 };
 

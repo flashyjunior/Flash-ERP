@@ -3,14 +3,17 @@
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
 import { Activity, Boxes, Package, PackageCheck, Plus, Store } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
 import { ActionDialog } from "@/components/dialogs/action-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import { WorkspaceTabs, WorkspaceTabsContent } from "@/components/layouts/workspace-tabs";
 import { matchesInventorySearchTerms } from "@/components/enterprise/enterprise-inventory-search";
-import type { EnterpriseInventoryWorkspaceData } from "@/server/repositories/enterprise-inventory.repository";
+import type {
+  EnterpriseInventorySerialDetailResponse,
+  EnterpriseInventoryWorkspaceData
+} from "@/server/repositories/enterprise-inventory.repository";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 const quantityFormatter = new Intl.NumberFormat("en-US", {
@@ -314,6 +317,92 @@ function SerialChip({ serialNumber }: { serialNumber: string }) {
   );
 }
 
+function productCatalogHref(productCode: string) {
+  return `/catalog/products/${encodeURIComponent(productCode)}`;
+}
+
+function inventoryLocationHref(locationCode: string) {
+  return `/inventory/locations/${encodeURIComponent(locationCode)}`;
+}
+
+/**
+ * Inventory drill-down: clicking a product row or a shop stock position opens
+ * the same serial / batch-expiry detail the store desktop and Online POS screens
+ * already show. Detail is fetched on demand from /api/inventory/serial-detail so
+ * the page payload stays unchanged regardless of serialized catalogue size.
+ */
+type InventoryDrillDownTarget = {
+  productCode: string;
+  productName: string;
+  locationCode: string | null;
+  locationName: string | null;
+  onHandQuantity: number;
+  isSerialized: boolean;
+  trackExpiry: boolean;
+};
+
+const inventorySerialStatusOptions = [
+  { value: "ALL", label: "All statuses" },
+  { value: "AVAILABLE", label: "Available" },
+  { value: "SOLD", label: "Sold" },
+  { value: "IN_TRANSIT", label: "In transit" },
+  { value: "ADJUSTED_OUT", label: "Adjusted out" }
+];
+
+function formatSerialStatus(status: string) {
+  return status.replace(/_/g, " ").toLowerCase().replace(/^\w/, (character) => character.toUpperCase());
+}
+
+function InventoryDetailPill({
+  tone = "neutral",
+  children
+}: {
+  tone?: "good" | "warning" | "neutral";
+  children: ReactNode;
+}) {
+  const toneClassName =
+    tone === "good"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : tone === "warning"
+        ? "border-amber-200 bg-amber-50 text-amber-800"
+        : "border-stone-200 bg-white/90 text-stone-700";
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${toneClassName}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+function renderTrackingBadges(
+  row: { isSerialized: boolean; trackExpiry: boolean },
+  untrackedHint = "Select the row for its usual detail"
+) {
+  const isTracked = row.isSerialized || row.trackExpiry;
+
+  return (
+    <div className="min-w-0">
+      {isTracked ? (
+        <div className="flex flex-wrap gap-1.5">
+          {row.isSerialized ? (
+            <InventoryDetailPill tone="good">Serialised</InventoryDetailPill>
+          ) : null}
+          {row.trackExpiry ? (
+            <InventoryDetailPill tone="warning">Batch / expiry</InventoryDetailPill>
+          ) : null}
+        </div>
+      ) : (
+        <span className="text-sm text-stone-400">Not tracked</span>
+      )}
+      <p className="mt-0.5 truncate text-xs text-stone-500">
+        {isTracked ? "Select the row to open serial and batch detail" : untrackedHint}
+      </p>
+    </div>
+  );
+}
+
 function summarizeTransferLines(lines: InterStoreTransferRow[]) {
   const uniqueProducts = [
     ...new Map(lines.map((line) => [line.productCode, `${line.productName} (${line.productCode})`] as const)).values()
@@ -370,6 +459,106 @@ export function EnterpriseInventoryWorkspace({
   );
   const [stockShopFilter, setStockShopFilter] = useState("");
   const [stockProductFilter, setStockProductFilter] = useState("");
+
+  const [inventoryDrillDown, setInventoryDrillDown] = useState<InventoryDrillDownTarget | null>(
+    null
+  );
+  const [inventoryDrillDownTab, setInventoryDrillDownTab] = useState<"serials" | "batches">(
+    "serials"
+  );
+  const [inventoryDrillDownSerialStatus, setInventoryDrillDownSerialStatus] = useState("AVAILABLE");
+  const [inventoryDrillDownDetail, setInventoryDrillDownDetail] =
+    useState<EnterpriseInventorySerialDetailResponse | null>(null);
+  const [inventoryDrillDownLoading, setInventoryDrillDownLoading] = useState(false);
+  const [inventoryDrillDownError, setInventoryDrillDownError] = useState<string | null>(null);
+  const inventoryDrillDownRequestRef = useRef(0);
+
+  const loadInventoryDrillDownDetail = useCallback(
+    async (target: InventoryDrillDownTarget) => {
+      const params = new URLSearchParams({ productCode: target.productCode });
+
+      if (target.locationCode) {
+        params.set("locationCode", target.locationCode);
+      }
+
+      const requestId = inventoryDrillDownRequestRef.current + 1;
+
+      inventoryDrillDownRequestRef.current = requestId;
+      setInventoryDrillDownLoading(true);
+      setInventoryDrillDownError(null);
+
+      try {
+        const response = await fetch(`/api/inventory/serial-detail?${params.toString()}`, {
+          cache: "no-store"
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && typeof payload.message === "string"
+              ? payload.message
+              : `Flash ERP could not load serial and batch detail (HTTP ${response.status}).`;
+
+          throw new Error(message);
+        }
+
+        if (inventoryDrillDownRequestRef.current !== requestId) {
+          return;
+        }
+
+        setInventoryDrillDownDetail(payload as EnterpriseInventorySerialDetailResponse);
+      } catch (error) {
+        if (inventoryDrillDownRequestRef.current !== requestId) {
+          return;
+        }
+
+        setInventoryDrillDownDetail(null);
+        setInventoryDrillDownError(
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not load serial and batch detail."
+        );
+      } finally {
+        if (inventoryDrillDownRequestRef.current === requestId) {
+          setInventoryDrillDownLoading(false);
+        }
+      }
+    },
+    []
+  );
+
+  const openInventoryDrillDown = useCallback(
+    (target: InventoryDrillDownTarget) => {
+      if (!target.isSerialized && !target.trackExpiry) {
+        return;
+      }
+
+      // Mirrors the store desktop and Online POS behaviour: serialised items land
+      // on the serial tab, everything else on batches, and the status filter
+      // resets so a reopened panel never inherits a stale narrowing.
+      setInventoryDrillDown(target);
+      setInventoryDrillDownTab(target.isSerialized ? "serials" : "batches");
+      setInventoryDrillDownSerialStatus("AVAILABLE");
+      setInventoryDrillDownDetail(null);
+      void loadInventoryDrillDownDetail(target);
+    },
+    [loadInventoryDrillDownDetail]
+  );
+
+  const closeInventoryDrillDown = useCallback(() => {
+    inventoryDrillDownRequestRef.current += 1;
+    setInventoryDrillDown(null);
+    setInventoryDrillDownDetail(null);
+    setInventoryDrillDownError(null);
+    setInventoryDrillDownLoading(false);
+  }, []);
+
+  const retryInventoryDrillDown = useCallback(() => {
+    if (inventoryDrillDown) {
+      void loadInventoryDrillDownDetail(inventoryDrillDown);
+    }
+  }, [inventoryDrillDown, loadInventoryDrillDownDetail]);
+
   const [poLocationCode, setPoLocationCode] = useState("");
   const [poSupplierNo, setPoSupplierNo] = useState("");
   const [poProductCode, setPoProductCode] = useState("");
@@ -488,9 +677,17 @@ export function EnterpriseInventoryWorkspace({
         cell: ({ row }) => (
           <div className="min-w-0">
             <p className="truncate font-medium text-stone-900">{row.original.productName}</p>
-            <p className="truncate text-xs text-stone-500">
-              {row.original.productCode}
-              {row.original.sku ? ` • ${row.original.sku}` : ""}
+            <p className="flex flex-wrap items-center gap-2 truncate text-xs text-stone-500">
+              <span>
+                {row.original.productCode}
+                {row.original.sku ? ` • ${row.original.sku}` : ""}
+              </span>
+              <a
+                className="font-semibold text-[var(--brand)] transition hover:text-[var(--brand-deep)]"
+                href={productCatalogHref(row.original.productCode)}
+              >
+                Open catalog
+              </a>
             </p>
           </div>
         ),
@@ -516,6 +713,13 @@ export function EnterpriseInventoryWorkspace({
         header: "Status"
       },
       {
+        accessorKey: "isSerialized",
+        header: "Serial / batch detail",
+        cell: ({ row }) =>
+          renderTrackingBadges(row.original, "Select the row to open the catalogue profile"),
+        meta: { disableTruncate: true }
+      },
+      {
         accessorKey: "lastMovementAtLabel",
         header: "Last movement",
         cell: ({ row }) => renderTimestamp(row.original.lastMovementAt, row.original.lastMovementAtLabel),
@@ -535,8 +739,16 @@ export function EnterpriseInventoryWorkspace({
             <p className="truncate font-medium text-stone-900">
               {row.original.storeName ?? row.original.warehouseName ?? "Unassigned"}
             </p>
-            <p className="truncate text-xs text-stone-500">
-              {row.original.locationName} ({row.original.locationCode})
+            <p className="flex flex-wrap items-center gap-2 truncate text-xs text-stone-500">
+              <span>
+                {row.original.locationName} ({row.original.locationCode})
+              </span>
+              <a
+                className="font-semibold text-[var(--brand)] transition hover:text-[var(--brand-deep)]"
+                href={inventoryLocationHref(row.original.locationCode)}
+              >
+                Open location
+              </a>
             </p>
           </div>
         ),
@@ -611,6 +823,13 @@ export function EnterpriseInventoryWorkspace({
         header: "Status"
       },
       {
+        accessorKey: "isSerialized",
+        header: "Serial / batch detail",
+        cell: ({ row }) =>
+          renderTrackingBadges(row.original, "Select the row to open that shop or warehouse"),
+        meta: { disableTruncate: true }
+      },
+      {
         accessorKey: "lastMovementAtLabel",
         header: "Last movement",
         cell: ({ row }) => renderTimestamp(row.original.lastMovementAt, row.original.lastMovementAtLabel),
@@ -667,6 +886,50 @@ export function EnterpriseInventoryWorkspace({
           )
       ),
     [stockProductFilter, stockShopFilter, workspace.stockPositionRows]
+  );
+
+  const inventoryDrillDownSerialRows = useMemo(() => {
+    const rows = inventoryDrillDownDetail?.serialUnits ?? [];
+
+    return rows
+      .filter(
+        (serialUnit) =>
+          inventoryDrillDownSerialStatus === "ALL" ||
+          serialUnit.status.toUpperCase() === inventoryDrillDownSerialStatus
+      )
+      .sort(
+        (left, right) =>
+          left.status.localeCompare(right.status) ||
+          left.serialNumber.localeCompare(right.serialNumber)
+      );
+  }, [inventoryDrillDownDetail, inventoryDrillDownSerialStatus]);
+  const inventoryDrillDownSerialCounts = useMemo(() => {
+    return (inventoryDrillDownDetail?.serialUnits ?? []).reduce<Record<string, number>>(
+      (counts, serialUnit) => {
+        const status = serialUnit.status.toUpperCase();
+
+        return { ...counts, [status]: (counts[status] ?? 0) + 1 };
+      },
+      {}
+    );
+  }, [inventoryDrillDownDetail]);
+  const inventoryDrillDownBatchRows = useMemo(() => {
+    return [...(inventoryDrillDownDetail?.batches ?? [])].sort((left, right) =>
+      left.expiryDate.localeCompare(right.expiryDate)
+    );
+  }, [inventoryDrillDownDetail]);
+  const inventoryDrillDownExpiringSoon = useMemo(
+    () =>
+      inventoryDrillDownBatchRows.filter(
+        (batch) =>
+          batch.daysUntilExpiry >= 0 &&
+          batch.daysUntilExpiry <= (inventoryDrillDownDetail?.expiryAlertLeadDays ?? 30)
+      ).length,
+    [inventoryDrillDownBatchRows, inventoryDrillDownDetail]
+  );
+  const inventoryDrillDownExpired = useMemo(
+    () => inventoryDrillDownBatchRows.filter((batch) => batch.daysUntilExpiry < 0).length,
+    [inventoryDrillDownBatchRows]
   );
   const interStoreLocationOptions = useMemo(
     () =>
@@ -2726,8 +2989,24 @@ export function EnterpriseInventoryWorkspace({
             data={workspace.productRows}
             emptyLabel="No products are available for canonical inventory posture yet."
             exportFileName="flash-erp-inventory-products"
-            getRowHref={(row) => `/catalog/products/${encodeURIComponent(row.productCode)}`}
+            getRowHref={(row) => productCatalogHref(row.productCode)}
             globalFilterFn={productFilter}
+            onRowSelect={(row) => {
+              if (!row.isSerialized && !row.trackExpiry) {
+                router.push(productCatalogHref(row.productCode));
+                return;
+              }
+
+              openInventoryDrillDown({
+                isSerialized: row.isSerialized,
+                locationCode: null,
+                locationName: "Every shop and warehouse",
+                onHandQuantity: row.onHandQuantity,
+                productCode: row.productCode,
+                productName: row.productName,
+                trackExpiry: row.trackExpiry
+              });
+            }}
             searchPlaceholder="Search stocked products by code, SKU, name, or status"
             serverPagination={
               dedicatedView
@@ -2750,9 +3029,25 @@ export function EnterpriseInventoryWorkspace({
               data={filteredStockPositionRows}
               emptyLabel="No shop inventory rows are available yet."
               exportFileName="flash-erp-stock-by-shop"
-              getRowHref={(row) => `/inventory/locations/${encodeURIComponent(row.locationCode)}`}
+              getRowHref={(row) => inventoryLocationHref(row.locationCode)}
               globalFilterFn={stockPositionFilter}
               hideSearch
+              onRowSelect={(row) => {
+                if (!row.isSerialized && !row.trackExpiry) {
+                  router.push(inventoryLocationHref(row.locationCode));
+                  return;
+                }
+
+                openInventoryDrillDown({
+                  isSerialized: row.isSerialized,
+                  locationCode: row.locationCode,
+                  locationName: row.locationName,
+                  onHandQuantity: row.onHandQuantity,
+                  productCode: row.productCode,
+                  productName: row.productName,
+                  trackExpiry: row.trackExpiry
+                });
+              }}
               initialPageSize={25}
               pageSizeOptions={[25, 50, 100]}
               searchPlaceholder="Optional text search"
@@ -3203,6 +3498,286 @@ export function EnterpriseInventoryWorkspace({
           </section>
         </WorkspaceTabsContent>
       </WorkspaceTabs>
+
+      <ActionDialog
+        description={
+          inventoryDrillDown
+            ? `${inventoryDrillDown.productCode} • ${
+                inventoryDrillDown.locationName ?? "Every shop and warehouse"
+              }`
+            : undefined
+        }
+        hideTrigger
+        onOpenChange={(open) => {
+          if (!open) {
+            closeInventoryDrillDown();
+          }
+        }}
+        open={inventoryDrillDown !== null}
+        title={inventoryDrillDown?.productName ?? "Inventory detail"}
+        triggerLabel="Open serial and batch detail"
+        widthClassName="max-w-5xl"
+      >
+        {inventoryDrillDown ? (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <InventoryDetailPill
+                tone={inventoryDrillDown.onHandQuantity > 0 ? "good" : "warning"}
+              >{`On hand ${quantityFormatter.format(inventoryDrillDown.onHandQuantity)}`}</InventoryDetailPill>
+              {inventoryDrillDown.isSerialized ? (
+                <InventoryDetailPill tone="good">Serialised</InventoryDetailPill>
+              ) : null}
+              {inventoryDrillDown.trackExpiry ? (
+                <InventoryDetailPill tone="warning">Batch / expiry tracked</InventoryDetailPill>
+              ) : null}
+              {inventoryDrillDownDetail ? (
+                <button
+                  className="text-xs font-semibold text-[var(--brand)] transition hover:text-[var(--brand-deep)]"
+                  onClick={() => void retryInventoryDrillDown()}
+                  type="button"
+                >
+                  Reload detail
+                </button>
+              ) : null}
+            </div>
+
+            <p className="text-xs leading-5 text-stone-500">
+              {inventoryDrillDownLoading
+                ? "Reading the canonical serial registry and batch ledger…"
+                : inventoryDrillDownDetail?.statusMessage ??
+                  "Serial and batch detail is read from the canonical enterprise ledger for this item."}
+            </p>
+
+            {inventoryDrillDownError ? (
+              <div
+                className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700"
+                role="alert"
+              >
+                <p className="font-semibold">Serial and batch detail could not be read.</p>
+                <p className="mt-1 break-words">{inventoryDrillDownError}</p>
+                <button
+                  className="mt-3 inline-flex items-center rounded-full border border-rose-300 bg-white px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-rose-700 transition hover:border-rose-400"
+                  onClick={() => void retryInventoryDrillDown()}
+                  type="button"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2">
+              {inventoryDrillDown.isSerialized ? (
+                <button
+                  className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                    inventoryDrillDownTab === "serials"
+                      ? "border-[var(--brand)] bg-[var(--brand)] text-white"
+                      : "border-stone-300 bg-white text-stone-700 hover:border-stone-400"
+                  }`}
+                  onClick={() => setInventoryDrillDownTab("serials")}
+                  type="button"
+                >
+                  {`Serial numbers${
+                    inventoryDrillDownDetail ? ` (${quantityFormatter.format(inventoryDrillDownDetail.serialUnitTotal)})` : ""
+                  }`}
+                </button>
+              ) : null}
+              {inventoryDrillDown.trackExpiry ? (
+                <button
+                  className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                    inventoryDrillDownTab === "batches"
+                      ? "border-[var(--brand)] bg-[var(--brand)] text-white"
+                      : "border-stone-300 bg-white text-stone-700 hover:border-stone-400"
+                  }`}
+                  onClick={() => setInventoryDrillDownTab("batches")}
+                  type="button"
+                >
+                  {`Batches & expiry${
+                    inventoryDrillDownDetail ? ` (${quantityFormatter.format(inventoryDrillDownDetail.batchTotal)})` : ""
+                  }`}
+                </button>
+              ) : null}
+            </div>
+
+            {inventoryDrillDown.isSerialized && inventoryDrillDownTab === "serials" ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    aria-label="Filter serial numbers by status"
+                    className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 outline-none transition focus:border-[var(--brand)]"
+                    onChange={(event) => setInventoryDrillDownSerialStatus(event.target.value)}
+                    value={inventoryDrillDownSerialStatus}
+                  >
+                    {inventorySerialStatusOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <InventoryDetailPill tone="good">{`Available ${quantityFormatter.format(
+                    inventoryDrillDownSerialCounts.AVAILABLE ?? 0
+                  )}`}</InventoryDetailPill>
+                  <InventoryDetailPill>{`Sold ${quantityFormatter.format(
+                    inventoryDrillDownSerialCounts.SOLD ?? 0
+                  )}`}</InventoryDetailPill>
+                  <InventoryDetailPill>{`In transit ${quantityFormatter.format(
+                    inventoryDrillDownSerialCounts.IN_TRANSIT ?? 0
+                  )}`}</InventoryDetailPill>
+                  <InventoryDetailPill tone="warning">{`Adjusted out ${quantityFormatter.format(
+                    inventoryDrillDownSerialCounts.ADJUSTED_OUT ?? 0
+                  )}`}</InventoryDetailPill>
+                </div>
+
+                {inventoryDrillDownDetail &&
+                inventoryDrillDownDetail.serialUnits.length < inventoryDrillDownDetail.serialUnitTotal ? (
+                  <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-5 text-amber-800">
+                    {`Showing the first ${quantityFormatter.format(
+                      inventoryDrillDownDetail.serialUnits.length
+                    )} of ${quantityFormatter.format(
+                      inventoryDrillDownDetail.serialUnitTotal
+                    )} units for this scope. Filter by shop on the Item Dynamic view to narrow the window.`}
+                  </p>
+                ) : null}
+
+                {inventoryDrillDownSerialRows.length ? (
+                  <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white">
+                    <table className="min-w-full table-fixed border-collapse text-sm">
+                      <thead className="bg-stone-100/90">
+                        <tr>
+                          {["Serial number", "Status", "Location", "Last document", "Last movement"].map(
+                            (heading) => (
+                              <th
+                                className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500"
+                                key={heading}
+                              >
+                                {heading}
+                              </th>
+                            )
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {inventoryDrillDownSerialRows.map((serialUnit) => (
+                          <tr className="border-t border-stone-200/80" key={serialUnit.serialUnitId}>
+                            <td className="px-3 py-2.5">
+                              <SerialChip serialNumber={serialUnit.serialNumber} />
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <InventoryDetailPill
+                                tone={
+                                  serialUnit.status.toUpperCase() === "AVAILABLE"
+                                    ? "good"
+                                    : serialUnit.status.toUpperCase() === "ADJUSTED_OUT"
+                                      ? "warning"
+                                      : "neutral"
+                                }
+                              >
+                                {formatSerialStatus(serialUnit.status)}
+                              </InventoryDetailPill>
+                            </td>
+                            <td className="truncate px-3 py-2.5 text-stone-700">
+                              {serialUnit.locationName ?? "Unassigned"}
+                            </td>
+                            <td className="truncate px-3 py-2.5 text-stone-700">
+                              {serialUnit.sourceReferenceLabel ?? "-"}
+                            </td>
+                            <td className="px-3 py-2.5 text-stone-700">
+                              {new Date(
+                                serialUnit.lastOccurredAt ?? serialUnit.updatedAt
+                              ).toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : inventoryDrillDownLoading || inventoryDrillDownError ? null : (
+                  <p className="rounded-2xl border border-stone-200 bg-white/90 px-4 py-6 text-center text-sm text-stone-600">
+                    No serial units match this item, location, and status filter.
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            {inventoryDrillDown.trackExpiry && inventoryDrillDownTab === "batches" ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <InventoryDetailPill>{`Active batches ${quantityFormatter.format(
+                    inventoryDrillDownDetail?.batchTotal ?? 0
+                  )}`}</InventoryDetailPill>
+                  <InventoryDetailPill tone="warning">{`Expiring within ${
+                    inventoryDrillDownDetail?.expiryAlertLeadDays ?? 30
+                  } days ${quantityFormatter.format(inventoryDrillDownExpiringSoon)}`}</InventoryDetailPill>
+                  <InventoryDetailPill tone="warning">{`Expired ${quantityFormatter.format(
+                    inventoryDrillDownExpired
+                  )}`}</InventoryDetailPill>
+                </div>
+
+                {inventoryDrillDownBatchRows.length ? (
+                  <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white">
+                    <table className="min-w-full table-fixed border-collapse text-sm">
+                      <thead className="bg-stone-100/90">
+                        <tr>
+                          {["Batch", "Location", "Manufactured", "Expiry", "Qty on hand", "Status"].map(
+                            (heading) => (
+                              <th
+                                className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500"
+                                key={heading}
+                              >
+                                {heading}
+                              </th>
+                            )
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {inventoryDrillDownBatchRows.map((batch) => (
+                          <tr className="border-t border-stone-200/80" key={batch.batchId}>
+                            <td className="truncate px-3 py-2.5 font-medium text-stone-900">
+                              {batch.batchNo}
+                            </td>
+                            <td className="truncate px-3 py-2.5 text-stone-700">{batch.locationName}</td>
+                            <td className="px-3 py-2.5 text-stone-700">
+                              {batch.manufacturedAt
+                                ? new Date(batch.manufacturedAt).toLocaleDateString()
+                                : "-"}
+                            </td>
+                            <td className="px-3 py-2.5 text-stone-700">
+                              {new Date(batch.expiryDate).toLocaleDateString()}
+                            </td>
+                            <td className="px-3 py-2.5 font-medium text-stone-900">
+                              {quantityFormatter.format(batch.quantityOnHand)}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <InventoryDetailPill
+                                tone={
+                                  batch.daysUntilExpiry <=
+                                  (inventoryDrillDownDetail?.expiryAlertLeadDays ?? 30)
+                                    ? "warning"
+                                    : "good"
+                                }
+                              >
+                                {batch.daysUntilExpiry < 0
+                                  ? "Expired"
+                                  : batch.daysUntilExpiry === 0
+                                    ? "Expires today"
+                                    : `${batch.daysUntilExpiry} days`}
+                              </InventoryDetailPill>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : inventoryDrillDownLoading || inventoryDrillDownError ? null : (
+                  <p className="rounded-2xl border border-stone-200 bg-white/90 px-4 py-6 text-center text-sm text-stone-600">
+                    No batch or expiry records with stock are held for this item in this scope.
+                  </p>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </ActionDialog>
 
       <section className="glass-panel rounded-[1.4rem] p-5">
         <p className="text-sm leading-6 text-stone-600">{workspace.statusMessage}</p>

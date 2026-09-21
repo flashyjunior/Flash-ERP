@@ -136,13 +136,21 @@ export default async function SettingsSubmenuPage({
         )
       : Promise.resolve(undefined),
     view === "retail-users"
-      ? getEnterpriseSecurityWorkspace().catch((error: unknown) =>
-          buildUnavailableEnterpriseSecurityWorkspace(
+      ? getEnterpriseSecurityWorkspace().catch((error: unknown) => {
+          console.error("Flash ERP could not load the enterprise security workspace.", error);
+
+          return buildUnavailableEnterpriseSecurityWorkspace(
             error instanceof Error
               ? `Unable to load live Flash ERP security policy: ${error.message}`
-              : "Unable to load live Flash ERP security policy."
-          )
-        )
+              : "Unable to load live Flash ERP security policy.",
+            {
+              loadError:
+                error instanceof Error
+                  ? error.message
+                  : "The security policy query failed without a message."
+            }
+          );
+        })
       : Promise.resolve(undefined)
   ]);
 
