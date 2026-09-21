@@ -1819,6 +1819,7 @@ async function getOnlineStoreAssignment(
 export type OnlineStoreReportId =
   | "sales"
   | "products"
+  | "serialsBatches"
   | "orders"
   | "layaways"
   | "layawayPayments"
@@ -1891,6 +1892,13 @@ const defaultOnlineReportDefinitions: OnlineStoreReportDefinition[] = [
     group: "Sales",
     description: "Product quantity, gross, tax, discount, and net movement.",
     parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "shiftId", "productQuery", "limit"]
+  },
+  {
+    reportId: "serialsBatches",
+    label: "Sold serials and batches",
+    group: "Inventory",
+    description: "Receipt-level serial numbers and batch allocations for tracked items sold at this shop.",
+    parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "shiftId", "productQuery", "locationId", "limit"]
   },
   {
     reportId: "orders",
@@ -1999,7 +2007,17 @@ function readOnlineReportDefinitions(value: Prisma.JsonValue | null | undefined)
     .sort((left, right) => left.sortOrder - right.sortOrder)
     .map(({ sortOrder: _sortOrder, ...definition }) => definition);
 
-  return definitions.length ? definitions : defaultOnlineReportDefinitions;
+  if (!definitions.length) {
+    return defaultOnlineReportDefinitions;
+  }
+
+  const soldTraceDefinition = defaultOnlineReportDefinitions.find(
+    (definition) => definition.reportId === "serialsBatches"
+  );
+
+  return soldTraceDefinition && !definitions.some((definition) => definition.reportId === "serialsBatches")
+    ? [...definitions, soldTraceDefinition]
+    : definitions;
 }
 
 export type OnlineStoreWorkspaceData = {
@@ -2729,6 +2747,21 @@ export type OnlineStoreWorkspaceData = {
       taxAmount: number;
       netAmount: number;
     }>;
+    serialBatchRows: Array<{
+      traceId: string;
+      transactionNo: string;
+      completedAt: string | null;
+      cashierCode: string | null;
+      productCode: string;
+      productName: string;
+      locationId: string | null;
+      locationName: string | null;
+      trackingType: "Serial" | "Batch";
+      serialNumber: string | null;
+      batchNo: string | null;
+      expiryDate: string | null;
+      quantity: number;
+    }>;
     salesOrderRows: Array<{
       orderId: string;
       orderNo: string;
@@ -2861,6 +2894,7 @@ const emptyOnlineStoreCollections = {
     salesRows: [],
     tenderRows: [],
     productRows: [],
+    serialBatchRows: [],
     salesOrderRows: [],
     layawayRows: [],
     layawayPaymentRows: [],
@@ -5234,6 +5268,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         completedAt: true,
         lines: {
           select: {
+            id: true,
             lineIntent: true,
             productCodeSnapshot: true,
             productNameSnapshot: true,
@@ -5248,7 +5283,15 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
             appliedPromotionNameSnapshot: true,
             taxAmount: true,
             lineTotal: true,
-            lineNote: true
+            lineNote: true,
+            serialNumbersSnapshot: true,
+            batchAllocationsSnapshot: true,
+            inventoryLocationId: true,
+            inventoryLocation: {
+              select: {
+                name: true
+              }
+            }
           }
         }
       }
@@ -5952,6 +5995,48 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
   }));
   const reportTenderRows = [...reportTenderMap.values()].sort((left, right) => right.netAmount - left.netAmount);
   const reportProductRows = [...reportProductMap.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount));
+  const reportSerialBatchRows: OnlineStoreWorkspaceData["reports"]["serialBatchRows"] =
+    reportTransactions
+      .flatMap((transaction) =>
+        transaction.lines
+          .filter((line) => line.lineIntent === PosTransactionLineIntent.SALE)
+          .flatMap((line) => {
+            const common = {
+              transactionNo: transaction.transactionNo,
+              completedAt: transaction.completedAt?.toISOString() ?? null,
+              cashierCode: transaction.cashierCodeSnapshot,
+              productCode: line.productCodeSnapshot,
+              productName: line.productNameSnapshot,
+              locationId: line.inventoryLocationId,
+              locationName: line.inventoryLocation?.name ?? null
+            };
+            const serialRows = (readStringArrayJson(line.serialNumbersSnapshot) ?? []).map(
+              (serialNumber) => ({
+                traceId: `${line.id}:SERIAL:${serialNumber}`,
+                ...common,
+                trackingType: "Serial" as const,
+                serialNumber,
+                batchNo: null,
+                expiryDate: null,
+                quantity: 1
+              })
+            );
+            const batchRows = readInventoryBatchAllocations(line.batchAllocationsSnapshot).map(
+              (batch) => ({
+                traceId: `${line.id}:BATCH:${batch.batchNo}:${batch.expiryDate}`,
+                ...common,
+                trackingType: "Batch" as const,
+                serialNumber: null,
+                batchNo: batch.batchNo,
+                expiryDate: batch.expiryDate,
+                quantity: batch.quantity
+              })
+            );
+
+            return [...serialRows, ...batchRows];
+          })
+      )
+      .slice(0, 500);
   const reportInventoryRows = ledgerPositions
     .map((position) => {
       const product = productById.get(position.productId);
@@ -6054,6 +6139,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     salesRows: reportSalesRows,
     tenderRows: reportTenderRows,
     productRows: reportProductRows,
+    serialBatchRows: reportSerialBatchRows,
     salesOrderRows: mappedSalesOrders.map((order) => ({
       orderId: order.orderId,
       orderNo: order.orderNo,
@@ -6563,6 +6649,7 @@ export async function browseOnlineStoreReports(
         completedAt: true,
         lines: {
           select: {
+            id: true,
             lineIntent: true,
             productCodeSnapshot: true,
             productNameSnapshot: true,
@@ -6575,7 +6662,15 @@ export async function browseOnlineStoreReports(
             unitPrice: true,
             discountAmount: true,
             taxAmount: true,
-            lineTotal: true
+            lineTotal: true,
+            serialNumbersSnapshot: true,
+            batchAllocationsSnapshot: true,
+            inventoryLocationId: true,
+            inventoryLocation: {
+              select: {
+                name: true
+              }
+            }
           }
         }
       }
@@ -7035,6 +7130,51 @@ export async function browseOnlineStoreReports(
     })),
     tenderRows: [...tenderRowsByKey.values()].sort((left, right) => right.netAmount - left.netAmount),
     productRows: [...productRowsByKey.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount)),
+    serialBatchRows: transactions
+      .flatMap((transaction) =>
+        transaction.lines
+          .filter(
+            (line) =>
+              line.lineIntent === PosTransactionLineIntent.SALE &&
+              (!criteria.locationId || line.inventoryLocationId === criteria.locationId)
+          )
+          .flatMap((line) => {
+            const common = {
+              transactionNo: transaction.transactionNo,
+              completedAt: transaction.completedAt?.toISOString() ?? null,
+              cashierCode: transaction.cashierCodeSnapshot,
+              productCode: line.productCodeSnapshot,
+              productName: line.productNameSnapshot,
+              locationId: line.inventoryLocationId,
+              locationName: line.inventoryLocation?.name ?? null
+            };
+            const serialRows = (readStringArrayJson(line.serialNumbersSnapshot) ?? []).map(
+              (serialNumber) => ({
+                traceId: `${line.id}:SERIAL:${serialNumber}`,
+                ...common,
+                trackingType: "Serial" as const,
+                serialNumber,
+                batchNo: null,
+                expiryDate: null,
+                quantity: 1
+              })
+            );
+            const batchRows = readInventoryBatchAllocations(line.batchAllocationsSnapshot).map(
+              (batch) => ({
+                traceId: `${line.id}:BATCH:${batch.batchNo}:${batch.expiryDate}`,
+                ...common,
+                trackingType: "Batch" as const,
+                serialNumber: null,
+                batchNo: batch.batchNo,
+                expiryDate: batch.expiryDate,
+                quantity: batch.quantity
+              })
+            );
+
+            return [...serialRows, ...batchRows];
+          })
+      )
+      .slice(0, criteria.limit),
     salesOrderRows: salesOrderReportRows.map((order) => {
       const lineCounts = salesOrderReportLineCountByOrderId.get(order.id);
 
@@ -12666,6 +12806,7 @@ function normalizeReportDateEnd(value: string | null) {
 
 function normalizeOnlineReportId(value: unknown): OnlineStoreReportId {
   return value === "products" ||
+    value === "serialsBatches" ||
     value === "orders" ||
     value === "layaways" ||
     value === "layawayPayments" ||

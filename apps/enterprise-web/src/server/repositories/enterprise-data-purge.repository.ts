@@ -2,10 +2,11 @@ import { Prisma } from "@prisma/client";
 import { SecurityLogKind, SecurityLogSeverity, SyncNodeType, RecordStatus } from "@flash-erp/domain";
 
 import { prisma } from "@/lib/db/prisma";
+import { serializeJsonField } from "@/server/repositories/json-field";
 import {
-  alwaysIncludedPurgeScopeKeys,
   enterpriseDataPurgeConfirmationText,
   enterpriseDataPurgeScopeByKey as scopeByKey,
+  transactionalPurgeScopeKeys,
   type EnterpriseDataPurgeRequest,
   type EnterpriseDataPurgeResponse,
   type EnterpriseDataPurgeScopeKey
@@ -20,9 +21,9 @@ export type {
 /**
  * Enterprise data purge.
  *
- * Transactional data is always removed. Master data is opt-in per scope so an
- * operator can, for example, wipe a pilot's trading history while keeping the
- * product catalogue, or reset the whole workspace back to an empty shell.
+ * Transactional data and master data are both explicitly selected. Master data
+ * requires the full transactional group so historical documents cannot retain
+ * broken references to deleted masters.
  *
  * Deletions are ordered child-before-parent. Rows that cascade from a parent we
  * delete are not listed separately; Prisma's `onDelete: Cascade` removes them.
@@ -39,7 +40,7 @@ export class EnterpriseDataPurgeError extends Error {
 }
 
 function resolveRequestedScopes(input: EnterpriseDataPurgeRequest) {
-  const requested = new Set<EnterpriseDataPurgeScopeKey>(alwaysIncludedPurgeScopeKeys);
+  const requested = new Set<EnterpriseDataPurgeScopeKey>();
 
   for (const value of Array.isArray(input.scopes) ? input.scopes : []) {
     if (typeof value !== "string") {
@@ -53,6 +54,25 @@ function resolveRequestedScopes(input: EnterpriseDataPurgeRequest) {
     }
 
     requested.add(scope.key);
+  }
+
+  if (requested.size === 0) {
+    throw new EnterpriseDataPurgeError(
+      "Select transactional data or at least one master-data scope before running the purge."
+    );
+  }
+
+  const selectedMasterScope = [...requested].find(
+    (key) => scopeByKey.get(key)?.group === "Master data"
+  );
+  const missingTransactionalScope = transactionalPurgeScopeKeys.find(
+    (key) => !requested.has(key)
+  );
+
+  if (selectedMasterScope && missingTransactionalScope) {
+    throw new EnterpriseDataPurgeError(
+      `Purging "${scopeByKey.get(selectedMasterScope)?.label}" also requires the Transactional data checkbox so related documents and stock records are removed safely.`
+    );
   }
 
   for (const key of requested) {
@@ -499,6 +519,7 @@ export async function purgeEnterpriseData(
   const selectedMasterScopes = scopes
     .filter((key) => scopeByKey.get(key)?.group === "Master data")
     .map((key) => scopeByKey.get(key)?.label ?? key);
+  const transactionalDataSelected = transactionalPurgeScopeKeys.every((key) => scopeSet.has(key));
 
   await prisma.securityLog.create({
     data: {
@@ -514,13 +535,15 @@ export async function purgeEnterpriseData(
       message: `${actorLabel} purged ${totalDeleted} record(s) across ${deletedCounts.length} table(s).${
         selectedMasterScopes.length
           ? ` Master data removed: ${selectedMasterScopes.join(", ")}.`
-          : " Transactional data only."
+          : transactionalDataSelected
+            ? " Transactional data only."
+            : " Selected master data only."
       }`,
-      detailsJson: {
+      detailsJson: serializeJsonField({
         scopes,
         totalDeleted,
         deletedCounts
-      } as Prisma.InputJsonValue
+      } satisfies Prisma.InputJsonValue)
     }
   });
 

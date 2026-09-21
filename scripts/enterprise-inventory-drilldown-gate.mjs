@@ -36,6 +36,28 @@ const posWorkspace = read(
   "apps/enterprise-web/src/components/enterprise/online-store-workspace.tsx"
 );
 const desktopApp = read("apps/store-desktop/src/renderer/modern-app.tsx");
+const enterpriseReportingRepository = read(
+  "apps/enterprise-web/src/server/repositories/enterprise-reporting.repository.ts"
+);
+const enterpriseReportingDashboard = read(
+  "apps/enterprise-web/src/components/enterprise/enterprise-reporting-dashboard.tsx"
+);
+const onlineStoreRepository = read(
+  "apps/enterprise-web/src/server/repositories/online-store.repository.ts"
+);
+const desktopRuntime = read("apps/store-desktop/src/shared/desktop-runtime.ts");
+const desktopReportProviders = [
+  "apps/store-desktop/src/main/offline/local-store-service.ts",
+  "apps/store-desktop/src/main/mssql/mssql-store-service.ts",
+  "apps/store-desktop/src/main/postgres/postgres-store-service.ts",
+].map(read);
+const purgeScopes = read("apps/enterprise-web/src/lib/security/data-purge-scopes.ts");
+const purgeWorkspace = read(
+  "apps/enterprise-web/src/components/enterprise/enterprise-security-workspace.tsx"
+);
+const purgeRepository = read(
+  "apps/enterprise-web/src/server/repositories/enterprise-data-purge.repository.ts"
+);
 const inventoryRows = `${inventoryRepository}\n${inventoryWorkspace}`;
 
 check(
@@ -79,7 +101,7 @@ check(
 check(
   "drill-down defaults to serials for serialized items and batches otherwise",
   inventoryWorkspace.includes('setInventoryDrillDownTab(target.isSerialized ? "serials" : "batches")') &&
-    inventoryWorkspace.includes('setInventoryDrillDownSerialStatus("ALL")')
+    inventoryWorkspace.includes('setInventoryDrillDownSerialStatus("AVAILABLE")')
 );
 check(
   "drill-down surfaces read failures instead of showing an empty list",
@@ -105,6 +127,51 @@ check(
 check(
   "store desktop drill-down reports registry failures instead of swallowing them",
   desktopApp.includes("inventoryDrillDownError")
+);
+check(
+  "HQ reporting derives sold serial and batch rows from immutable sale snapshots",
+  enterpriseReportingRepository.includes("soldInventoryTraceRows") &&
+    enterpriseReportingRepository.includes("serialNumbersSnapshot") &&
+    enterpriseReportingRepository.includes("batchAllocationsSnapshot")
+);
+check(
+  "HQ reporting exposes the sold serials and batches drill-down",
+  enterpriseReportingDashboard.includes('id: "soldInventoryTrace"') &&
+    enterpriseReportingDashboard.includes("Sold serials and batches")
+);
+check(
+  "Online POS reporting exposes sold serial and batch snapshots",
+    onlineStoreRepository.includes("serialBatchRows") &&
+    onlineStoreRepository.includes("serialNumbersSnapshot") &&
+    onlineStoreRepository.includes("batchAllocationsSnapshot") &&
+    posWorkspace.includes('activeReport === "serialsBatches"')
+);
+check(
+  "Store Desktop report contract and navigation expose sold serials and batches",
+  desktopRuntime.includes("serialBatchRows: StoreSerialBatchSalesReportRow[]") &&
+    desktopApp.includes('reportKind: "serials-batches"') &&
+    desktopApp.includes("report.serialBatchRows.map")
+);
+check(
+  "all Store Desktop database providers derive the report from sale snapshots",
+  desktopReportProviders.every(
+    (provider) =>
+      provider.includes("mappedSerialBatchRows") &&
+      provider.includes("readSerializedLineNumbers(row.serial_numbers_json)") &&
+      provider.includes("readInventoryBatchAllocations(row.batch_allocations_json)") &&
+      provider.includes("serialBatchRows: mappedSerialBatchRows")
+  )
+);
+check(
+  "security presents one explicit transactional purge checkbox",
+  purgeWorkspace.includes("Clear all transactional data") &&
+    purgeWorkspace.includes("toggleTransactionalPurge") &&
+    purgeScopes.includes("transactionalPurgeScopeKeys")
+);
+check(
+  "the server rejects master-data purge unless transactional cleanup is selected",
+  purgeRepository.includes("const requested = new Set<EnterpriseDataPurgeScopeKey>()") &&
+    purgeRepository.includes("selectedMasterScope && missingTransactionalScope")
 );
 
 for (const relativePath of missingFiles) {

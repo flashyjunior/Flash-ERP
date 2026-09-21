@@ -161,6 +161,7 @@ import type {
   StoreReceiptSearchResult,
   StoreReportBrowseRequest,
   StoreReportResult,
+  StoreSerialBatchSalesReportRow,
   StoreRecoveryTaskSummary,
   StoreRemoteInterStoreStockRequestInput,
   StoreRemoteInventoryLookupInput,
@@ -982,6 +983,18 @@ type ReportInventoryRow = {
   quantity_on_hand: string | number;
   unit_price: string | number;
   updated_at: string;
+};
+
+type ReportSerialBatchRow = {
+  line_id: string;
+  transaction_no: string;
+  completed_at: string;
+  cashier_code: string | null;
+  product_code: string;
+  product_name: string;
+  inventory_location_code: string | null;
+  serial_numbers_json: string | null;
+  batch_allocations_json: string | null;
 };
 
 type ReportBankingRow = {
@@ -10664,6 +10677,34 @@ export class MssqlStoreService {
       salesParams,
     );
 
+    const serialBatchResult = await this.query<ReportSerialBatchRow>(
+      `SELECT TOP (@limit)
+        line.[id] AS [line_id],
+        txn.[transaction_no],
+        txn.[completed_at],
+        ISNULL(txn.[cashier_code], shift.[cashier_code]) AS [cashier_code],
+        line.[product_code_snapshot] AS [product_code],
+        line.[product_name_snapshot] AS [product_name],
+        line.[inventory_location_code],
+        line.[serial_numbers_json],
+        line.[batch_allocations_json]
+       FROM [dbo].[pos_transaction_line] AS line
+       INNER JOIN [dbo].[pos_transaction] AS txn
+         ON txn.[id] = line.[pos_transaction_id]
+       LEFT JOIN [dbo].[customer] AS customer
+         ON customer.[id] = txn.[customer_id]
+       LEFT JOIN [dbo].[pos_shift] AS shift
+         ON shift.[id] = txn.[shift_id]
+       WHERE ${salesWhere.join(" AND ")}
+         AND line.[line_intent] = N'SALE'
+         AND (
+           ISNULL(NULLIF(LTRIM(RTRIM(line.[serial_numbers_json])), N''), N'[]') <> N'[]'
+           OR ISNULL(NULLIF(LTRIM(RTRIM(line.[batch_allocations_json])), N''), N'[]') <> N'[]'
+         )
+       ORDER BY txn.[completed_at] DESC, txn.[transaction_no] DESC, line.[product_name_snapshot] ASC`,
+      salesParams,
+    );
+
     const shiftWhere = ["1 = 1"];
     const shiftParams: Record<string, unknown> = { limit };
 
@@ -10869,6 +10910,42 @@ export class MssqlStoreService {
           updatedAt: row.updated_at,
         };
       });
+    const mappedSerialBatchRows = serialBatchResult.recordset
+      .flatMap<StoreSerialBatchSalesReportRow>((row) => [
+        ...readSerializedLineNumbers(row.serial_numbers_json).map(
+          (serialNumber, index) => ({
+            traceId: `${row.line_id}:serial:${index}:${serialNumber}`,
+            transactionNo: row.transaction_no,
+            completedAt: row.completed_at,
+            cashierCode: row.cashier_code,
+            productCode: row.product_code,
+            productName: row.product_name,
+            locationCode: row.inventory_location_code,
+            trackingType: "Serial" as const,
+            serialNumber,
+            batchNo: null,
+            expiryDate: null,
+            quantity: 1,
+          }),
+        ),
+        ...readInventoryBatchAllocations(row.batch_allocations_json).map(
+          (batch, index) => ({
+            traceId: `${row.line_id}:batch:${index}:${batch.batchNo}`,
+            transactionNo: row.transaction_no,
+            completedAt: row.completed_at,
+            cashierCode: row.cashier_code,
+            productCode: row.product_code,
+            productName: row.product_name,
+            locationCode: row.inventory_location_code,
+            trackingType: "Batch" as const,
+            serialNumber: null,
+            batchNo: batch.batchNo,
+            expiryDate: batch.expiryDate,
+            quantity: batch.quantity,
+          }),
+        ),
+      ])
+      .slice(0, limit);
     const mappedBankingRows = bankingResult.recordset.map<StoreBankingReportRow>(
       (row) => ({
         depositNo: row.deposit_no,
@@ -11013,6 +11090,7 @@ export class MssqlStoreService {
       salesOrderRows: mappedSalesOrderRows,
       shiftRows: mappedShiftRows,
       inventoryRows: mappedInventoryRows,
+      serialBatchRows: mappedSerialBatchRows,
       bankingRows: mappedBankingRows,
     };
   }

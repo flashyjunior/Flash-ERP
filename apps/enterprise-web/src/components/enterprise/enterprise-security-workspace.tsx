@@ -21,6 +21,7 @@ import {
   enterpriseDataPurgeConfirmationText,
   enterpriseDataPurgeScopeByKey as purgeScopeByKey,
   enterpriseDataPurgeScopes,
+  transactionalPurgeScopeKeys,
   type EnterpriseDataPurgeResponse,
   type EnterpriseDataPurgeScopeKey
 } from "@/lib/security/data-purge-scopes";
@@ -750,6 +751,12 @@ export function EnterpriseSecurityWorkspace({
       if (checked) {
         next.add(key);
 
+        if (purgeScopeByKey.get(key)?.group === "Master data") {
+          for (const transactionalKey of transactionalPurgeScopeKeys) {
+            next.add(transactionalKey);
+          }
+        }
+
         for (const dependency of purgeScopeByKey.get(key)?.requires ?? []) {
           next.add(dependency);
         }
@@ -762,6 +769,22 @@ export function EnterpriseSecurityWorkspace({
             next.delete(scope.key);
           }
         }
+      }
+
+      return next;
+    });
+  }
+
+  function toggleTransactionalPurge(checked: boolean) {
+    setPurgeScopes((current) => {
+      const next = new Set(current);
+
+      if (checked) {
+        for (const key of transactionalPurgeScopeKeys) {
+          next.add(key);
+        }
+      } else {
+        next.clear();
       }
 
       return next;
@@ -1044,31 +1067,38 @@ export function EnterpriseSecurityWorkspace({
             <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700">
               <p className="font-semibold">This permanently deletes data. There is no undo.</p>
               <p className="mt-1">
-                Every transactional record for this organisation is removed. Master data is only
-                removed where you tick it below. Take a database backup first. Shops, terminals,
-                users, roles, and security logs are always kept.
+                Only the data groups selected below are removed. Master-data selections also select
+                transactional data so related documents, stock, and financial records cannot be
+                orphaned. Take a database backup first. Shops, terminals, users, roles, and security
+                logs are always kept.
               </p>
             </div>
 
             <section className="mt-5">
               <h3 className="text-sm font-semibold text-stone-900">
-                Always included — transactional data
+                Transactional data
               </h3>
-              <div className="mt-3 grid gap-2 md:grid-cols-2">
-                {transactionalPurgeScopes.map((scope) => (
-                  <div
-                    className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm"
-                    key={scope.key}
-                  >
-                    <label className="inline-flex items-center gap-3 font-semibold text-stone-800">
-                      <input checked disabled type="checkbox" />
-                      {scope.label}
-                    </label>
-                    <p className="mt-1 pl-7 text-xs leading-5 text-stone-500">
-                      {scope.description}
-                    </p>
-                  </div>
-                ))}
+              <div className="mt-3 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm">
+                <label className="inline-flex items-center gap-3 font-semibold text-stone-800">
+                  <input
+                    checked={transactionalPurgeScopeKeys.every((key) => purgeScopes.has(key))}
+                    onChange={(event) => toggleTransactionalPurge(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Clear all transactional data
+                </label>
+                <p className="mt-1 pl-7 text-xs leading-5 text-stone-500">
+                  Sales, orders, purchasing, transfers, stock balances, serials, batches, cash,
+                  ecommerce orders, sync queues, and finance journals.
+                </p>
+                <details className="mt-2 pl-7 text-xs text-stone-500">
+                  <summary className="cursor-pointer font-semibold text-stone-600">View included records</summary>
+                  <ul className="mt-2 grid gap-1 md:grid-cols-2">
+                    {transactionalPurgeScopes.map((scope) => (
+                      <li key={scope.key}>{scope.label}</li>
+                    ))}
+                  </ul>
+                </details>
               </div>
             </section>
 
@@ -1129,14 +1159,13 @@ export function EnterpriseSecurityWorkspace({
 
             <div className="mt-5 flex flex-wrap items-center justify-end gap-3">
               <span className="text-xs text-stone-500">
-                {purgeScopes.size
-                  ? `${purgeScopes.size} master-data scope(s) selected.`
-                  : "Transactional data only."}
+                {`${transactionalPurgeScopeKeys.every((key) => purgeScopes.has(key)) ? "Transactional data selected" : "Transactional data not selected"}; ${[...purgeScopes].filter((key) => purgeScopeByKey.get(key)?.group === "Master data").length} master-data scope(s) selected.`}
               </span>
               <button
                 className="inline-flex items-center justify-center rounded-full bg-rose-600 px-5 py-2.5 text-sm font-semibold text-white shadow-[0_18px_34px_rgba(225,29,72,0.22)] transition hover:brightness-[1.05] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={
                   purgeState.status === "submitting" ||
+                  purgeScopes.size === 0 ||
                   purgeConfirmationText.trim().toUpperCase() !==
                     enterpriseDataPurgeConfirmationText ||
                   purgePassword.trim().length === 0
