@@ -1711,7 +1711,7 @@ async function getOnlineStoreAssignment(
       : await requireEnterpriseSession();
 
   if (!session) {
-    throw new Error("Your online store session has expired. Sign in again, then retry the POS action.");
+    throw new Error("Your Online POS session has expired. Sign in again, then retry the POS action.");
   }
 
   const hasOnlineStoreRole = session.roleCodes.some((roleCode) =>
@@ -3082,7 +3082,7 @@ async function requireOnlineManagerApproval(input: {
       purpose: input.purpose,
       reason: "WRONG_HOME_STORE"
     });
-    throw new Error(`${supervisor.displayName} is not assigned to this online store.`);
+    throw new Error(`${supervisor.displayName} is not assigned to this Online POS.`);
   }
 
   const permissionCodes = [
@@ -3272,7 +3272,7 @@ async function ensureOnlineRegisterTerminal(tx: OnlineStoreTx, context: OnlineSt
       retailOrgId: session.retailOrgId,
       storeId: store.id,
       code: onlineTerminalCode,
-      name: "Online Store Browser Register",
+      name: "Online POS Browser Register",
       status: RecordStatus.ACTIVE,
       licenseStatus: "LICENSED"
     },
@@ -3469,7 +3469,7 @@ async function prepareOnlinePayments(
   const tenderMethods = await getActiveTenderMethods(tx, retailOrgId);
 
   if (tenderMethods.length === 0) {
-    throw new Error("Configure at least one active tender method before taking payments in the online store.");
+    throw new Error("Configure at least one active tender method before taking payments in the Online POS.");
   }
 
   const defaultTender = tenderMethods.find(isCashTender) ?? tenderMethods[0];
@@ -3602,7 +3602,7 @@ export async function getOnlineStorePendingSalesOrders(): Promise<
   }
 
   if (!assignment.store) {
-    throw new Error("Your home store must be an Online Store before refreshing pending orders.");
+    throw new Error("Your home store must be an Online POS shop before refreshing pending orders.");
   }
 
   const currentStoreId = assignment.store.id;
@@ -3945,7 +3945,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         buildUnavailableFuelOperationsWorkspace(
           error instanceof Error
             ? error.message
-            : "Flash ERP could not load Online Store Fuel Operations."
+            : "Flash ERP could not load Online POS Fuel Operations."
         )
       )
     : buildUnavailableFuelOperationsWorkspace(
@@ -3956,7 +3956,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     return {
       isAvailable: false,
       unavailableReason:
-        "Your user profile is not assigned to a home store. Assign the user to an online store from Retail Users.",
+        "Your user profile is not assigned to a home store. Assign the user to an Online POS shop from Retail Users.",
       operator,
       capabilities,
       store: null,
@@ -3990,8 +3990,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       isAvailable: false,
       unavailableReason:
         hasOnlineStoreRole
-          ? "Your home store is not marked as an Online Store. Switch the store execution mode in HQ store setup before using browser POS."
-          : "Your user profile is not assigned to an online-store role. Assign Online Store Cashier or Online Store Supervisor before using browser POS.",
+          ? "Your home store is not marked as an Online POS shop. Switch the store execution mode in HQ store setup before using browser POS."
+          : "Your user profile is not assigned to an online-store role. Assign Online POS Cashier or Online POS Supervisor before using browser POS.",
       operator,
       capabilities,
       store: null,
@@ -6396,7 +6396,7 @@ export type BrowseOnlineStoreReportsResponse = {
 export async function browseOnlineStoreReports(
   input: OnlineStoreReportCriteria = {}
 ): Promise<BrowseOnlineStoreReportsResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("browsing online store reports");
+  const { session, user, store } = await requireOnlineStoreForOperation("browsing Online POS reports");
   const requestedStoreScope = input.scope === "STORE";
   const storeScopeAllowed = sessionHasAllPermissions(session, ["pos.receipt.search"], {
     requireSupervisorEligible: true
@@ -7105,7 +7105,7 @@ export async function browseOnlineStoreReports(
       category: "ONLINE_STORE",
       action: "REPORT_BROWSED",
       actorLabel: user.loginId,
-      targetType: "Online store report",
+      targetType: "Online POS report",
       targetRef: criteria.reportId,
       sourceNodeCode: "ONLINE_DIRECT",
       message: `${user.loginId} browsed ${criteria.reportId} report parameters for ${store.code}.`,
@@ -7672,7 +7672,7 @@ async function findOnlineStoreCustomer(
   });
 
   if (!customer) {
-    throw new Error("Choose an active customer before continuing this online store action.");
+    throw new Error("Choose an active customer before continuing this Online POS action.");
   }
 
   return customer;
@@ -8478,7 +8478,7 @@ async function assertOnlineStoreSaleStockAvailable(
     : insufficientLine.product.name;
 
   throw new Error(
-    `Only ${formatNumberForMessage(availableQuantity)} ${itemLabel} is available in ${salesLocation.code}. Receive or transfer stock into the online store sales location before ${actionLabel} ${formatNumberForMessage(requestedQuantity)}.`
+    `Only ${formatNumberForMessage(availableQuantity)} ${itemLabel} is available in ${salesLocation.code}. Receive or transfer stock into the Online POS sales location before ${actionLabel} ${formatNumberForMessage(requestedQuantity)}.`
   );
 }
 
@@ -9113,7 +9113,7 @@ async function completeOnlineStoreParkedTransaction(
   await postPosTransactionAccountingInTransaction(tx, {
     retailOrgId: session.retailOrgId,
     transactionId: transaction.id,
-    postedBy: "Online store POS"
+    postedBy: "Online POS"
   });
 
   if (openSalesOrder) {
@@ -9300,11 +9300,11 @@ export async function createOnlineStoreSale(
   }
 
   if (!assignment.store) {
-    throw new Error("Your home store is not configured as an Online Store.");
+    throw new Error("Your home store is not configured as an Online POS shop.");
   }
 
   if (!assignment.store.salesEnabled) {
-    throw new Error("This online store is not enabled for POS sales.");
+    throw new Error("This Online POS is not enabled for POS sales.");
   }
 
   const store = assignment.store;
@@ -9312,7 +9312,7 @@ export async function createOnlineStoreSale(
   const session = assignment.session;
 
   if (!sessionHasAllPermissions(session, ["pos.sale.process"])) {
-    throw new Error("Flash ERP requires sale processing privileges before completing an online store sale.");
+    throw new Error("Flash ERP requires sale processing privileges before completing an Online POS sale.");
   }
 
   if (input.sourceTransactionId || input.salesOrderId) {
@@ -9326,7 +9326,7 @@ export async function createOnlineStoreSale(
         store,
         managerOverride: input.managerOverride,
         permissionCodes: ["pos.loyalty.redeem"],
-        purpose: "approving online store loyalty redemption",
+        purpose: "approving Online POS loyalty redemption",
         requireSupervisorEligible: false
       });
     }
@@ -9614,7 +9614,7 @@ export async function createOnlineStoreSale(
           store,
           managerOverride: input.managerOverride,
           permissionCodes: [...managerPermissionCodes],
-          purpose: "approving online store POS overrides",
+          purpose: "approving Online POS overrides",
           requireSupervisorEligible: managerOverrideRequiresSupervisor
         })
       : null;
@@ -9730,7 +9730,7 @@ export async function createOnlineStoreSale(
       const availableQuantity = availableQuantityByProduct.get(insufficientLine.product.id) ?? 0;
 
       throw new Error(
-        `Only ${formatNumberForMessage(availableQuantity)} ${insufficientLine.product.name} is available in ${salesLocation.code}. Receive or transfer stock into the online store sales location before selling ${formatNumberForMessage(requestedQuantity)}.`
+        `Only ${formatNumberForMessage(availableQuantity)} ${insufficientLine.product.name} is available in ${salesLocation.code}. Receive or transfer stock into the Online POS sales location before selling ${formatNumberForMessage(requestedQuantity)}.`
       );
     }
 
@@ -10071,7 +10071,7 @@ export async function createOnlineStoreSale(
     await postPosTransactionAccountingInTransaction(tx, {
       retailOrgId: session.retailOrgId,
       transactionId: transaction.id,
-      postedBy: "Online store POS"
+      postedBy: "Online POS"
     });
 
     for (const line of pricedLines) {
@@ -10102,7 +10102,7 @@ export async function createOnlineStoreSale(
         targetType: "POS transaction",
         targetRef: transaction.transactionNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} completed online store sale ${transaction.transactionNo} for ${store.code}.`,
+        message: `${user.loginId} completed Online POS sale ${transaction.transactionNo} for ${store.code}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
           shiftNo: shift.shiftNo,
@@ -10215,10 +10215,10 @@ export async function createOnlineStoreSale(
 export async function createOnlineStoreHeldSale(
   input: CreateOnlineStoreHeldSaleRequest
 ): Promise<CreateOnlineStoreHeldSaleResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("holding an online store sale");
+  const { session, user, store } = await requireOnlineStoreForOperation("holding an Online POS sale");
 
   if (!store.salesEnabled) {
-    throw new Error("This online store is not enabled for POS sales.");
+    throw new Error("This Online POS is not enabled for POS sales.");
   }
 
   const lineInputs = Array.isArray(input.lines) ? input.lines : [];
@@ -10382,7 +10382,7 @@ export async function createOnlineStoreHeldSale(
 export async function createOnlineStoreSalesOrder(
   input: CreateOnlineStoreSalesOrderRequest
 ): Promise<CreateOnlineStoreSalesOrderResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("saving an online store sales order");
+  const { session, user, store } = await requireOnlineStoreForOperation("saving an Online POS sales order");
   const orderType = input.orderType === "LAYAWAY" ? "LAYAWAY" : "SALES_ORDER";
   const isLayaway = orderType === "LAYAWAY";
 
@@ -10398,7 +10398,7 @@ export async function createOnlineStoreSalesOrder(
   }
 
   if (!store.salesEnabled) {
-    throw new Error("This online store is not enabled for POS orders.");
+    throw new Error("This Online POS is not enabled for POS orders.");
   }
 
   const lineInputs = Array.isArray(input.lines) ? input.lines : [];
@@ -10927,7 +10927,7 @@ export async function cancelOnlineStoreSalesOrder(
   input: CancelOnlineStoreSalesOrderRequest = {},
 ): Promise<CancelOnlineStoreSalesOrderResponse> {
   const { session, user, store } = await requireOnlineStoreForOperation(
-    "cancelling an online store sales order",
+    "cancelling an Online POS sales order",
   );
   const requestedOrderId = optionalText(orderId);
 
@@ -11723,7 +11723,7 @@ export async function createOnlineStoreSalesOrderFulfilmentTransfers(
 export async function recordOnlineStoreAccountPayment(
   input: RecordOnlineStoreAccountPaymentRequest
 ): Promise<RecordOnlineStoreAccountPaymentResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("recording an online store account payment");
+  const { session, user, store } = await requireOnlineStoreForOperation("recording an Online POS account payment");
   const customerId = optionalText(input.customerId);
   const tenderMethodCode = optionalText(input.tenderMethodCode);
   const amount = normalizeMoney(input.amount, "account payment");
@@ -11864,7 +11864,7 @@ export async function recordOnlineStoreAccountPayment(
         targetType: "Customer",
         targetRef: customer.customerNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} collected ${amount.toFixed(2)} from ${customer.fullName} through online store ${store.code}.`,
+        message: `${user.loginId} collected ${amount.toFixed(2)} from ${customer.fullName} through Online POS ${store.code}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
           shiftNo: shift.shiftNo,
@@ -11945,7 +11945,7 @@ async function requireOnlineStoreForOperation(operationLabel: string) {
   }
 
   if (!assignment.store) {
-    throw new Error(`Your home store must be an Online Store before ${operationLabel}.`);
+    throw new Error(`Your home store must be an Online POS shop before ${operationLabel}.`);
   }
 
   await ensureOnlineStoreInventoryTopology(prisma, {
@@ -11963,16 +11963,16 @@ async function requireOnlineStoreForOperation(operationLabel: string) {
 export async function unlockOnlineStoreScreen(
   input: OnlineStoreUnlockRequest
 ): Promise<OnlineStoreUnlockResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("unlocking the online store screen");
+  const { session, user, store } = await requireOnlineStoreForOperation("unlocking the Online POS screen");
   const loginId = optionalText(input.loginId);
   const password = typeof input.password === "string" ? input.password : "";
 
   if (!loginId || !password) {
-    throw new Error("Enter your login ID and password to unlock the online store.");
+    throw new Error("Enter your login ID and password to unlock the Online POS.");
   }
 
   if (loginId.toUpperCase() !== user.loginId.toUpperCase()) {
-    throw new Error("Unlock this browser with the signed-in online store operator.");
+    throw new Error("Unlock this browser with the signed-in Online POS operator.");
   }
 
   const operator = await prisma.retailUser.findFirst({
@@ -11999,10 +11999,10 @@ export async function unlockOnlineStoreScreen(
         category: "ONLINE_STORE_LOCK",
         action: "SCREEN_UNLOCK_FAILED",
         actorLabel: user.loginId,
-        targetType: "Online store",
+        targetType: "Online POS",
         targetRef: store.code,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} failed to unlock online store screen for ${store.code}.`,
+        message: `${user.loginId} failed to unlock Online POS screen for ${store.code}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
           attemptedLoginId: loginId
@@ -12020,10 +12020,10 @@ export async function unlockOnlineStoreScreen(
       category: "ONLINE_STORE_LOCK",
       action: "SCREEN_UNLOCKED",
       actorLabel: user.loginId,
-      targetType: "Online store",
+      targetType: "Online POS",
       targetRef: store.code,
       sourceNodeCode: "ONLINE_DIRECT",
-      message: `${user.loginId} unlocked online store screen for ${store.code}.`,
+      message: `${user.loginId} unlocked Online POS screen for ${store.code}.`,
       detailsJson: serializeJsonField({
         storeCode: store.code
       } satisfies Prisma.InputJsonValue)
@@ -12035,7 +12035,7 @@ export async function unlockOnlineStoreScreen(
       loginId: operator.loginId,
       displayName: operator.displayName
     },
-    message: "Flash ERP unlocked the online store.",
+    message: "Flash ERP unlocked the Online POS.",
     serverProcessedAt: new Date().toISOString()
   };
 }
@@ -12105,11 +12105,11 @@ export async function upsertOnlineStoreExpense(
     : null;
 
   if (expenseId && !existingExpense) {
-    throw new Error("Flash ERP could not find that draft store expense for this online store.");
+    throw new Error("Flash ERP could not find that draft store expense for this Online POS.");
   }
 
   if (existingExpense && existingExpense.status !== OperatingExpenseStatus.DRAFT) {
-    throw new Error("Only draft store expenses can be edited from the online store.");
+    throw new Error("Only draft store expenses can be edited from the Online POS.");
   }
 
   const expense = existingExpense
@@ -12193,7 +12193,7 @@ export async function confirmOnlineStoreExpense(
   }
 
   if (expense.status !== OperatingExpenseStatus.DRAFT) {
-    throw new Error("Only draft store expenses can be confirmed from the online store.");
+    throw new Error("Only draft store expenses can be confirmed from the Online POS.");
   }
 
   const confirmed = await prisma.operatingExpense.update({
@@ -12556,7 +12556,7 @@ export async function searchOnlineStoreTransactionReferences(
   });
 
   if (!assignment.user?.homeStore || !assignment.store) {
-    throw new Error("Open an assigned Online Store before searching saved transaction references.");
+    throw new Error("Open an assigned Online POS shop before searching saved transaction references.");
   }
 
   const { session } = assignment;
@@ -12636,7 +12636,7 @@ async function resolveOnlineStoreLocation(input: {
   });
 
   if (!location) {
-    throw new Error("Flash ERP could not find an active inventory location for this online store operation.");
+    throw new Error("Flash ERP could not find an active inventory location for this Online POS operation.");
   }
 
   return location;
@@ -12933,7 +12933,7 @@ export async function createOnlineStoreCorrection(
   const { session, user, store } = await requireOnlineStoreForOperation("processing POS corrections online");
 
   if (!store.salesEnabled) {
-    throw new Error("This online store is not enabled for POS returns or exchanges.");
+    throw new Error("This Online POS is not enabled for POS returns or exchanges.");
   }
 
   const sourceTransactionNo = optionalText(input.sourceTransactionNo);
@@ -13044,7 +13044,7 @@ export async function createOnlineStoreCorrection(
     });
 
     if (!sourceTransaction) {
-      throw new Error("Flash ERP could not find a completed original sale receipt for this online store.");
+      throw new Error("Flash ERP could not find a completed original sale receipt for this Online POS.");
     }
 
     const requestedReturnLineIds = returnLineInputs
@@ -13319,7 +13319,7 @@ export async function createOnlineStoreCorrection(
             store,
             managerOverride: input.managerOverride,
             permissionCodes: [...correctionManagerPermissionCodes],
-            purpose: isVoidCorrection ? "approving an online store void" : "approving online store correction overrides",
+            purpose: isVoidCorrection ? "approving an Online POS void" : "approving Online POS correction overrides",
             requireSupervisorEligible: true
           })
         : null;
@@ -13780,7 +13780,7 @@ export async function createOnlineStoreCorrection(
     await postPosTransactionAccountingInTransaction(tx, {
       retailOrgId: session.retailOrgId,
       transactionId: transaction.id,
-      postedBy: "Online store POS"
+      postedBy: "Online POS"
     });
 
     await tx.securityLog.create({
@@ -13794,7 +13794,7 @@ export async function createOnlineStoreCorrection(
         targetType: "POS transaction",
         targetRef: transaction.transactionNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} completed online store ${correctionType.toLowerCase()} ${transaction.transactionNo} against ${sourceTransaction.transactionNo}.`,
+        message: `${user.loginId} completed Online POS ${correctionType.toLowerCase()} ${transaction.transactionNo} against ${sourceTransaction.transactionNo}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
           shiftNo: shift.shiftNo,
@@ -13896,7 +13896,7 @@ export async function createOnlineStoreCorrection(
 export async function openOnlineStoreShift(
   input: OpenOnlineStoreShiftRequest = {}
 ): Promise<OpenOnlineStoreShiftResponse> {
-  const context = await requireOnlineStoreForOperation("opening an online store shift");
+  const context = await requireOnlineStoreForOperation("opening an Online POS shift");
   const { session, user, store } = context;
   const configuredOpeningFloat = readOnlineOptionSettings(store.retailOrg.optionsSettingsJson).shiftFloatPromptAmount;
   const openingFloatAmount = normalizeMoney(input.openingFloatAmount ?? configuredOpeningFloat, "opening float");
@@ -13907,7 +13907,7 @@ export async function openOnlineStoreShift(
         store,
         managerOverride: input.managerOverride,
         permissionCodes: ["pos.shift.open"],
-        purpose: "opening an online store shift"
+        purpose: "opening an Online POS shift"
       })
     : null;
 
@@ -14007,7 +14007,7 @@ export async function openOnlineStoreShift(
         targetType: "POS shift",
         targetRef: shift.shiftNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} opened online store shift ${shift.shiftNo} for ${store.code}.`,
+        message: `${user.loginId} opened Online POS shift ${shift.shiftNo} for ${store.code}.`,
         detailsJson: serializeJsonField({
           storeCode: store.code,
           terminalCode: onlineTerminalCode,
@@ -14038,13 +14038,13 @@ export async function openOnlineStoreShift(
 export async function recordOnlineStoreEod(
   input: RecordOnlineStoreEodRequest
 ): Promise<RecordOnlineStoreEodResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("recording online store EOD");
+  const { session, user, store } = await requireOnlineStoreForOperation("recording Online POS EOD");
   const declaredCashAmount = normalizeMoney(input.declaredCashAmount, "declared cash");
   const shiftId = optionalText(input.shiftId);
   const note = optionalText(input.note);
 
   if (!sessionHasAllPermissions(session, ["pos.shift.close"])) {
-    throw new Error("Flash ERP requires shift close privileges before closing an online store shift.");
+    throw new Error("Flash ERP requires shift close privileges before closing an Online POS shift.");
   }
 
   return prisma.$transaction(async (tx) => {
@@ -14114,7 +14114,7 @@ export async function recordOnlineStoreEod(
     });
 
     if (!shift) {
-      throw new Error("Open and trade a browser POS shift before recording online store EOD.");
+      throw new Error("Open and trade a browser POS shift before recording Online POS EOD.");
     }
 
     const existing = await tx.eodReconciliation.findFirst({
@@ -14219,7 +14219,7 @@ export async function recordOnlineStoreEod(
 export async function recordOnlineStoreBanking(
   input: RecordOnlineStoreBankingRequest
 ): Promise<RecordOnlineStoreBankingResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("recording online store banking");
+  const { session, user, store } = await requireOnlineStoreForOperation("recording Online POS banking");
   const reconciliationId = optionalText(input.reconciliationId);
   const amount = normalizeMoney(input.amount, "banking deposit");
   const bankNameInput = optionalText(input.bankName);
@@ -14231,7 +14231,7 @@ export async function recordOnlineStoreBanking(
     store,
     managerOverride: input.managerOverride,
     permissionCodes: ["pos.shift.close"],
-    purpose: "recording online store banking",
+    purpose: "recording Online POS banking",
     requireSupervisorEligible: true
   });
 
@@ -14368,11 +14368,11 @@ export async function createOnlineStoreGoodsReceipt(
   const { session, user, store } = await requireOnlineStoreForOperation("receiving stock online");
 
   if (!store.warehouseEnabled) {
-    throw new Error("This online store is not enabled for receiving or warehouse operations.");
+    throw new Error("This Online POS is not enabled for receiving or warehouse operations.");
   }
 
   if (!sessionHasAllPermissions(session, ["inventory.grn.receive"])) {
-    throw new Error("Flash ERP requires goods-receipt privileges before receiving online store stock.");
+    throw new Error("Flash ERP requires goods-receipt privileges before receiving Online POS stock.");
   }
 
   const lineInputs = Array.isArray(input.lines) ? input.lines : [];
@@ -14857,7 +14857,7 @@ export async function createOnlineStoreSupplierReturn(
   const { session, user, store } = await requireOnlineStoreForOperation("posting online supplier return");
 
   if (!store.warehouseEnabled) {
-    throw new Error("This online store is not enabled for supplier returns.");
+    throw new Error("This Online POS is not enabled for supplier returns.");
   }
 
   if (!sessionHasAllPermissions(session, ["inventory.supplier-return.manage"])) {
@@ -15166,10 +15166,10 @@ export async function createOnlineStoreSupplierReturn(
 export async function createOnlineStoreStockCount(
   input: CreateOnlineStoreStockCountRequest
 ): Promise<CreateOnlineStoreStockCountResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("posting online store stock count");
+  const { session, user, store } = await requireOnlineStoreForOperation("posting Online POS stock count");
 
   if (!store.warehouseEnabled) {
-    throw new Error("This online store is not enabled for inventory count operations.");
+    throw new Error("This Online POS is not enabled for inventory count operations.");
   }
 
   if (!sessionHasAllPermissions(session, ["inventory.count.submit"])) {
@@ -15441,7 +15441,7 @@ export async function createOnlineStoreStockCount(
 export async function commitOnlineStoreStockCount(
   input: { sessionId?: string | null; sessionNo?: string | null }
 ): Promise<CommitOnlineStoreStockCountResponse> {
-  const { session, user, store } = await requireOnlineStoreForOperation("committing online store stock count");
+  const { session, user, store } = await requireOnlineStoreForOperation("committing Online POS stock count");
   const sessionId = optionalText(input.sessionId);
   const sessionNo = optionalText(input.sessionNo);
 
@@ -15790,7 +15790,7 @@ export async function createOnlineStoreTransferRequest(
       )
     ) {
       throw new Error(
-        `${requestedTransferBatchNo} is not an amendable draft for this online store.`
+        `${requestedTransferBatchNo} is not an amendable draft for this Online POS shop.`
       );
     }
 
@@ -16114,7 +16114,7 @@ export async function processOnlineStoreTransfer(
   });
 
   if (!transfer) {
-    throw new Error("Flash ERP could not find that inter-store transfer for this online store.");
+    throw new Error("Flash ERP could not find that inter-store transfer for this Online POS.");
   }
 
   const requestedQuantity = toQuantity(transfer.requestedQuantity);
@@ -16139,7 +16139,7 @@ export async function processOnlineStoreTransfer(
       const postStockImmediately = await shouldPostStockImmediately(tx, session.retailOrgId, store.id);
 
       if (transfer.sourceStoreId !== store.id) {
-        throw new Error(`${transfer.transferNo} is not waiting for issue from this online store.`);
+        throw new Error(`${transfer.transferNo} is not waiting for issue from this Online POS.`);
       }
 
       if (
@@ -16425,7 +16425,7 @@ export async function processOnlineStoreTransfer(
     }
 
     if (transfer.destinationStoreId !== store.id) {
-      throw new Error(`${transfer.transferNo} is not waiting for receipt into this online store.`);
+      throw new Error(`${transfer.transferNo} is not waiting for receipt into this Online POS.`);
     }
 
     if (

@@ -1298,7 +1298,7 @@ export async function getEnterpriseSecurityWorkspace(): Promise<EnterpriseSecuri
 
   if (activeOnlineDirectStores.length > 0 && onlineStoreEligibleUsers === 0) {
     priorities.push(
-      "Create active online store cashier or supervisor users with an ONLINE_DIRECT home store before browser POS sign-in is expected to work."
+      "Create active Online POS cashier or supervisor users with an ONLINE_DIRECT home store before browser POS sign-in is expected to work."
     );
   }
 
@@ -1709,7 +1709,7 @@ export async function createEnterpriseRetailUser(
 
       if (hasOnlineStoreRole && !canUseOnlineStoreRole(homeStore)) {
         throw new Error(
-          "Assign online store roles only to users whose home store is an active ONLINE_DIRECT store."
+          "Assign Online POS roles only to users whose home store is an active ONLINE_DIRECT store."
         );
       }
 
@@ -1781,7 +1781,7 @@ export async function createEnterpriseRetailUser(
         loginId: user.loginId,
         message:
           hasOnlineStoreRole && homeStore?.storeMode === "ONLINE_DIRECT"
-            ? `Flash ERP created online store user ${user.loginId}. This operator can sign into ${homeStore.code} through the online store.`
+            ? `Flash ERP created Online POS user ${user.loginId}. This operator can sign into ${homeStore.code} through the Online POS.`
             : `Flash ERP created retail user ${user.loginId}. Store desktops will receive the operator on their next pull.`,
         serverProcessedAt: new Date().toISOString()
       };
@@ -1901,7 +1901,7 @@ export async function updateEnterpriseRetailUser(
 
       if (hasOnlineStoreRole && !canUseOnlineStoreRole(homeStore)) {
         throw new Error(
-          "Assign online store roles only to users whose home store is an active ONLINE_DIRECT store."
+          "Assign Online POS roles only to users whose home store is an active ONLINE_DIRECT store."
         );
       }
 
@@ -2000,7 +2000,7 @@ export async function updateEnterpriseRetailUser(
         loginId: updatedUser.loginId,
         message:
           hasOnlineStoreRole && homeStore?.storeMode === "ONLINE_DIRECT"
-            ? `Flash ERP updated online store user ${updatedUser.loginId}. This operator can sign into ${homeStore.code} through the online store.`
+            ? `Flash ERP updated Online POS user ${updatedUser.loginId}. This operator can sign into ${homeStore.code} through the Online POS.`
             : `Flash ERP updated retail user ${updatedUser.loginId}. Store desktops will consume the operator delta on their next pull.`,
         serverProcessedAt: new Date().toISOString()
       };

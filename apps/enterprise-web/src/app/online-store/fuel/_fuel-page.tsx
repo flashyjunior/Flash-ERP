@@ -72,7 +72,7 @@ export async function OnlineStoreFuelPage({
     buildUnavailableFuelOperationsWorkspace(
       error instanceof Error
         ? error.message
-        : "Flash ERP could not load Online Store Fuel Operations."
+        : "Flash ERP could not load Online POS Fuel Operations."
     )
   );
 
@@ -85,7 +85,7 @@ export async function OnlineStoreFuelPage({
       pageDescription={pageDescription}
       pageHeading={pageHeading}
       shellActiveSection="online-store"
-      shellEyebrow="Online Store"
+      shellEyebrow="Online POS"
       workspace={workspace}
     />
   );

@@ -157,7 +157,7 @@ const navigation: NavigationItem[] = [
   },
   {
     key: "online-store",
-    label: "Online Store",
+    label: "Online POS",
     icon: Store,
     href: "/online-store",
     children: enterpriseOnlineStoreMenuItems.map((item) => menuItemChild(item))
@@ -1466,7 +1466,7 @@ export function EnterpriseShell({
             ) : (
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-                  Online store
+                  Online POS
                 </p>
                 <p className="mt-1 truncate text-sm font-semibold text-white">
                   {sessionSnapshot?.homeStoreName ?? "Store workspace"}

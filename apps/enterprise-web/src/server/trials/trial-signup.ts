@@ -738,7 +738,7 @@ export async function applyTrialProvisioningCallback(payload: TrialProvisioningC
         status: "ACTIVE",
         provisionerReference: optionalText(payload.provisionerReference, 200) || null,
         workspaceUrl: requiredHttpsUrl(payload.workspaceUrl, "HQ workspace URL"),
-        onlineStoreUrl: requiredHttpsUrl(payload.onlineStoreUrl, "Online Store URL"),
+        onlineStoreUrl: requiredHttpsUrl(payload.onlineStoreUrl, "Online POS URL"),
         storefrontUrl: requiredHttpsUrl(payload.storefrontUrl, "Ecommerce storefront URL"),
         trialStartsAt: startsAt,
         trialExpiresAt: expiresAt,

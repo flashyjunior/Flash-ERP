@@ -2140,7 +2140,7 @@ export async function assertEnterprisePermission(
   }
 
   if (session.isOnlineStoreUser) {
-    throw new EnterpriseAuthError("Flash ERP online store users cannot access HQ features.", 403);
+    throw new EnterpriseAuthError("Flash ERP Online POS users cannot access HQ features.", 403);
   }
 
   const required = requiredPermissions.filter(Boolean);

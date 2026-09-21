@@ -1543,7 +1543,7 @@ function buildShiftReportWindowHtml(input: {
       </div>`
     )
     .join("");
-  const storeName = input.workspace.store?.name ?? "Online store";
+  const storeName = input.workspace.store?.name ?? "Online POS";
   const storeCode = input.workspace.store?.code ?? "online";
   const operatorLabel = `${input.workspace.operator.displayName} (${input.workspace.operator.loginId})`;
 
@@ -1963,7 +1963,7 @@ function OnlineStorePosSettingsWorkspace({
       <section className="rms-panel rms-tab-panel">
         <div className="rms-panel-title">
           <div>
-            <span>{workspace.store?.name ?? "Online store"}</span>
+            <span>{workspace.store?.name ?? "Online POS"}</span>
             <h2>{onlinePosSettingsTabs.find((tab) => tab.id === activeTab)?.label ?? "Settings"}</h2>
           </div>
           <div className="rms-settings-title-pills">
@@ -4099,15 +4099,15 @@ export function OnlineStoreWorkspace({
       };
 
       if (!response.ok) {
-        throw new Error(payload.message ?? "Flash ERP could not unlock this online store.");
+        throw new Error(payload.message ?? "Flash ERP could not unlock this Online POS.");
       }
 
       setLockPassword("");
-      setLockMessage(payload.message ?? "Flash ERP unlocked the online store.");
+      setLockMessage(payload.message ?? "Flash ERP unlocked the Online POS.");
       setIsScreenLocked(false);
       setActiveWorkspace("dashboard");
     } catch (error) {
-      setLockMessage(error instanceof Error ? error.message : "Flash ERP could not unlock this online store.");
+      setLockMessage(error instanceof Error ? error.message : "Flash ERP could not unlock this Online POS.");
     } finally {
       setIsUnlocking(false);
     }
@@ -4916,7 +4916,7 @@ export function OnlineStoreWorkspace({
       retailOrgName: workspace.branding.tradingName,
       companyLogoUrl: workspace.branding.companyLogoUrl,
       storeCode: workspace.store?.code ?? "ONLINE",
-      storeName: workspace.store?.name ?? "Online store",
+      storeName: workspace.store?.name ?? "Online POS",
       storePhone: workspace.store?.phone ?? null,
       storeLocation: workspace.store?.location ?? null,
       storeAddress: workspace.store?.addressLine1 ?? null,
@@ -4979,7 +4979,7 @@ export function OnlineStoreWorkspace({
       retailOrgName: workspace.branding.tradingName,
       companyLogoUrl: workspace.branding.companyLogoUrl,
       storeCode: workspace.store?.code ?? "ONLINE",
-      storeName: workspace.store?.name ?? "Online store",
+      storeName: workspace.store?.name ?? "Online POS",
       storePhone: workspace.store?.phone ?? null,
       storeLocation: workspace.store?.location ?? null,
       storeAddress: workspace.store?.addressLine1 ?? null,
@@ -5045,7 +5045,7 @@ export function OnlineStoreWorkspace({
       retailOrgName: workspace.branding.tradingName,
       companyLogoUrl: localReceiptLogoUrl ?? workspace.branding.companyLogoUrl,
       storeCode: workspace.store?.code ?? "ONLINE",
-      storeName: workspace.store?.name ?? "Online store",
+      storeName: workspace.store?.name ?? "Online POS",
       storePhone: workspace.store?.phone ?? null,
       storeLocation: workspace.store?.location ?? null,
       storeAddress: workspace.store?.addressLine1 ?? null,
@@ -5512,7 +5512,7 @@ export function OnlineStoreWorkspace({
         <body>
           <main>
             <header>
-              <div><h1>${escapeHtml(reportTitle)}</h1><h2>${escapeHtml(workspace.store?.name ?? "Online store")} • ${escapeHtml(criteriaLabel)}</h2></div>
+              <div><h1>${escapeHtml(reportTitle)}</h1><h2>${escapeHtml(workspace.store?.name ?? "Online POS")} • ${escapeHtml(criteriaLabel)}</h2></div>
               <div><strong>${escapeHtml(workspace.operator.loginId)}</strong><br />${escapeHtml(new Date().toLocaleString())}</div>
             </header>
             <table><thead><tr>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table>
@@ -6355,7 +6355,7 @@ export function OnlineStoreWorkspace({
             supplierNo: purchaseOrderCreateSupplierNo,
             externalReference: purchaseOrderCreateReference.trim() || null,
             note: purchaseOrderCreateNote.trim() || null,
-            operatorName: "Online store",
+            operatorName: "Online POS",
             autoCommit: true,
             lines: purchaseOrderCreateLines.map((line) => ({
               productCode: line.productCode,
@@ -6849,7 +6849,7 @@ export function OnlineStoreWorkspace({
     receiptWindow.document.write(
       buildGoodsReceiptWindowHtml({
         receipt,
-        storeName: workspace.store?.name ?? "Online store",
+        storeName: workspace.store?.name ?? "Online POS",
         currencyCode
       })
     );
@@ -6869,7 +6869,7 @@ export function OnlineStoreWorkspace({
     transferWindow.document.write(
       buildTransferDocumentWindowHtml({
         transfer,
-        storeName: workspace.store?.name ?? "Online store",
+        storeName: workspace.store?.name ?? "Online POS",
         companyLogoUrl: localReceiptLogoUrl ?? workspace.branding.companyLogoUrl
       })
     );
@@ -8834,7 +8834,7 @@ export function OnlineStoreWorkspace({
     return (
       <main className="rms-online-unavailable">
         <section className="rms-panel">
-          <span className="rms-kicker">Online store</span>
+          <span className="rms-kicker">Online POS</span>
           <h1>Workspace unavailable</h1>
           <p>{workspace.unavailableReason}</p>
         </section>
@@ -8968,7 +8968,7 @@ export function OnlineStoreWorkspace({
             <StatusPill>{`Expected cash ${formatMoney(currentShift?.expectedCashAmount ?? workspace.metrics.expectedCash, currencyCode)}`}</StatusPill>
             <StatusPill>{`Account pay ${formatMoney(workspace.metrics.accountPayments, currencyCode)}`}</StatusPill>
             <StatusPill>{`Open orders ${formatNumber.format(workspace.metrics.openOrders)}`}</StatusPill>
-            <StatusPill tone="good">Online Store</StatusPill>
+            <StatusPill tone="good">Online POS</StatusPill>
             <StatusPill>{workspace.store?.code ?? "online-store"}</StatusPill>
             <StatusPill>{localClock}</StatusPill>
             {trialSampleDataEnabled && workspace.products.length === 0 ? (
@@ -9542,8 +9542,8 @@ export function OnlineStoreWorkspace({
                 )) : (
                   <div className="rms-empty-catalog">
                     {saleMode !== "SALE"
-                      ? "No active catalog items are available for this online store."
-                      : "No stock or service items are available for this online store location."}
+                      ? "No active catalog items are available for this Online POS."
+                      : "No stock or service items are available for this Online POS location."}
                   </div>
                 )}
               </div>
@@ -10926,7 +10926,7 @@ export function OnlineStoreWorkspace({
                         </div>
                       );
                     })}
-                    {!transferDocumentGroups.length ? <EmptyState title="No transfer requests" detail="Transfer requests posted from this online store will appear here." /> : null}
+                    {!transferDocumentGroups.length ? <EmptyState title="No transfer requests" detail="Transfer requests posted from this Online POS will appear here." /> : null}
                   </div>
                 </div>
               ) : null}
@@ -11654,7 +11654,7 @@ export function OnlineStoreWorkspace({
         <div className="rms-lock-overlay" role="dialog" aria-modal="true">
           <section className="rms-login-card rms-lock-card">
             <div className="rms-panel-title">
-              <div><span>Screen locked</span><h2>Unlock online store</h2></div>
+              <div><span>Screen locked</span><h2>Unlock Online POS</h2></div>
               <StatusPill tone="warning">Preserved</StatusPill>
             </div>
             <form

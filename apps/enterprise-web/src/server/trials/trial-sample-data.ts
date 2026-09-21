@@ -147,7 +147,7 @@ async function reconcileTrialSampleData(input: TrialSampleDataInput) {
     const onlineLocation = locationByCode.get("ONLINE-SALES");
     if (!mainStore || !onlineStore || !mainLocation || !onlineLocation) {
       throw new TrialSampleDataError(
-        "The trial workspace is missing its Main or Online Store stock location.",
+        "The trial workspace is missing its Main or Online shop stock location.",
         409,
       );
     }
@@ -563,7 +563,7 @@ async function reconcileTrialSampleData(input: TrialSampleDataInput) {
     ...result,
     message:
       result.createdProductCount > 0
-        ? `${result.productCount} ${result.businessTypeLabel} sample products are ready in Enterprise, Online Store, and the public storefront.`
+        ? `${result.productCount} ${result.businessTypeLabel} sample products are ready in Enterprise, Online POS, and the public storefront.`
         : "The trial sample catalogue was already created. Flash ERP verified its products, stock, pricing, and storefront links.",
   };
 }

@@ -31,7 +31,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not browse that online store report."
+            : "Flash ERP could not browse that Online POS report."
       },
       { status: 400 }
     );

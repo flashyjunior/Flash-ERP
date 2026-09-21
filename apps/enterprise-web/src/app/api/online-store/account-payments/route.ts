@@ -21,7 +21,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not record that online store account payment."
+            : "Flash ERP could not record that Online POS account payment."
       },
       { status: 400 }
     );

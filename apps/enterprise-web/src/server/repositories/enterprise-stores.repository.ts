@@ -142,7 +142,7 @@ function normalizeStoreStockUpdateMode(value: string | null | undefined) {
 }
 
 function formatStoreMode(value: string | null | undefined) {
-  return normalizeStoreMode(value) === "ONLINE_DIRECT" ? "Online store" : "Offline-first";
+  return normalizeStoreMode(value) === "ONLINE_DIRECT" ? "Online POS" : "Offline-first";
 }
 
 function getStoreModeDescription(value: string | null | undefined) {
@@ -1397,7 +1397,7 @@ export async function getEnterpriseStoresWorkspace(): Promise<EnterpriseStoresWo
   const coverageMessages = [
     `${activeStores} active store profile(s), ${desktopNodes} desktop node(s), and ${terminals} terminal binding(s) are currently saved in Flash ERP enterprise.`,
     onlineStores > 0
-      ? `${onlineStores} online store(s) write directly to the enterprise SQL Server database through the browser store workspace instead of using store sync.`
+      ? `${onlineStores} Online POS shop(s) write directly to the enterprise SQL Server database through the browser store workspace instead of using store sync.`
       : "No online-direct stores are configured yet; all active stores currently remain offline-first unless switched in store setup.",
     `${salesEnabledStores} sales-enabled site(s), ${warehouseEnabledStores} warehouse-enabled site(s), and ${hybridStores} hybrid site(s) are currently configured across the estate.`,
     `${inventoryLocations} inventory location(s) are registered across the estate, and ${storeRows.reduce((sum, row) => sum + row.stockMovements, 0)} canonical stock movement(s) have already landed in enterprise.`,

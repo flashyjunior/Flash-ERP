@@ -825,7 +825,7 @@ export function EnterpriseSecurityPanel({
     if (hasOnlineStoreDraftConflict) {
       setUserState({
         status: "error",
-        message: "Choose an active ONLINE_DIRECT home store before saving online store roles."
+        message: "Choose an active ONLINE_DIRECT home store before saving Online POS roles."
       });
       return;
     }
@@ -1284,7 +1284,7 @@ export function EnterpriseSecurityPanel({
                 </p>
                 <p className="mt-1">
                   {hasOnlineStoreDraftConflict
-                    ? "Online store roles require an active ONLINE_DIRECT home store."
+                    ? "Online POS roles require an active ONLINE_DIRECT home store."
                     : selectedHasOnlineStoreRole && selectedHomeStore
                       ? `${selectedHomeStore.name} is ready for online-store sign-in.`
                       : selectedHasOnlineStoreRole
@@ -1300,7 +1300,7 @@ export function EnterpriseSecurityPanel({
                 value: role.roleCode,
                 label: `${role.name} (${role.roleCode})`,
                 helper: `${role.permissionCount} permission(s) • ${role.status}${
-                  onlineStoreRoleCodes.has(role.roleCode) ? " • online store login role" : ""
+                  onlineStoreRoleCodes.has(role.roleCode) ? " • Online POS login role" : ""
                 }`
               }))}
               onToggle={(value, nextChecked) =>

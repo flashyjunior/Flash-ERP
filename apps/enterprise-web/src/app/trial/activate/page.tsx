@@ -156,7 +156,7 @@ function ActivationForm() {
               : "/sign-in"
           }
         >
-          Continue to {landingPath === "/online-store" ? "Online Store" : "Enterprise"} sign in
+          Continue to {landingPath === "/online-store" ? "Online POS" : "Enterprise"} sign in
         </Link>
       </div>
     );

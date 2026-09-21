@@ -26,7 +26,7 @@ export async function POST(
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not cancel that online store sales order."
+            : "Flash ERP could not cancel that Online POS sales order."
       },
       { status: 400 }
     );

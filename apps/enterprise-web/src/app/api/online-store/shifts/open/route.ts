@@ -23,7 +23,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not open the online store shift."
+            : "Flash ERP could not open the Online POS shift."
       },
       { status: 400 }
     );

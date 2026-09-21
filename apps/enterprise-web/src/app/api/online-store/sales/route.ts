@@ -42,7 +42,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not complete that online store sale."
+            : "Flash ERP could not complete that Online POS sale."
       },
       { status: 400 }
     );

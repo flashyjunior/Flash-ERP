@@ -14,7 +14,7 @@ export async function GET() {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not refresh pending online store sales orders."
+            : "Flash ERP could not refresh pending Online POS sales orders."
       },
       { status: 400 }
     );
@@ -45,7 +45,7 @@ export async function POST(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Flash ERP could not save that online store sales order."
+            : "Flash ERP could not save that Online POS sales order."
       },
       { status: 400 }
     );
