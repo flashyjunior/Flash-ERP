@@ -180,6 +180,11 @@ requireIncludes(
 );
 requireIncludes(
   worker,
+  "const databaseUrl = childDatabaseUrl(row.workspaceDatabaseName);\n      await applyMigrations(databaseUrl);",
+  "Active trial reconciliation must apply current migrations before repairing and restarting a workspace.",
+);
+requireIncludes(
+  worker,
   "const repairedOnlineStore = await tx.store.upsert",
   "Active trial reconciliation must recreate a missing legacy Online Store branch.",
 );

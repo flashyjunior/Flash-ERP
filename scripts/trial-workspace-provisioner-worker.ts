@@ -2135,6 +2135,8 @@ async function reconcileActiveWorkspaces() {
     if (!row.workspaceSlug || !row.workspaceDatabaseName || !row.workspacePort)
       continue;
     try {
+      const databaseUrl = childDatabaseUrl(row.workspaceDatabaseName);
+      await applyMigrations(databaseUrl);
       const repaired = await reconcileWorkspaceStorefront({
         requestId: row.id,
         requestNo: row.requestNo,
