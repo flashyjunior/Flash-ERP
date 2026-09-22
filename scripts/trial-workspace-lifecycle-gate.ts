@@ -26,6 +26,9 @@ const migration = read(
 const conversionMigration = read(
   "prisma/migrations-sqlserver/20260922020000_trial_paid_conversion/migration.sql",
 );
+const supportFullAccessMigration = read(
+  "prisma/migrations-sqlserver/20260922050000_flash_support_full_access/migration.sql",
+);
 const worker = read("scripts/trial-workspace-provisioner-worker.ts");
 const service = read("scripts/run-trial-provisioner-service.mjs");
 const runtime = read("scripts/run-trial-workspace-service.mjs");
@@ -213,11 +216,12 @@ requireIncludes(
   "retailUserSession.updateMany",
   "Paid conversion must be able to revoke retained support sessions selectively.",
 );
-const trialSupportPermissions = worker.match(
-  /const trialSupportPermissionCodes = \[([\s\S]*?)\] as const;/,
-)?.[1];
-assert.ok(trialSupportPermissions, "Trial support must use a named permission allow-list.");
-for (const deniedPermission of [
+requireIncludes(
+  worker,
+  "const trialSupportPermissionCodes = securityPermissionCatalog.map(",
+  "Trial support must derive full access from the authoritative permission catalog.",
+);
+for (const fullAccessPermission of [
   "security.data-purge.execute",
   "security.user.manage",
   "security.role.manage",
@@ -228,15 +232,26 @@ for (const deniedPermission of [
   "finance.setup.manage",
   "fuel.hq.manage",
 ]) {
-  assert.ok(
-    !trialSupportPermissions.includes(`"${deniedPermission}"`),
-    `Trial and converted support access must exclude ${deniedPermission}.`,
+  requireIncludes(
+    read("packages/domain/src/security-permissions.ts"),
+    `code: "${fullAccessPermission}"`,
+    `The full Flash support catalog must include ${fullAccessPermission}.`,
   );
 }
 requireIncludes(
+  supportFullAccessMigration,
+  "CROSS JOIN [dbo].[Permission] AS [permission]",
+  "Existing Flash support roles must receive every persisted permission.",
+);
+requireIncludes(
+  supportFullAccessMigration,
+  "[role].[code] = N'FLASH_SUPPORT'",
+  "The full-access migration must target only the Flash support role.",
+);
+requireIncludes(
   worker,
   "permissionCodes: trialSupportPermissionCodes",
-  "Converted support reconciliation must retain the same restricted permission set.",
+  "Converted support reconciliation must retain the same full permission set.",
 );
 requireIncludes(
   worker,

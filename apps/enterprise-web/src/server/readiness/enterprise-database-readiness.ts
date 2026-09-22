@@ -27,6 +27,7 @@ const requiredMigrationNames = [
   "20260922020000_trial_paid_conversion",
   "20260922030000_navigation_permission_coverage",
   "20260922040000_finance_fuel_permissions",
+  "20260922050000_flash_support_full_access",
 ];
 
 const requiredTables = [
