@@ -11,6 +11,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$trialProvisionerRuntimeFiles = @(
+  "apps\enterprise-web\src\server\trials\trial-owner-token.ts",
+  "apps\enterprise-web\src\server\trials\trial-sample-catalog.ts",
+  "apps\enterprise-web\src\server\trials\trial-sample-data.ts",
+  "packages\domain\src\prisma-enums.ts",
+  "packages\domain\src\security-permissions.ts",
+  "packages\domain\src\trial-support.ts",
+  "scripts\manage-flash-erp-trial-workspace.ps1",
+  "scripts\run-trial-provisioner-service.mjs",
+  "scripts\run-trial-workspace-service.mjs",
+  "scripts\trial-sqlserver-url.ts",
+  "scripts\trial-support-credentials-core.ts",
+  "scripts\trial-workspace-provisioner-worker.ts"
+)
+
 function Write-Step {
   param([string]$Message)
   Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -91,21 +106,13 @@ function Assert-RuntimePayload {
     "apps\enterprise-web\.next\static",
     "apps\enterprise-web\public",
     "apps\enterprise-web\next.config.mjs",
-    "apps\enterprise-web\src\server\trials\trial-owner-token.ts",
-    "packages\domain\src\prisma-enums.ts",
-    "packages\domain\src\security-permissions.ts",
     "scripts\run-enterprise-web-service.mjs",
     "scripts\start-enterprise-web.mjs",
-    "scripts\run-trial-provisioner-service.mjs",
-    "scripts\run-trial-workspace-service.mjs",
-    "scripts\trial-sqlserver-url.ts",
-    "scripts\trial-workspace-provisioner-worker.ts",
-    "scripts\manage-flash-erp-trial-workspace.ps1",
     "prisma\schema.prisma",
     "prisma\migrations-sqlserver",
     "prisma.config.ts",
     "release-runtime-manifest.json"
-  )
+  ) + $script:trialProvisionerRuntimeFiles
   foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root $relativePath))) {
       throw "Required runtime path was not packaged: $relativePath"
@@ -321,26 +328,15 @@ try {
 
   $scriptsDestination = Join-Path $payloadRoot "scripts"
   New-Item -ItemType Directory -Path $scriptsDestination -Force | Out-Null
-  foreach ($scriptName in @(
-    "run-enterprise-web-service.mjs",
-    "start-enterprise-web.mjs",
-    "run-trial-provisioner-service.mjs",
-    "run-trial-workspace-service.mjs",
-    "trial-sqlserver-url.ts",
-    "trial-workspace-provisioner-worker.ts",
-    "manage-flash-erp-trial-workspace.ps1"
-  )) {
+  foreach ($scriptName in @("run-enterprise-web-service.mjs", "start-enterprise-web.mjs")) {
     Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$scriptName") -Destination $scriptsDestination
   }
 
-  $trialServerDestination = Join-Path $payloadRoot "apps\enterprise-web\src\server\trials"
-  New-Item -ItemType Directory -Path $trialServerDestination -Force | Out-Null
-  Copy-Item -LiteralPath (Join-Path $repositoryRoot "apps\enterprise-web\src\server\trials\trial-owner-token.ts") -Destination $trialServerDestination
-
-  $domainSourceDestination = Join-Path $payloadRoot "packages\domain\src"
-  New-Item -ItemType Directory -Path $domainSourceDestination -Force | Out-Null
-  foreach ($domainSourceName in @("prisma-enums.ts", "security-permissions.ts")) {
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot "packages\domain\src\$domainSourceName") -Destination $domainSourceDestination
+  foreach ($relativePath in $trialProvisionerRuntimeFiles) {
+    $sourcePath = Join-Path $repositoryRoot $relativePath
+    $destinationPath = Join-Path $payloadRoot $relativePath
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
   }
 
   $prismaDestination = Join-Path $payloadRoot "prisma"
@@ -364,6 +360,7 @@ try {
     runtimeDependencyModel = $runtimeDependencyModel
     requiredRuntimeModules = $runtimeModules
     requiredRuntimeAliases = $aliasArray
+    requiredTrialProvisionerFiles = $trialProvisionerRuntimeFiles
     requiredMigrations = $migrationNames
   }
   $runtimeManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payloadRoot "release-runtime-manifest.json") -Encoding UTF8
@@ -399,6 +396,7 @@ try {
     runtimeDependencyModel = $runtimeDependencyModel
     requiredRuntimeModules = $runtimeModules
     requiredRuntimeAliases = $aliasArray
+    requiredTrialProvisionerFiles = $trialProvisionerRuntimeFiles
     requiredMigrations = $migrationNames
   }
   $releaseManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $packageRoot "release-manifest.json") -Encoding UTF8
@@ -457,7 +455,7 @@ After deployment, confirm the local provisioner before registering a trial:
 
    Invoke-RestMethod -Uri 'http://127.0.0.1:3099/health'
 
-It must return ok=true. Persisted verified requests that were waiting while the provisioner was unavailable are replayed automatically on startup. A verified signup then creates its own SQL Server database, app directory, scheduled task, port, owner invitation, full owner role, and 14-day expiry. Expiry retains the database for audit but stops access; an authorised extension restarts the same workspace without restoring revoked sessions.
+It must return ok=true and reconciliation.status=succeeded. Persisted verified requests that were waiting while the provisioner was unavailable are replayed automatically on startup. A verified signup then creates its own SQL Server database, app directory, scheduled task, port, owner invitation, full owner role, and 14-day expiry. Expiry retains the database for audit but stops access; an authorised extension restarts the same workspace without restoring revoked sessions.
 
 Do not delete or reuse a failed C:\FlashRMS\releases\FlashRMS-$ReleaseId directory. Build a package with a new release ID for any retry.
 "@

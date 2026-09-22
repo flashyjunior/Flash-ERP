@@ -14,7 +14,7 @@ import {
 
 const root = process.cwd();
 const read = (relativePath: string) =>
-  fs.readFileSync(path.join(root, relativePath), "utf8");
+  fs.readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
 const requireIncludes = (source: string, value: string, message: string) => {
   assert.ok(source.includes(value), message);
 };
@@ -52,6 +52,8 @@ const passwordResetRelay = read(
   "apps/enterprise-web/src/server/trials/trial-password-reset-relay.ts",
 );
 const deployer = read("scripts/deploy-flash-erp-vps-release.ps1");
+const packager = read("scripts/package-flash-erp-vps-release.ps1");
+const packageSmoke = read("scripts/smoke-flash-erp-vps-release-package.ps1");
 
 for (const model of ["TrialLifecycleEvent", "TrialWorkspaceRuntime"]) {
   requireIncludes(
@@ -239,6 +241,21 @@ requireIncludes(
   "Startup must reconcile active trial storefront ownership.",
 );
 requireIncludes(
+  service,
+  'reconciliation.status = "succeeded"',
+  "Provisioner health must retain successful active-workspace reconciliation evidence.",
+);
+requireIncludes(
+  service,
+  "scheduleReconciliationRetry();",
+  "The provisioner must schedule an active-workspace retry after a startup reconciliation failure.",
+);
+requireIncludes(
+  service,
+  'enqueue("reconcile-active");\n  }, 60_000)',
+  "Failed active-workspace reconciliation must retry after a bounded delay.",
+);
+requireIncludes(
   worker,
   'await manageRuntime("Ensure", allocation)',
   "Active trial reconciliation must refresh each isolated runtime from the corrected release.",
@@ -267,6 +284,38 @@ requireIncludes(
   deployer,
   "Wait-ForTrialProvisioner",
   "Deployment must verify that the new release owns the trial provisioner.",
+);
+requireIncludes(
+  deployer,
+  '[string]$health.reconciliation.status -ne "succeeded"',
+  "Deployment must wait for active trial migration and runtime refresh, not only provisioner liveness.",
+);
+for (const provisionerRuntimeFile of [
+  "trial-support.ts",
+  "trial-support-credentials-core.ts",
+  "trial-sample-data.ts",
+  "trial-sample-catalog.ts",
+]) {
+  requireIncludes(
+    packager,
+    provisionerRuntimeFile,
+    `The VPS package must carry trial provisioner dependency ${provisionerRuntimeFile}.`,
+  );
+}
+requireIncludes(
+  deployer,
+  'requiredTrialProvisionerFiles',
+  "Deployment must validate the complete trial provisioner runtime-file contract.",
+);
+requireIncludes(
+  packageSmoke,
+  "PACKAGED_TRIAL_PROVISIONER_MODULE_RESOLUTION=OK",
+  "Release packaging must execute a no-write trial provisioner module-resolution smoke.",
+);
+requireIncludes(
+  worker,
+  'process.env.FLASH_ERP_TRIAL_PROVISIONER_MODULE_SMOKE !== "true"',
+  "The no-write provisioner module smoke must remain explicitly gated.",
 );
 requireIncludes(
   runtime,

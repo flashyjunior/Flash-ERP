@@ -36,6 +36,30 @@ try {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $archive = [IO.Compression.ZipFile]::OpenRead($payloadPath)
   try {
+    foreach ($relativePath in @($manifest.requiredTrialProvisionerFiles)) {
+      $entryName = ([string]$relativePath).Replace("\", "/")
+      $entry = $archive.Entries | Where-Object {
+        $_.FullName.Replace("\", "/") -eq $entryName
+      } | Select-Object -First 1
+      if (-not $entry) {
+        throw "Trial provisioner runtime file is missing from the payload: $relativePath"
+      }
+
+      $destination = Join-Path $smokeRoot ([string]$relativePath)
+      New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+      $input = $entry.Open()
+      try {
+        $output = [IO.File]::Create($destination)
+        try {
+          $input.CopyTo($output)
+        } finally {
+          $output.Dispose()
+        }
+      } finally {
+        $input.Dispose()
+      }
+    }
+
     foreach ($alias in @($manifest.requiredRuntimeAliases)) {
       $prefix = ([string]$alias.path).TrimEnd("/") + "/"
       $entries = @($archive.Entries | Where-Object {
@@ -109,6 +133,28 @@ process.stdout.write("PACKAGED_RUNTIME_MODULE_RESOLUTION=OK\n");
   if ($LASTEXITCODE -ne 0) {
     throw "Packaged runtime module resolution failed with exit code $LASTEXITCODE."
   }
+
+  $tsxCli = Join-Path $nodeModules "tsx\dist\cli.mjs"
+  $provisionerWorker = Join-Path $smokeRoot "scripts\trial-workspace-provisioner-worker.ts"
+  if (-not (Test-Path -LiteralPath $tsxCli -PathType Leaf)) {
+    throw "The package smoke could not locate the tsx CLI: $tsxCli"
+  }
+  $previousDatabaseUrl = $env:DATABASE_URL
+  $previousModuleSmoke = $env:FLASH_ERP_TRIAL_PROVISIONER_MODULE_SMOKE
+  try {
+    $env:DATABASE_URL = "sqlserver://127.0.0.1:1433;database=flash_erp_package_smoke;user=smoke;password=PackageSmoke123!;encrypt=false;trustServerCertificate=true"
+    $env:FLASH_ERP_TRIAL_PROVISIONER_MODULE_SMOKE = "true"
+    $workerOutput = @(& node.exe $tsxCli $provisionerWorker module-smoke 2>&1)
+    $workerExitCode = $LASTEXITCODE
+    $workerText = $workerOutput -join "`n"
+    if ($workerExitCode -ne 0 -or $workerText -notlike "*TRIAL_PROVISIONER_MODULE_RESOLUTION=OK*") {
+      throw "The packaged trial provisioner dependency smoke failed.`n$workerText"
+    }
+  } finally {
+    $env:DATABASE_URL = $previousDatabaseUrl
+    $env:FLASH_ERP_TRIAL_PROVISIONER_MODULE_SMOKE = $previousModuleSmoke
+  }
+  Write-Host "PACKAGED_TRIAL_PROVISIONER_MODULE_RESOLUTION=OK"
 
   $prismaAlias = @($manifest.requiredRuntimeAliases | Where-Object {
     $_.path -like "*/@prisma/client-*"

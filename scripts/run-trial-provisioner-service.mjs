@@ -9,6 +9,14 @@ const host = "127.0.0.1";
 const port = Number.parseInt(process.env.FLASH_ERP_TRIAL_PROVISIONER_PORT || "3099", 10);
 const secret = process.env.FLASH_ERP_TRIAL_PROVISIONER_SECRET?.trim();
 const worker = path.join(repositoryRoot, "scripts", "trial-workspace-provisioner-worker.ts");
+const reconciliation = {
+  status: "pending",
+  lastQueuedAt: null,
+  lastStartedAt: null,
+  lastSucceededAt: null,
+  lastFailedAt: null,
+  lastError: null
+};
 
 if (!secret) throw new Error("FLASH_ERP_TRIAL_PROVISIONER_SECRET is required.");
 if (!Number.isInteger(port) || port < 1024 || port > 65535) {
@@ -55,18 +63,57 @@ function runWorker(command, body = "") {
 }
 
 let queue = Promise.resolve();
+let reconciliationRetryTimer = null;
+
+function scheduleReconciliationRetry() {
+  if (reconciliationRetryTimer) return;
+  reconciliationRetryTimer = setTimeout(() => {
+    reconciliationRetryTimer = null;
+    enqueue("reconcile-active");
+  }, 60_000);
+  reconciliationRetryTimer.unref();
+}
+
 function enqueue(command, body = "") {
-  queue = queue
-    .then(() => runWorker(command, body))
-    .catch((error) => {
+  const isActiveReconciliation = command === "reconcile-active";
+  if (isActiveReconciliation) {
+    reconciliation.status = "queued";
+    reconciliation.lastQueuedAt = new Date().toISOString();
+  }
+  queue = queue.then(async () => {
+    if (isActiveReconciliation) {
+      reconciliation.status = "running";
+      reconciliation.lastStartedAt = new Date().toISOString();
+      reconciliation.lastError = null;
+    }
+    try {
+      await runWorker(command, body);
+      if (isActiveReconciliation) {
+        reconciliation.status = "succeeded";
+        reconciliation.lastSucceededAt = new Date().toISOString();
+        reconciliation.lastFailedAt = null;
+      }
+    } catch (error) {
+      if (isActiveReconciliation) {
+        reconciliation.status = "failed";
+        reconciliation.lastFailedAt = new Date().toISOString();
+        reconciliation.lastError =
+          error instanceof Error ? error.message.slice(0, 1000) : String(error).slice(0, 1000);
+        scheduleReconciliationRetry();
+      }
       process.stderr.write(`[trial-provisioner] ${new Date().toISOString()} ${error instanceof Error ? error.message : String(error)}\n`);
-    });
+    }
+  });
 }
 
 const server = http.createServer((request, response) => {
   if (request.method === "GET" && request.url === "/health") {
     response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-    response.end(JSON.stringify({ ok: true, service: "flash-erp-trial-provisioner" }));
+    response.end(JSON.stringify({
+      ok: true,
+      service: "flash-erp-trial-provisioner",
+      reconciliation
+    }));
     return;
   }
   if (request.method !== "POST" || !["/provision", "/extend"].includes(request.url || "")) {
@@ -107,14 +154,17 @@ const sweepTimer = setInterval(() => enqueue("sweep"), 60_000);
 sweepTimer.unref();
 const recoveryTimer = setInterval(() => enqueue("recover"), 5 * 60_000);
 recoveryTimer.unref();
-setTimeout(() => enqueue("recover"), 2_000).unref();
-setTimeout(() => enqueue("recover-failed"), 4_000).unref();
-setTimeout(() => enqueue("reconcile-active"), 6_000).unref();
+const initialReconciliationTimer = setTimeout(() => enqueue("reconcile-active"), 1_000);
+initialReconciliationTimer.unref();
+setTimeout(() => enqueue("recover"), 3_000).unref();
+setTimeout(() => enqueue("recover-failed"), 5_000).unref();
 setTimeout(() => enqueue("sweep"), 10_000).unref();
 
 function shutdown() {
   clearInterval(sweepTimer);
   clearInterval(recoveryTimer);
+  clearTimeout(initialReconciliationTimer);
+  if (reconciliationRetryTimer) clearTimeout(reconciliationRetryTimer);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 30_000).unref();
 }
