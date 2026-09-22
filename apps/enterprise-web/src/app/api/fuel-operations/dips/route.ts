@@ -6,7 +6,7 @@ import { createFuelTankDip } from "@/server/repositories/erp-fuel-operations.rep
 export async function POST(request: Request) {
   try {
     const session = await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["fuel.dip.capture"]
     );
     const payload = await request.json();

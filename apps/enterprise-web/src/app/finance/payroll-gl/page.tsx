@@ -1,4 +1,5 @@
 import { ErpPayrollGlWorkspace } from "@/components/enterprise/erp-payroll-gl-workspace";
+import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableErpPayrollGlWorkspace,
   getErpPayrollGlWorkspace
@@ -7,6 +8,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function FinancePayrollGlPage() {
+  await requireEnterprisePermission(["finance.manage"]);
   const workspace = await getErpPayrollGlWorkspace().catch((error: unknown) =>
     buildUnavailableErpPayrollGlWorkspace(
       error instanceof Error

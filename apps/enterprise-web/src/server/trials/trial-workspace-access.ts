@@ -66,7 +66,7 @@ export async function isTrialSupportUser(
 async function expireWorkspace(requestId: string, now: Date) {
   await prisma.$transaction(async (tx) => {
     const runtime = await tx.trialWorkspaceRuntime.findUnique({ where: { id: requestId } });
-    if (!runtime || runtime.status === "EXPIRED") return;
+    if (!runtime || ["EXPIRED", "CONVERTED"].includes(runtime.status)) return;
 
     const enterpriseNode = await tx.syncNode.findFirst({
       where: { nodeType: "ENTERPRISE", isPrimary: true },
@@ -117,28 +117,130 @@ async function expireWorkspace(requestId: string, now: Date) {
   });
 }
 
+async function enforceConvertedSupportAccess(
+  runtime: {
+    id: string;
+    requestNo: string;
+    workspaceSlug: string;
+    status: string;
+    retainSupportAccess: boolean | null;
+    supportAccessExpiresAt: Date | null;
+    supportApprovalReference: string | null;
+  },
+  now: Date
+) {
+  if (runtime.status !== "CONVERTED") return;
+
+  const supportWindowIsActive =
+    runtime.retainSupportAccess === true &&
+    runtime.supportAccessExpiresAt !== null &&
+    runtime.supportAccessExpiresAt.getTime() > now.getTime();
+  if (supportWindowIsActive) return;
+
+  await prisma.$transaction(async (tx) => {
+    const supportUser = await tx.retailUser.findFirst({
+      where: {
+        loginId: trialSupportLoginId(runtime.workspaceSlug),
+        deletedAt: null
+      },
+      select: { id: true, retailOrgId: true, accountStatus: true }
+    });
+    if (!supportUser) return;
+
+    const revokedSessions = await tx.retailUserSession.updateMany({
+      where: { retailUserId: supportUser.id, revokedAt: null },
+      data: { revokedAt: now }
+    });
+    const removedRoles = await tx.retailUserRole.deleteMany({
+      where: { retailUserId: supportUser.id }
+    });
+    const disabledUsers = await tx.retailUser.updateMany({
+      where: {
+        id: supportUser.id,
+        accountStatus: { not: "DISABLED" }
+      },
+      data: {
+        accountStatus: "DISABLED",
+        failedLoginAttempts: 0,
+        lockedUntil: null
+      }
+    });
+    if (revokedSessions.count + removedRoles.count + disabledUsers.count === 0) return;
+
+    const enterpriseNode = await tx.syncNode.findFirst({
+      where: {
+        retailOrgId: supportUser.retailOrgId,
+        nodeType: "ENTERPRISE",
+        isPrimary: true
+      },
+      select: { code: true }
+    });
+    if (!enterpriseNode) return;
+
+    await tx.securityLog.create({
+      data: {
+        retailOrgId: supportUser.retailOrgId,
+        kind: SecurityLogKind.SECURITY,
+        severity: SecurityLogSeverity.WARNING,
+        category: "TRIAL",
+        action: "CONVERTED_SUPPORT_ACCESS_REVOKED",
+        actorLabel: "Trial workspace access guard",
+        targetType: "Retail user",
+        targetRef: trialSupportLoginId(runtime.workspaceSlug),
+        sourceNodeCode: enterpriseNode.code,
+        message: `Flash support access for converted workspace ${runtime.requestNo} was revoked because its approved support window is no longer active.`,
+        detailsJson: JSON.stringify({
+          retainSupportAccess: runtime.retainSupportAccess,
+          supportAccessExpiresAt: runtime.supportAccessExpiresAt?.toISOString() ?? null,
+          supportApprovalReference: runtime.supportApprovalReference,
+          revokedSessionCount: revokedSessions.count,
+          removedRoleCount: removedRoles.count
+        })
+      }
+    });
+  });
+}
+
 export async function enforceTrialWorkspaceAccess(): Promise<TrialWorkspaceAccessState | null> {
   const runtime = await prisma.trialWorkspaceRuntime.findFirst({
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
+      requestNo: true,
+      workspaceSlug: true,
       status: true,
-      trialExpiresAt: true
+      trialExpiresAt: true,
+      subscriptionLicensedUntil: true,
+      retainSupportAccess: true,
+      supportAccessExpiresAt: true,
+      supportApprovalReference: true
     }
   });
 
   if (!runtime) return null;
 
   const now = new Date();
-  const isExpired = runtime.trialExpiresAt.getTime() <= now.getTime();
-  if (isExpired && runtime.status !== "EXPIRED") {
+  const isConverted = runtime.status === "CONVERTED";
+  const isTrialExpired = runtime.trialExpiresAt.getTime() <= now.getTime();
+  const isPaidLicenseExpired =
+    isConverted &&
+    runtime.subscriptionLicensedUntil !== null &&
+    runtime.subscriptionLicensedUntil.getTime() <= now.getTime();
+  if (!isConverted && isTrialExpired && runtime.status !== "EXPIRED") {
     await expireWorkspace(runtime.id, now);
   }
+  await enforceConvertedSupportAccess(runtime, now);
 
   return {
     requestId: runtime.id,
-    status: isExpired ? "EXPIRED" : runtime.status,
-    expiresAt: runtime.trialExpiresAt,
-    blocked: isExpired || runtime.status !== "ACTIVE"
+    status: isPaidLicenseExpired
+      ? "SUBSCRIPTION_EXPIRED"
+      : !isConverted && isTrialExpired
+        ? "EXPIRED"
+        : runtime.status,
+    expiresAt: runtime.subscriptionLicensedUntil ?? runtime.trialExpiresAt,
+    blocked:
+      isPaidLicenseExpired ||
+      (!isConverted && (isTrialExpired || runtime.status !== "ACTIVE"))
   };
 }

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { InventoryAdjustmentTaskRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { requestInventoryAdjustmentTask } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -12,6 +13,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.adjust"]);
     const { locationCode } = await context.params;
     const payload = (await request.json()) as Partial<InventoryAdjustmentTaskRequest>;
 
@@ -64,7 +66,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not queue the inventory adjustment task."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

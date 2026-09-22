@@ -6,7 +6,7 @@ import { upsertFuelTank } from "@/server/repositories/erp-fuel-operations.reposi
 export async function POST(request: Request) {
   try {
     await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["fuel.tank.manage"]
     );
     const payload = await request.json();

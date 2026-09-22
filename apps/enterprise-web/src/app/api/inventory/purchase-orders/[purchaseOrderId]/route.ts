@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import type { UpdatePurchaseOrderRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updatePurchaseOrder } from "@/server/repositories/store-sync.repository";
 
 export async function PATCH(
@@ -13,6 +14,7 @@ export async function PATCH(
   }
 ) {
   try {
+    await assertEnterprisePermission(["inventory.purchase-order.manage"]);
     const { purchaseOrderId } = await context.params;
     const payload = (await request.json()) as Partial<UpdatePurchaseOrderRequest>;
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
@@ -73,7 +75,7 @@ export async function PATCH(
             ? error.message
             : "Flash ERP could not update the purchase order."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

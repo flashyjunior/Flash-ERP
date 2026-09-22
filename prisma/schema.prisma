@@ -178,48 +178,56 @@ model RetailOrg {
 }
 
 model TrialSignupRequest {
-  id                       String                @id @default(uuid()) @db.NVarChar(100)
-  requestNo                String                @unique @db.NVarChar(50)
-  companyName              String                @db.NVarChar(200)
-  contactName              String                @db.NVarChar(200)
-  email                    String                @db.NVarChar(254)
-  emailNormalized          String                @db.NVarChar(254)
-  phone                    String                @db.NVarChar(40)
-  countryCode              String                @default("GH") @db.NVarChar(2)
-  city                     String?               @db.NVarChar(200)
-  businessType             String                @db.NVarChar(60)
-  branchCount              Int                   @default(1)
-  employeeCountRange       String                @db.NVarChar(30)
-  preferredSlug            String?               @db.NVarChar(80)
-  status                   String                @default("PENDING_VERIFICATION") @db.NVarChar(40)
-  verificationCodeHash     String?               @db.NVarChar(64)
-  verificationExpiresAt    DateTime?
-  verificationAttemptCount Int                   @default(0)
-  verifiedAt               DateTime?
-  provisioningRequestKey   String                @unique @db.NVarChar(200)
-  provisionerReference     String?               @db.NVarChar(200)
-  workspaceUrl             String?               @db.NVarChar(1000)
-  onlineStoreUrl           String?               @db.NVarChar(1000)
-  storefrontUrl            String?               @db.NVarChar(1000)
-  trialStartsAt            DateTime?
-  trialExpiresAt           DateTime?
-  workspaceSlug            String?               @db.NVarChar(80)
-  workspaceDatabaseName    String?               @db.NVarChar(128)
-  workspacePort            Int?
-  ownerLoginId             String?               @db.NVarChar(254)
-  activationSentAt         DateTime?
-  expiredAt                DateTime?
-  extensionCount           Int                   @default(0)
-  lastLifecycleAt          DateTime?
-  failureCode              String?               @db.NVarChar(100)
-  failureMessage           String?               @db.NVarChar(1000)
-  marketingConsent         Boolean               @default(false)
-  termsAcceptedAt          DateTime
-  ipAddressHash            String?               @db.NVarChar(64)
-  userAgent                String?               @db.NVarChar(500)
-  createdAt                DateTime              @default(now())
-  updatedAt                DateTime              @updatedAt
-  lifecycleEvents          TrialLifecycleEvent[]
+  id                        String                @id @default(uuid()) @db.NVarChar(100)
+  requestNo                 String                @unique @db.NVarChar(50)
+  companyName               String                @db.NVarChar(200)
+  contactName               String                @db.NVarChar(200)
+  email                     String                @db.NVarChar(254)
+  emailNormalized           String                @db.NVarChar(254)
+  phone                     String                @db.NVarChar(40)
+  countryCode               String                @default("GH") @db.NVarChar(2)
+  city                      String?               @db.NVarChar(200)
+  businessType              String                @db.NVarChar(60)
+  branchCount               Int                   @default(1)
+  employeeCountRange        String                @db.NVarChar(30)
+  preferredSlug             String?               @db.NVarChar(80)
+  status                    String                @default("PENDING_VERIFICATION") @db.NVarChar(40)
+  verificationCodeHash      String?               @db.NVarChar(64)
+  verificationExpiresAt     DateTime?
+  verificationAttemptCount  Int                   @default(0)
+  verifiedAt                DateTime?
+  provisioningRequestKey    String                @unique @db.NVarChar(200)
+  provisionerReference      String?               @db.NVarChar(200)
+  workspaceUrl              String?               @db.NVarChar(1000)
+  onlineStoreUrl            String?               @db.NVarChar(1000)
+  storefrontUrl             String?               @db.NVarChar(1000)
+  trialStartsAt             DateTime?
+  trialExpiresAt            DateTime?
+  workspaceSlug             String?               @db.NVarChar(80)
+  workspaceDatabaseName     String?               @db.NVarChar(128)
+  workspacePort             Int?
+  ownerLoginId              String?               @db.NVarChar(254)
+  activationSentAt          DateTime?
+  expiredAt                 DateTime?
+  extensionCount            Int                   @default(0)
+  subscriptionPlanCode      String?               @db.NVarChar(80)
+  subscriptionReference     String?               @db.NVarChar(200)
+  subscriptionLicensedUntil DateTime?
+  convertedAt               DateTime?
+  convertedBy               String?               @db.NVarChar(254)
+  retainSupportAccess       Boolean?
+  supportAccessExpiresAt    DateTime?
+  supportApprovalReference  String?               @db.NVarChar(200)
+  lastLifecycleAt           DateTime?
+  failureCode               String?               @db.NVarChar(100)
+  failureMessage            String?               @db.NVarChar(1000)
+  marketingConsent          Boolean               @default(false)
+  termsAcceptedAt           DateTime
+  ipAddressHash             String?               @db.NVarChar(64)
+  userAgent                 String?               @db.NVarChar(500)
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+  lifecycleEvents           TrialLifecycleEvent[]
 
   @@index([emailNormalized, createdAt])
   @@index([status, createdAt])
@@ -248,20 +256,28 @@ model TrialLifecycleEvent {
 }
 
 model TrialWorkspaceRuntime {
-  id              String    @id @db.NVarChar(100)
-  requestNo       String    @unique @db.NVarChar(50)
-  workspaceSlug   String    @unique @db.NVarChar(80)
-  companyName     String    @db.NVarChar(200)
-  ownerUserId     String    @db.NVarChar(100)
-  status          String    @default("PROVISIONING") @db.NVarChar(40)
-  trialStartsAt   DateTime
-  trialExpiresAt  DateTime
-  activatedAt     DateTime?
-  expiredAt       DateTime?
-  extensionCount  Int       @default(0)
-  lastLifecycleAt DateTime  @default(now())
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id                        String    @id @db.NVarChar(100)
+  requestNo                 String    @unique @db.NVarChar(50)
+  workspaceSlug             String    @unique @db.NVarChar(80)
+  companyName               String    @db.NVarChar(200)
+  ownerUserId               String    @db.NVarChar(100)
+  status                    String    @default("PROVISIONING") @db.NVarChar(40)
+  trialStartsAt             DateTime
+  trialExpiresAt            DateTime
+  activatedAt               DateTime?
+  expiredAt                 DateTime?
+  extensionCount            Int       @default(0)
+  subscriptionPlanCode      String?   @db.NVarChar(80)
+  subscriptionReference     String?   @db.NVarChar(200)
+  subscriptionLicensedUntil DateTime?
+  convertedAt               DateTime?
+  convertedBy               String?   @db.NVarChar(254)
+  retainSupportAccess       Boolean?
+  supportAccessExpiresAt    DateTime?
+  supportApprovalReference  String?   @db.NVarChar(200)
+  lastLifecycleAt           DateTime  @default(now())
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   @@index([status, trialExpiresAt])
   @@map("trial_workspace_runtime")

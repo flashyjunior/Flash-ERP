@@ -116,7 +116,7 @@ const server = http.createServer((request, response) => {
     }));
     return;
   }
-  if (request.method !== "POST" || !["/provision", "/extend"].includes(request.url || "")) {
+  if (request.method !== "POST" || !["/provision", "/extend", "/convert"].includes(request.url || "")) {
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ message: "Not found." }));
     return;
@@ -134,7 +134,12 @@ const server = http.createServer((request, response) => {
       const body = Buffer.concat(chunks).toString("utf8");
       verifyRequest(body, request.headers);
       const parsed = JSON.parse(body);
-      const command = request.url === "/extend" ? "extend" : "provision";
+      const command =
+        request.url === "/extend"
+          ? "extend"
+          : request.url === "/convert"
+            ? "convert"
+            : "provision";
       const operationId = `${command}:${parsed.requestId || crypto.randomUUID()}:${Date.now()}`;
       enqueue(command, body);
       response.writeHead(202, { "content-type": "application/json", "cache-control": "no-store" });

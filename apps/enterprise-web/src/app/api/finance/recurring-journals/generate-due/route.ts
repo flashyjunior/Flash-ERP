@@ -5,7 +5,7 @@ import { generateDueErpRecurringJournalDrafts } from "@/server/repositories/erp-
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.manage"]);
     const payload = await request.json().catch(() => ({}));
     const response = await generateDueErpRecurringJournalDrafts(payload);
 

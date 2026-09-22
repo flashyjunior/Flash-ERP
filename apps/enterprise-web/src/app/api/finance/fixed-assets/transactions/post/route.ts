@@ -5,7 +5,7 @@ import { postErpFixedAssetTransaction } from "@/server/repositories/erp-fixed-as
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.post"]);
     const payload = await request.json();
     const response = await postErpFixedAssetTransaction(payload);
 

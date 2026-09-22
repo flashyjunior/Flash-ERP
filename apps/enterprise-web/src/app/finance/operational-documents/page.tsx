@@ -8,7 +8,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function OperationalDocumentsPage() {
-  await requireEnterprisePermission(["operations.dashboard.view"]);
+  await requireEnterprisePermission(["finance.manage"]);
   const workspace = await getErpOperationalDocumentsWorkspace().catch((error: unknown) =>
     buildUnavailableErpOperationalDocumentsWorkspace(
       error instanceof Error

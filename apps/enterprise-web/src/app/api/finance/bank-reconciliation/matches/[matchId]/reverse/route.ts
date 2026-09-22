@@ -11,7 +11,7 @@ type ReverseBankReconciliationMatchRouteContext = {
 
 export async function POST(request: Request, context: ReverseBankReconciliationMatchRouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.approve"]);
     const { matchId } = await context.params;
     const payload = await request.json().catch(() => ({}));
     const response = await reverseErpBankReconciliationMatch(matchId, payload);

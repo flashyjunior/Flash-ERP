@@ -5,7 +5,7 @@ import { upsertErpGlAccount } from "@/server/repositories/erp-finance-foundation
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.setup.manage"]);
     const payload = await request.json();
     const response = await upsertErpGlAccount(payload);
 

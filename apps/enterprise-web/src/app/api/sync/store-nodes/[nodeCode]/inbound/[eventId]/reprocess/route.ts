@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import {
+  assertEnterprisePermission,
+  EnterpriseAuthError
+} from "@/server/auth/enterprise-session";
+import {
   reprocessStoreInboundEvent,
   recordStoreSyncRequestFailure
 } from "@/server/repositories/store-sync.repository";
@@ -17,22 +21,28 @@ export async function POST(
   let eventId = "unknown";
 
   try {
+    const session = await assertEnterprisePermission(["sync.monitor"]);
     ({ nodeCode, eventId } = await params);
     const rawBody = await request.text();
     const body = rawBody.trim().length > 0 ? JSON.parse(rawBody) : {};
     const result = await reprocessStoreInboundEvent(
       nodeCode,
       eventId,
-      parseStoreNodeInboundActionRequest(body)
+      {
+        ...parseStoreNodeInboundActionRequest(body),
+        operatorName: session.displayName || session.loginId
+      }
     );
 
     return NextResponse.json(result);
   } catch (error) {
-    await recordStoreSyncRequestFailure(
-      nodeCode,
-      `sync.inbound-reprocess.failed:${eventId}`,
-      error
-    );
+    if (!(error instanceof EnterpriseAuthError)) {
+      await recordStoreSyncRequestFailure(
+        nodeCode,
+        `sync.inbound-reprocess.failed:${eventId}`,
+        error
+      );
+    }
 
     return NextResponse.json(
       {
@@ -42,7 +52,8 @@ export async function POST(
             : "Flash ERP could not reprocess the inbound packet for this node."
       },
       {
-        status: getSyncRouteStatus(error)
+        status:
+          error instanceof EnterpriseAuthError ? error.status : getSyncRouteStatus(error)
       }
     );
   }

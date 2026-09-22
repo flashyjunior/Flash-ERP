@@ -11,7 +11,7 @@ type PostSettlementAllocationRouteContext = {
 
 export async function POST(_request: Request, context: PostSettlementAllocationRouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.post"]);
     const { allocationId } = await context.params;
     const response = await postErpSettlementAllocation(allocationId);
 

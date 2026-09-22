@@ -40,7 +40,7 @@ function normalizeEvidenceKind(value: FormDataEntryValue | null) {
 export async function POST(request: Request) {
   try {
     await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["fuel.dip.capture", "fuel.meter-reading.capture", "inventory.transfer.receive"],
       { any: true }
     );

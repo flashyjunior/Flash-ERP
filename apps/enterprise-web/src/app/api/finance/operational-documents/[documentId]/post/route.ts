@@ -11,7 +11,7 @@ type PostOperationalDocumentRouteContext = {
 
 export async function POST(_request: Request, context: PostOperationalDocumentRouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.post"]);
     const { documentId } = await context.params;
     const response = await postErpOperationalDocument(documentId);
 

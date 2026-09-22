@@ -135,6 +135,15 @@ const catalog = [
         sortOrder: 116
     },
     {
+        code: "settings.license.manage",
+        name: "Manage licensing",
+        description: "View and manage enterprise shop, node, and terminal licensing.",
+        domain: "Settings",
+        group: "Licensing",
+        surface: "enterprise",
+        sortOrder: 118
+    },
+    {
         code: "settings.receipt-template.manage",
         name: "Manage receipt templates",
         description: "Design and publish thermal receipt templates for stores.",
@@ -223,6 +232,15 @@ const catalog = [
         group: "Security logs",
         surface: "enterprise",
         sortOrder: 210
+    },
+    {
+        code: "security.data-purge.execute",
+        name: "Purge enterprise data",
+        description: "Irreversibly delete transactional and selected master data for the whole organisation.",
+        domain: "Security",
+        group: "Data purge",
+        surface: "enterprise",
+        sortOrder: 215
     },
     {
         code: "inventory.view",
@@ -369,6 +387,15 @@ const catalog = [
         sortOrder: 320
     },
     {
+        code: "ecommerce.console.access",
+        name: "Access ecommerce staff console",
+        description: "Open and operate customer orders, catalog publication, payment options, and storefront setup.",
+        domain: "Operations",
+        group: "Ecommerce",
+        surface: "store",
+        sortOrder: 321
+    },
+    {
         code: "pos.shift.open",
         name: "Open shift",
         description: "Open a POS shift and start a branch till session.",
@@ -486,6 +513,60 @@ const catalog = [
         sortOrder: 440
     },
     {
+        code: "pos.layaway.create",
+        name: "Create layaways",
+        description: "Create a layaway and accept its opening deposit subject to company policy.",
+        domain: "POS",
+        group: "Layaway",
+        surface: "store",
+        sortOrder: 442
+    },
+    {
+        code: "pos.layaway.payment.receive",
+        name: "Receive layaway payments",
+        description: "Receive and attribute installment payments against an active layaway.",
+        domain: "POS",
+        group: "Layaway",
+        surface: "store",
+        sortOrder: 443
+    },
+    {
+        code: "pos.layaway.cancel-refund",
+        name: "Cancel and refund layaways",
+        description: "Cancel a layaway and process its policy-governed refund and cancellation fee.",
+        domain: "POS",
+        group: "Layaway",
+        surface: "store",
+        sortOrder: 444
+    },
+    {
+        code: "pos.layaway.reservation.release",
+        name: "Release layaway reservations",
+        description: "Release reserved layaway stock without completing the layaway sale.",
+        domain: "POS",
+        group: "Layaway",
+        surface: "store",
+        sortOrder: 445
+    },
+    {
+        code: "pos.layaway.policy.override",
+        name: "Override layaway policy",
+        description: "Approve an exception to deposit, reservation, cancellation, or fulfilment policy.",
+        domain: "POS",
+        group: "Layaway",
+        surface: "store",
+        sortOrder: 446
+    },
+    {
+        code: "pos.layaway.fulfil",
+        name: "Fulfil layaways",
+        description: "Convert a fully eligible layaway into a completed sale and release its reservation.",
+        domain: "POS",
+        group: "Layaway",
+        surface: "store",
+        sortOrder: 447
+    },
+    {
         code: "sync.monitor",
         name: "Monitor sync",
         description: "Review sync topology, queue posture, and node health.",
@@ -520,6 +601,69 @@ const catalog = [
         group: "Dashboards",
         surface: "enterprise",
         sortOrder: 470
+    },
+    {
+        code: "finance.view",
+        name: "View finance",
+        description: "View general-ledger balances, financial statements, journals, and finance inquiries.",
+        domain: "Finance",
+        group: "Access",
+        surface: "enterprise",
+        sortOrder: 472
+    },
+    {
+        code: "finance.manage",
+        name: "Manage finance operations",
+        description: "Prepare finance documents, settlements, cashbook activity, budgets, payroll batches, and asset transactions.",
+        domain: "Finance",
+        group: "Operations",
+        surface: "enterprise",
+        sortOrder: 473
+    },
+    {
+        code: "finance.post",
+        name: "Post finance transactions",
+        description: "Post prepared journals, operational documents, settlements, cashbook entries, payroll batches, and asset transactions.",
+        domain: "Finance",
+        group: "Posting",
+        surface: "enterprise",
+        sortOrder: 474
+    },
+    {
+        code: "finance.approve",
+        name: "Approve finance controls",
+        description: "Approve or lock budgets, close fiscal periods, and perform controlled finance reversals.",
+        domain: "Finance",
+        group: "Approval",
+        surface: "enterprise",
+        sortOrder: 475
+    },
+    {
+        code: "finance.setup.manage",
+        name: "Manage finance setup",
+        description: "Maintain accounting settings, fiscal calendars, currencies, accounts, posting profiles, tax setup, and document numbering.",
+        domain: "Finance",
+        group: "Setup",
+        surface: "enterprise",
+        sortOrder: 476
+    },
+    {
+        code: "fuel.hq.view",
+        name: "View HQ fuel operations",
+        description: "View enterprise fuel stations, tanks, pumps, deliveries, sales, evidence, and reconciliation posture.",
+        domain: "Fuel Operations",
+        group: "HQ access",
+        surface: "enterprise",
+        sortOrder: 477
+    },
+    {
+        code: "fuel.hq.manage",
+        name: "Manage HQ fuel operations",
+        description: "Maintain enterprise fuel setup and record or fulfil HQ fuel operations.",
+        domain: "Fuel Operations",
+        group: "HQ operations",
+        surface: "enterprise",
+        sortOrder: 478
     },
     {
         code: "hr.view",
@@ -619,6 +763,78 @@ const catalog = [
         group: "Visitor management",
         surface: "enterprise",
         sortOrder: 600
+    },
+    {
+        code: "hr.payroll.view",
+        name: "View payroll",
+        description: "View protected payroll runs, employee calculations, payslips, and statutory filings.",
+        domain: "Human Resources",
+        group: "Payroll",
+        surface: "enterprise",
+        sortOrder: 610
+    },
+    {
+        code: "hr.payroll.manage",
+        name: "Manage payroll",
+        description: "Maintain statutory setup and calculate or recalculate draft payroll runs.",
+        domain: "Human Resources",
+        group: "Payroll",
+        surface: "enterprise",
+        sortOrder: 620
+    },
+    {
+        code: "hr.payroll.approve",
+        name: "Approve payroll",
+        description: "Approve, reopen, and post payroll runs to Finance.",
+        domain: "Human Resources",
+        group: "Payroll",
+        surface: "enterprise",
+        sortOrder: 630
+    },
+    {
+        code: "hr.payroll.file",
+        name: "Manage payroll filings",
+        description: "Export statutory schedules and record PAYE, SSNIT, and Tier-2 filing or payment references.",
+        domain: "Human Resources",
+        group: "Payroll",
+        surface: "enterprise",
+        sortOrder: 640
+    },
+    {
+        code: "hr.benefits.manage",
+        name: "Manage employee benefits",
+        description: "Maintain benefit plans and employee benefit enrollments used by payroll.",
+        domain: "Human Resources",
+        group: "Employee finance",
+        surface: "enterprise",
+        sortOrder: 650
+    },
+    {
+        code: "hr.employee-finance.view",
+        name: "View employee finance workflows",
+        description: "View employee loans, salary advances, expense claims, travel, and their Finance references.",
+        domain: "Human Resources",
+        group: "Employee finance",
+        surface: "enterprise",
+        sortOrder: 660
+    },
+    {
+        code: "hr.employee-finance.manage",
+        name: "Manage employee finance workflows",
+        description: "Create and maintain employee loans, salary advances, expense claims, and travel requests.",
+        domain: "Human Resources",
+        group: "Employee finance",
+        surface: "enterprise",
+        sortOrder: 670
+    },
+    {
+        code: "hr.employee-finance.approve",
+        name: "Approve employee finance workflows",
+        description: "Approve, pay, disburse, and settle employee finance transactions with Finance posting.",
+        domain: "Human Resources",
+        group: "Employee finance",
+        surface: "enterprise",
+        sortOrder: 680
     },
     {
         code: "catalog.manage",

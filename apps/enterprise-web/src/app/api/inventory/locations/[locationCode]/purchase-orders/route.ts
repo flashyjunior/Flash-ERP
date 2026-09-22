@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 
 import type { CreatePurchaseOrderRequest } from "@flash-erp/sync-core";
 
+import {
+  assertEnterpriseOrOnlineStorePermission,
+  EnterpriseAuthError
+} from "@/server/auth/enterprise-session";
 import { createPurchaseOrder } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -12,6 +16,10 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterpriseOrOnlineStorePermission(
+      ["inventory.purchase-order.manage"],
+      ["inventory.grn.receive"]
+    );
     const { locationCode } = await context.params;
     const payload = (await request.json()) as Partial<CreatePurchaseOrderRequest>;
     const lines = Array.isArray(payload.lines)
@@ -68,7 +76,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not save the purchase order."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

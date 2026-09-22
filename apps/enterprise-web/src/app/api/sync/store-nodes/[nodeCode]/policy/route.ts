@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import {
+  assertEnterprisePermission,
+  EnterpriseAuthError
+} from "@/server/auth/enterprise-session";
+import {
   updateEnterpriseSyncNodePolicy,
   type EnterpriseSyncPolicyInput
 } from "@/server/repositories/enterprise-sync-node.repository";
@@ -35,6 +39,7 @@ export async function PATCH(
   { params }: { params: Promise<{ nodeCode: string }> }
 ) {
   try {
+    await assertEnterprisePermission(["sync.monitor"]);
     const { nodeCode } = await params;
     const body = await request.json();
     const result = await updateEnterpriseSyncNodePolicy(nodeCode, parsePolicyRequest(body));
@@ -49,7 +54,7 @@ export async function PATCH(
             : "Flash ERP could not update the sync policy."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

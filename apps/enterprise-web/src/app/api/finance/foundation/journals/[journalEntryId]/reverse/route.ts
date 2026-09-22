@@ -11,7 +11,7 @@ type ReverseJournalRouteContext = {
 
 export async function POST(request: Request, context: ReverseJournalRouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.approve"]);
     const { journalEntryId } = await context.params;
     const payload = await request.json().catch(() => ({}));
     const response = await reverseErpJournalEntry(journalEntryId, payload);

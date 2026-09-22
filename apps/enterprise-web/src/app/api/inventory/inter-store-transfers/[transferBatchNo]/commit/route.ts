@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { commitInterStoreTransferBatch } from "@/server/repositories/store-sync.repository";
 
 export async function POST(
@@ -11,6 +12,7 @@ export async function POST(
   }
 ) {
   try {
+    await assertEnterprisePermission(["inventory.transfer.request"]);
     const { transferBatchNo } = await context.params;
     const response = await commitInterStoreTransferBatch(decodeURIComponent(transferBatchNo));
 
@@ -23,7 +25,7 @@ export async function POST(
             ? error.message
             : "Flash ERP could not commit the transfer request."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

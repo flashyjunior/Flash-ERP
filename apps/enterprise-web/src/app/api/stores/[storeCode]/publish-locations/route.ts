@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { PublishStoreLocationsRequest } from "@flash-erp/sync-core";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { publishStoreInventoryLocations } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -31,7 +31,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not queue the location publication packets."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

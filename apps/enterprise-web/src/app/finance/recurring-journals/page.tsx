@@ -1,4 +1,5 @@
 import { ErpRecurringJournalsWorkspace } from "@/components/enterprise/erp-recurring-journals-workspace";
+import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableErpRecurringJournalsWorkspace,
   getErpRecurringJournalsWorkspace
@@ -7,6 +8,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function FinanceRecurringJournalsPage() {
+  await requireEnterprisePermission(["finance.manage"]);
   const workspace = await getErpRecurringJournalsWorkspace().catch((error: unknown) =>
     buildUnavailableErpRecurringJournalsWorkspace(
       error instanceof Error

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { createEnterpriseCustomer } from "@/server/repositories/enterprise-customers.repository";
 
 export async function POST(request: Request) {
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
           error instanceof Error ? error.message : "Flash ERP could not create that customer."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

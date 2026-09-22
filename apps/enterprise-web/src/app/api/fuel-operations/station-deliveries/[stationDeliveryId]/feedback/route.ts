@@ -13,7 +13,7 @@ type RouteContext = {
 export async function POST(request: Request, context: RouteContext) {
   try {
     const session = await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["inventory.transfer.receive"]
     );
     const { stationDeliveryId } = await context.params;

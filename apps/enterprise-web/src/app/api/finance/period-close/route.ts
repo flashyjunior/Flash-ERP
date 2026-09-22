@@ -5,7 +5,7 @@ import { updateErpFiscalPeriodCloseStatus } from "@/server/repositories/erp-fina
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.approve"]);
     const payload = await request.json();
     const response = await updateErpFiscalPeriodCloseStatus(payload);
 

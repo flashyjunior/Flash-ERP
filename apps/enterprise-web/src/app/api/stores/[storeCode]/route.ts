@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updateEnterpriseStore } from "@/server/repositories/enterprise-stores.repository";
 
 export async function POST(
@@ -96,7 +96,7 @@ export async function POST(
             : "Flash ERP could not update that store.",
       },
       {
-        status: 400,
+        status: error instanceof EnterpriseAuthError ? error.status : 400,
       },
     );
   }

@@ -5,7 +5,7 @@ import { createErpBankStatement } from "@/server/repositories/erp-bank-reconcili
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.manage"]);
     const payload = await request.json();
     const response = await createErpBankStatement(payload);
 

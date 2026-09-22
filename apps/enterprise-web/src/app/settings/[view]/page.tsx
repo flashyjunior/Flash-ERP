@@ -63,10 +63,10 @@ export default async function SettingsSubmenuPage({
     smtp: "settings.smtp.manage",
     sms: "settings.sms.manage",
     "inventory-catalogs": "master.product.manage",
-    "fuel-operations": "settings.company.manage",
+    "fuel-operations": "fuel.hq.manage",
     "leave-types": "hr.leave.manage",
     "shop-prices": "master.product.manage",
-    licenses: "master.store.manage",
+    licenses: "settings.license.manage",
     "receipt-templates": "settings.receipt-template.manage",
     "retail-users": "settings.retail-user.manage",
     options: "settings.option.manage"

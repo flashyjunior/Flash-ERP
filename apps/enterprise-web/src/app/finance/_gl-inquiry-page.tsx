@@ -23,7 +23,7 @@ export async function renderErpGlInquiryPage(
   searchParams?: GlInquirySearchParams,
   journalEntryId?: string
 ) {
-  await requireEnterprisePermission(["operations.dashboard.view"]);
+  await requireEnterprisePermission(["finance.view"]);
   const filters = (await searchParams) ?? {};
   const workspaceFilters: ErpGlInquiryFilters = {
     companyCode: filters.company ?? "",

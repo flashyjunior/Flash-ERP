@@ -11,7 +11,7 @@ type PostCashbookEntryRouteContext = {
 
 export async function POST(_request: Request, context: PostCashbookEntryRouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.post"]);
     const { entryId } = await context.params;
     const response = await postErpCashbookEntry(entryId);
 

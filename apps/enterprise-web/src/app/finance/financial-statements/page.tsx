@@ -21,7 +21,7 @@ type FinancialStatementsPageProps = {
 export default async function FinancialStatementsPage({
   searchParams
 }: FinancialStatementsPageProps) {
-  await requireEnterprisePermission(["operations.dashboard.view"]);
+  await requireEnterprisePermission(["finance.view"]);
   const filters = (await searchParams) ?? {};
   const workspaceFilters: ErpFinancialStatementFilters = {
     companyCode: filters.company ?? "",

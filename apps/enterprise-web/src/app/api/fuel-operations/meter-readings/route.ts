@@ -6,7 +6,7 @@ import { createFuelMeterReading } from "@/server/repositories/erp-fuel-operation
 export async function POST(request: Request) {
   try {
     const session = await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["fuel.meter-reading.capture"]
     );
     const payload = await request.json();

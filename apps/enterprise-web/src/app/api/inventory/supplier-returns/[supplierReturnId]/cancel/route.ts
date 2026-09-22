@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { CancelSupplierReturnRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { cancelSupplierReturn } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -12,6 +13,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.supplier-return.manage"]);
     const { supplierReturnId } = await context.params;
     const body =
       request.headers.get("content-length") === "0"
@@ -32,7 +34,7 @@ export async function POST(request: Request, context: RouteContext) {
             : "Flash ERP could not cancel the supplier return."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

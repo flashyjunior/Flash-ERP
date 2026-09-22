@@ -11,7 +11,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.manage"]);
     const { templateId } = await context.params;
     const payload = await request.json().catch(() => ({}));
     const response = await generateErpRecurringJournalDraft({

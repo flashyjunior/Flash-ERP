@@ -1,6 +1,7 @@
 import type { UpdateSupplierClaimRequest } from "@flash-erp/sync-core";
 import { NextResponse } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updateSupplierClaim } from "@/server/repositories/store-sync.repository";
 
 export async function PATCH(
@@ -12,6 +13,7 @@ export async function PATCH(
   }
 ) {
   try {
+    await assertEnterprisePermission(["inventory.supplier-return.manage"]);
     const { claimId } = await context.params;
     const body = (await request.json()) as Partial<UpdateSupplierClaimRequest>;
     const response = await updateSupplierClaim(decodeURIComponent(claimId), {
@@ -33,7 +35,7 @@ export async function PATCH(
             : "Flash ERP could not update the supplier claim."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

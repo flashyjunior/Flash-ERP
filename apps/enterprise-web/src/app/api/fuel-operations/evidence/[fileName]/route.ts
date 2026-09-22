@@ -11,7 +11,7 @@ type FuelEvidenceFileRouteContext = {
 
 export async function GET(_request: Request, context: FuelEvidenceFileRouteContext) {
   await assertEnterpriseOrOnlineStorePermission(
-    ["settings.company.manage"],
+    ["fuel.hq.view"],
     ["fuel.dip.capture", "fuel.meter-reading.capture", "fuel.reconciliation.manage"],
     { any: true }
   );

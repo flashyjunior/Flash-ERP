@@ -1,9 +1,17 @@
 "use client";
 
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
-import { BadgeDollarSign, PackageOpen, Save, Store } from "lucide-react";
+import {
+  BadgeDollarSign,
+  Check,
+  ChevronDown,
+  PackageOpen,
+  Save,
+  Search,
+  Store
+} from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
@@ -27,6 +35,204 @@ function targetLabel(target: TargetRow) {
   return target.productVariantCode
     ? `${target.productName} / ${target.productVariantName ?? target.productVariantCode}`
     : target.productName;
+}
+
+function ProductTargetCombobox({
+  targets,
+  value,
+  onChange
+}: {
+  targets: TargetRow[];
+  value: string;
+  onChange: (targetId: string) => void;
+}) {
+  const listboxId = useId();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const selectedTarget = targets.find((target) => target.targetId === value) ?? null;
+  const filteredTargets = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+
+    if (!normalizedQuery) return targets;
+
+    return targets.filter((target) =>
+      [
+        target.productName,
+        target.productCode,
+        target.productType,
+        target.productVariantName,
+        target.productVariantCode,
+        targetLabel(target)
+      ]
+        .filter(Boolean)
+        .some((candidate) => String(candidate).toLowerCase().includes(normalizedQuery))
+    );
+  }, [query, targets]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+        setQuery("");
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [isOpen]);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [query]);
+
+  function openPicker() {
+    if (targets.length === 0) return;
+    setIsOpen(true);
+    setQuery("");
+    window.requestAnimationFrame(() => searchInputRef.current?.focus());
+  }
+
+  function chooseTarget(targetId: string) {
+    onChange(targetId);
+    setIsOpen(false);
+    setQuery("");
+  }
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
+        className="flex w-full items-center justify-between gap-3 rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-left text-sm outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)] disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-400"
+        disabled={targets.length === 0}
+        onClick={() => (isOpen ? setIsOpen(false) : openPicker())}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openPicker();
+          }
+        }}
+        type="button"
+      >
+        <span className="min-w-0">
+          <span className="block truncate font-semibold text-stone-900">
+            {selectedTarget ? targetLabel(selectedTarget) : "Choose a product"}
+          </span>
+          {selectedTarget ? (
+            <span className="block truncate text-xs font-normal text-stone-500">
+              {[selectedTarget.productCode, selectedTarget.productVariantCode]
+                .filter(Boolean)
+                .join(" / ")}
+            </span>
+          ) : null}
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          className={`h-4 w-4 shrink-0 text-stone-500 transition ${isOpen ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {isOpen ? (
+        <div className="absolute z-40 mt-2 w-full min-w-[18rem] overflow-hidden rounded-lg border border-stone-200 bg-white shadow-xl">
+          <div className="flex items-center gap-2 border-b border-stone-200 px-3 py-2">
+            <Search aria-hidden="true" className="h-4 w-4 shrink-0 text-stone-400" />
+            <input
+              aria-activedescendant={
+                filteredTargets[activeIndex]
+                  ? `${listboxId}-option-${activeIndex}`
+                  : undefined
+              }
+              aria-autocomplete="list"
+              aria-controls={listboxId}
+              aria-expanded="true"
+              aria-label="Search products"
+              className="min-w-0 flex-1 bg-transparent py-1 text-sm text-stone-900 outline-none placeholder:text-stone-400"
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setIsOpen(false);
+                  setQuery("");
+                  return;
+                }
+
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setActiveIndex((current) =>
+                    Math.min(current + 1, Math.max(filteredTargets.length - 1, 0))
+                  );
+                  return;
+                }
+
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setActiveIndex((current) => Math.max(current - 1, 0));
+                  return;
+                }
+
+                if (event.key === "Enter" && filteredTargets[activeIndex]) {
+                  event.preventDefault();
+                  chooseTarget(filteredTargets[activeIndex].targetId);
+                }
+              }}
+              placeholder="Search name, code, or matrix option"
+              ref={searchInputRef}
+              role="combobox"
+              value={query}
+            />
+          </div>
+
+          <div className="max-h-72 overflow-y-auto p-1" id={listboxId} role="listbox">
+            {filteredTargets.length > 0 ? (
+              filteredTargets.map((target, index) => {
+                const isSelected = target.targetId === value;
+                const isActive = index === activeIndex;
+
+                return (
+                  <button
+                    aria-selected={isSelected}
+                    className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm transition ${
+                      isActive ? "bg-stone-100" : "hover:bg-stone-50"
+                    }`}
+                    id={`${listboxId}-option-${index}`}
+                    key={target.targetId}
+                    onClick={() => chooseTarget(target.targetId)}
+                    onMouseEnter={() => setActiveIndex(index)}
+                    role="option"
+                    type="button"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-semibold text-stone-900">
+                        {targetLabel(target)}
+                      </span>
+                      <span className="block truncate text-xs text-stone-500">
+                        {[target.productCode, target.productVariantCode, target.productType]
+                          .filter(Boolean)
+                          .join(" / ")}
+                      </span>
+                    </span>
+                    {isSelected ? (
+                      <Check aria-hidden="true" className="h-4 w-4 shrink-0 text-emerald-600" />
+                    ) : null}
+                  </button>
+                );
+              })
+            ) : (
+              <p className="px-3 py-6 text-center text-sm text-stone-500">
+                No products match that search.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 const priceFilter: FilterFn<PriceRow> = (row, _columnId, filterValue) => {
@@ -107,6 +313,17 @@ export function EnterpriseStorePricingWorkspace({
   const selectedSellingUnit = selectedTarget?.sellingUnitOptions.find(
     (unit) => unit.unitOfMeasureCode === sellingUnitCode
   );
+
+  function selectTarget(nextTargetId: string) {
+    const nextTarget = workspace.targets.find((target) => target.targetId === nextTargetId);
+
+    setTargetId(nextTargetId);
+    setUnitPrice(nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : "");
+    setSellingUnitCode(nextTarget?.sellingUnitOptions[0]?.unitOfMeasureCode ?? "");
+    setSellingUnitPrice(nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : "");
+    setSellingUnitBarcode("");
+    setSellingUnitDefault(false);
+  }
 
   const priceColumns = useMemo<ColumnDef<PriceRow>[]>(
     () => [
@@ -462,32 +679,14 @@ export function EnterpriseStorePricingWorkspace({
           </div>
 
           <div className="mt-5 grid gap-4">
-            <label className="grid gap-2 text-sm font-semibold text-stone-700">
-              Product
-              <select
-                className="rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)]"
-                onChange={(event) => {
-                  const nextTargetId = event.target.value;
-                  const nextTarget = workspace.targets.find(
-                    (target) => target.targetId === nextTargetId
-                  );
-
-                  setTargetId(nextTargetId);
-                  setUnitPrice(nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : "");
-                  setSellingUnitCode(
-                    nextTarget?.sellingUnitOptions[0]?.unitOfMeasureCode ?? ""
-                  );
-                  setSellingUnitPrice(nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : "");
-                }}
+            <div className="grid gap-2 text-sm font-semibold text-stone-700">
+              <span>Product</span>
+              <ProductTargetCombobox
+                onChange={selectTarget}
+                targets={workspace.targets}
                 value={targetId}
-              >
-                {workspace.targets.map((target) => (
-                  <option key={target.targetId} value={target.targetId}>
-                    {targetLabel(target)}
-                  </option>
-                ))}
-              </select>
-            </label>
+              />
+            </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-2 text-sm font-semibold text-stone-700">
@@ -636,35 +835,14 @@ export function EnterpriseStorePricingWorkspace({
             </div>
 
             <div className="mt-5 grid gap-4">
-              <label className="grid gap-2 text-sm font-semibold text-stone-700">
-                Product
-                <select
-                  className="rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--brand)]"
-                  onChange={(event) => {
-                    const nextTargetId = event.target.value;
-                    const nextTarget = workspace.targets.find(
-                      (target) => target.targetId === nextTargetId
-                    );
-
-                    setTargetId(nextTargetId);
-                    setSellingUnitCode(
-                      nextTarget?.sellingUnitOptions[0]?.unitOfMeasureCode ?? ""
-                    );
-                    setSellingUnitPrice(
-                      nextTarget ? nextTarget.baseUnitPrice.toFixed(2) : ""
-                    );
-                    setSellingUnitBarcode("");
-                    setSellingUnitDefault(false);
-                  }}
+              <div className="grid gap-2 text-sm font-semibold text-stone-700">
+                <span>Product</span>
+                <ProductTargetCombobox
+                  onChange={selectTarget}
+                  targets={workspace.targets}
                   value={targetId}
-                >
-                  {workspace.targets.map((target) => (
-                    <option key={target.targetId} value={target.targetId}>
-                      {targetLabel(target)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                />
+              </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="grid gap-2 text-sm font-semibold text-stone-700">

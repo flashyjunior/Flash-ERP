@@ -2,10 +2,12 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import type { CreateInterStoreTransferBatchRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { createInterStoreTransferBatch } from "@/server/repositories/store-sync.repository";
 
 export async function POST(request: NextRequest) {
   try {
+    await assertEnterprisePermission(["inventory.transfer.request"]);
     const payload = (await request.json()) as Partial<CreateInterStoreTransferBatchRequest>;
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
 
@@ -83,7 +85,7 @@ export async function POST(request: NextRequest) {
             ? error.message
             : "Flash ERP could not create the inter-store request."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { createHqGoodsReceiptFromPurchaseOrder } from "@/server/repositories/enterprise-purchases.repository";
 
 type RouteContext = {
@@ -10,6 +11,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.grn.receive"]);
     const { purchaseOrderId } = await context.params;
     const payload = (await request.json()) as {
       externalReference?: string | null;
@@ -58,7 +60,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not post the HQ goods receipt."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

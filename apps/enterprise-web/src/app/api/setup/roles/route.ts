@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { createEnterpriseRole } from "@/server/repositories/enterprise-security.repository";
 
 export async function POST(request: Request) {
@@ -17,7 +17,7 @@ export async function POST(request: Request) {
             ? error.message
             : "Flash ERP could not create that role right now."
       },
-      { status: 400 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 400 }
     );
   }
 }

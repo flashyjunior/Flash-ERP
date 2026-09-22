@@ -47,7 +47,14 @@ async function resolveTrialAccount(token: string) {
   }
 
   const runtime = await prisma.trialWorkspaceRuntime.findUnique({ where: { id: payload.requestId } });
-  if (!runtime || runtime.status !== "ACTIVE" || runtime.trialExpiresAt.getTime() <= Date.now()) {
+  if (
+    !runtime ||
+    (runtime.status === "CONVERTED" &&
+      runtime.subscriptionLicensedUntil !== null &&
+      runtime.subscriptionLicensedUntil.getTime() <= Date.now()) ||
+    (runtime.status !== "CONVERTED" &&
+      (runtime.status !== "ACTIVE" || runtime.trialExpiresAt.getTime() <= Date.now()))
+  ) {
     throw new TrialOwnerActivationError("This trial workspace is no longer available.", 410);
   }
 

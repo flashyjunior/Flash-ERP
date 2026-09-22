@@ -1,4 +1,5 @@
 import { ErpArApSettlementWorkspace } from "@/components/enterprise/erp-ar-ap-settlement-workspace";
+import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableErpArApSettlementWorkspace,
   getErpArApSettlementWorkspace
@@ -7,6 +8,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function FinanceArApSettlementsPage() {
+  await requireEnterprisePermission(["finance.manage"]);
   const workspace = await getErpArApSettlementWorkspace().catch((error: unknown) =>
     buildUnavailableErpArApSettlementWorkspace(
       error instanceof Error

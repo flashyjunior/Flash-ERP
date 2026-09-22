@@ -46,13 +46,15 @@ export async function OnlineStoreFuelPage({
   pageHeading
 }: OnlineStoreFuelPageProps) {
   const session = await requireEnterpriseSession();
-  const availableViews = session.isOnlineStoreUser
-    ? onlineStoreFuelViews.filter((view) =>
-        onlineStoreFuelViewPermissions[view].every((permissionCode) =>
-          session.permissionCodes.includes(permissionCode)
-        )
-      )
-    : [...onlineStoreFuelViews];
+  if (!session.isOnlineStoreUser) {
+    redirect("/unauthorized");
+  }
+
+  const availableViews = onlineStoreFuelViews.filter((view) =>
+    onlineStoreFuelViewPermissions[view].every((permissionCode) =>
+      session.permissionCodes.includes(permissionCode)
+    )
+  );
 
   if (availableViews.length === 0) {
     redirect("/online-store");
@@ -66,9 +68,7 @@ export async function OnlineStoreFuelPage({
     redirect(onlineStoreFuelViewHrefs[resolvedDefaultView]);
   }
 
-  const workspace = await getFuelOperationsWorkspace(
-    session.isOnlineStoreUser ? { storeCode: session.homeStoreCode } : {}
-  ).catch((error: unknown) =>
+  const workspace = await getFuelOperationsWorkspace({ storeCode: session.homeStoreCode }).catch((error: unknown) =>
     buildUnavailableFuelOperationsWorkspace(
       error instanceof Error
         ? error.message

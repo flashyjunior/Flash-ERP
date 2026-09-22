@@ -11,7 +11,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["fuel.hq.manage"]);
     const { fuelSaleId } = await context.params;
     const payload = await request.json();
     const response = await fulfillFuelSaleOrder(fuelSaleId, payload);
