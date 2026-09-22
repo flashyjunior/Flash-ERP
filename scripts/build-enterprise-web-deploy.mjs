@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import path from "node:path";
 
+import { applyNextDeployContextPatch } from "./patch-next-deploy-context.mjs";
+
 function parsePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -30,6 +32,8 @@ const env = {
   NEXT_TELEMETRY_DISABLED: process.env.NEXT_TELEMETRY_DISABLED || "1",
   NODE_OPTIONS: nodeOptions,
 };
+
+applyNextDeployContextPatch();
 
 const nextBuildDirectory = path.resolve("apps/enterprise-web/.next");
 console.log(`[deploy-build] Removing stale Next output from ${nextBuildDirectory}.`);
