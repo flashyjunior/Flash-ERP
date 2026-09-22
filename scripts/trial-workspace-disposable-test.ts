@@ -933,28 +933,18 @@ async function main() {
         0,
         "Disabled converted support must not retain any tenant role assignment.",
       );
-      const dangerousSupportGrantCount = await convertedWorkspace.rolePermission.count({
+      const supportGrantCount = await convertedWorkspace.rolePermission.count({
         where: {
           role: {
             retailOrgId: owner.retailOrgId,
             code: "FLASH_SUPPORT",
           },
-          permission: {
-            code: {
-              in: [
-                "security.data-purge.execute",
-                "security.user.manage",
-                "security.role.manage",
-                "security.privilege.manage",
-              ],
-            },
-          },
         },
       });
       assert.equal(
-        dangerousSupportGrantCount,
-        0,
-        "Converted support must not retain destructive or security-administration grants.",
+        supportGrantCount,
+        securityPermissionCatalog.length,
+        "The Flash support role must retain the complete permission catalog even when its user assignment is disabled.",
       );
       assert.equal(
         await convertedWorkspace.retailUserSession.count({

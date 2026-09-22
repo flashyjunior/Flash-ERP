@@ -139,31 +139,9 @@ const onlineStoreSupervisorPermissionCodes = [
   "ecommerce.console.access",
 ] as const;
 
-const trialSupportPermissionCodes = [
-  "operations.dashboard.view",
-  "master.customer.manage",
-  "master.supplier.manage",
-  "master.tax.manage",
-  "master.tender.manage",
-  "master.bank.manage",
-  "master.department.manage",
-  "master.category.manage",
-  "master.product.manage",
-  "master.store.manage",
-  "master.loyalty.manage",
-  "master.promotion.manage",
-  "settings.company.manage",
-  "settings.ldap.manage",
-  "settings.smtp.manage",
-  "settings.sms.manage",
-  "settings.license.manage",
-  "settings.receipt-template.manage",
-  "settings.retail-user.manage",
-  "settings.option.manage",
-  "inventory.view",
-  "sync.monitor",
-  "ecommerce.console.access",
-] as const;
+const trialSupportPermissionCodes = securityPermissionCatalog.map(
+  (permission) => permission.code,
+);
 const trialSupportPermissionCodeSet = new Set<string>(trialSupportPermissionCodes);
 
 const root = process.cwd();
@@ -513,7 +491,7 @@ async function ensureTrialSupportAccount(
     update: {
       name: TRIAL_SUPPORT_ROLE_NAME,
       description:
-        "Dedicated Flash ERP onboarding access for this trial workspace.",
+        "Dedicated full administrative access for Flash ERP support in this workspace.",
       status: RecordStatus.ACTIVE,
     },
     create: {
@@ -521,7 +499,7 @@ async function ensureTrialSupportAccount(
       code: TRIAL_SUPPORT_ROLE_CODE,
       name: TRIAL_SUPPORT_ROLE_NAME,
       description:
-        "Dedicated Flash ERP onboarding access for this trial workspace.",
+        "Dedicated full administrative access for Flash ERP support in this workspace.",
       status: RecordStatus.ACTIVE,
     },
   });
