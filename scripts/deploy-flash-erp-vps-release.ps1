@@ -152,6 +152,52 @@ function Assert-DirectoryJunctionTarget {
   }
 }
 
+function Assert-RuntimeModuleResolution {
+  param(
+    [string]$Root,
+    [string]$NodeExecutable,
+    [object]$Manifest
+  )
+
+  $runtimeModules = @($Manifest.requiredRuntimeModules)
+  if ($runtimeModules.Count -eq 0) {
+    throw "The release manifest has no required runtime modules."
+  }
+
+  $previousRuntimeBase = $env:FLASH_ERP_RUNTIME_RESOLUTION_BASE
+  $previousRuntimeModules = $env:FLASH_ERP_RUNTIME_MODULES
+  $runtimeSmokeScript = Join-Path ([IO.Path]::GetTempPath()) ("flash-erp-runtime-module-smoke-{0}.cjs" -f [Guid]::NewGuid().ToString("N"))
+  try {
+    $env:FLASH_ERP_RUNTIME_RESOLUTION_BASE = Join-Path $Root "apps\enterprise-web\.next\server"
+    $env:FLASH_ERP_RUNTIME_MODULES = ConvertTo-Json -InputObject $runtimeModules -Compress -Depth 4
+    @'
+const path = require("node:path");
+const { createRequire } = require("node:module");
+const runtimeRequire = createRequire(
+  path.join(process.env.FLASH_ERP_RUNTIME_RESOLUTION_BASE, "flash-erp-runtime-smoke.cjs"),
+);
+const checks = JSON.parse(process.env.FLASH_ERP_RUNTIME_MODULES);
+for (const check of checks) {
+  const loaded = runtimeRequire(check.specifier);
+  if (check.requiredExport && typeof loaded[check.requiredExport] === "undefined") {
+    throw new Error(`${check.specifier} does not export ${check.requiredExport}`);
+  }
+}
+process.stdout.write("FLASH_ERP_RUNTIME_MODULE_RESOLUTION=OK\n");
+'@ | Set-Content -LiteralPath $runtimeSmokeScript -Encoding ASCII
+    & $NodeExecutable $runtimeSmokeScript
+    if ($LASTEXITCODE -ne 0) {
+      throw "Runtime module resolution failed with exit code $LASTEXITCODE."
+    }
+  } finally {
+    $env:FLASH_ERP_RUNTIME_RESOLUTION_BASE = $previousRuntimeBase
+    $env:FLASH_ERP_RUNTIME_MODULES = $previousRuntimeModules
+    if (Test-Path -LiteralPath $runtimeSmokeScript -PathType Leaf) {
+      Remove-Item -LiteralPath $runtimeSmokeScript -Force
+    }
+  }
+}
+
 function Assert-PayloadLayout {
   param(
     [string]$Root,
@@ -166,7 +212,6 @@ function Assert-PayloadLayout {
     "apps\enterprise-web\.next\BUILD_ID",
     "apps\enterprise-web\.next\server",
     "apps\enterprise-web\.next\static",
-    "apps\enterprise-web\.next\node_modules",
     "apps\enterprise-web\public",
     "apps\enterprise-web\next.config.mjs",
     "apps\enterprise-web\package.json",
@@ -239,7 +284,31 @@ function Assert-PayloadLayout {
     }
   }
 
-  foreach ($alias in @($Manifest.requiredRuntimeAliases)) {
+  $dependencyModel = [string]$Manifest.runtimeDependencyModel
+  $supportedDependencyModels = @(
+    "reused-root-node-modules",
+    "packaged-next-aliases-plus-reused-root-node-modules"
+  )
+  if ($supportedDependencyModels -notcontains $dependencyModel) {
+    throw "The release manifest has an unsupported runtime dependency model: $dependencyModel"
+  }
+  if (@($Manifest.requiredRuntimeModules).Count -eq 0) {
+    throw "The release manifest has no required runtime modules."
+  }
+
+  $runtimeAliases = @($Manifest.requiredRuntimeAliases)
+  if ($runtimeAliases.Count -gt 0) {
+    if ($dependencyModel -ne "packaged-next-aliases-plus-reused-root-node-modules") {
+      throw "The runtime payload contains aliases under an incompatible dependency model."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "apps\enterprise-web\.next\node_modules") -PathType Container)) {
+      throw "The runtime payload is missing its packaged Next dependency aliases."
+    }
+  } elseif ($dependencyModel -ne "reused-root-node-modules") {
+    throw "The release dependency model requires aliases, but the manifest has none."
+  }
+
+  foreach ($alias in $runtimeAliases) {
     $relativeAliasPath = ([string]$alias.path).Replace("/", "\")
     $aliasPath = Join-Path $Root $relativeAliasPath
     if (-not (Test-Path -LiteralPath $aliasPath -PathType Container)) {
@@ -574,6 +643,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
       throw "Prisma generate failed with exit code $LASTEXITCODE."
     }
+    Assert-RuntimeModuleResolution -Root $targetRelease -NodeExecutable $nodeExe -Manifest $manifest
   } finally {
     Pop-Location
   }
