@@ -38,6 +38,9 @@ const nextConfig = {
           memoryBasedWorkersCount: false,
           parallelServerBuildTraces: false,
           parallelServerCompiles: false,
+          // Next 16 can intermittently lose its async context while exporting a
+          // page. Retry the isolated prerender before failing the deploy build.
+          staticGenerationRetryCount: 3,
           webpackMemoryOptimizations: true,
         },
       }
