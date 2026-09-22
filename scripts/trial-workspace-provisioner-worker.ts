@@ -2558,6 +2558,13 @@ async function readStandardInput() {
 
 async function main() {
   const command = process.argv[2]?.trim().toLowerCase();
+  if (command === "module-smoke") {
+    if (process.env.FLASH_ERP_TRIAL_PROVISIONER_MODULE_SMOKE !== "true") {
+      throw new Error("The trial provisioner module smoke is disabled.");
+    }
+    process.stdout.write("TRIAL_PROVISIONER_MODULE_RESOLUTION=OK\n");
+    return;
+  }
   if (command === "sweep") return sweepExpired();
   if (command === "recover") return recoverPendingProvisioning();
   if (command === "recover-failed") return recoverFailedProvisioning();

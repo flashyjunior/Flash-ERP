@@ -284,6 +284,16 @@ function Assert-PayloadLayout {
     }
   }
 
+  if (-not ($Manifest.PSObject.Properties.Name -contains "requiredTrialProvisionerFiles")) {
+    throw "The release manifest has no trial provisioner runtime-file contract."
+  }
+  foreach ($relativePath in @($Manifest.requiredTrialProvisionerFiles)) {
+    $runtimePath = Join-Path $Root (([string]$relativePath).Replace("/", "\"))
+    if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+      throw "The runtime payload is missing trial provisioner dependency $relativePath."
+    }
+  }
+
   $dependencyModel = [string]$Manifest.runtimeDependencyModel
   $supportedDependencyModels = @(
     "reused-root-node-modules",
@@ -488,7 +498,7 @@ function Wait-ForTrialProvisioner {
   param(
     [int]$Port,
     [string]$ExpectedRelease,
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 300
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -505,7 +515,11 @@ function Wait-ForTrialProvisioner {
       if ($health.ok -ne $true) {
         throw "The trial provisioner health response did not report ok=true."
       }
-      Write-Host "Trial provisioner is owned by the new release and reports ok=true." -ForegroundColor Green
+      if (-not $health.reconciliation -or [string]$health.reconciliation.status -ne "succeeded") {
+        $status = if ($health.reconciliation) { [string]$health.reconciliation.status } else { "missing" }
+        throw "The trial provisioner is healthy, but active-workspace reconciliation is $status."
+      }
+      Write-Host "Trial provisioner is owned by the new release and active-workspace reconciliation succeeded." -ForegroundColor Green
       return
     } catch {
       Start-Sleep -Seconds 3
