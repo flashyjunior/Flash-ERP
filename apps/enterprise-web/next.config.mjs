@@ -41,6 +41,16 @@ const nextConfig = {
           // Next 16 can intermittently lose its async context while exporting a
           // page. Retry the isolated prerender before failing the deploy build.
           staticGenerationRetryCount: 3,
+          // Keep deploy builds deterministic on constrained Windows hosts. Next
+          // otherwise renders up to eight pages concurrently inside each worker.
+          staticGenerationMaxConcurrency: parsePositiveInteger(
+            process.env.FLASH_ERP_NEXT_STATIC_CONCURRENCY,
+            1,
+          ),
+          staticGenerationMinPagesPerWorker: parsePositiveInteger(
+            process.env.FLASH_ERP_NEXT_MIN_PAGES_PER_WORKER,
+            1000,
+          ),
           webpackMemoryOptimizations: true,
         },
       }

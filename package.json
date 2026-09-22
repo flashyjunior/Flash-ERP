@@ -88,7 +88,7 @@
     "bootstrap:enterprise-admin": "tsx scripts/bootstrap-enterprise-admin.ts",
     "bootstrap:store-operators": "tsx scripts/bootstrap-store-operators.ts",
     "data:import-production-stock": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/import-production-stock-workbook.ps1",
-    "typecheck:production-stock-import": "tsc -p scripts/tsconfig.production-stock-import.json --noEmit",
+    "typecheck:production-stock-import": "npm run prisma:generate && tsc -p scripts/tsconfig.production-stock-import.json --noEmit",
     "acceptance:mobile-auth": "tsx scripts/mobile-auth-regression-gate.ts",
     "acceptance:mobile-operations": "tsx scripts/mobile-operational-regression-gate.ts",
     "acceptance:mobile": "npm --workspace @flash-erp/mobile run typecheck && npm run acceptance:mobile-startup && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations && npm run acceptance:mobile-ui",
@@ -108,5 +108,11 @@
     "prisma": "^7.7.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.7.0": true,
+    "esbuild@0.27.7": true,
+    "prisma@7.7.0": true,
+    "sharp@0.34.5": true
   }
 }
