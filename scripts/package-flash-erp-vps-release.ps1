@@ -80,6 +80,8 @@ function Assert-RuntimePayload {
   param(
     [string]$Root,
     [object[]]$Aliases,
+    [string]$DependencyModel,
+    [object[]]$RuntimeModules,
     [string]$BuildId
   )
 
@@ -87,7 +89,6 @@ function Assert-RuntimePayload {
     "apps\enterprise-web\.next\BUILD_ID",
     "apps\enterprise-web\.next\server",
     "apps\enterprise-web\.next\static",
-    "apps\enterprise-web\.next\node_modules",
     "apps\enterprise-web\public",
     "apps\enterprise-web\next.config.mjs",
     "apps\enterprise-web\src\server\trials\trial-owner-token.ts",
@@ -112,6 +113,33 @@ function Assert-RuntimePayload {
   }
 
   Assert-NoForbiddenPayloadContent -Root $Root
+
+  $supportedDependencyModels = @(
+    "reused-root-node-modules",
+    "packaged-next-aliases-plus-reused-root-node-modules"
+  )
+  if ($supportedDependencyModels -notcontains $DependencyModel) {
+    throw "Unsupported runtime dependency model: $DependencyModel"
+  }
+  if (@($RuntimeModules).Count -eq 0) {
+    throw "The runtime dependency contract has no required modules."
+  }
+  foreach ($runtimeModule in @($RuntimeModules)) {
+    if ([string]::IsNullOrWhiteSpace([string]$runtimeModule.specifier)) {
+      throw "The runtime dependency contract contains an empty module specifier."
+    }
+  }
+
+  if (@($Aliases).Count -gt 0) {
+    if ($DependencyModel -ne "packaged-next-aliases-plus-reused-root-node-modules") {
+      throw "Packaged Next aliases require the packaged-aliases runtime dependency model."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "apps\enterprise-web\.next\node_modules") -PathType Container)) {
+      throw "The runtime payload is missing its packaged Next dependency aliases."
+    }
+  } elseif ($DependencyModel -ne "reused-root-node-modules") {
+    throw "The runtime dependency model requires aliases, but none were packaged."
+  }
 
   foreach ($alias in $Aliases) {
     $aliasPath = Join-Path $Root (([string]$alias.path).Replace("/", "\"))
@@ -196,10 +224,6 @@ try {
 
   $aliasSourceRoot = Join-Path $nextSource "node_modules"
   $aliasLinks = @(Get-ChildItem -LiteralPath $aliasSourceRoot -Directory -Force -Recurse -Attributes ReparsePoint -ErrorAction SilentlyContinue)
-  if ($aliasLinks.Count -eq 0) {
-    throw "The current Next build did not expose any runtime dependency aliases; refusing to create an unverified package."
-  }
-
   $aliases = New-Object System.Collections.Generic.List[object]
   foreach ($aliasLink in $aliasLinks) {
     $relativeToNext = $aliasLink.FullName.Substring($nextSource.Length + 1)
@@ -240,10 +264,51 @@ try {
   }
   $aliasArray = @($aliases.ToArray())
 
-  $prismaAliases = @($aliasArray | Where-Object { $_.path -like "*/node_modules/@prisma/client-*" })
-  if ($prismaAliases.Count -eq 0) {
-    throw "The package has no materialized @prisma/client hashed runtime alias. This is the failure boundary from release r3/r4."
+  if ($aliasArray.Count -gt 0) {
+    $runtimeDependencyModel = "packaged-next-aliases-plus-reused-root-node-modules"
+    $prismaAliases = @($aliasArray | Where-Object { $_.path -like "*/node_modules/@prisma/client-*" })
+    if ($prismaAliases.Count -eq 0) {
+      throw "The package has Next runtime aliases but no materialized @prisma/client hashed alias."
+    }
+  } else {
+    $runtimeDependencyModel = "reused-root-node-modules"
+    $prismaTraceFound = $false
+    $traceFiles = @(Get-ChildItem -LiteralPath (Join-Path $nextSource "server") -Filter "*.nft.json" -File -Recurse -ErrorAction SilentlyContinue)
+    foreach ($traceFile in $traceFiles) {
+      $traceContent = [IO.File]::ReadAllText($traceFile.FullName).Replace("\", "/")
+      if ($traceContent.Contains("node_modules/@prisma/client/")) {
+        $prismaTraceFound = $true
+        break
+      }
+    }
+    if (-not $prismaTraceFound) {
+      throw "The Webpack server traces do not contain @prisma/client; refusing to package an unverified dependency layout."
+    }
+
+    $standaloneModules = Join-Path $nextSource "standalone\node_modules"
+    foreach ($relativePath in @(
+      "@prisma\client\package.json",
+      "@prisma\client\default.js",
+      ".prisma\client\package.json",
+      ".prisma\client\index.js"
+    )) {
+      if (-not (Test-Path -LiteralPath (Join-Path $standaloneModules $relativePath) -PathType Leaf)) {
+        throw "The Webpack standalone trace is missing required Prisma runtime file: $relativePath"
+      }
+    }
+    Write-Host "Webpack runtime dependencies are traced as normal modules; the release will reuse the governed root node_modules junction."
   }
+
+  $runtimeModules = @(
+    [PSCustomObject]@{
+      specifier = "@prisma/client"
+      requiredExport = "PrismaClient"
+    },
+    [PSCustomObject]@{
+      specifier = "next/package.json"
+      requiredExport = ""
+    }
+  )
 
   Write-Step "Copying public assets, service hosts, Prisma schema, and SQL Server migrations"
   $webSource = Join-Path $repositoryRoot "apps\enterprise-web"
@@ -296,11 +361,13 @@ try {
     sourceCommit = $sourceCommit
     sourceDirty = $sourceDirty
     buildId = $buildId
+    runtimeDependencyModel = $runtimeDependencyModel
+    requiredRuntimeModules = $runtimeModules
     requiredRuntimeAliases = $aliasArray
     requiredMigrations = $migrationNames
   }
   $runtimeManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payloadRoot "release-runtime-manifest.json") -Encoding UTF8
-  Assert-RuntimePayload -Root $payloadRoot -Aliases $aliasArray -BuildId $buildId
+  Assert-RuntimePayload -Root $payloadRoot -Aliases $aliasArray -DependencyModel $runtimeDependencyModel -RuntimeModules $runtimeModules -BuildId $buildId
   Assert-PowerShell51Parse -ScriptPath (Join-Path $payloadRoot "scripts\manage-flash-erp-trial-workspace.ps1")
 
   Write-Step "Creating and re-extracting the inner runtime ZIP"
@@ -309,7 +376,7 @@ try {
   $payloadHash = (Get-FileHash -LiteralPath $payloadZip -Algorithm SHA256).Hash
   New-Item -ItemType Directory -Path $payloadVerificationRoot -Force | Out-Null
   Expand-Archive -LiteralPath $payloadZip -DestinationPath $payloadVerificationRoot
-  Assert-RuntimePayload -Root $payloadVerificationRoot -Aliases $aliasArray -BuildId $buildId
+  Assert-RuntimePayload -Root $payloadVerificationRoot -Aliases $aliasArray -DependencyModel $runtimeDependencyModel -RuntimeModules $runtimeModules -BuildId $buildId
   Assert-PowerShell51Parse -ScriptPath (Join-Path $payloadVerificationRoot "scripts\manage-flash-erp-trial-workspace.ps1")
 
   Write-Step "Generating the flat operator-facing package"
@@ -329,6 +396,8 @@ try {
     payloadSha256 = $payloadHash
     deploymentScript = $deploymentScriptName
     commandFile = $commandName
+    runtimeDependencyModel = $runtimeDependencyModel
+    requiredRuntimeModules = $runtimeModules
     requiredRuntimeAliases = $aliasArray
     requiredMigrations = $migrationNames
   }
@@ -371,7 +440,7 @@ Release directory: C:\FlashRMS\releases\FlashRMS-$ReleaseId
 
    & '.\$commandName'
 
-The deployer verifies the payload checksum, refuses release-directory reuse, reuses the active dependency tree, restores the current VPS .env, preserves uploads, applies SQL Server migrations, regenerates Prisma Client with the managed VPS Node runtime, materializes and checks hashed Next dependency aliases, switches FlashRMSHQ to scripts\run-enterprise-web-service.mjs, and automatically restores the prior task action if sustained health fails.
+The deployer verifies the payload checksum, refuses release-directory reuse, reuses and executable-checks the active dependency tree, restores the current VPS .env, preserves uploads, applies SQL Server migrations, regenerates Prisma Client with the managed VPS Node runtime, validates any Next dependency aliases that the build actually emits, switches FlashRMSHQ to scripts\run-enterprise-web-service.mjs, and automatically restores the prior task action if sustained health fails.
 
 Success requires FlashRMSHQ to remain Running, port 3000 to remain listening for 60 seconds, database readiness ready=true, and HTTP 200 from local and public live/readiness/catalog/storefront plus configured hero images.
 
@@ -411,6 +480,17 @@ Do not delete or reuse a failed C:\FlashRMS\releases\FlashRMS-$ReleaseId directo
   $outerPayloadHash = (Get-FileHash -LiteralPath $outerPayload -Algorithm SHA256).Hash
   if ($outerPayloadHash -ne [string]$outerManifest.payloadSha256) {
     throw "The outer extracted payload checksum does not match its manifest."
+  }
+
+  Write-Step "Executing the packaged runtime dependency smoke"
+  & powershell.exe `
+    -NoProfile `
+    -NonInteractive `
+    -ExecutionPolicy Bypass `
+    -File (Join-Path $repositoryRoot "scripts\smoke-flash-erp-vps-release-package.ps1") `
+    -PackageDirectory $packageRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "The packaged runtime dependency smoke failed."
   }
 
   Write-Step "Exercising the hydrated release layout regression gate"
