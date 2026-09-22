@@ -87,6 +87,8 @@
     "e2e:certification": "playwright test",
     "bootstrap:enterprise-admin": "tsx scripts/bootstrap-enterprise-admin.ts",
     "bootstrap:store-operators": "tsx scripts/bootstrap-store-operators.ts",
+    "data:import-production-stock": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/import-production-stock-workbook.ps1",
+    "typecheck:production-stock-import": "tsc -p scripts/tsconfig.production-stock-import.json --noEmit",
     "acceptance:mobile-auth": "tsx scripts/mobile-auth-regression-gate.ts",
     "acceptance:mobile-operations": "tsx scripts/mobile-operational-regression-gate.ts",
     "acceptance:mobile": "npm --workspace @flash-erp/mobile run typecheck && npm run acceptance:mobile-startup && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations && npm run acceptance:mobile-ui",

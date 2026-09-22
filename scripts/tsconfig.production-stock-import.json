@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": "..",
+    "paths": {
+      "@flash-erp/domain": ["packages/domain/src/index.ts"],
+      "@flash-erp/domain/*": ["packages/domain/src/*"],
+      "@/*": ["apps/enterprise-web/src/*"]
+    },
+    "types": ["node"]
+  },
+  "include": [
+    "import-production-stock-workbook.ts",
+    "../apps/enterprise-web/src/server/repositories/enterprise-data-purge.repository.ts"
+  ]
+}
