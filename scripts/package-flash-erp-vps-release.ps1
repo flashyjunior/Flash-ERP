@@ -18,9 +18,11 @@ $trialProvisionerRuntimeFiles = @(
   "packages\domain\src\prisma-enums.ts",
   "packages\domain\src\security-permissions.ts",
   "packages\domain\src\trial-support.ts",
+  "scripts\configure-flash-erp-trial-domain.ps1",
   "scripts\manage-flash-erp-trial-workspace.ps1",
   "scripts\run-trial-provisioner-service.mjs",
   "scripts\run-trial-workspace-service.mjs",
+  "scripts\set-trial-workspace-public-url.ps1",
   "scripts\trial-sqlserver-url.ts",
   "scripts\trial-support-credentials-core.ts",
   "scripts\trial-workspace-provisioner-worker.ts"
@@ -365,7 +367,13 @@ try {
   }
   $runtimeManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payloadRoot "release-runtime-manifest.json") -Encoding UTF8
   Assert-RuntimePayload -Root $payloadRoot -Aliases $aliasArray -DependencyModel $runtimeDependencyModel -RuntimeModules $runtimeModules -BuildId $buildId
-  Assert-PowerShell51Parse -ScriptPath (Join-Path $payloadRoot "scripts\manage-flash-erp-trial-workspace.ps1")
+  foreach ($operatorScript in @(
+      "configure-flash-erp-trial-domain.ps1",
+      "manage-flash-erp-trial-workspace.ps1",
+      "set-trial-workspace-public-url.ps1"
+    )) {
+    Assert-PowerShell51Parse -ScriptPath (Join-Path $payloadRoot "scripts\$operatorScript")
+  }
 
   Write-Step "Creating and re-extracting the inner runtime ZIP"
   $payloadZip = Join-Path $packageRoot $payloadName
