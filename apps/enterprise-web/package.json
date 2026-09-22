@@ -6,6 +6,7 @@
     "dev": "prisma generate --schema ../../prisma/schema.prisma && next dev",
     "build": "prisma generate --schema ../../prisma/schema.prisma && next build",
     "build:deploy": "node ../../scripts/build-enterprise-web-deploy.mjs",
+    "build:deploy:webpack": "prisma generate --schema ../../prisma/schema.prisma && next build --webpack",
     "start": "node ../../scripts/start-enterprise-web.mjs",
     "start:cluster": "node ../../scripts/start-enterprise-web-cluster.mjs",
     "typecheck": "tsc --noEmit"
