@@ -23,7 +23,8 @@ const requiredMigrationNames = [
   "20260825010000_ecommerce_store_payment_reconciliation",
   "20260825020000_ecommerce_terminal_reservation_reconciliation",
   "20260826010000_public_trial_signup",
-  "20260827010000_trial_workspace_lifecycle"
+  "20260827010000_trial_workspace_lifecycle",
+  "20260922010000_data_purge_hq_admin_access"
 ];
 const requiredTables = [
   "GlAccount",

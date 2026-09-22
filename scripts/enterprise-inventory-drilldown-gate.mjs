@@ -58,6 +58,9 @@ const purgeWorkspace = read(
 const purgeRepository = read(
   "apps/enterprise-web/src/server/repositories/enterprise-data-purge.repository.ts"
 );
+const dataPurgePermissionMigration = read(
+  "prisma/migrations-sqlserver/20260922010000_data_purge_hq_admin_access/migration.sql"
+);
 const inventoryRows = `${inventoryRepository}\n${inventoryWorkspace}`;
 
 check(
@@ -153,6 +156,12 @@ check(
     desktopApp.includes("report.serialBatchRows.map")
 );
 check(
+  "Store Desktop inventory users can open the sold serial and batch report",
+  /item\.id === "report-inventory"\s*\|\|\s*item\.id === "report-serials-batches"[\s\S]*?hasInventoryVisibility/.test(
+    desktopApp
+  )
+);
+check(
   "all Store Desktop database providers derive the report from sale snapshots",
   desktopReportProviders.every(
     (provider) =>
@@ -172,6 +181,12 @@ check(
   "the server rejects master-data purge unless transactional cleanup is selected",
   purgeRepository.includes("const requested = new Set<EnterpriseDataPurgeScopeKey>()") &&
     purgeRepository.includes("selectedMasterScope && missingTransactionalScope")
+);
+check(
+  "SQL Server deployment grants the data purge permission to existing HQ admins",
+  dataPurgePermissionMigration.includes("security.data-purge.execute") &&
+    dataPurgePermissionMigration.includes("HQ_ADMIN") &&
+    dataPurgePermissionMigration.includes("NOT EXISTS")
 );
 
 for (const relativePath of missingFiles) {

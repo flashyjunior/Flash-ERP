@@ -1912,7 +1912,10 @@ function getVisibleReportWorkspaces(snapshot: StoreSyncSnapshot | null) {
       return capabilities.cashierEligible || capabilities.canProcessSale;
     }
 
-    if (item.id === "report-inventory") {
+    if (
+      item.id === "report-inventory" ||
+      item.id === "report-serials-batches"
+    ) {
       return (
         capabilities.supervisorEligible || capabilities.hasInventoryVisibility
       );
