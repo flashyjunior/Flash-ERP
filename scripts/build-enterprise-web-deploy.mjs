@@ -36,14 +36,18 @@ console.log(`[deploy-build] Removing stale Next output from ${nextBuildDirectory
 rmSync(nextBuildDirectory, { recursive: true, force: true });
 
 console.log(
-  `[deploy-build] Building enterprise web with ${workerCount} Next worker(s) and Node heap cap ${memoryMb} MB.`,
+  `[deploy-build] Building enterprise web with Webpack, ${workerCount} Next worker(s), and Node heap cap ${memoryMb} MB.`,
 );
 
-const result = spawnSync(npmCommand, ["--workspace", "@flash-erp/enterprise-web", "run", "build"], {
-  env,
-  shell: process.platform === "win32",
-  stdio: "inherit",
-});
+const result = spawnSync(
+  npmCommand,
+  ["--workspace", "@flash-erp/enterprise-web", "run", "build:deploy:webpack"],
+  {
+    env,
+    shell: process.platform === "win32",
+    stdio: "inherit",
+  },
+);
 
 if (result.error) {
   console.error(result.error);
