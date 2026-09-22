@@ -5,7 +5,7 @@ import { createErpSettlementAllocation } from "@/server/repositories/erp-ar-ap-s
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.manage"]);
     const payload = await request.json();
     const response = await createErpSettlementAllocation(payload);
 

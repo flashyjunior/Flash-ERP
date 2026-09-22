@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { InventoryGoodsReceiptRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { recordInventoryGoodsReceipt } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -12,6 +13,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.grn.receive"]);
     const { locationCode } = await context.params;
     const payload = (await request.json()) as Partial<InventoryGoodsReceiptRequest>;
 
@@ -72,7 +74,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not post the goods receipt."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

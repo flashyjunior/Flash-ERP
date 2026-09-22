@@ -1,4 +1,4 @@
-export type SecurityPermissionDomain = "Master" | "Settings" | "Security" | "Inventory" | "POS" | "Sync" | "Operations" | "Human Resources";
+export type SecurityPermissionDomain = "Master" | "Settings" | "Security" | "Inventory" | "POS" | "Sync" | "Operations" | "Finance" | "Fuel Operations" | "Human Resources";
 export type SecurityPermissionSurface = "enterprise" | "store" | "both";
 export type SecurityPermissionDefinition = {
     code: string;

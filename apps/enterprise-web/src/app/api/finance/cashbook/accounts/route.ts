@@ -5,7 +5,7 @@ import { upsertErpCashbookAccount } from "@/server/repositories/erp-cashbook.rep
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.setup.manage"]);
     const payload = await request.json();
     const response = await upsertErpCashbookAccount(payload);
 

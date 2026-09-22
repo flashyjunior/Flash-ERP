@@ -9,7 +9,9 @@ import {
 } from "@/server/repositories/erp-finance-foundation.repository";
 
 export async function renderErpFinanceFoundationPage(view: ErpFinanceFoundationView) {
-  await requireEnterprisePermission(["operations.dashboard.view"]);
+  await requireEnterprisePermission([
+    view === "journals" ? "finance.manage" : "finance.setup.manage"
+  ]);
   const workspace = await getErpFinanceFoundationWorkspace().catch((error: unknown) =>
     buildUnavailableErpFinanceFoundationWorkspace(
       error instanceof Error

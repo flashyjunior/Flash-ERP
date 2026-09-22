@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { createEnterpriseBankBranch } from "@/server/repositories/enterprise-setup.repository";
 
 export async function POST(request: Request) {
   try {
+    await assertEnterprisePermission(["master.bank.manage"]);
     const payload = (await request.json()) as {
       branchCode?: string;
       bankCode?: string;
@@ -25,7 +27,7 @@ export async function POST(request: Request) {
       {
         message: error instanceof Error ? error.message : "Flash ERP could not create that bank branch."
       },
-      { status: 400 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 400 }
     );
   }
 }

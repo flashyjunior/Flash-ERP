@@ -24,6 +24,9 @@ const requiredMigrationNames = [
   "20260826010000_public_trial_signup",
   "20260827010000_trial_workspace_lifecycle",
   "20260922010000_data_purge_hq_admin_access",
+  "20260922020000_trial_paid_conversion",
+  "20260922030000_navigation_permission_coverage",
+  "20260922040000_finance_fuel_permissions",
 ];
 
 const requiredTables = [
@@ -61,6 +64,22 @@ const requiredTables = [
 ];
 
 const requiredColumns = [
+  { tableName: "trial_signup_request", columnName: "convertedAt" },
+  { tableName: "trial_signup_request", columnName: "convertedBy" },
+  { tableName: "trial_signup_request", columnName: "subscriptionPlanCode" },
+  { tableName: "trial_signup_request", columnName: "subscriptionReference" },
+  { tableName: "trial_signup_request", columnName: "subscriptionLicensedUntil" },
+  { tableName: "trial_signup_request", columnName: "retainSupportAccess" },
+  { tableName: "trial_signup_request", columnName: "supportAccessExpiresAt" },
+  { tableName: "trial_signup_request", columnName: "supportApprovalReference" },
+  { tableName: "trial_workspace_runtime", columnName: "convertedAt" },
+  { tableName: "trial_workspace_runtime", columnName: "convertedBy" },
+  { tableName: "trial_workspace_runtime", columnName: "subscriptionPlanCode" },
+  { tableName: "trial_workspace_runtime", columnName: "subscriptionReference" },
+  { tableName: "trial_workspace_runtime", columnName: "subscriptionLicensedUntil" },
+  { tableName: "trial_workspace_runtime", columnName: "retainSupportAccess" },
+  { tableName: "trial_workspace_runtime", columnName: "supportAccessExpiresAt" },
+  { tableName: "trial_workspace_runtime", columnName: "supportApprovalReference" },
   { tableName: "Store", columnName: "storeGroupCode" },
   { tableName: "Store", columnName: "storeGroupName" },
   { tableName: "Store", columnName: "storeGroupType" },

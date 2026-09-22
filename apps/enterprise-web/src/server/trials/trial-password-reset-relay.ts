@@ -101,6 +101,7 @@ export async function deliverTrialPasswordResetFromWorkspace(rawBody: string, he
       requestNo: true,
       status: true,
       trialExpiresAt: true,
+      subscriptionLicensedUntil: true,
       workspaceSlug: true,
       workspaceUrl: true,
       ownerLoginId: true,
@@ -110,9 +111,12 @@ export async function deliverTrialPasswordResetFromWorkspace(rawBody: string, he
   });
   if (
     !trial ||
-    trial.status !== "ACTIVE" ||
-    !trial.trialExpiresAt ||
-    trial.trialExpiresAt.getTime() <= now.getTime() ||
+    !["ACTIVE", "CONVERTED"].includes(trial.status) ||
+    (trial.status === "ACTIVE" &&
+      (!trial.trialExpiresAt || trial.trialExpiresAt.getTime() <= now.getTime())) ||
+    (trial.status === "CONVERTED" &&
+      trial.subscriptionLicensedUntil !== null &&
+      trial.subscriptionLicensedUntil.getTime() <= now.getTime()) ||
     !trial.workspaceSlug ||
     !trial.workspaceUrl
   ) {
@@ -174,8 +178,8 @@ export async function deliverTrialPasswordResetFromWorkspace(rawBody: string, he
       outcome: "SUCCEEDED",
       actorType: "TRIAL_WORKSPACE",
       actorRef: `trial:${trial.requestNo}`,
-      previousStatus: "ACTIVE",
-      newStatus: "ACTIVE",
+      previousStatus: trial.status,
+      newStatus: trial.status,
       detailsJson: JSON.stringify({ loginId, deliveryHint: result.deliveryHint })
     }
   });

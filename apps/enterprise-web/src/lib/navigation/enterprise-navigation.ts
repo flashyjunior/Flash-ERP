@@ -33,11 +33,13 @@ export type EnterpriseSecurityView =
   | "security-logs"
   | "data-purge";
 
+export type EnterpriseNavigationPermissionRequirement = readonly [string, ...string[]];
+
 export type EnterpriseNavigationMenuItem = {
   key: string;
   label: string;
   href: string;
-  requiredPermissions?: readonly string[];
+  requiredPermissions: EnterpriseNavigationPermissionRequirement;
 };
 
 export type EnterpriseNavigationMenuGroup = {
@@ -47,42 +49,187 @@ export type EnterpriseNavigationMenuGroup = {
 };
 
 export const enterpriseMasterMenuItems = [
-  { key: "customers", label: "Customers", href: "/master/customers" },
-  { key: "suppliers", label: "Suppliers", href: "/master/suppliers" },
-  { key: "tax", label: "Tax", href: "/master/tax" },
-  { key: "tenders", label: "Tenders", href: "/master/tenders" },
-  { key: "banks", label: "Banks", href: "/master/banks" },
-  { key: "departments", label: "Departments", href: "/master/departments" },
-  { key: "categories", label: "Categories", href: "/master/categories" },
-  { key: "products", label: "Products", href: "/catalog" },
-  { key: "uom", label: "UOM", href: "/master/uom" },
-  { key: "stores", label: "Stores", href: "/stores" },
-  { key: "loyalty", label: "Loyalty", href: "/master/loyalty" },
-  { key: "promotions", label: "Promotions", href: "/master/promotions" }
+  {
+    key: "customers",
+    label: "Customers",
+    href: "/master/customers",
+    requiredPermissions: ["master.customer.manage"]
+  },
+  {
+    key: "suppliers",
+    label: "Suppliers",
+    href: "/master/suppliers",
+    requiredPermissions: ["master.supplier.manage"]
+  },
+  { key: "tax", label: "Tax", href: "/master/tax", requiredPermissions: ["master.tax.manage"] },
+  {
+    key: "tenders",
+    label: "Tenders",
+    href: "/master/tenders",
+    requiredPermissions: ["master.tender.manage"]
+  },
+  {
+    key: "banks",
+    label: "Banks",
+    href: "/master/banks",
+    requiredPermissions: ["master.bank.manage"]
+  },
+  {
+    key: "departments",
+    label: "Departments",
+    href: "/master/departments",
+    requiredPermissions: ["master.department.manage"]
+  },
+  {
+    key: "categories",
+    label: "Categories",
+    href: "/master/categories",
+    requiredPermissions: ["master.category.manage"]
+  },
+  {
+    key: "products",
+    label: "Products",
+    href: "/catalog",
+    requiredPermissions: ["master.product.manage"]
+  },
+  {
+    key: "uom",
+    label: "UOM",
+    href: "/master/uom",
+    requiredPermissions: ["master.product.manage"]
+  },
+  {
+    key: "stores",
+    label: "Stores",
+    href: "/stores",
+    requiredPermissions: ["master.store.manage"]
+  },
+  {
+    key: "loyalty",
+    label: "Loyalty",
+    href: "/master/loyalty",
+    requiredPermissions: ["master.loyalty.manage"]
+  },
+  {
+    key: "promotions",
+    label: "Promotions",
+    href: "/master/promotions",
+    requiredPermissions: ["master.promotion.manage"]
+  }
 ] as const;
 
 export const enterpriseSettingsMenuItems = [
-  { key: "company", label: "Company", href: "/settings/company" },
-  { key: "ldap", label: "LDAP", href: "/settings/ldap" },
-  { key: "smtp", label: "SMTP", href: "/settings/smtp" },
-  { key: "sms", label: "SMS", href: "/settings/sms" },
-  { key: "inventory-catalogs", label: "Inventory Catalogs", href: "/settings/inventory-catalogs" },
-  { key: "fuel-operations", label: "Fuel Operations", href: "/settings/fuel-operations" },
-  { key: "leave-types", label: "Leave Types", href: "/settings/leave-types" },
-  { key: "licenses", label: "Licensing", href: "/settings/licenses" },
-  { key: "receipt-templates", label: "Receipt Templates", href: "/settings/receipt-templates" },
-  { key: "retail-users", label: "Retail Users", href: "/settings/retail-users" }
+  {
+    key: "company",
+    label: "Company",
+    href: "/settings/company",
+    requiredPermissions: ["settings.company.manage"]
+  },
+  {
+    key: "ldap",
+    label: "LDAP",
+    href: "/settings/ldap",
+    requiredPermissions: ["settings.ldap.manage"]
+  },
+  {
+    key: "smtp",
+    label: "SMTP",
+    href: "/settings/smtp",
+    requiredPermissions: ["settings.smtp.manage"]
+  },
+  {
+    key: "sms",
+    label: "SMS",
+    href: "/settings/sms",
+    requiredPermissions: ["settings.sms.manage"]
+  },
+  {
+    key: "inventory-catalogs",
+    label: "Inventory Catalogs",
+    href: "/settings/inventory-catalogs",
+    requiredPermissions: ["master.product.manage"]
+  },
+  {
+    key: "fuel-operations",
+    label: "Fuel Operations",
+    href: "/settings/fuel-operations",
+    requiredPermissions: ["fuel.hq.manage"]
+  },
+  {
+    key: "leave-types",
+    label: "Leave Types",
+    href: "/settings/leave-types",
+    requiredPermissions: ["hr.leave.manage"]
+  },
+  {
+    key: "licenses",
+    label: "Licensing",
+    href: "/settings/licenses",
+    requiredPermissions: ["settings.license.manage"]
+  },
+  {
+    key: "receipt-templates",
+    label: "Receipt Templates",
+    href: "/settings/receipt-templates",
+    requiredPermissions: ["settings.receipt-template.manage"]
+  },
+  {
+    key: "retail-users",
+    label: "Retail Users",
+    href: "/settings/retail-users",
+    requiredPermissions: ["settings.retail-user.manage"]
+  }
 ] as const;
 
 export const enterpriseFinanceSettingsMenuItems = [
-  { key: "foundation", label: "Finance Overview", href: "/finance/foundation" },
-  { key: "fiscal-calendar", label: "Fiscal Calendar", href: "/finance/fiscal-calendar" },
-  { key: "multi-currency", label: "Multi Currency", href: "/finance/multi-currency" },
-  { key: "chart-of-accounts", label: "Chart of Accounts", href: "/finance/chart-of-accounts" },
-  { key: "posting-setup", label: "Posting Setup", href: "/finance/posting-setup" },
-  { key: "party-profiles", label: "Party Profiles", href: "/finance/party-profiles" },
-  { key: "document-numbering", label: "Document Numbering", href: "/finance/document-numbering" },
-  { key: "operating-foundation", label: "Operating Foundation", href: "/finance/operating-foundation" }
+  {
+    key: "foundation",
+    label: "Finance Overview",
+    href: "/finance/foundation",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "fiscal-calendar",
+    label: "Fiscal Calendar",
+    href: "/finance/fiscal-calendar",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "multi-currency",
+    label: "Multi Currency",
+    href: "/finance/multi-currency",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "chart-of-accounts",
+    label: "Chart of Accounts",
+    href: "/finance/chart-of-accounts",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "posting-setup",
+    label: "Posting Setup",
+    href: "/finance/posting-setup",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "party-profiles",
+    label: "Party Profiles",
+    href: "/finance/party-profiles",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "document-numbering",
+    label: "Document Numbering",
+    href: "/finance/document-numbering",
+    requiredPermissions: ["finance.setup.manage"]
+  },
+  {
+    key: "operating-foundation",
+    label: "Operating Foundation",
+    href: "/finance/operating-foundation",
+    requiredPermissions: ["finance.setup.manage"]
+  }
 ] as const;
 
 export const enterpriseSettingsMenuGroups: readonly EnterpriseNavigationMenuGroup[] = [
@@ -99,12 +246,24 @@ export const enterpriseSettingsMenuGroups: readonly EnterpriseNavigationMenuGrou
   {
     key: "system",
     label: "System",
-    items: [{ key: "sync", label: "Sync", href: "/sync" }]
+    items: [
+      {
+        key: "sync",
+        label: "Sync",
+        href: "/sync",
+        requiredPermissions: ["sync.monitor"]
+      }
+    ]
   }
 ] as const;
 
 export const enterpriseOnlineStoreMenuItems = [
-  { key: "online-store-pos", label: "POS", href: "/online-store" }
+  {
+    key: "online-store-pos",
+    label: "POS",
+    href: "/online-store",
+    requiredPermissions: ["pos.sale.process"]
+  }
 ] as const;
 
 export const enterpriseOnlineFuelMenuItems = [
@@ -147,30 +306,120 @@ export const enterpriseOnlineFuelMenuItems = [
 ] as const;
 
 export const enterpriseInventoryMenuItems = [
-  { key: "products", label: "Products", href: "/inventory/products" },
-  { key: "shop-prices", label: "Shop Prices", href: "/inventory/shop-prices" },
-  { key: "stock-by-shop", label: "Item Dynamic", href: "/inventory/stock-by-shop" },
-  { key: "transfers", label: "Transfers", href: "/inventory/transfers" },
-  { key: "in-transit", label: "In-Transit", href: "/inventory/in-transit" },
-  { key: "stock-count", label: "Stock Count", href: "/inventory/stock-count" }
+  {
+    key: "products",
+    label: "Products",
+    href: "/inventory/products",
+    requiredPermissions: ["inventory.view"]
+  },
+  {
+    key: "shop-prices",
+    label: "Shop Prices",
+    href: "/inventory/shop-prices",
+    requiredPermissions: ["master.product.manage"]
+  },
+  {
+    key: "stock-by-shop",
+    label: "Item Dynamic",
+    href: "/inventory/stock-by-shop",
+    requiredPermissions: ["inventory.view"]
+  },
+  {
+    key: "transfers",
+    label: "Transfers",
+    href: "/inventory/transfers",
+    requiredPermissions: ["inventory.view"]
+  },
+  {
+    key: "in-transit",
+    label: "In-Transit",
+    href: "/inventory/in-transit",
+    requiredPermissions: ["inventory.view"]
+  },
+  {
+    key: "stock-count",
+    label: "Stock Count",
+    href: "/inventory/stock-count",
+    requiredPermissions: ["inventory.view"]
+  }
 ] as const;
 
 export const enterprisePurchasesMenuItems = [
-  { key: "purchase-orders", label: "Purchase orders", href: "/purchases/purchase-orders" },
-  { key: "goods-receipt", label: "Goods Receipt", href: "/purchases/goods-receipt" },
-  { key: "predictive-review", label: "Predictive Review", href: "/purchases/predictive-review" }
+  {
+    key: "purchase-orders",
+    label: "Purchase orders",
+    href: "/purchases/purchase-orders",
+    requiredPermissions: ["inventory.view"]
+  },
+  {
+    key: "goods-receipt",
+    label: "Goods Receipt",
+    href: "/purchases/goods-receipt",
+    requiredPermissions: ["inventory.view"]
+  },
+  {
+    key: "predictive-review",
+    label: "Predictive Review",
+    href: "/purchases/predictive-review",
+    requiredPermissions: ["inventory.view"]
+  }
 ] as const;
 
 export const enterpriseFuelOperationsMenuItems = [
-  { key: "fuel-overview", label: "Fuel Overview", href: "/fuel-operations" },
-  { key: "fuel-tanks", label: "Tank Management", href: "/fuel-operations/tanks" },
-  { key: "fuel-pumps", label: "Pumps & Nozzles", href: "/fuel-operations/pumps" },
-  { key: "fuel-dips", label: "Tank Dips", href: "/fuel-operations/dips" },
-  { key: "fuel-meter-readings", label: "Meter Readings", href: "/fuel-operations/meter-readings" },
-  { key: "fuel-stations", label: "Filling Stations", href: "/fuel-operations/stations" },
-  { key: "fuel-deliveries", label: "Fuel Deliveries", href: "/fuel-operations/deliveries" },
-  { key: "fuel-supplier-receipts", label: "Supplier Receipts", href: "/fuel-operations/supplier-receipts" },
-  { key: "fuel-reconciliation", label: "Reconciliation", href: "/fuel-operations#reconciliation" }
+  {
+    key: "fuel-overview",
+    label: "Fuel Overview",
+    href: "/fuel-operations",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-tanks",
+    label: "Tank Management",
+    href: "/fuel-operations/tanks",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-pumps",
+    label: "Pumps & Nozzles",
+    href: "/fuel-operations/pumps",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-dips",
+    label: "Tank Dips",
+    href: "/fuel-operations/dips",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-meter-readings",
+    label: "Meter Readings",
+    href: "/fuel-operations/meter-readings",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-stations",
+    label: "Filling Stations",
+    href: "/fuel-operations/stations",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-deliveries",
+    label: "Fuel Deliveries",
+    href: "/fuel-operations/deliveries",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-supplier-receipts",
+    label: "Supplier Receipts",
+    href: "/fuel-operations/supplier-receipts",
+    requiredPermissions: ["fuel.hq.view"]
+  },
+  {
+    key: "fuel-reconciliation",
+    label: "Reconciliation",
+    href: "/fuel-operations#reconciliation",
+    requiredPermissions: ["fuel.hq.view"]
+  }
 ] as const;
 
 export const enterpriseHumanResourcesMenuItems = [
@@ -259,51 +508,138 @@ export const enterpriseFinanceMenuGroups: readonly EnterpriseNavigationMenuGroup
     key: "general-ledger",
     label: "General Ledger",
     items: [
-      { key: "ledger", label: "Ledger Overview", href: "/finance" },
-      { key: "financial-statements", label: "Financial Statements", href: "/finance/financial-statements" },
-      { key: "trial-balance", label: "Trial Balance", href: "/finance/trial-balance" },
-      { key: "account-activity", label: "Account Activity", href: "/finance/account-activity" },
-      { key: "journal-inquiry", label: "Journal Inquiry", href: "/finance/journal-inquiry" },
-      { key: "journals", label: "Manual Journals", href: "/finance/journals" },
-      { key: "recurring-journals", label: "Recurring Journals", href: "/finance/recurring-journals" }
+      {
+        key: "ledger",
+        label: "Ledger Overview",
+        href: "/finance",
+        requiredPermissions: ["finance.view"]
+      },
+      {
+        key: "financial-statements",
+        label: "Financial Statements",
+        href: "/finance/financial-statements",
+        requiredPermissions: ["finance.view"]
+      },
+      {
+        key: "trial-balance",
+        label: "Trial Balance",
+        href: "/finance/trial-balance",
+        requiredPermissions: ["finance.view"]
+      },
+      {
+        key: "account-activity",
+        label: "Account Activity",
+        href: "/finance/account-activity",
+        requiredPermissions: ["finance.view"]
+      },
+      {
+        key: "journal-inquiry",
+        label: "Journal Inquiry",
+        href: "/finance/journal-inquiry",
+        requiredPermissions: ["finance.view"]
+      },
+      {
+        key: "journals",
+        label: "Manual Journals",
+        href: "/finance/journals",
+        requiredPermissions: ["finance.manage"]
+      },
+      {
+        key: "recurring-journals",
+        label: "Recurring Journals",
+        href: "/finance/recurring-journals",
+        requiredPermissions: ["finance.manage"]
+      }
     ]
   },
   {
     key: "receivables-payables",
     label: "Receivables & Payables",
     items: [
-      { key: "operational-documents", label: "Source Documents", href: "/finance/operational-documents" },
-      { key: "ar-ap-documents", label: "AR/AP Documents", href: "/finance/ar-ap-documents" },
-      { key: "ar-ap-settlements", label: "Receipts & Payments", href: "/finance/ar-ap-settlements" }
+      {
+        key: "operational-documents",
+        label: "Source Documents",
+        href: "/finance/operational-documents",
+        requiredPermissions: ["finance.manage"]
+      },
+      {
+        key: "ar-ap-documents",
+        label: "AR/AP Documents",
+        href: "/finance/ar-ap-documents",
+        requiredPermissions: ["finance.manage"]
+      },
+      {
+        key: "ar-ap-settlements",
+        label: "Receipts & Payments",
+        href: "/finance/ar-ap-settlements",
+        requiredPermissions: ["finance.manage"]
+      }
     ]
   },
   {
     key: "banking",
     label: "Banking",
     items: [
-      { key: "cashbook", label: "Cashbook", href: "/finance/cashbook" },
-      { key: "bank-reconciliation", label: "Bank Reconciliation", href: "/finance/bank-reconciliation" }
+      {
+        key: "cashbook",
+        label: "Cashbook",
+        href: "/finance/cashbook",
+        requiredPermissions: ["finance.manage"]
+      },
+      {
+        key: "bank-reconciliation",
+        label: "Bank Reconciliation",
+        href: "/finance/bank-reconciliation",
+        requiredPermissions: ["finance.manage"]
+      }
     ]
   },
   {
     key: "fixed-assets",
     label: "Fixed Assets",
-    items: [{ key: "fixed-assets", label: "Asset Register", href: "/finance/fixed-assets" }]
+    items: [
+      {
+        key: "fixed-assets",
+        label: "Asset Register",
+        href: "/finance/fixed-assets",
+        requiredPermissions: ["finance.manage"]
+      }
+    ]
   },
   {
     key: "planning-payroll",
     label: "Planning & Payroll",
     items: [
-      { key: "budgets", label: "Budgets", href: "/finance/budgets" },
-      { key: "payroll-gl", label: "Payroll GL", href: "/finance/payroll-gl" }
+      {
+        key: "budgets",
+        label: "Budgets",
+        href: "/finance/budgets",
+        requiredPermissions: ["finance.manage"]
+      },
+      {
+        key: "payroll-gl",
+        label: "Payroll GL",
+        href: "/finance/payroll-gl",
+        requiredPermissions: ["finance.manage"]
+      }
     ]
   },
   {
     key: "finance-operations",
     label: "POS & Operations",
     items: [
-      { key: "pos", label: "POS", href: "/pos" },
-      { key: "operations", label: "Operations", href: "/operations" }
+      {
+        key: "pos",
+        label: "POS",
+        href: "/pos",
+        requiredPermissions: ["operations.dashboard.view"]
+      },
+      {
+        key: "operations",
+        label: "Operations",
+        href: "/operations",
+        requiredPermissions: ["operations.dashboard.view"]
+      }
     ]
   }
 ] as const;
@@ -311,18 +647,285 @@ export const enterpriseFinanceMenuGroups: readonly EnterpriseNavigationMenuGroup
 export const enterpriseFinanceMenuItems = enterpriseFinanceMenuGroups.flatMap((group) => group.items);
 
 export const enterpriseSecurityMenuItems = [
-  { key: "users", label: "Users", href: "/security/users" },
+  {
+    key: "users",
+    label: "Users",
+    href: "/security/users",
+    requiredPermissions: ["security.user.manage"]
+  },
   {
     key: "roles-privileges",
     label: "Roles & Privileges",
-    href: "/security/roles-privileges"
+    href: "/security/roles-privileges",
+    requiredPermissions: ["security.role.manage", "security.privilege.manage"]
   },
-  { key: "audit-logs", label: "Audit Logs", href: "/security/audit-logs" },
-  { key: "online-users", label: "Online Users", href: "/security/online-users" },
-  { key: "password-policy", label: "Password Policy", href: "/security/password-policy" },
-  { key: "security-logs", label: "Security Logs", href: "/security/security-logs" },
-  { key: "data-purge", label: "Data Purge", href: "/security/data-purge" }
+  {
+    key: "audit-logs",
+    label: "Audit Logs",
+    href: "/security/audit-logs",
+    requiredPermissions: ["security.audit-log.view"]
+  },
+  {
+    key: "online-users",
+    label: "Online Users",
+    href: "/security/online-users",
+    requiredPermissions: ["security.online-user.view"]
+  },
+  {
+    key: "password-policy",
+    label: "Password Policy",
+    href: "/security/password-policy",
+    requiredPermissions: ["security.password-policy.manage"]
+  },
+  {
+    key: "security-logs",
+    label: "Security Logs",
+    href: "/security/security-logs",
+    requiredPermissions: ["security.log.view"]
+  },
+  {
+    key: "data-purge",
+    label: "Data Purge",
+    href: "/security/data-purge",
+    requiredPermissions: ["security.data-purge.execute"]
+  },
 ] as const;
+
+export type EnterpriseNavigationAudience = "enterprise" | "online-store";
+
+export type EnterpriseNavigationSection = {
+  key: string;
+  label: string;
+  href: string;
+  audience: EnterpriseNavigationAudience;
+  requiredPermissions: EnterpriseNavigationPermissionRequirement;
+  items?: readonly EnterpriseNavigationMenuItem[];
+  groups?: readonly EnterpriseNavigationMenuGroup[];
+};
+
+// This catalogue controls menu visibility; page and API authorization remain separate server guards.
+export const enterpriseNavigationSections: readonly EnterpriseNavigationSection[] = [
+  {
+    key: "overview",
+    label: "Dashboard",
+    href: "/",
+    audience: "enterprise",
+    requiredPermissions: ["operations.dashboard.view"]
+  },
+  {
+    key: "online-store",
+    label: "Online POS",
+    href: "/online-store",
+    audience: "online-store",
+    requiredPermissions: ["pos.sale.process"],
+    items: enterpriseOnlineStoreMenuItems
+  },
+  {
+    key: "online-fuel-management",
+    label: "Fuel Management",
+    href: "/online-store/fuel",
+    audience: "online-store",
+    requiredPermissions: [
+      "fuel.station.view",
+      "fuel.tank.manage",
+      "fuel.dip.capture",
+      "fuel.meter-reading.capture",
+      "fuel.supplier-receipt.capture",
+      "fuel.reconciliation.manage"
+    ],
+    items: enterpriseOnlineFuelMenuItems
+  },
+  {
+    key: "master",
+    label: "Master",
+    href: "/master/customers",
+    audience: "enterprise",
+    requiredPermissions: [
+      "master.customer.manage",
+      "master.supplier.manage",
+      "master.tax.manage",
+      "master.tender.manage",
+      "master.bank.manage",
+      "master.department.manage",
+      "master.category.manage",
+      "master.product.manage",
+      "master.store.manage",
+      "master.loyalty.manage",
+      "master.promotion.manage"
+    ],
+    items: enterpriseMasterMenuItems
+  },
+  {
+    key: "inventory",
+    label: "Inventory",
+    href: "/inventory/products",
+    audience: "enterprise",
+    requiredPermissions: ["inventory.view", "master.product.manage"],
+    items: enterpriseInventoryMenuItems
+  },
+  {
+    key: "purchases",
+    label: "Purchases",
+    href: "/purchases/purchase-orders",
+    audience: "enterprise",
+    requiredPermissions: ["inventory.view"],
+    items: enterprisePurchasesMenuItems
+  },
+  {
+    key: "fuel-operations",
+    label: "Fuel",
+    href: "/fuel-operations",
+    audience: "enterprise",
+    requiredPermissions: ["fuel.hq.view", "fuel.hq.manage"],
+    items: enterpriseFuelOperationsMenuItems
+  },
+  {
+    key: "human-resources",
+    label: "Human Resources",
+    href: "/human-resources",
+    audience: "enterprise",
+    requiredPermissions: [
+      "hr.view",
+      "hr.document.manage",
+      "hr.visitor.view",
+      "hr.payroll.view",
+      "hr.employee-finance.view"
+    ],
+    items: enterpriseHumanResourcesMenuItems
+  },
+  {
+    key: "finance",
+    label: "Finance",
+    href: "/finance",
+    audience: "enterprise",
+    requiredPermissions: [
+      "finance.view",
+      "finance.manage",
+      "finance.post",
+      "finance.approve",
+      "finance.setup.manage",
+      "operations.dashboard.view"
+    ],
+    groups: enterpriseFinanceMenuGroups
+  },
+  {
+    key: "settings",
+    label: "Settings",
+    href: "/settings/company",
+    audience: "enterprise",
+    requiredPermissions: [
+      "settings.company.manage",
+      "settings.ldap.manage",
+      "settings.smtp.manage",
+      "settings.sms.manage",
+      "settings.license.manage",
+      "settings.receipt-template.manage",
+      "settings.retail-user.manage",
+      "finance.setup.manage",
+      "fuel.hq.manage",
+      "master.product.manage",
+      "hr.leave.manage",
+      "operations.dashboard.view",
+      "sync.monitor"
+    ],
+    groups: enterpriseSettingsMenuGroups
+  },
+  {
+    key: "security",
+    label: "Security",
+    href: "/security/users",
+    audience: "enterprise",
+    requiredPermissions: [
+      "security.user.manage",
+      "security.role.manage",
+      "security.privilege.manage",
+      "security.audit-log.view",
+      "security.online-user.view",
+      "security.password-policy.manage",
+      "security.log.view",
+      "security.data-purge.execute"
+    ],
+    items: enterpriseSecurityMenuItems
+  },
+  {
+    key: "reports",
+    label: "Reports",
+    href: "/reports",
+    audience: "enterprise",
+    requiredPermissions: ["operations.dashboard.view", "hr.view"]
+  }
+];
+
+export function hasEnterpriseNavigationPermission(
+  requiredPermissions: readonly string[],
+  grantedPermissions: ReadonlySet<string>
+) {
+  return requiredPermissions.some((permissionCode) => grantedPermissions.has(permissionCode));
+}
+
+export function filterEnterpriseNavigationSections(
+  audience: EnterpriseNavigationAudience,
+  grantedPermissions: ReadonlySet<string>
+) {
+  return enterpriseNavigationSections.flatMap((section) => {
+    if (
+      section.audience !== audience ||
+      !hasEnterpriseNavigationPermission(section.requiredPermissions, grantedPermissions)
+    ) {
+      return [];
+    }
+
+    if (section.groups) {
+      const groups = section.groups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) =>
+            hasEnterpriseNavigationPermission(item.requiredPermissions, grantedPermissions)
+          )
+        }))
+        .filter((group) => group.items.length > 0);
+      const firstAuthorizedItem = groups[0]?.items[0];
+
+      if (!firstAuthorizedItem) {
+        return [];
+      }
+
+      const configuredLandingItem = groups
+        .flatMap((group) => group.items)
+        .find((item) => item.href === section.href);
+
+      return [
+        {
+          ...section,
+          href: configuredLandingItem?.href ?? firstAuthorizedItem.href,
+          groups
+        }
+      ];
+    }
+
+    if (section.items) {
+      const items = section.items.filter((item) =>
+        hasEnterpriseNavigationPermission(item.requiredPermissions, grantedPermissions)
+      );
+
+      if (items.length === 0) {
+        return [];
+      }
+
+      const configuredLandingItem = items.find((item) => item.href === section.href);
+
+      return [
+        {
+          ...section,
+          href: configuredLandingItem?.href ?? items[0].href,
+          items
+        }
+      ];
+    }
+
+    return [section];
+  });
+}
 
 export const enterpriseMasterPageMeta: Record<
   EnterpriseMasterView,

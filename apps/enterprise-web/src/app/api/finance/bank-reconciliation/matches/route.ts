@@ -5,7 +5,7 @@ import { matchErpBankStatementLine } from "@/server/repositories/erp-bank-reconc
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.manage"]);
     const payload = await request.json();
     const response = await matchErpBankStatementLine(payload);
 

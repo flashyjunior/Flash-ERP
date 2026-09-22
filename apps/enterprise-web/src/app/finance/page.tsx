@@ -28,7 +28,7 @@ type FinancePageProps = {
 };
 
 export default async function FinancePage({ searchParams }: FinancePageProps) {
-  const session = await requireEnterprisePermission(["operations.dashboard.view"]);
+  const session = await requireEnterprisePermission(["finance.view"]);
   const filters = (await searchParams) ?? {};
   const workspaceFilters = {
     dateFrom: filters.from ?? "",

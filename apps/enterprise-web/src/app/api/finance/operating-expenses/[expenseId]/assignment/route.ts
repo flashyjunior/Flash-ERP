@@ -13,7 +13,7 @@ export async function POST(
   }
 ) {
   try {
-    const session = await assertEnterprisePermission(["settings.company.manage"]);
+    const session = await assertEnterprisePermission(["finance.post"]);
     const { expenseId } = await context.params;
     const payload = await request.json();
 

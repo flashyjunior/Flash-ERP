@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { upsertEnterpriseStoreInventoryLocation } from "@/server/repositories/enterprise-stores.repository";
 import { publishStoreInventoryLocations } from "@/server/repositories/store-sync.repository";
 
@@ -7,9 +8,9 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ storeCode: string }> },
 ) {
-  const { storeCode } = await params;
-
   try {
+    await assertEnterprisePermission(["master.store.manage"]);
+    const { storeCode } = await params;
     const body = await request.json().catch(() => ({}));
     const response = await upsertEnterpriseStoreInventoryLocation(
       decodeURIComponent(storeCode),
@@ -54,7 +55,7 @@ export async function POST(
             ? error.message
             : "Flash ERP could not save that inventory location.",
       },
-      { status: 400 },
+      { status: error instanceof EnterpriseAuthError ? error.status : 400 },
     );
   }
 }

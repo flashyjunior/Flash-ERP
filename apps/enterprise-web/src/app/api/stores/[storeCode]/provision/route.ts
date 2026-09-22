@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { provisionEnterpriseStoreTopology } from "@/server/repositories/enterprise-stores.repository";
 
 export async function POST(
@@ -48,7 +48,7 @@ export async function POST(
             : "Flash ERP could not provision that store topology."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

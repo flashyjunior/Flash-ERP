@@ -55,18 +55,12 @@ import {
 } from "react";
 
 import {
-  enterpriseFuelOperationsMenuItems,
-  enterpriseFinanceMenuGroups,
-  enterpriseHumanResourcesMenuItems,
-  enterpriseMasterMenuItems,
-  enterpriseInventoryMenuItems,
-  enterpriseOnlineFuelMenuItems,
-  enterpriseOnlineStoreMenuItems,
-  enterprisePurchasesMenuItems,
-  enterpriseSecurityMenuItems,
-  enterpriseSettingsMenuGroups,
+  enterpriseNavigationSections,
+  filterEnterpriseNavigationSections,
   type EnterpriseNavigationMenuGroup,
-  type EnterpriseNavigationMenuItem
+  type EnterpriseNavigationMenuItem,
+  type EnterpriseNavigationPermissionRequirement,
+  type EnterpriseNavigationSection
 } from "@/lib/navigation/enterprise-navigation";
 import {
   buildAccountInitials,
@@ -83,21 +77,31 @@ type EnterpriseShellProps = {
   children: ReactNode;
 };
 
-type NavigationChildItem = {
+type NavigationChildRoute = {
   groupKey?: string;
   key: string;
   label: string;
-  href?: string;
-  requiredPermissions?: readonly string[];
-  type?: "group";
+  href: string;
+  requiredPermissions: EnterpriseNavigationPermissionRequirement;
+  type?: never;
 };
+
+type NavigationChildGroup = {
+  groupKey: string;
+  key: string;
+  label: string;
+  type: "group";
+};
+
+type NavigationChildItem = NavigationChildRoute | NavigationChildGroup;
 
 type NavigationItem = {
   key: string;
   label: string;
   icon: LucideIcon;
-  href?: string;
-  hiddenInSidebar?: boolean;
+  href: string;
+  audience: "enterprise" | "online-store";
+  requiredPermissions: EnterpriseNavigationPermissionRequirement;
   children?: NavigationChildItem[];
 };
 
@@ -149,98 +153,22 @@ type SessionWarningState = {
   totalSeconds: number;
 };
 
-const navigation: NavigationItem[] = [
-  {
-    key: "overview",
-    label: "Dashboard",
-    icon: LayoutDashboard,
-    href: "/"
-  },
-  {
-    key: "online-store",
-    label: "Online POS",
-    icon: Store,
-    href: "/online-store",
-    children: enterpriseOnlineStoreMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "online-fuel-management",
-    label: "Fuel Management",
-    icon: Fuel,
-    href: "/online-store/fuel",
-    children: enterpriseOnlineFuelMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "profile",
-    label: "Profile",
-    icon: UserCircle2,
-    href: "/profile",
-    hiddenInSidebar: true
-  },
-  {
-    key: "master",
-    label: "Master",
-    icon: SlidersHorizontal,
-    href: "/master/customers",
-    children: enterpriseMasterMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "inventory",
-    label: "Inventory",
-    icon: Package,
-    href: "/inventory/products",
-    children: enterpriseInventoryMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "purchases",
-    label: "Purchases",
-    icon: PackageCheck,
-    href: "/purchases/purchase-orders",
-    children: enterprisePurchasesMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "fuel-operations",
-    label: "Fuel",
-    icon: Fuel,
-    href: "/fuel-operations",
-    children: enterpriseFuelOperationsMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "human-resources",
-    label: "Human Resources",
-    icon: Users,
-    href: "/human-resources/organization",
-    children: enterpriseHumanResourcesMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "finance",
-    label: "Finance",
-    icon: Landmark,
-    href: "/finance",
-    children: groupedMenuChildren(enterpriseFinanceMenuGroups)
-  },
-  {
-    key: "settings",
-    label: "Settings",
-    icon: Settings2,
-    href: "/settings/company",
-    children: groupedMenuChildren(enterpriseSettingsMenuGroups)
-  },
-  {
-    key: "security",
-    label: "Security",
-    icon: ShieldCheck,
-    href: "/security/users",
-    children: enterpriseSecurityMenuItems.map((item) => menuItemChild(item))
-  },
-  {
-    key: "reports",
-    label: "Reports",
-    icon: BarChart3,
-    href: "/reports"
-  }
-];
 const sidebarExpandedSectionStorageKey = "flash-erp:enterprise-shell-expanded-section";
+
+const navigationIconByKey: Record<string, LucideIcon> = {
+  overview: LayoutDashboard,
+  "online-store": Store,
+  "online-fuel-management": Fuel,
+  master: SlidersHorizontal,
+  inventory: Package,
+  purchases: PackageCheck,
+  "fuel-operations": Fuel,
+  "human-resources": Users,
+  finance: Landmark,
+  settings: Settings2,
+  security: ShieldCheck,
+  reports: BarChart3
+};
 
 const navigationChildIconByKey: Record<string, LucideIcon> = {
   "account-activity": Activity,
@@ -365,6 +293,22 @@ function groupedMenuChildren(groups: readonly EnterpriseNavigationMenuGroup[]): 
   ]);
 }
 
+function navigationItemFromSection(section: EnterpriseNavigationSection): NavigationItem {
+  return {
+    audience: section.audience,
+    key: section.key,
+    label: section.label,
+    icon: navigationIconByKey[section.key] ?? FileText,
+    href: section.href,
+    requiredPermissions: section.requiredPermissions,
+    children: section.groups
+      ? groupedMenuChildren(section.groups)
+      : section.items?.map((item) => menuItemChild(item))
+  };
+}
+
+const navigation: NavigationItem[] = enterpriseNavigationSections.map(navigationItemFromSection);
+
 function matchesHref(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -377,10 +321,13 @@ function findActiveNavigationMatch(
   const activeChildMatch = items
     .flatMap((item) =>
       (item.children ?? [])
-        .filter((child) => child.href && matchesHref(pathname, child.href))
+        .filter(
+          (child): child is NavigationChildRoute =>
+            child.type !== "group" && matchesHref(pathname, child.href)
+        )
         .map((child) => ({ child, item }))
     )
-    .sort((left, right) => (right.child.href?.length ?? 0) - (left.child.href?.length ?? 0))[0];
+    .sort((left, right) => right.child.href.length - left.child.href.length)[0];
 
   if (activeChildMatch) {
     return {
@@ -470,31 +417,11 @@ export function EnterpriseShell({
     [sessionSnapshot?.permissionCodes]
   );
   const sidebarNavigation = useMemo(() => {
-    const visibleNavigation = navigation.filter((item) => !item.hiddenInSidebar);
-    const filterChildrenByPermission = (item: NavigationItem) => ({
-      ...item,
-      children: item.children?.filter(
-        (child) =>
-          !child.requiredPermissions?.length ||
-          child.requiredPermissions.every((permissionCode) =>
-            sessionPermissionCodes.has(permissionCode)
-          )
-      )
-    });
+    const audience = isOnlineStoreSession ? "online-store" : "enterprise";
 
-    if (isOnlineStoreSession) {
-      return visibleNavigation
-        .filter((item) => item.key === "online-store" || item.key === "online-fuel-management")
-        .map(filterChildrenByPermission)
-        .filter(
-          (item) => item.key !== "online-fuel-management" || Boolean(item.children?.length)
-        );
-    }
-
-    return visibleNavigation
-      .filter((item) => item.key !== "online-store" && item.key !== "online-fuel-management")
-      .map(filterChildrenByPermission)
-      .filter((item) => !item.children || item.children.length > 0);
+    return filterEnterpriseNavigationSections(audience, sessionPermissionCodes).map(
+      navigationItemFromSection
+    );
   }, [isOnlineStoreSession, sessionPermissionCodes]);
   const activeNavigationMatch = useMemo(
     () => findActiveNavigationMatch(pathname, sidebarNavigation, activeSection),

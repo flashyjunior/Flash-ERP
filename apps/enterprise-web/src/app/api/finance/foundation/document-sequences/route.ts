@@ -5,7 +5,7 @@ import { updateErpDocumentSequence } from "@/server/repositories/erp-finance-fou
 
 export async function PATCH(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.setup.manage"]);
     const payload = await request.json();
     const response = await updateErpDocumentSequence(payload);
 

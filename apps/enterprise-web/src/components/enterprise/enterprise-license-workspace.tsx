@@ -1,21 +1,50 @@
 "use client";
 
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
-import { KeyRound, MonitorSmartphone, RefreshCcw, ShieldCheck, Store } from "lucide-react";
+import {
+  ArrowRightLeft,
+  Database,
+  KeyRound,
+  Loader2,
+  MonitorSmartphone,
+  RefreshCcw,
+  ShieldCheck,
+  Store
+} from "lucide-react";
 import { useRouter } from "next/navigation";
-import { startTransition, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 
 import { GridRowActions, SharedDataGrid } from "@/components/data-grid/data-grid";
+import { ActionDialog } from "@/components/dialogs/action-dialog";
 import { EnterpriseShell } from "@/components/layouts/enterprise-shell";
 import { WorkspaceTabs, WorkspaceTabsContent } from "@/components/layouts/workspace-tabs";
+import {
+  canConvertTrialWorkspace,
+  isTrialAdminWorkspaceListResponse,
+  type TrialAdminWorkspace,
+  type TrialAdminWorkspaceStatus
+} from "@/lib/trials/trial-admin-workspaces";
 import type { EnterpriseStoresWorkspaceData } from "@/server/repositories/enterprise-stores.repository";
 
 type StoreRow = EnterpriseStoresWorkspaceData["storeRows"][number];
 type TerminalRow = EnterpriseStoresWorkspaceData["terminalLicenseRows"][number];
 
 type MutationState = {
-  status: "idle" | "submitting" | "success" | "error";
+  status: "idle" | "loading" | "submitting" | "success" | "error";
   message: string;
+};
+
+type TrialStatusFilter = "ALL" | TrialAdminWorkspaceStatus;
+
+type ConversionForm = {
+  planCode: string;
+  subscriptionReference: string;
+  licensedUntil: string;
+  retainSupportAccess: boolean;
+  supportAccessExpiresAt: string;
+  supportApprovalReference: string;
+  stepUpPassword: string;
+  confirmed: boolean;
 };
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -79,6 +108,36 @@ function getLicenseTone(status: string) {
 
 function formatDate(value: string | null) {
   return value ? new Date(value).toLocaleDateString() : "Not set";
+}
+
+function formatDateInput(value: string | null) {
+  return value ? new Date(value).toISOString().slice(0, 10) : "";
+}
+
+function getTrialStatusTone(status: TrialAdminWorkspaceStatus) {
+  switch (status) {
+    case "ACTIVE":
+      return "bg-sky-100 text-sky-700";
+    case "CONVERTING":
+      return "bg-amber-100 text-amber-700";
+    case "CONVERTED":
+      return "bg-emerald-100 text-emerald-700";
+    case "EXPIRED":
+      return "bg-rose-100 text-rose-700";
+  }
+}
+
+function createEmptyConversionForm(): ConversionForm {
+  return {
+    planCode: "",
+    subscriptionReference: "",
+    licensedUntil: "",
+    retainSupportAccess: false,
+    supportAccessExpiresAt: "",
+    supportApprovalReference: "",
+    stepUpPassword: "",
+    confirmed: false
+  };
 }
 
 function isLicensed(row: { licenseStatus: string; licensedUntil: string | null }) {
@@ -163,6 +222,57 @@ export function EnterpriseLicenseWorkspace({
     status: "idle",
     message: ""
   });
+  const [trialWorkspaces, setTrialWorkspaces] = useState<TrialAdminWorkspace[]>([]);
+  const [trialStatusFilter, setTrialStatusFilter] = useState<TrialStatusFilter>("ALL");
+  const [trialState, setTrialState] = useState<MutationState>({
+    status: "idle",
+    message: ""
+  });
+  const [conversionTarget, setConversionTarget] = useState<TrialAdminWorkspace | null>(null);
+  const [conversionForm, setConversionForm] = useState<ConversionForm>(createEmptyConversionForm);
+  const [conversionState, setConversionState] = useState<MutationState>({
+    status: "idle",
+    message: ""
+  });
+
+  const loadTrialWorkspaces = useCallback(async (showSuccess = false) => {
+    setTrialState({ status: "loading", message: "" });
+
+    try {
+      const response = await fetch("/api/trials/admin", {
+        cache: "no-store",
+        headers: { Accept: "application/json" }
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok) {
+        throw new Error(
+          payload && typeof payload === "object" && "message" in payload
+            ? String(payload.message)
+            : "Flash ERP could not load trial workspaces."
+        );
+      }
+      if (!isTrialAdminWorkspaceListResponse(payload)) {
+        throw new Error("Flash ERP returned an invalid trial-workspace response.");
+      }
+
+      setTrialWorkspaces(payload.workspaces);
+      setTrialState({
+        status: showSuccess ? "success" : "idle",
+        message: showSuccess ? "Trial workspaces refreshed." : ""
+      });
+    } catch (error) {
+      setTrialState({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Flash ERP could not load trial workspaces."
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadTrialWorkspaces();
+  }, [loadTrialWorkspaces]);
 
   const activeStore = useMemo(
     () => workspace.storeRows.find((store) => store.storeCode === activeStoreCode) ?? null,
@@ -178,6 +288,13 @@ export function EnterpriseLicenseWorkspace({
   const storeLicenseNeedsKey = storeLicenseStatus === "LICENSED" || storeLicenseStatus === "TRIAL";
   const terminalLicenseNeedsKey =
     terminalLicenseStatus === "LICENSED" || terminalLicenseStatus === "TRIAL";
+  const visibleTrialWorkspaces = useMemo(
+    () =>
+      trialStatusFilter === "ALL"
+        ? trialWorkspaces
+        : trialWorkspaces.filter((workspaceRow) => workspaceRow.status === trialStatusFilter),
+    [trialStatusFilter, trialWorkspaces]
+  );
 
   const storeColumns = useMemo<ColumnDef<StoreRow>[]>(
     () => [
@@ -560,6 +677,127 @@ export function EnterpriseLicenseWorkspace({
     }
   }
 
+  function openConversion(workspaceRow: TrialAdminWorkspace) {
+    setConversionTarget(workspaceRow);
+    setConversionForm({
+      planCode: workspaceRow.subscriptionPlanCode ?? "",
+      subscriptionReference: workspaceRow.subscriptionReference ?? "",
+      licensedUntil: formatDateInput(workspaceRow.subscriptionLicensedUntil),
+      retainSupportAccess: workspaceRow.retainSupportAccess === true,
+      supportAccessExpiresAt: formatDateInput(workspaceRow.supportAccessExpiresAt),
+      supportApprovalReference: workspaceRow.supportApprovalReference ?? "",
+      stepUpPassword: "",
+      confirmed: false
+    });
+    setConversionState({ status: "idle", message: "" });
+  }
+
+  function closeConversion() {
+    if (conversionState.status === "submitting") {
+      return;
+    }
+
+    setConversionTarget(null);
+    setConversionForm(createEmptyConversionForm());
+    setConversionState({ status: "idle", message: "" });
+  }
+
+  async function handleConvertTrial() {
+    if (!conversionTarget) {
+      return;
+    }
+
+    const planCode = conversionForm.planCode.trim();
+    const subscriptionReference = conversionForm.subscriptionReference.trim();
+    const supportApprovalReference = conversionForm.supportApprovalReference.trim();
+
+    if (
+      !planCode ||
+      !subscriptionReference ||
+      !conversionForm.stepUpPassword ||
+      !conversionForm.confirmed
+    ) {
+      setConversionState({
+        status: "error",
+        message:
+          "Enter the subscription details and your current password, then confirm the conversion."
+      });
+      return;
+    }
+
+    if (
+      conversionForm.retainSupportAccess &&
+      (!conversionForm.supportAccessExpiresAt || !supportApprovalReference)
+    ) {
+      setConversionState({
+        status: "error",
+        message: "Retained Flash Support access requires an approval reference and expiry date."
+      });
+      return;
+    }
+
+    setConversionState({ status: "submitting", message: "" });
+
+    try {
+      const stepUpResponse = await fetch("/api/auth/step-up", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ password: conversionForm.stepUpPassword })
+      });
+      const stepUpPayload = (await stepUpResponse.json().catch(() => null)) as
+        | { message?: string }
+        | null;
+
+      if (!stepUpResponse.ok) {
+        throw new Error(
+          stepUpPayload?.message ?? "Flash ERP could not verify your current password."
+        );
+      }
+
+      const response = await fetch(
+        `/api/trials/admin/${encodeURIComponent(conversionTarget.id)}/convert`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            planCode,
+            subscriptionReference,
+            licensedUntil: conversionForm.licensedUntil || null,
+            retainSupportAccess: conversionForm.retainSupportAccess,
+            supportAccessExpiresAt: conversionForm.retainSupportAccess
+              ? conversionForm.supportAccessExpiresAt
+              : null,
+            supportApprovalReference: conversionForm.retainSupportAccess
+              ? supportApprovalReference
+              : null
+          })
+        }
+      );
+      const payload = (await response.json().catch(() => null)) as { message?: string } | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.message ?? "Flash ERP could not convert this trial.");
+      }
+
+      const message = payload?.message ?? `${conversionTarget.companyName} is now licensed.`;
+      setConversionTarget(null);
+      setConversionForm(createEmptyConversionForm());
+      setConversionState({ status: "idle", message: "" });
+      await loadTrialWorkspaces();
+      setTrialState({ status: "success", message });
+      startTransition(() => router.refresh());
+    } catch (error) {
+      setConversionState({
+        status: "error",
+        message: error instanceof Error ? error.message : "Flash ERP could not convert this trial."
+      });
+    }
+  }
+
   return (
     <EnterpriseShell
       activeSection="settings"
@@ -609,7 +847,8 @@ export function EnterpriseLicenseWorkspace({
         defaultValue="shops"
         tabs={[
           { value: "shops", label: "Shop licensing" },
-          { value: "terminals", label: "Terminal licensing" }
+          { value: "terminals", label: "Terminal licensing" },
+          { value: "trials", label: "Trial conversions" }
         ]}
       >
         <WorkspaceTabsContent value="shops">
@@ -877,7 +1116,383 @@ export function EnterpriseLicenseWorkspace({
             />
           </div>
         </WorkspaceTabsContent>
+
+        <WorkspaceTabsContent value="trials">
+          <section className="space-y-4">
+            <div className="flex flex-col gap-3 border-b border-stone-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-stone-500">
+                  Enterprise subscriptions
+                </p>
+                <h2 className="mt-1 text-xl font-semibold text-stone-950">Trial-to-paid workspaces</h2>
+                <p className="mt-1 max-w-3xl text-sm leading-6 text-stone-600">
+                  Conversion licenses the existing workspace in place. Its physical database identity
+                  remains unchanged so connections, backups, and audit history continue safely.
+                </p>
+              </div>
+              <button
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-stone-200 bg-white px-3 text-sm font-semibold text-stone-700 transition hover:border-stone-300 disabled:opacity-60"
+                disabled={trialState.status === "loading"}
+                onClick={() => void loadTrialWorkspaces(true)}
+                type="button"
+              >
+                <RefreshCcw
+                  className={`h-4 w-4 ${trialState.status === "loading" ? "animate-spin" : ""}`}
+                />
+                Refresh
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter trial workspaces by status">
+              {(["ALL", "ACTIVE", "EXPIRED", "CONVERTING", "CONVERTED"] as const).map((status) => {
+                const count =
+                  status === "ALL"
+                    ? trialWorkspaces.length
+                    : trialWorkspaces.filter((workspaceRow) => workspaceRow.status === status).length;
+
+                return (
+                  <button
+                    className={`inline-flex h-9 items-center rounded-lg border px-3 text-sm font-semibold transition ${
+                      trialStatusFilter === status
+                        ? "border-[var(--brand)] bg-[color:rgba(37,99,235,0.08)] text-[var(--brand-deep)]"
+                        : "border-stone-200 bg-white text-stone-600 hover:border-stone-300"
+                    }`}
+                    key={status}
+                    onClick={() => setTrialStatusFilter(status)}
+                    type="button"
+                  >
+                    {status === "ALL" ? "All" : status.toLowerCase().replace(/^./, (letter) => letter.toUpperCase())}
+                    <span className="ml-2 text-xs opacity-70">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <Feedback state={trialState} />
+
+            <div className="overflow-x-auto border-y border-stone-200 bg-white/70">
+              <table className="min-w-[1100px] w-full border-collapse text-left text-sm">
+                <thead className="bg-stone-50/90 text-[11px] uppercase tracking-[0.14em] text-stone-500">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold">Business</th>
+                    <th className="px-4 py-3 font-semibold">Status</th>
+                    <th className="px-4 py-3 font-semibold">Trial expiry</th>
+                    <th className="px-4 py-3 font-semibold">Subscription</th>
+                    <th className="px-4 py-3 font-semibold">Database identity</th>
+                    <th className="px-4 py-3 text-right font-semibold">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-200">
+                  {trialState.status === "loading" && trialWorkspaces.length === 0 ? (
+                    <tr>
+                      <td className="px-4 py-10 text-center text-stone-500" colSpan={6}>
+                        <span className="inline-flex items-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading trial workspaces...
+                        </span>
+                      </td>
+                    </tr>
+                  ) : visibleTrialWorkspaces.length === 0 ? (
+                    <tr>
+                      <td className="px-4 py-10 text-center text-stone-500" colSpan={6}>
+                        No {trialStatusFilter === "ALL" ? "trial" : trialStatusFilter.toLowerCase()} workspaces found.
+                      </td>
+                    </tr>
+                  ) : (
+                    visibleTrialWorkspaces.map((workspaceRow) => (
+                      <tr className="align-top text-stone-700" key={workspaceRow.id}>
+                        <td className="px-4 py-3">
+                          <p className="font-semibold text-stone-950">{workspaceRow.companyName}</p>
+                          <p className="mt-0.5 text-xs text-stone-500">{workspaceRow.email}</p>
+                          <p className="mt-0.5 text-xs text-stone-500">
+                            {workspaceRow.requestNo} · {workspaceRow.workspaceSlug ?? "No workspace slug"}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getTrialStatusTone(
+                              workspaceRow.status
+                            )}`}
+                          >
+                            {workspaceRow.status}
+                          </span>
+                          {workspaceRow.convertedAt ? (
+                            <p className="mt-1.5 text-xs text-stone-500">
+                              Converted {formatDate(workspaceRow.convertedAt)}
+                            </p>
+                          ) : null}
+                        </td>
+                        <td className="px-4 py-3">{formatDate(workspaceRow.trialExpiresAt)}</td>
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-stone-900">
+                            {workspaceRow.subscriptionPlanCode ?? "Not licensed"}
+                          </p>
+                          <p className="mt-0.5 text-xs text-stone-500">
+                            {workspaceRow.subscriptionReference ?? "No subscription reference"}
+                          </p>
+                          {workspaceRow.subscriptionLicensedUntil ? (
+                            <p className="mt-0.5 text-xs text-stone-500">
+                              Licensed until {formatDate(workspaceRow.subscriptionLicensedUntil)}
+                            </p>
+                          ) : null}
+                          {workspaceRow.retainSupportAccess ? (
+                            <p className="mt-0.5 text-xs text-stone-500">
+                              Support approved until {formatDate(workspaceRow.supportAccessExpiresAt)}
+                            </p>
+                          ) : null}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="inline-flex items-start gap-2 text-xs text-stone-600">
+                            <Database className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span className="break-all font-mono">
+                              {workspaceRow.workspaceDatabaseName ?? "Not allocated"}
+                            </span>
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {canConvertTrialWorkspace(workspaceRow) ? (
+                            <button
+                              className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,var(--brand),var(--brand-deep))] px-3 text-sm font-semibold text-white shadow-[0_10px_22px_rgba(29,78,216,0.18)] transition hover:brightness-[1.03]"
+                              onClick={() => openConversion(workspaceRow)}
+                              type="button"
+                            >
+                              <ArrowRightLeft className="h-4 w-4" />
+                              {workspaceRow.status === "CONVERTING"
+                                ? "Retry conversion"
+                                : "Convert to paid"}
+                            </button>
+                          ) : workspaceRow.status === "CONVERTED" ? (
+                            <span className="text-xs font-semibold text-emerald-700">Licensed</span>
+                          ) : (
+                            <span className="text-xs font-semibold text-stone-500">Not available</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </WorkspaceTabsContent>
       </WorkspaceTabs>
+
+      <ActionDialog
+        description="Record the approved subscription and convert the existing customer workspace without changing its database identity."
+        hideTrigger
+        onOpenChange={(open) => {
+          if (!open) {
+            closeConversion();
+          }
+        }}
+        open={Boolean(conversionTarget)}
+        title={conversionTarget ? `Convert ${conversionTarget.companyName}` : "Convert trial to paid"}
+        triggerLabel=""
+        widthClassName="max-w-2xl"
+      >
+        {conversionTarget ? (
+          <form
+            className="space-y-5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleConvertTrial();
+            }}
+          >
+            <div className="grid gap-3 border-b border-stone-200 pb-4 text-sm sm:grid-cols-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">Workspace</p>
+                <p className="mt-1 font-semibold text-stone-950">{conversionTarget.workspaceSlug ?? "Not allocated"}</p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">Current status</p>
+                <p className="mt-1 font-semibold text-stone-950">{conversionTarget.status}</p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 border-l-4 border-sky-500 bg-sky-50 px-4 py-3 text-sm leading-6 text-sky-900">
+              <Database className="mt-0.5 h-5 w-5 shrink-0" />
+              <p>
+                The physical database remains <span className="break-all font-mono font-semibold">{conversionTarget.workspaceDatabaseName ?? "unallocated"}</span>.
+                Conversion updates licensing only; it does not rename or copy customer data.
+              </p>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5 text-sm text-stone-700">
+                <span className="font-semibold text-stone-900">Plan code</span>
+                <input
+                  autoFocus
+                  className="h-10 rounded-xl border border-stone-300 bg-white px-3 outline-none transition focus:border-[var(--brand)]"
+                  disabled={conversionState.status === "submitting"}
+                  onChange={(event) =>
+                    setConversionForm((current) => ({ ...current, planCode: event.target.value }))
+                  }
+                  placeholder="For example, BUSINESS"
+                  required
+                  value={conversionForm.planCode}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm text-stone-700">
+                <span className="font-semibold text-stone-900">Subscription reference</span>
+                <input
+                  className="h-10 rounded-xl border border-stone-300 bg-white px-3 outline-none transition focus:border-[var(--brand)]"
+                  disabled={conversionState.status === "submitting"}
+                  onChange={(event) =>
+                    setConversionForm((current) => ({
+                      ...current,
+                      subscriptionReference: event.target.value
+                    }))
+                  }
+                  placeholder="Approved contract or billing reference"
+                  required
+                  value={conversionForm.subscriptionReference}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm text-stone-700 sm:col-span-2">
+                <span className="font-semibold text-stone-900">Paid license expiry (optional)</span>
+                <input
+                  className="h-10 rounded-xl border border-stone-300 bg-white px-3 outline-none transition focus:border-[var(--brand)]"
+                  disabled={conversionState.status === "submitting"}
+                  onChange={(event) =>
+                    setConversionForm((current) => ({ ...current, licensedUntil: event.target.value }))
+                  }
+                  type="date"
+                  value={conversionForm.licensedUntil}
+                />
+                <span className="text-xs text-stone-500">Leave blank for a subscription without a fixed expiry.</span>
+              </label>
+            </div>
+
+            <div className="space-y-3 border-y border-stone-200 py-4">
+              <label className="flex items-start gap-3 text-sm text-stone-700">
+                <input
+                  checked={conversionForm.retainSupportAccess}
+                  className="mt-1"
+                  disabled={conversionState.status === "submitting"}
+                  onChange={(event) =>
+                    setConversionForm((current) => ({
+                      ...current,
+                      retainSupportAccess: event.target.checked
+                    }))
+                  }
+                  type="checkbox"
+                />
+                <span>
+                  <strong className="block text-stone-900">Retain Flash Support access</strong>
+                  Keep the managed support account enabled for a customer-approved, time-bounded support window.
+                </span>
+              </label>
+              {conversionForm.retainSupportAccess ? (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="grid gap-1.5 text-sm text-stone-700">
+                    <span className="font-semibold text-stone-900">Support access expiry</span>
+                    <input
+                      className="h-10 rounded-xl border border-stone-300 bg-white px-3 outline-none transition focus:border-[var(--brand)]"
+                      disabled={conversionState.status === "submitting"}
+                      min={new Date().toISOString().slice(0, 10)}
+                      onChange={(event) =>
+                        setConversionForm((current) => ({
+                          ...current,
+                          supportAccessExpiresAt: event.target.value
+                        }))
+                      }
+                      required
+                      type="date"
+                      value={conversionForm.supportAccessExpiresAt}
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-sm text-stone-700">
+                    <span className="font-semibold text-stone-900">Support approval reference</span>
+                    <input
+                      className="h-10 rounded-xl border border-stone-300 bg-white px-3 outline-none transition focus:border-[var(--brand)]"
+                      disabled={conversionState.status === "submitting"}
+                      onChange={(event) =>
+                        setConversionForm((current) => ({
+                          ...current,
+                          supportApprovalReference: event.target.value
+                        }))
+                      }
+                      placeholder="Customer approval or support agreement"
+                      required
+                      value={conversionForm.supportApprovalReference}
+                    />
+                  </label>
+                </div>
+              ) : null}
+              <label className="grid gap-1.5 text-sm text-stone-700">
+                <span className="font-semibold text-stone-900">Current password</span>
+                <input
+                  autoComplete="current-password"
+                  className="h-10 rounded-xl border border-stone-300 bg-white px-3 outline-none transition focus:border-[var(--brand)]"
+                  disabled={conversionState.status === "submitting"}
+                  onChange={(event) =>
+                    setConversionForm((current) => ({
+                      ...current,
+                      stepUpPassword: event.target.value
+                    }))
+                  }
+                  required
+                  type="password"
+                  value={conversionForm.stepUpPassword}
+                />
+                <span className="text-xs text-stone-500">
+                  Paid conversion requires fresh password verification.
+                </span>
+              </label>
+              <label className="flex items-start gap-3 text-sm text-stone-700">
+                <input
+                  checked={conversionForm.confirmed}
+                  className="mt-1"
+                  disabled={conversionState.status === "submitting"}
+                  onChange={(event) =>
+                    setConversionForm((current) => ({ ...current, confirmed: event.target.checked }))
+                  }
+                  required
+                  type="checkbox"
+                />
+                <span>
+                  <strong className="block text-stone-900">Confirm paid conversion</strong>
+                  I confirm the subscription details are approved and this workspace should leave the trial lifecycle.
+                </span>
+              </label>
+            </div>
+
+            <Feedback state={conversionState} />
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                className="inline-flex h-10 items-center justify-center rounded-xl border border-stone-300 bg-white px-4 text-sm font-semibold text-stone-700 transition hover:border-stone-400"
+                disabled={conversionState.status === "submitting"}
+                onClick={closeConversion}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,var(--brand),var(--brand-deep))] px-4 text-sm font-semibold text-white transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={
+                  conversionState.status === "submitting" ||
+                  !conversionForm.planCode.trim() ||
+                  !conversionForm.subscriptionReference.trim() ||
+                  !conversionForm.stepUpPassword ||
+                  (conversionForm.retainSupportAccess &&
+                    (!conversionForm.supportAccessExpiresAt ||
+                      !conversionForm.supportApprovalReference.trim())) ||
+                  !conversionForm.confirmed
+                }
+                type="submit"
+              >
+                {conversionState.status === "submitting" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ArrowRightLeft className="h-4 w-4" />
+                )}
+                {conversionState.status === "submitting" ? "Converting..." : "Convert to paid"}
+              </button>
+            </div>
+          </form>
+        ) : null}
+      </ActionDialog>
     </EnterpriseShell>
   );
 }

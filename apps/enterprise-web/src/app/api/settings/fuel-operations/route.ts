@@ -5,7 +5,7 @@ import { upsertFuelOperationsSettings } from "@/server/repositories/erp-fuel-ope
 
 export async function PATCH(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["fuel.hq.manage"]);
     const payload = await request.json();
     const response = await upsertFuelOperationsSettings(payload);
 

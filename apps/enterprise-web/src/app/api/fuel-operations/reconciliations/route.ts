@@ -6,7 +6,7 @@ import { createFuelDailyReconciliation } from "@/server/repositories/erp-fuel-op
 export async function POST(request: Request) {
   try {
     await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["fuel.reconciliation.manage"]
     );
     const payload = await request.json();

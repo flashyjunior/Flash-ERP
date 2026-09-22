@@ -5,7 +5,7 @@ import { createErpOperationalDocument } from "@/server/repositories/erp-operatio
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.manage"]);
     const payload = await request.json();
     const response = await createErpOperationalDocument(payload);
 

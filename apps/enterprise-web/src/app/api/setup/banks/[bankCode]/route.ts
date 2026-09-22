@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updateEnterpriseBank } from "@/server/repositories/enterprise-setup.repository";
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ bankCode: string }> }
 ) {
-  const { bankCode } = await params;
-
   try {
+    await assertEnterprisePermission(["master.bank.manage"]);
+    const { bankCode } = await params;
     const payload = (await request.json()) as {
       bankCode?: string;
       name?: string;
@@ -28,7 +29,7 @@ export async function POST(
       {
         message: error instanceof Error ? error.message : "Flash ERP could not update that bank."
       },
-      { status: 400 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 400 }
     );
   }
 }

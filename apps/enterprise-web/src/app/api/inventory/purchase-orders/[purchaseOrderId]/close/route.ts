@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { ClosePurchaseOrderRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { closePurchaseOrder } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -12,6 +13,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.purchase-order.manage"]);
     const { purchaseOrderId } = await context.params;
     const body =
       request.headers.get("content-length") === "0"
@@ -28,7 +30,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not close the purchase order."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

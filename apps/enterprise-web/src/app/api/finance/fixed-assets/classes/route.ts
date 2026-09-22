@@ -5,7 +5,7 @@ import { upsertErpFixedAssetClass } from "@/server/repositories/erp-fixed-assets
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.setup.manage"]);
     const payload = await request.json();
     const response = await upsertErpFixedAssetClass(payload);
 

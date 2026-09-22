@@ -8,7 +8,7 @@ export async function POST(
   context: { params: Promise<{ requestId: string }> }
 ) {
   try {
-    const session = await assertEnterprisePermission(["master.store.manage"]);
+    const session = await assertEnterprisePermission(["settings.license.manage"]);
     const { requestId } = await context.params;
     const body = (await request.json()) as { days?: unknown };
     return NextResponse.json(

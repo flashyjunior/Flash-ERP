@@ -5,7 +5,7 @@ import { upsertErpTaxGroup } from "@/server/repositories/erp-tax-setup.repositor
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.setup.manage"]);
     const payload = await request.json();
     const response = await upsertErpTaxGroup(payload);
 

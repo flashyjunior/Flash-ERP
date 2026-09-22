@@ -6,7 +6,7 @@ import { createFuelDelivery } from "@/server/repositories/erp-fuel-operations.re
 export async function POST(request: Request) {
   try {
     await assertEnterpriseOrOnlineStorePermission(
-      ["settings.company.manage"],
+      ["fuel.hq.manage"],
       ["fuel.supplier-receipt.capture"]
     );
     const payload = await request.json();

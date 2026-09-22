@@ -65,6 +65,26 @@ type ExtensionRequest = {
   actorRef: string;
 };
 
+type ConversionRequest = {
+  version: number;
+  requestId: string;
+  provisioningRequestKey: string;
+  planCode: string;
+  subscriptionReference: string;
+  licensedUntil: string | null;
+  retainSupportAccess: boolean;
+  supportAccessExpiresAt: string | null;
+  supportApprovalReference: string | null;
+  actorRef: string;
+};
+
+type PublicUrlRequest = {
+  version: number;
+  workspaceSlug: string;
+  baseUrl: string;
+  actorRef: string;
+};
+
 type WorkspaceAllocation = {
   slug: string;
   databaseName: string;
@@ -118,6 +138,33 @@ const onlineStoreSupervisorPermissionCodes = [
   "pos.layaway.policy.override",
   "ecommerce.console.access",
 ] as const;
+
+const trialSupportPermissionCodes = [
+  "operations.dashboard.view",
+  "master.customer.manage",
+  "master.supplier.manage",
+  "master.tax.manage",
+  "master.tender.manage",
+  "master.bank.manage",
+  "master.department.manage",
+  "master.category.manage",
+  "master.product.manage",
+  "master.store.manage",
+  "master.loyalty.manage",
+  "master.promotion.manage",
+  "settings.company.manage",
+  "settings.ldap.manage",
+  "settings.smtp.manage",
+  "settings.sms.manage",
+  "settings.license.manage",
+  "settings.receipt-template.manage",
+  "settings.retail-user.manage",
+  "settings.option.manage",
+  "inventory.view",
+  "sync.monitor",
+  "ecommerce.console.access",
+] as const;
+const trialSupportPermissionCodeSet = new Set<string>(trialSupportPermissionCodes);
 
 const root = process.cwd();
 const controlUrl = process.env.DATABASE_URL?.trim();
@@ -222,6 +269,26 @@ function containedPath(parent: string, child: string) {
   return childPath;
 }
 
+function normalizePublicBaseUrl(value: string) {
+  const parsed = new URL(value);
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(
+      "Trial workspace public URLs cannot contain credentials, query strings, or fragments.",
+    );
+  }
+  if (
+    process.env.NODE_ENV === "production" &&
+    parsed.protocol !== "https:" &&
+    process.env.FLASH_ERP_TRIAL_ALLOW_INSECURE_URLS !== "true"
+  ) {
+    throw new Error("Production trial workspace URLs must use HTTPS.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Trial workspace public URLs must use HTTP or HTTPS.");
+  }
+  return parsed.toString().replace(/\/$/, "");
+}
+
 function publicBaseUrl(slug: string, port: number) {
   const template = requiredEnvironment("FLASH_ERP_TRIAL_PUBLIC_URL_TEMPLATE");
   const value = template
@@ -231,15 +298,7 @@ function publicBaseUrl(slug: string, port: number) {
     throw new Error(
       "The trial public URL template contains an unknown placeholder.",
     );
-  const parsed = new URL(value);
-  if (
-    process.env.NODE_ENV === "production" &&
-    parsed.protocol !== "https:" &&
-    process.env.FLASH_ERP_TRIAL_ALLOW_INSECURE_URLS !== "true"
-  ) {
-    throw new Error("Production trial workspace URLs must use HTTPS.");
-  }
-  return parsed.toString().replace(/\/$/, "");
+  return normalizePublicBaseUrl(value);
 }
 
 async function allocateWorkspace(
@@ -304,7 +363,9 @@ async function allocateWorkspace(
     slug,
     databaseName,
     port,
-    baseUrl: publicBaseUrl(slug, port),
+    baseUrl: existing.workspaceUrl
+      ? normalizePublicBaseUrl(existing.workspaceUrl)
+      : publicBaseUrl(slug, port),
     runtimeDirectory,
     configPath: containedPath(
       runtimeDirectory,
@@ -422,6 +483,7 @@ async function ensureTrialSupportAccount(
     storeId: string;
     nodeCode: string;
     retailOrgId: string;
+    permissionCodes?: readonly string[];
   },
 ): Promise<boolean> {
   const supportLoginId = trialSupportLoginId(input.slug);
@@ -464,12 +526,22 @@ async function ensureTrialSupportAccount(
     },
   });
 
+  const requestedPermissionCodes = input.permissionCodes
+    ? [...input.permissionCodes]
+    : [...trialSupportPermissionCodes];
   const permissions = await workspace.permission.findMany({
     where: {
-      code: { in: securityPermissionCatalog.map((entry) => entry.code) },
+      code: { in: requestedPermissionCodes },
     },
-    select: { id: true },
+    select: { id: true, code: true },
   });
+  if (permissions.length !== requestedPermissionCodes.length) {
+    const resolvedCodes = new Set(permissions.map((permission) => permission.code));
+    const missingCodes = requestedPermissionCodes.filter((code) => !resolvedCodes.has(code));
+    throw new Error(
+      `Trial support role is missing permission code(s): ${missingCodes.join(", ")}.`,
+    );
+  }
   await workspace.rolePermission.deleteMany({ where: { roleId: role.id } });
   await workspace.rolePermission.createMany({
     data: permissions.map((permission) => ({
@@ -1825,7 +1897,7 @@ async function provision(request: ProvisionRequest) {
       "The trial provisioning request does not exist in the control plane.",
     );
   }
-  if (existing.status === "ACTIVE" && existing.workspaceDatabaseName) return;
+  if (["ACTIVE", "CONVERTING", "CONVERTED"].includes(existing.status) && existing.workspaceDatabaseName) return;
 
   const allocation = await allocateWorkspace(request);
   const startsAt = existing.trialStartsAt || new Date();
@@ -2045,6 +2117,7 @@ async function reconcileWorkspaceSupportUser(input: {
   requestNo: string;
   workspaceSlug: string;
   workspaceDatabaseName: string;
+  permissionCodes?: readonly string[];
 }) {
   const workspace = new PrismaClient({
     adapter: new PrismaMssql(childDatabaseUrl(input.workspaceDatabaseName)),
@@ -2098,6 +2171,7 @@ async function reconcileWorkspaceSupportUser(input: {
       storeId: mainStore.id,
       nodeCode: node.code,
       retailOrgId: owner.retailOrgId,
+      permissionCodes: input.permissionCodes,
     });
   } finally {
     await workspace.$disconnect();
@@ -2127,6 +2201,7 @@ async function reconcileActiveWorkspaces() {
       workspaceSlug: true,
       workspaceDatabaseName: true,
       workspacePort: true,
+      workspaceUrl: true,
     },
   });
 
@@ -2210,6 +2285,7 @@ async function reconcileActiveWorkspaces() {
         workspaceSlug: row.workspaceSlug,
         workspaceDatabaseName: row.workspaceDatabaseName,
         workspacePort: row.workspacePort,
+        workspaceUrl: row.workspaceUrl,
       });
       writeWorkspaceEnvironment(
         {
@@ -2241,6 +2317,13 @@ async function reconcileActiveWorkspaces() {
         `${row.requestNo}: ${error instanceof Error ? error.message.slice(0, 300) : "storefront reconciliation failed"}`,
       );
     }
+  }
+  try {
+    await reconcilePaidConversions();
+  } catch (error) {
+    failures.push(
+      `paid conversion reconciliation: ${error instanceof Error ? error.message.slice(0, 500) : "conversion reconciliation failed"}`,
+    );
   }
   if (failures.length > 0) {
     throw new Error(
@@ -2306,6 +2389,7 @@ function allocationFromRow(row: {
   workspaceSlug: string;
   workspaceDatabaseName: string;
   workspacePort: number;
+  workspaceUrl?: string | null;
 }) {
   const runtimeRoot = path.resolve(
     requiredEnvironment("FLASH_ERP_TRIAL_RUNTIME_ROOT"),
@@ -2318,13 +2402,113 @@ function allocationFromRow(row: {
     slug: row.workspaceSlug,
     databaseName: row.workspaceDatabaseName,
     port: row.workspacePort,
-    baseUrl: publicBaseUrl(row.workspaceSlug, row.workspacePort),
+    baseUrl: row.workspaceUrl
+      ? normalizePublicBaseUrl(row.workspaceUrl)
+      : publicBaseUrl(row.workspaceSlug, row.workspacePort),
     runtimeDirectory,
     configPath: containedPath(
       runtimeDirectory,
       path.join(runtimeDirectory, "config", "workspace.env"),
     ),
   };
+}
+
+async function setWorkspacePublicUrl(input: PublicUrlRequest) {
+  assertProvisioningEnabled();
+  if (input.version !== 1) {
+    throw new Error("Unsupported trial public URL request version.");
+  }
+  const workspaceSlug = input.workspaceSlug.trim().toLowerCase();
+  const actorRef = input.actorRef.trim();
+  if (!workspaceSlug || !actorRef) {
+    throw new Error("Workspace slug and operator reference are required.");
+  }
+  const baseUrl = normalizePublicBaseUrl(input.baseUrl.trim());
+  const parsedBaseUrl = new URL(baseUrl);
+  if (parsedBaseUrl.pathname !== "/" || parsedBaseUrl.port) {
+    throw new Error(
+      "A trial workspace public URL must use the domain root and standard HTTPS port.",
+    );
+  }
+
+  const matches = await control.trialSignupRequest.findMany({
+    where: { workspaceSlug },
+    orderBy: { createdAt: "desc" },
+    take: 2,
+  });
+  if (matches.length === 0) {
+    throw new Error(`No trial workspace uses slug ${workspaceSlug}.`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`Workspace slug ${workspaceSlug} is not unique.`);
+  }
+  const row = matches[0];
+  if (
+    !["ACTIVE", "CONVERTING", "CONVERTED"].includes(row.status) ||
+    !row.workspaceDatabaseName ||
+    !row.workspacePort
+  ) {
+    throw new Error(
+      "The trial public URL can only be changed for a complete active or converted workspace.",
+    );
+  }
+
+  const allocation = allocationFromRow({
+    workspaceSlug,
+    workspaceDatabaseName: row.workspaceDatabaseName,
+    workspacePort: row.workspacePort,
+    workspaceUrl: baseUrl,
+  });
+  writeWorkspaceEnvironment(
+    {
+      requestId: row.id,
+      business: { type: row.businessType },
+    },
+    allocation,
+    childDatabaseUrl(row.workspaceDatabaseName),
+  );
+  await manageRuntime("Ensure", allocation);
+  await waitForRuntime(allocation.port);
+
+  await control.$transaction(async (tx) => {
+    await tx.trialSignupRequest.update({
+      where: { id: row.id },
+      data: {
+        workspaceUrl: baseUrl,
+        onlineStoreUrl: `${baseUrl}/online-store`,
+        storefrontUrl: `${baseUrl}/shop/${workspaceSlug}`,
+        lastLifecycleAt: new Date(),
+      },
+    });
+    await tx.trialLifecycleEvent.create({
+      data: {
+        trialSignupRequestId: row.id,
+        eventType: "PUBLIC_URL_CHANGED",
+        outcome: "SUCCEEDED",
+        actorType: "OPERATOR",
+        actorRef,
+        previousStatus: row.status,
+        newStatus: row.status,
+        detailsJson: JSON.stringify({
+          previousWorkspaceUrl: row.workspaceUrl,
+          workspaceUrl: baseUrl,
+          workspaceSlug,
+          port: row.workspacePort,
+        }),
+      },
+    });
+  });
+
+  process.stdout.write(
+    `${JSON.stringify({
+      requestNo: row.requestNo,
+      workspaceSlug,
+      workspaceUrl: baseUrl,
+      onlineStoreUrl: `${baseUrl}/online-store`,
+      storefrontUrl: `${baseUrl}/shop/${workspaceSlug}`,
+      runtimePort: row.workspacePort,
+    })}\n`,
+  );
 }
 
 async function sweepExpired() {
@@ -2350,6 +2534,7 @@ async function sweepExpired() {
       workspaceSlug: row.workspaceSlug,
       workspaceDatabaseName: row.workspaceDatabaseName,
       workspacePort: row.workspacePort,
+      workspaceUrl: row.workspaceUrl,
     });
     await expireChild({
       id: row.id,
@@ -2401,6 +2586,7 @@ async function extendTrial(input: ExtensionRequest) {
     workspaceSlug: row.workspaceSlug,
     workspaceDatabaseName: row.workspaceDatabaseName,
     workspacePort: row.workspacePort,
+    workspaceUrl: row.workspaceUrl,
   });
   const previousExpiry = row.trialExpiresAt;
   const base = Math.max(Date.now(), previousExpiry.getTime());
@@ -2550,6 +2736,466 @@ async function extendTrial(input: ExtensionRequest) {
   });
 }
 
+function sameOptionalDate(left: Date | null, right: Date | null) {
+  return left?.getTime() === right?.getTime();
+}
+
+async function reconcilePaidConversions() {
+  const conversions = await control.trialSignupRequest.findMany({
+    where: {
+      status: { in: ["CONVERTING", "CONVERTED"] },
+      workspaceSlug: { not: null },
+      workspaceDatabaseName: { not: null },
+      workspacePort: { not: null },
+      subscriptionPlanCode: { not: null },
+      subscriptionReference: { not: null },
+      retainSupportAccess: { not: null },
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 100,
+  });
+  const failures: string[] = [];
+  for (const row of conversions) {
+    try {
+      await convertTrial({
+        version: 1,
+        requestId: row.id,
+        provisioningRequestKey: row.provisioningRequestKey,
+        planCode: row.subscriptionPlanCode!,
+        subscriptionReference: row.subscriptionReference!,
+        licensedUntil: row.subscriptionLicensedUntil?.toISOString() ?? null,
+        retainSupportAccess: row.retainSupportAccess!,
+        supportAccessExpiresAt: row.supportAccessExpiresAt?.toISOString() ?? null,
+        supportApprovalReference: row.supportApprovalReference,
+        actorRef: row.convertedBy || `trial:${row.requestNo}:conversion-reconciliation`,
+      });
+    } catch (error) {
+      failures.push(
+        `${row.requestNo}: ${error instanceof Error ? error.message.slice(0, 300) : "conversion reconciliation failed"}`,
+      );
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(failures.join(" | "));
+  }
+}
+
+async function convertTrial(input: ConversionRequest) {
+  assertProvisioningEnabled();
+  const planCode = input.planCode?.trim().toUpperCase();
+  const subscriptionReference = input.subscriptionReference?.trim();
+  const licensedUntil = input.licensedUntil ? new Date(input.licensedUntil) : null;
+  const supportAccessExpiresAt = input.supportAccessExpiresAt
+    ? new Date(input.supportAccessExpiresAt)
+    : null;
+  const supportApprovalReference = input.supportApprovalReference?.trim() || null;
+  if (
+    input.version !== 1 ||
+    !/^[A-Z0-9][A-Z0-9._-]{0,79}$/.test(planCode || "") ||
+    !subscriptionReference ||
+    subscriptionReference.length > 200 ||
+    (licensedUntil && Number.isNaN(licensedUntil.getTime())) ||
+    (supportAccessExpiresAt && Number.isNaN(supportAccessExpiresAt.getTime())) ||
+    typeof input.retainSupportAccess !== "boolean" ||
+    (input.retainSupportAccess &&
+      (!supportAccessExpiresAt ||
+        !supportApprovalReference ||
+        supportApprovalReference.length > 200)) ||
+    (!input.retainSupportAccess &&
+      (supportAccessExpiresAt !== null || supportApprovalReference !== null)) ||
+    (licensedUntil &&
+      supportAccessExpiresAt &&
+      supportAccessExpiresAt.getTime() > licensedUntil.getTime()) ||
+    !input.actorRef?.trim()
+  ) {
+    throw new Error("The trial conversion request is invalid.");
+  }
+
+  const row = await control.trialSignupRequest.findUnique({
+    where: { id: input.requestId },
+  });
+  if (
+    !row ||
+    row.provisioningRequestKey !== input.provisioningRequestKey ||
+    !["ACTIVE", "EXPIRED", "CONVERTING", "CONVERTED"].includes(row.status) ||
+    !row.workspaceSlug ||
+    !row.workspaceDatabaseName ||
+    !row.workspacePort
+  ) {
+    throw new Error(
+      "The trial conversion target is not an active, expired, or converted complete workspace.",
+    );
+  }
+  if (
+    ["CONVERTING", "CONVERTED"].includes(row.status) &&
+    (row.subscriptionPlanCode !== planCode ||
+      row.subscriptionReference !== subscriptionReference ||
+      !sameOptionalDate(row.subscriptionLicensedUntil, licensedUntil) ||
+      row.retainSupportAccess !== input.retainSupportAccess ||
+      !sameOptionalDate(row.supportAccessExpiresAt, supportAccessExpiresAt) ||
+      row.supportApprovalReference !== supportApprovalReference)
+  ) {
+    throw new Error(
+      "The workspace was already converted with different subscription metadata.",
+    );
+  }
+
+  const allocation = allocationFromRow({
+    workspaceSlug: row.workspaceSlug,
+    workspaceDatabaseName: row.workspaceDatabaseName,
+    workspacePort: row.workspacePort,
+    workspaceUrl: row.workspaceUrl,
+  });
+  const databaseUrl = childDatabaseUrl(row.workspaceDatabaseName);
+  await applyMigrations(databaseUrl);
+  const workspace = new PrismaClient({ adapter: new PrismaMssql(databaseUrl) });
+  const convertedAt = row.convertedAt || new Date();
+  const paidLicenseKey = `PAID-${crypto
+    .createHash("sha256")
+    .update(`${row.id}:${subscriptionReference}`)
+    .digest("hex")
+    .slice(0, 32)
+    .toUpperCase()}`;
+  try {
+    let runtime = await workspace.trialWorkspaceRuntime.findUniqueOrThrow({
+      where: { id: row.id },
+    });
+    if (!["ACTIVE", "EXPIRED", "CONVERTING", "CONVERTED"].includes(runtime.status)) {
+      throw new Error(
+        `Trial runtime ${row.requestNo} is not in a convertible state.`,
+      );
+    }
+    if (
+      runtime.status === "CONVERTED" &&
+      (runtime.subscriptionPlanCode !== planCode ||
+        runtime.subscriptionReference !== subscriptionReference ||
+        !sameOptionalDate(runtime.subscriptionLicensedUntil, licensedUntil) ||
+        runtime.retainSupportAccess !== input.retainSupportAccess ||
+        !sameOptionalDate(runtime.supportAccessExpiresAt, supportAccessExpiresAt) ||
+        runtime.supportApprovalReference !== supportApprovalReference)
+    ) {
+      throw new Error(
+        "The child workspace was already converted with different conversion metadata.",
+      );
+    }
+
+    const owner = await workspace.retailUser.findUniqueOrThrow({
+      where: { id: runtime.ownerUserId },
+      select: { retailOrgId: true },
+    });
+    const supportLoginId = trialSupportLoginId(row.workspaceSlug);
+    const supportShouldBeActive =
+      input.retainSupportAccess &&
+      supportAccessExpiresAt !== null &&
+      supportAccessExpiresAt.getTime() > Date.now();
+    let supportUser = await workspace.retailUser.findFirst({
+      where: {
+        retailOrgId: owner.retailOrgId,
+        loginId: supportLoginId,
+        deletedAt: null,
+      },
+      select: { id: true, accountStatus: true },
+    });
+    if (supportShouldBeActive && supportUser?.accountStatus !== UserAccountStatus.ACTIVE) {
+      await reconcileWorkspaceSupportUser({
+        requestId: row.id,
+        requestNo: row.requestNo,
+        workspaceSlug: row.workspaceSlug,
+        workspaceDatabaseName: row.workspaceDatabaseName,
+        permissionCodes: trialSupportPermissionCodes,
+      });
+      supportUser = await workspace.retailUser.findFirst({
+        where: {
+          retailOrgId: owner.retailOrgId,
+          loginId: supportLoginId,
+          deletedAt: null,
+        },
+        select: { id: true, accountStatus: true },
+      });
+    }
+    if (supportShouldBeActive && !supportUser) {
+      throw new Error(`Flash support account ${supportLoginId} could not be retained.`);
+    }
+
+    const supportRole = await workspace.role.findUnique({
+      where: {
+        retailOrgId_code: {
+          retailOrgId: owner.retailOrgId,
+          code: TRIAL_SUPPORT_ROLE_CODE,
+        },
+      },
+      select: { id: true, status: true },
+    });
+    if (supportShouldBeActive && !supportRole) {
+      throw new Error(`Flash support role ${TRIAL_SUPPORT_ROLE_CODE} could not be retained.`);
+    }
+    const [
+      stores,
+      warehouses,
+      terminals,
+      activeSupportSessions,
+      supportRoleAssignments,
+      supportRolePermissions,
+    ] = await Promise.all([
+      workspace.store.findMany({
+        where: { retailOrgId: owner.retailOrgId },
+        select: { id: true, licenseStatus: true, licenseKey: true, licensedUntil: true },
+      }),
+      workspace.warehouse.findMany({
+        where: { retailOrgId: owner.retailOrgId },
+        select: { licenseStatus: true, licenseKey: true, licensedUntil: true },
+      }),
+      workspace.terminal.findMany({
+        where: { retailOrgId: owner.retailOrgId },
+        select: { id: true, licenseStatus: true, licenseKey: true, licensedUntil: true },
+      }),
+      supportUser
+        ? workspace.retailUserSession.count({
+            where: { retailUserId: supportUser.id, revokedAt: null },
+          })
+        : Promise.resolve(0),
+      supportUser
+        ? workspace.retailUserRole.findMany({
+            where: { retailUserId: supportUser.id },
+            select: { roleId: true },
+          })
+        : Promise.resolve([]),
+      supportRole
+        ? workspace.rolePermission.findMany({
+            where: { roleId: supportRole.id },
+            select: {
+              permissionId: true,
+              permission: { select: { code: true } },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+    const licenseMatches = (license: {
+      licenseStatus: string;
+      licenseKey: string | null;
+      licensedUntil: Date | null;
+    }) =>
+      license.licenseStatus === "LICENSED" &&
+      license.licenseKey === paidLicenseKey &&
+      sameOptionalDate(license.licensedUntil, licensedUntil);
+    const changedStores = stores.filter((license) => !licenseMatches(license));
+    const changedWarehouses = warehouses.filter((license) => !licenseMatches(license));
+    const changedTerminals = terminals.filter((license) => !licenseMatches(license));
+    const runtimeMatches =
+      runtime.status === "CONVERTED" &&
+      runtime.subscriptionPlanCode === planCode &&
+      runtime.subscriptionReference === subscriptionReference &&
+      sameOptionalDate(runtime.subscriptionLicensedUntil, licensedUntil) &&
+      runtime.retainSupportAccess === input.retainSupportAccess &&
+      sameOptionalDate(runtime.supportAccessExpiresAt, supportAccessExpiresAt) &&
+      runtime.supportApprovalReference === supportApprovalReference;
+    const deniedSupportPermissionIds = supportRolePermissions
+      .filter((assignment) => !trialSupportPermissionCodeSet.has(assignment.permission.code))
+      .map((assignment) => assignment.permissionId);
+    const hasDeniedSupportPermission = deniedSupportPermissionIds.length > 0;
+    const supportMatches = supportShouldBeActive
+      ? supportUser?.accountStatus === UserAccountStatus.ACTIVE &&
+        supportRole?.status === RecordStatus.ACTIVE &&
+        supportRoleAssignments.length === 1 &&
+        supportRoleAssignments[0]?.roleId === supportRole.id &&
+        !hasDeniedSupportPermission
+      : !hasDeniedSupportPermission &&
+        (!supportUser ||
+          (supportUser.accountStatus === UserAccountStatus.DISABLED &&
+            activeSupportSessions === 0 &&
+            supportRoleAssignments.length === 0));
+    const conversionAlreadyApplied =
+      runtimeMatches &&
+      stores.every(licenseMatches) &&
+      warehouses.every(licenseMatches) &&
+      terminals.every(licenseMatches) &&
+      supportMatches;
+
+    if (!conversionAlreadyApplied) {
+      const now = new Date();
+      await workspace.$transaction(async (tx) => {
+        await tx.trialWorkspaceRuntime.update({
+          where: { id: row.id },
+          data: {
+            status: "CONVERTED",
+            subscriptionPlanCode: planCode,
+            subscriptionReference,
+            subscriptionLicensedUntil: licensedUntil,
+            convertedAt,
+            convertedBy: input.actorRef.trim(),
+            expiredAt: null,
+            retainSupportAccess: input.retainSupportAccess,
+            supportAccessExpiresAt,
+            supportApprovalReference,
+            lastLifecycleAt: now,
+          },
+        });
+        const licenseData = {
+          licenseStatus: "LICENSED",
+          licenseKey: paidLicenseKey,
+          licensedUntil,
+        };
+        await tx.store.updateMany({
+          where: { retailOrgId: owner.retailOrgId },
+          data: licenseData,
+        });
+        await tx.warehouse.updateMany({
+          where: { retailOrgId: owner.retailOrgId },
+          data: licenseData,
+        });
+        await tx.terminal.updateMany({
+          where: { retailOrgId: owner.retailOrgId },
+          data: licenseData,
+        });
+        if (changedStores.length > 0) {
+          await tx.licenseEvent.createMany({
+            data: changedStores.map((store) => ({
+              retailOrgId: owner.retailOrgId,
+              storeId: store.id,
+              scope: "STORE",
+              action: "TRIAL_CONVERTED_TO_PAID",
+              previousStatus: store.licenseStatus,
+              newStatus: "LICENSED",
+              previousLicensedUntil: store.licensedUntil,
+              newLicensedUntil: licensedUntil,
+              previousLicenseKey: store.licenseKey,
+              newLicenseKey: paidLicenseKey,
+              operatorName: input.actorRef.trim(),
+              note: `Converted to paid plan ${planCode}.`,
+            })),
+          });
+        }
+        if (changedTerminals.length > 0) {
+          await tx.licenseEvent.createMany({
+            data: changedTerminals.map((terminal) => ({
+              retailOrgId: owner.retailOrgId,
+              terminalId: terminal.id,
+              scope: "TERMINAL",
+              action: "TRIAL_CONVERTED_TO_PAID",
+              previousStatus: terminal.licenseStatus,
+              newStatus: "LICENSED",
+              previousLicensedUntil: terminal.licensedUntil,
+              newLicensedUntil: licensedUntil,
+              previousLicenseKey: terminal.licenseKey,
+              newLicenseKey: paidLicenseKey,
+              operatorName: input.actorRef.trim(),
+              note: `Converted to paid plan ${planCode}.`,
+            })),
+          });
+        }
+        if (supportRole && deniedSupportPermissionIds.length > 0) {
+          await tx.rolePermission.deleteMany({
+            where: {
+              roleId: supportRole.id,
+              permissionId: { in: deniedSupportPermissionIds },
+            },
+          });
+        }
+        if (supportUser && supportShouldBeActive && supportRole) {
+          await tx.retailUserRole.deleteMany({
+            where: {
+              retailUserId: supportUser.id,
+              roleId: { not: supportRole.id },
+            },
+          });
+          await tx.retailUserRole.upsert({
+            where: {
+              retailUserId_roleId: {
+                retailUserId: supportUser.id,
+                roleId: supportRole.id,
+              },
+            },
+            update: {},
+            create: {
+              retailUserId: supportUser.id,
+              roleId: supportRole.id,
+            },
+          });
+          if (supportUser.accountStatus !== UserAccountStatus.ACTIVE) {
+            await tx.retailUser.update({
+              where: { id: supportUser.id },
+              data: {
+                accountStatus: UserAccountStatus.ACTIVE,
+                failedLoginAttempts: 0,
+                lockedUntil: null,
+              },
+            });
+          }
+        } else if (supportUser) {
+          if (activeSupportSessions > 0) {
+            await tx.retailUserSession.updateMany({
+              where: { retailUserId: supportUser.id, revokedAt: null },
+              data: { revokedAt: now },
+            });
+          }
+          await tx.retailUserRole.deleteMany({
+            where: { retailUserId: supportUser.id },
+          });
+          if (supportUser.accountStatus !== UserAccountStatus.DISABLED) {
+            await tx.retailUser.update({
+              where: { id: supportUser.id },
+              data: {
+                accountStatus: UserAccountStatus.DISABLED,
+                failedLoginAttempts: 0,
+                lockedUntil: null,
+              },
+            });
+          }
+        }
+        await tx.securityLog.create({
+          data: {
+            retailOrgId: owner.retailOrgId,
+            kind: SecurityLogKind.AUDIT,
+            severity: SecurityLogSeverity.INFO,
+            category: "LICENSE",
+            action: "TRIAL_CONVERTED_TO_PAID",
+            actorLabel: input.actorRef.trim(),
+            targetType: "Trial workspace",
+            targetRef: row.requestNo,
+            message: `Workspace ${row.requestNo} was converted to paid plan ${planCode}; Flash support access was ${supportShouldBeActive ? "retained for its approved window" : "disabled"}.`,
+            detailsJson: JSON.stringify({
+              storeLicenseChanges: changedStores.length,
+              warehouseLicenseChanges: changedWarehouses.length,
+              terminalLicenseChanges: changedTerminals.length,
+              licensedUntil: licensedUntil?.toISOString() ?? null,
+              retainSupportAccess: input.retainSupportAccess,
+              supportAccessExpiresAt: supportAccessExpiresAt?.toISOString() ?? null,
+              supportApprovalReference,
+              removedDangerousSupportGrantCount: deniedSupportPermissionIds.length,
+            }),
+          },
+        });
+      }, {
+        maxWait: 60_000,
+        timeout: 60_000,
+      });
+      runtime = await workspace.trialWorkspaceRuntime.findUniqueOrThrow({
+        where: { id: row.id },
+      });
+    }
+
+    await manageRuntime("Ensure", allocation);
+    await waitForRuntime(allocation.port);
+    await callback({
+      requestId: row.id,
+      provisioningRequestKey: row.provisioningRequestKey,
+      status: "CONVERTED",
+      lifecycleAction: "CONVERTED",
+      provisionerReference: row.provisionerReference || `trial:${row.requestNo}`,
+      convertedAt: runtime.convertedAt?.toISOString() || convertedAt.toISOString(),
+      convertedBy: runtime.convertedBy || input.actorRef.trim(),
+      planCode,
+      subscriptionReference,
+      licensedUntil: licensedUntil?.toISOString() ?? null,
+      retainSupportAccess: input.retainSupportAccess,
+      supportAccessExpiresAt: supportAccessExpiresAt?.toISOString() ?? null,
+      supportApprovalReference,
+    });
+  } finally {
+    await workspace.$disconnect();
+  }
+}
+
 async function readStandardInput() {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
@@ -2578,8 +3224,12 @@ async function main() {
     return provision(JSON.parse(raw) as ProvisionRequest);
   if (command === "extend")
     return extendTrial(JSON.parse(raw) as ExtensionRequest);
+  if (command === "convert")
+    return convertTrial(JSON.parse(raw) as ConversionRequest);
+  if (command === "set-public-url")
+    return setWorkspacePublicUrl(JSON.parse(raw) as PublicUrlRequest);
   throw new Error(
-    "Use provision, recover, recover-failed, reconcile-active, extend, or sweep with the trial provisioner worker.",
+    "Use provision, recover, recover-failed, reconcile-active, extend, convert, set-public-url, or sweep with the trial provisioner worker.",
   );
 }
 

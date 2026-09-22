@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updateEnterpriseSupplier } from "@/server/repositories/enterprise-suppliers.repository";
 
 export async function PATCH(
@@ -47,7 +47,7 @@ export async function PATCH(
           error instanceof Error ? error.message : "Flash ERP could not update that supplier."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

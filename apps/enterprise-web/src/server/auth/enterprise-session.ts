@@ -208,9 +208,11 @@ async function assertTrialWorkspaceAvailable() {
   if (!access?.blocked) return;
 
   throw new EnterpriseAuthError(
-    access.status === "EXPIRED"
-      ? "This Flash ERP trial has expired. Contact Flash Code Solutions to extend access."
-      : "This Flash ERP trial workspace is not active yet.",
+    access.status === "SUBSCRIPTION_EXPIRED"
+      ? "This Flash ERP subscription has expired. Contact Flash Code Solutions to renew access."
+      : access.status === "EXPIRED"
+        ? "This Flash ERP trial has expired. Contact Flash Code Solutions to extend access."
+        : "This Flash ERP trial workspace is not active yet.",
     403
   );
 }

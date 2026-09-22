@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updateEnterpriseTenderMethod } from "@/server/repositories/enterprise-setup.repository";
 
 export async function POST(
@@ -67,7 +67,7 @@ export async function POST(
             : "Flash ERP could not update that tender method."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

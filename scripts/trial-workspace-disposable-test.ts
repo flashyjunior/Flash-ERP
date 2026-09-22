@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { PrismaMssql } from "@prisma/adapter-mssql";
 import { PrismaClient } from "@prisma/client";
-import { securityPermissionCatalog } from "@flash-erp/domain";
+import { securityPermissionCatalog, trialSupportLoginId } from "@flash-erp/domain";
 import dotenv from "dotenv";
 import sql from "mssql";
 
@@ -91,7 +91,13 @@ function mssqlUrl(connection: SqlConnection) {
 }
 
 function runWorker(
-  command: "provision" | "sweep" | "extend" | "reconcile-active",
+  command:
+    | "provision"
+    | "sweep"
+    | "extend"
+    | "convert"
+    | "set-public-url"
+    | "reconcile-active",
   body = "",
 ) {
   return new Promise<string>((resolve, reject) => {
@@ -337,6 +343,47 @@ async function main() {
   assert.equal(request.status, "ACTIVE");
   assert.ok(request.workspaceDatabaseName);
   assert.ok(request.workspacePort);
+  assert.ok(request.workspaceSlug);
+  const customWorkspaceUrl = `https://trial-gate-${suffix}.example.test`;
+  await runWorker(
+    "set-public-url",
+    JSON.stringify({
+      version: 1,
+      workspaceSlug: request.workspaceSlug,
+      baseUrl: customWorkspaceUrl,
+      actorRef: "trial-lifecycle-gate",
+    }),
+  );
+  request = await control.trialSignupRequest.findUniqueOrThrow({
+    where: { id: testId },
+  });
+  assert.equal(request.workspaceUrl, customWorkspaceUrl);
+  assert.equal(request.onlineStoreUrl, `${customWorkspaceUrl}/online-store`);
+  assert.equal(
+    request.storefrontUrl,
+    `${customWorkspaceUrl}/shop/${request.workspaceSlug}`,
+  );
+  assert.equal(
+    await control.trialLifecycleEvent.count({
+      where: {
+        trialSignupRequestId: testId,
+        eventType: "PUBLIC_URL_CHANGED",
+        outcome: "SUCCEEDED",
+      },
+    }),
+    1,
+  );
+  const workspaceEnvironment = readFileSync(
+    path.join(runtimeRoot, request.workspaceSlug || "", "config", "workspace.env"),
+    "utf8",
+  );
+  assert.ok(
+    workspaceEnvironment.includes(
+      `FLASH_ERP_ENTERPRISE_APP_URL=${JSON.stringify(customWorkspaceUrl)}`,
+    ),
+    "The custom workspace URL must be written into the isolated runtime environment.",
+  );
+  assert.match(workspaceEnvironment, /FLASH_ERP_COOKIE_SECURE="true"/);
   childDatabaseName = request.workspaceDatabaseName || "";
   const childUrl = prismaUrl({
     ...parseSqlServerUrl(datasourceUrl),
@@ -723,10 +770,246 @@ async function main() {
         }),
         1,
       );
+
+      const owner = await extendedWorkspace.retailUser.findUniqueOrThrow({
+        where: { id: runtime.ownerUserId },
+      });
+      const support = await extendedWorkspace.retailUser.findFirstOrThrow({
+        where: {
+          retailOrgId: owner.retailOrgId,
+          loginId: trialSupportLoginId(request.workspaceSlug || ""),
+          deletedAt: null,
+        },
+      });
+      await extendedWorkspace.retailUserSession.createMany({
+        data: [
+          {
+            retailOrgId: owner.retailOrgId,
+            retailUserId: owner.id,
+            tokenHash: crypto.createHash("sha256").update(`paid-owner:${testId}`).digest("hex"),
+            expiresAt: new Date(Date.now() + 60 * 60_000),
+          },
+          {
+            retailOrgId: owner.retailOrgId,
+            retailUserId: support.id,
+            tokenHash: crypto.createHash("sha256").update(`paid-support:${testId}`).digest("hex"),
+            expiresAt: new Date(Date.now() + 60 * 60_000),
+          },
+        ],
+      });
     } finally {
       await extendedWorkspace.$disconnect();
     }
   }
+
+  const originalDatabaseName = request.workspaceDatabaseName;
+  const originalWorkspaceSlug = request.workspaceSlug;
+  const licensedUntil = new Date(Date.now() + 365 * 24 * 60 * 60_000);
+  await control.trialSignupRequest.update({
+    where: { id: testId },
+    data: {
+      status: "CONVERTING",
+      convertedBy: "trial-lifecycle-gate",
+      subscriptionPlanCode: "RETAIL-ANNUAL",
+      subscriptionReference: `SUB-${suffix.toUpperCase()}`,
+      subscriptionLicensedUntil: licensedUntil,
+      retainSupportAccess: false,
+      supportAccessExpiresAt: null,
+      supportApprovalReference: null,
+      lastLifecycleAt: new Date(),
+    },
+  });
+  await control.trialLifecycleEvent.create({
+    data: {
+      trialSignupRequestId: testId,
+      eventType: "CONVERSION_QUEUED",
+      outcome: "IN_PROGRESS",
+      actorType: "STAFF",
+      actorRef: "trial-lifecycle-gate",
+      previousStatus: "ACTIVE",
+      newStatus: "CONVERTING",
+      detailsJson: JSON.stringify({
+        planCode: "RETAIL-ANNUAL",
+        subscriptionReference: `SUB-${suffix.toUpperCase()}`,
+        licensedUntil: licensedUntil.toISOString(),
+        retainSupportAccess: false,
+        supportAccessExpiresAt: null,
+        supportApprovalReference: null,
+      }),
+    },
+  });
+  const conversionPayload = {
+    version: 1,
+    requestId: testId,
+    provisioningRequestKey: `flash-erp-trial:${testId}`,
+    planCode: "RETAIL-ANNUAL",
+    subscriptionReference: `SUB-${suffix.toUpperCase()}`,
+    licensedUntil: licensedUntil.toISOString(),
+    retainSupportAccess: false,
+    supportAccessExpiresAt: null,
+    supportApprovalReference: null,
+    actorRef: "trial-lifecycle-gate",
+  };
+  await runWorker("convert", JSON.stringify(conversionPayload));
+  request = await control.trialSignupRequest.findUniqueOrThrow({
+    where: { id: testId },
+  });
+  assert.equal(request.status, "CONVERTED");
+  assert.equal(request.workspaceDatabaseName, originalDatabaseName);
+  assert.equal(request.workspaceSlug, originalWorkspaceSlug);
+  assert.equal(request.subscriptionPlanCode, conversionPayload.planCode);
+  assert.equal(request.subscriptionReference, conversionPayload.subscriptionReference);
+  assert.equal(request.subscriptionLicensedUntil?.getTime(), licensedUntil.getTime());
+  assert.equal(request.retainSupportAccess, false);
+  assert.equal(request.supportAccessExpiresAt, null);
+  assert.equal(request.supportApprovalReference, null);
+  assert.ok(request.convertedAt);
+  assert.equal(request.convertedBy, conversionPayload.actorRef);
+
+  {
+    const convertedWorkspace = new PrismaClient({ adapter: new PrismaMssql(childUrl) });
+    try {
+      const runtime = await convertedWorkspace.trialWorkspaceRuntime.findUniqueOrThrow({
+        where: { id: testId },
+      });
+      assert.equal(runtime.status, "CONVERTED");
+      assert.equal(runtime.subscriptionPlanCode, conversionPayload.planCode);
+      assert.equal(runtime.subscriptionReference, conversionPayload.subscriptionReference);
+      assert.equal(runtime.subscriptionLicensedUntil?.getTime(), licensedUntil.getTime());
+      assert.equal(runtime.retainSupportAccess, false);
+      assert.equal(runtime.supportAccessExpiresAt, null);
+      assert.equal(runtime.supportApprovalReference, null);
+      assert.equal(
+        await convertedWorkspace.store.count({ where: { licenseStatus: "LICENSED" } }),
+        2,
+      );
+      assert.equal(
+        await convertedWorkspace.warehouse.count({ where: { licenseStatus: "LICENSED" } }),
+        2,
+      );
+      assert.equal(
+        await convertedWorkspace.terminal.count({ where: { licenseStatus: "LICENSED" } }),
+        1,
+      );
+      const owner = await convertedWorkspace.retailUser.findUniqueOrThrow({
+        where: { id: runtime.ownerUserId },
+      });
+      const licensedStore = await convertedWorkspace.store.findFirstOrThrow({
+        where: { retailOrgId: owner.retailOrgId, licenseStatus: "LICENSED" },
+      });
+      assert.match(licensedStore.licenseKey || "", /^PAID-[A-F0-9]{32}$/);
+      assert.notEqual(licensedStore.licenseKey, conversionPayload.subscriptionReference);
+      assert.equal(
+        await convertedWorkspace.licenseEvent.count({
+          where: {
+            retailOrgId: owner.retailOrgId,
+            action: "TRIAL_CONVERTED_TO_PAID",
+            scope: "STORE",
+          },
+        }),
+        2,
+      );
+      assert.equal(
+        await convertedWorkspace.licenseEvent.count({
+          where: {
+            retailOrgId: owner.retailOrgId,
+            action: "TRIAL_CONVERTED_TO_PAID",
+            scope: "TERMINAL",
+          },
+        }),
+        1,
+      );
+      const support = await convertedWorkspace.retailUser.findFirstOrThrow({
+        where: {
+          retailOrgId: owner.retailOrgId,
+          loginId: trialSupportLoginId(request.workspaceSlug || ""),
+        },
+      });
+      assert.equal(support.accountStatus, "DISABLED");
+      assert.equal(
+        await convertedWorkspace.retailUserRole.count({
+          where: { retailUserId: support.id },
+        }),
+        0,
+        "Disabled converted support must not retain any tenant role assignment.",
+      );
+      const dangerousSupportGrantCount = await convertedWorkspace.rolePermission.count({
+        where: {
+          role: {
+            retailOrgId: owner.retailOrgId,
+            code: "FLASH_SUPPORT",
+          },
+          permission: {
+            code: {
+              in: [
+                "security.data-purge.execute",
+                "security.user.manage",
+                "security.role.manage",
+                "security.privilege.manage",
+              ],
+            },
+          },
+        },
+      });
+      assert.equal(
+        dangerousSupportGrantCount,
+        0,
+        "Converted support must not retain destructive or security-administration grants.",
+      );
+      assert.equal(
+        await convertedWorkspace.retailUserSession.count({
+          where: { retailUserId: support.id, revokedAt: { not: null } },
+        }),
+        1,
+      );
+      assert.equal(
+        await convertedWorkspace.retailUserSession.count({
+          where: {
+            retailUserId: owner.id,
+            tokenHash: crypto.createHash("sha256").update(`paid-owner:${testId}`).digest("hex"),
+            revokedAt: null,
+          },
+        }),
+        1,
+        "Conversion must not revoke the customer's active session when disabling support access.",
+      );
+    } finally {
+      await convertedWorkspace.$disconnect();
+    }
+  }
+
+  const convertedEventCount = await control.trialLifecycleEvent.count({
+    where: { trialSignupRequestId: testId, eventType: "CONVERTED", outcome: "SUCCEEDED" },
+  });
+  await runWorker("convert", JSON.stringify(conversionPayload));
+  assert.equal(
+    await control.trialLifecycleEvent.count({
+      where: { trialSignupRequestId: testId, eventType: "CONVERTED", outcome: "SUCCEEDED" },
+    }),
+    convertedEventCount,
+    "Replaying the same conversion must not duplicate the completed control-plane audit event.",
+  );
+  await assert.rejects(
+    runWorker(
+      "convert",
+      JSON.stringify({ ...conversionPayload, subscriptionReference: "SUB-CONFLICT" }),
+    ),
+    /different subscription metadata/i,
+  );
+  await runWorker("sweep");
+  assert.equal(
+    (await control.trialSignupRequest.findUniqueOrThrow({ where: { id: testId } })).status,
+    "CONVERTED",
+    "The expiry sweep must not regress a converted workspace.",
+  );
+  await assert.rejects(
+    createSampleData(childUrl, {
+      retailOrgId: "converted-workspace",
+      userId: "converted-workspace",
+      actorLabel: "Converted workspace",
+    }),
+    /trial is not active/i,
+  );
   const events = await control.trialLifecycleEvent.findMany({
     where: { trialSignupRequestId: testId },
     select: { eventType: true, outcome: true },
@@ -735,6 +1018,11 @@ async function main() {
     events.some(
       (event) =>
         event.eventType === "PROVISIONED" && event.outcome === "SUCCEEDED",
+    ),
+  );
+  assert.ok(
+    events.some(
+      (event) => event.eventType === "CONVERTED" && event.outcome === "SUCCEEDED",
     ),
   );
   assert.ok(
@@ -757,7 +1045,7 @@ async function main() {
   );
 
   console.log(
-    "Disposable SQL Server trial provisioning, expiry, and extension acceptance passed.",
+    "Disposable SQL Server trial provisioning, expiry, extension, and paid-conversion acceptance passed.",
   );
 }
 

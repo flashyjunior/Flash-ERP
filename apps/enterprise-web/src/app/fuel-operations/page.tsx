@@ -1,4 +1,5 @@
 import { FuelOperationsWorkspace } from "@/components/enterprise/erp-fuel-operations-workspace";
+import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableFuelOperationsWorkspace,
   getFuelOperationsWorkspace
@@ -18,6 +19,8 @@ const hqFuelOperationsViews = [
 ] as const;
 
 export default async function FuelOperationsPage() {
+  await requireEnterprisePermission(["fuel.hq.view"]);
+
   const workspace = await getFuelOperationsWorkspace().catch((error: unknown) =>
     buildUnavailableFuelOperationsWorkspace(
       error instanceof Error

@@ -6,6 +6,8 @@ export type SecurityPermissionDomain =
   | "POS"
   | "Sync"
   | "Operations"
+  | "Finance"
+  | "Fuel Operations"
   | "Human Resources";
 
 export type SecurityPermissionSurface = "enterprise" | "store" | "both";
@@ -156,6 +158,15 @@ const catalog: SecurityPermissionDefinition[] = [
     group: "Company",
     surface: "enterprise",
     sortOrder: 116
+  },
+  {
+    code: "settings.license.manage",
+    name: "Manage licensing",
+    description: "View and manage enterprise shop, node, and terminal licensing.",
+    domain: "Settings",
+    group: "Licensing",
+    surface: "enterprise",
+    sortOrder: 118
   },
   {
     code: "settings.receipt-template.manage",
@@ -616,6 +627,69 @@ const catalog: SecurityPermissionDefinition[] = [
     group: "Dashboards",
     surface: "enterprise",
     sortOrder: 470
+  },
+  {
+    code: "finance.view",
+    name: "View finance",
+    description: "View general-ledger balances, financial statements, journals, and finance inquiries.",
+    domain: "Finance",
+    group: "Access",
+    surface: "enterprise",
+    sortOrder: 472
+  },
+  {
+    code: "finance.manage",
+    name: "Manage finance operations",
+    description: "Prepare finance documents, settlements, cashbook activity, budgets, payroll batches, and asset transactions.",
+    domain: "Finance",
+    group: "Operations",
+    surface: "enterprise",
+    sortOrder: 473
+  },
+  {
+    code: "finance.post",
+    name: "Post finance transactions",
+    description: "Post prepared journals, operational documents, settlements, cashbook entries, payroll batches, and asset transactions.",
+    domain: "Finance",
+    group: "Posting",
+    surface: "enterprise",
+    sortOrder: 474
+  },
+  {
+    code: "finance.approve",
+    name: "Approve finance controls",
+    description: "Approve or lock budgets, close fiscal periods, and perform controlled finance reversals.",
+    domain: "Finance",
+    group: "Approval",
+    surface: "enterprise",
+    sortOrder: 475
+  },
+  {
+    code: "finance.setup.manage",
+    name: "Manage finance setup",
+    description: "Maintain accounting settings, fiscal calendars, currencies, accounts, posting profiles, tax setup, and document numbering.",
+    domain: "Finance",
+    group: "Setup",
+    surface: "enterprise",
+    sortOrder: 476
+  },
+  {
+    code: "fuel.hq.view",
+    name: "View HQ fuel operations",
+    description: "View enterprise fuel stations, tanks, pumps, deliveries, sales, evidence, and reconciliation posture.",
+    domain: "Fuel Operations",
+    group: "HQ access",
+    surface: "enterprise",
+    sortOrder: 477
+  },
+  {
+    code: "fuel.hq.manage",
+    name: "Manage HQ fuel operations",
+    description: "Maintain enterprise fuel setup and record or fulfil HQ fuel operations.",
+    domain: "Fuel Operations",
+    group: "HQ operations",
+    surface: "enterprise",
+    sortOrder: 478
   },
   {
     code: "hr.view",

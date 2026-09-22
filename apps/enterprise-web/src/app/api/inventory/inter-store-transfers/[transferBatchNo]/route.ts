@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import type { UpdateInterStoreTransferBatchRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { updateInterStoreTransferBatch } from "@/server/repositories/store-sync.repository";
 
 export async function PATCH(
@@ -13,6 +14,7 @@ export async function PATCH(
   }
 ) {
   try {
+    await assertEnterprisePermission(["inventory.transfer.request"]);
     const { transferBatchNo } = await context.params;
     const payload = (await request.json()) as Partial<UpdateInterStoreTransferBatchRequest>;
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
@@ -90,7 +92,7 @@ export async function PATCH(
             ? error.message
             : "Flash ERP could not update the transfer request."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

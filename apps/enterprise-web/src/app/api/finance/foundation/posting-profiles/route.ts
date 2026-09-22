@@ -5,7 +5,7 @@ import { upsertErpArApPostingProfile } from "@/server/repositories/erp-finance-f
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.setup.manage"]);
     const payload = await request.json();
     const response = await upsertErpArApPostingProfile(payload);
 

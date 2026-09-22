@@ -23,6 +23,9 @@ const schema = read("prisma/schema.prisma");
 const migration = read(
   "prisma/migrations-sqlserver/20260827010000_trial_workspace_lifecycle/migration.sql",
 );
+const conversionMigration = read(
+  "prisma/migrations-sqlserver/20260922020000_trial_paid_conversion/migration.sql",
+);
 const worker = read("scripts/trial-workspace-provisioner-worker.ts");
 const service = read("scripts/run-trial-provisioner-service.mjs");
 const runtime = read("scripts/run-trial-workspace-service.mjs");
@@ -47,6 +50,19 @@ const callback = read("apps/enterprise-web/src/server/trials/trial-signup.ts");
 const extensionRoute = read(
   "apps/enterprise-web/src/app/api/trials/admin/[requestId]/extend/route.ts",
 );
+const conversionRoute = read(
+  "apps/enterprise-web/src/app/api/trials/admin/[requestId]/convert/route.ts",
+);
+const lifecycle = read(
+  "apps/enterprise-web/src/server/trials/trial-lifecycle.ts",
+);
+const sampleData = read(
+  "apps/enterprise-web/src/server/trials/trial-sample-data.ts",
+);
+const readiness = read(
+  "apps/enterprise-web/src/server/readiness/enterprise-database-readiness.ts",
+);
+const readinessGate = read("scripts/database-readiness-gate.ts");
 const envExample = read(".env.example");
 const passwordResetRelay = read(
   "apps/enterprise-web/src/server/trials/trial-password-reset-relay.ts",
@@ -67,6 +83,23 @@ for (const table of ["trial_lifecycle_event", "trial_workspace_runtime"]) {
     migration,
     `OBJECT_ID(N'[dbo].[${table}]'`,
     `${table} migration must be idempotent.`,
+  );
+}
+for (const column of [
+  "convertedAt",
+  "convertedBy",
+  "subscriptionPlanCode",
+  "subscriptionReference",
+  "subscriptionLicensedUntil",
+  "retainSupportAccess",
+  "supportAccessExpiresAt",
+  "supportApprovalReference",
+]) {
+  requireIncludes(schema, column, `Trial conversion schema must persist ${column}.`);
+  requireIncludes(
+    conversionMigration,
+    `N'${column}'`,
+    `Trial conversion migration must add ${column} idempotently.`,
   );
 }
 for (const key of [
@@ -129,6 +162,86 @@ requireIncludes(
   worker,
   'lifecycleAction: "EXTENDED"',
   "The provisioner must implement trial extension.",
+);
+requireIncludes(
+  worker,
+  'command === "convert"',
+  "The provisioner worker must expose paid conversion.",
+);
+requireIncludes(
+  worker,
+  'command === "set-public-url"',
+  "The provisioner worker must expose a governed custom-domain operation.",
+);
+requireIncludes(
+  worker,
+  "workspaceUrl: row.workspaceUrl",
+  "Runtime reconciliation must preserve a workspace-specific public URL.",
+);
+requireIncludes(
+  worker,
+  'eventType: "PUBLIC_URL_CHANGED"',
+  "Custom-domain changes must be recorded in the trial lifecycle audit.",
+);
+requireIncludes(
+  worker,
+  'writeWorkspaceEnvironment(\n    {\n      requestId: row.id',
+  "A custom-domain change must rewrite the isolated runtime environment.",
+);
+requireIncludes(
+  worker,
+  'status: "CONVERTED"',
+  "Paid conversion must persist the child runtime conversion state.",
+);
+requireIncludes(
+  worker,
+  'licenseStatus: "LICENSED"',
+  "Paid conversion must license stores, warehouses, and terminals.",
+);
+requireIncludes(
+  worker,
+  'const paidLicenseKey = `PAID-${crypto',
+  "Paid conversion must derive an opaque stable license key.",
+);
+requireIncludes(
+  worker,
+  "tx.licenseEvent.createMany",
+  "Paid conversion must retain Store and Terminal license history.",
+);
+requireIncludes(
+  worker,
+  "retailUserSession.updateMany",
+  "Paid conversion must be able to revoke retained support sessions selectively.",
+);
+const trialSupportPermissions = worker.match(
+  /const trialSupportPermissionCodes = \[([\s\S]*?)\] as const;/,
+)?.[1];
+assert.ok(trialSupportPermissions, "Trial support must use a named permission allow-list.");
+for (const deniedPermission of [
+  "security.data-purge.execute",
+  "security.user.manage",
+  "security.role.manage",
+  "security.privilege.manage",
+  "finance.manage",
+  "finance.post",
+  "finance.approve",
+  "finance.setup.manage",
+  "fuel.hq.manage",
+]) {
+  assert.ok(
+    !trialSupportPermissions.includes(`"${deniedPermission}"`),
+    `Trial and converted support access must exclude ${deniedPermission}.`,
+  );
+}
+requireIncludes(
+  worker,
+  "permissionCodes: trialSupportPermissionCodes",
+  "Converted support reconciliation must retain the same restricted permission set.",
+);
+requireIncludes(
+  worker,
+  "reconcilePaidConversions",
+  "Governed reconciliation must repair partial paid conversions.",
 );
 requireIncludes(
   worker,
@@ -239,6 +352,11 @@ requireIncludes(
   service,
   'enqueue("reconcile-active")',
   "Startup must reconcile active trial storefront ownership.",
+);
+requireIncludes(
+  service,
+  '"/convert"',
+  "The signed provisioner service must expose the conversion endpoint.",
 );
 requireIncludes(
   service,
@@ -353,6 +471,36 @@ requireIncludes(
   "Expiry must revoke trial store licenses.",
 );
 requireIncludes(
+  access,
+  'runtime.status === "CONVERTED"',
+  "Converted workspaces must bypass the old trial expiry date.",
+);
+requireIncludes(
+  access,
+  "runtime.subscriptionLicensedUntil.getTime() <= now.getTime()",
+  "Converted workspaces must enforce a finite paid licence expiry.",
+);
+requireIncludes(
+  access,
+  '"SUBSCRIPTION_EXPIRED"',
+  "Paid licence expiry must be distinguishable from trial expiry.",
+);
+requireIncludes(
+  auth,
+  "This Flash ERP subscription has expired. Contact Flash Code Solutions to renew access.",
+  "Converted customers must receive a subscription-renewal message when paid access expires.",
+);
+requireIncludes(
+  auth,
+  "This Flash ERP trial has expired. Contact Flash Code Solutions to extend access.",
+  "Trial customers must retain the trial-expiry message.",
+);
+requireIncludes(
+  access,
+  "enforceConvertedSupportAccess",
+  "Converted support access must be revoked during sign-in and session checks after approval expiry.",
+);
+requireIncludes(
   activation,
   'accountStatus: "ACTIVE"',
   "Activation must grant the verified owner account access.",
@@ -404,14 +552,95 @@ requireIncludes(
 );
 requireIncludes(
   callback,
+  'status === "CONVERTED"',
+  "The control plane must accept signed paid-conversion completion.",
+);
+requireIncludes(
+  callback,
+  'request.status === "CONVERTED" && status !== "CONVERTED"',
+  "A stale callback must not regress a converted workspace.",
+);
+requireIncludes(
+  callback,
   'lifecycleAction === "EXTENDED"',
   "The control plane must govern extension callbacks.",
 );
 requireIncludes(
   extensionRoute,
-  'assertEnterprisePermission(["master.store.manage"])',
+  'assertEnterprisePermission(["settings.license.manage"])',
   "Only authorized staff may extend a trial.",
 );
+requireIncludes(
+  conversionRoute,
+  'assertEnterprisePermission(["settings.license.manage"])',
+  "Only licensing staff may convert a trial.",
+);
+requireIncludes(
+  conversionRoute,
+  'assertEnterpriseStepUp("converting a trial workspace to a paid subscription", {\n      force: true',
+  "Trial conversion must always require step-up verification.",
+);
+for (const contractField of [
+  "planCode",
+  "subscriptionReference",
+  "licensedUntil",
+  "retainSupportAccess",
+  "supportAccessExpiresAt",
+  "supportApprovalReference",
+]) {
+  requireIncludes(
+    conversionRoute,
+    contractField,
+    `The conversion API must accept ${contractField}.`,
+  );
+}
+requireIncludes(
+  lifecycle,
+  'status: "CONVERTING"',
+  "Conversion must claim the control request before enqueueing the worker.",
+);
+requireIncludes(
+  lifecycle,
+  "current.retainSupportAccess !== input.retainSupportAccess",
+  "Conversion replay must compare the persisted support-access contract.",
+);
+requireIncludes(
+  lifecycle,
+  "current.supportApprovalReference !== supportApprovalReference",
+  "Conversion replay must compare the support approval contract.",
+);
+requireIncludes(
+  passwordResetRelay,
+  '["ACTIVE", "CONVERTED"].includes(trial.status)',
+  "Converted workspaces must retain control-plane password-reset delivery.",
+);
+requireIncludes(
+  passwordResetRelay,
+  "trial.subscriptionLicensedUntil.getTime() <= now.getTime()",
+  "Expired paid subscriptions must not receive password-reset or MFA delivery.",
+);
+requireIncludes(
+  activation,
+  "runtime.subscriptionLicensedUntil.getTime() <= Date.now()",
+  "Expired paid subscriptions must not accept an owner activation token.",
+);
+requireIncludes(
+  sampleData,
+  'permittedRuntimeStatuses: ["ACTIVE"]',
+  "Manual sample-data creation must remain limited to active trials.",
+);
+for (const source of [readiness, readinessGate]) {
+  requireIncludes(
+    source,
+    "20260922020000_trial_paid_conversion",
+    "Database readiness must require the paid-conversion migration.",
+  );
+  requireIncludes(
+    source,
+    "subscriptionLicensedUntil",
+    "Database readiness must require the conversion columns.",
+  );
+}
 
 process.env.FLASH_ERP_TRIAL_WORKSPACE_SECRET = "trial-lifecycle-gate-secret";
 const token = createTrialOwnerActivationToken({

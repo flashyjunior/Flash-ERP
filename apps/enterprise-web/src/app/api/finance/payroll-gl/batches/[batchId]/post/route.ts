@@ -11,7 +11,7 @@ type RouteContext = {
 
 export async function POST(_request: Request, context: RouteContext) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["finance.post"]);
     const { batchId } = await context.params;
     const response = await postErpPayrollPostingBatch(batchId);
 

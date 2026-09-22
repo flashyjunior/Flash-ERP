@@ -14,7 +14,9 @@ const ACTIVE_REQUEST_STATUSES = [
   "VERIFIED",
   "AWAITING_PROVISIONER",
   "PROVISIONING",
-  "ACTIVE"
+  "ACTIVE",
+  "CONVERTING",
+  "CONVERTED"
 ];
 
 const BUSINESS_TYPES = new Set([
@@ -76,6 +78,14 @@ type TrialProvisioningCallback = {
   workspacePort?: unknown;
   ownerLoginId?: unknown;
   activationSentAt?: unknown;
+  convertedAt?: unknown;
+  convertedBy?: unknown;
+  planCode?: unknown;
+  subscriptionReference?: unknown;
+  licensedUntil?: unknown;
+  retainSupportAccess?: unknown;
+  supportAccessExpiresAt?: unknown;
+  supportApprovalReference?: unknown;
 };
 
 function optionalText(value: unknown, maximumLength = 200) {
@@ -279,6 +289,10 @@ function publicStatus(request: {
     message:
       request.status === "ACTIVE"
         ? "Your Flash ERP trial workspace is ready. Use the secure activation email to set your password."
+        : request.status === "CONVERTED"
+          ? "Your Flash ERP workspace is licensed and active."
+        : request.status === "CONVERTING"
+          ? "Your Flash ERP workspace is being converted to a paid subscription."
         : request.status === "EXPIRED"
           ? "Your Flash ERP trial has expired. Contact Flash Code Solutions if you need an extension."
         : request.status === "PROVISIONING"
@@ -614,6 +628,12 @@ export async function applyTrialProvisioningCallback(payload: TrialProvisioningC
     where: { id: requestId, provisioningRequestKey }
   });
   if (!request) throw new TrialSignupError("Trial request was not found.", 404);
+  if (request.status === "CONVERTED" && status !== "CONVERTED") {
+    return { requestNo: request.requestNo, status: request.status };
+  }
+  if (request.status === "CONVERTING" && status !== "CONVERTED") {
+    return { requestNo: request.requestNo, status: request.status };
+  }
   if (request.status === "ACTIVE" && status === "ACTIVE" && lifecycleAction !== "EXTENDED") {
     return { requestNo: request.requestNo, status: request.status };
   }
@@ -668,6 +688,123 @@ export async function applyTrialProvisioningCallback(payload: TrialProvisioningC
           previousStatus: request.status,
           newStatus: "PROVISIONING",
           previousExpiresAt: request.trialExpiresAt
+        }
+      });
+      return updated;
+    });
+  }
+  if (status === "CONVERTED") {
+    if (lifecycleAction !== "CONVERTED") {
+      throw new TrialSignupError("The conversion callback lifecycle action is invalid.");
+    }
+    if (!["ACTIVE", "EXPIRED", "CONVERTING", "CONVERTED"].includes(request.status)) {
+      throw new TrialSignupError("Only a complete trial workspace can be converted.", 409);
+    }
+    const planCode = requiredText(payload.planCode, "Subscription plan code", 80).toUpperCase();
+    const subscriptionReference = requiredText(
+      payload.subscriptionReference,
+      "Subscription reference",
+      200
+    );
+    const convertedAt = new Date(requiredText(payload.convertedAt, "Conversion timestamp", 100));
+    const convertedBy = requiredText(payload.convertedBy, "Conversion actor", 254);
+    const licensedUntil = payload.licensedUntil
+      ? new Date(requiredText(payload.licensedUntil, "Licensed-until timestamp", 100))
+      : null;
+    const supportAccessExpiresAt = payload.supportAccessExpiresAt
+      ? new Date(requiredText(payload.supportAccessExpiresAt, "Support-access expiry", 100))
+      : null;
+    const supportApprovalReference =
+      optionalText(payload.supportApprovalReference, 200) || null;
+    if (
+      Number.isNaN(convertedAt.getTime()) ||
+      (licensedUntil && Number.isNaN(licensedUntil.getTime())) ||
+      (supportAccessExpiresAt && Number.isNaN(supportAccessExpiresAt.getTime())) ||
+      typeof payload.retainSupportAccess !== "boolean"
+    ) {
+      throw new TrialSignupError("The conversion callback metadata is invalid.");
+    }
+    const retainSupportAccess = payload.retainSupportAccess;
+    if (
+      retainSupportAccess &&
+      (!supportAccessExpiresAt || !supportApprovalReference)
+    ) {
+      throw new TrialSignupError(
+        "Retained support access requires expiry and approval metadata."
+      );
+    }
+    if (
+      licensedUntil &&
+      supportAccessExpiresAt &&
+      supportAccessExpiresAt.getTime() > licensedUntil.getTime()
+    ) {
+      throw new TrialSignupError(
+        "Support access cannot extend beyond the paid licence expiry."
+      );
+    }
+    if (
+      !retainSupportAccess &&
+      (supportAccessExpiresAt || supportApprovalReference)
+    ) {
+      throw new TrialSignupError(
+        "Disabled support access cannot retain approval metadata."
+      );
+    }
+    if (request.status === "CONVERTED") {
+      const matchesExistingConversion =
+        request.subscriptionPlanCode === planCode &&
+        request.subscriptionReference === subscriptionReference &&
+        request.subscriptionLicensedUntil?.getTime() === licensedUntil?.getTime() &&
+        request.retainSupportAccess === retainSupportAccess &&
+        request.supportAccessExpiresAt?.getTime() === supportAccessExpiresAt?.getTime() &&
+        request.supportApprovalReference === supportApprovalReference;
+      if (!matchesExistingConversion) {
+        throw new TrialSignupError(
+          "This workspace was already converted with different subscription metadata.",
+          409
+        );
+      }
+      return { requestNo: request.requestNo, status: request.status };
+    }
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.trialSignupRequest.update({
+        where: { id: request.id },
+        data: {
+          status: "CONVERTED",
+          convertedAt,
+          convertedBy,
+          subscriptionPlanCode: planCode,
+          subscriptionReference,
+          subscriptionLicensedUntil: licensedUntil,
+          retainSupportAccess,
+          supportAccessExpiresAt,
+          supportApprovalReference,
+          lastLifecycleAt: convertedAt,
+          failureCode: null,
+          failureMessage: null
+        },
+        select: { requestNo: true, status: true }
+      });
+      await tx.trialLifecycleEvent.create({
+        data: {
+          trialSignupRequestId: request.id,
+          eventType: "CONVERTED",
+          outcome: "SUCCEEDED",
+          actorType: "PROVISIONER",
+          actorRef: optionalText(payload.provisionerReference, 200) || null,
+          previousStatus: request.status,
+          newStatus: "CONVERTED",
+          previousExpiresAt: request.trialExpiresAt,
+          newExpiresAt: request.trialExpiresAt,
+          detailsJson: JSON.stringify({
+            convertedBy,
+            planCode,
+            subscriptionReference,
+            licensedUntil: licensedUntil?.toISOString() ?? null,
+            retainSupportAccess: payload.retainSupportAccess,
+            supportAccessExpiresAt: supportAccessExpiresAt?.toISOString() ?? null,
+            supportApprovalReference
+          })
         }
       });
       return updated;

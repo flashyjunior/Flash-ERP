@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { renewEnterpriseLicenses } from "@/server/repositories/enterprise-stores.repository";
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["master.store.manage"]);
+    await assertEnterprisePermission(["settings.license.manage"]);
     const body = (await request.json()) as {
       storeCodes?: unknown;
       terminalCodes?: unknown;
@@ -44,7 +44,7 @@ export async function POST(request: Request) {
             : "Flash ERP could not renew those licenses.",
       },
       {
-        status: 400,
+        status: error instanceof EnterpriseAuthError ? error.status : 400,
       },
     );
   }

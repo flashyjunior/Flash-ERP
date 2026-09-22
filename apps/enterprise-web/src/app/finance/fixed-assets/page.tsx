@@ -1,4 +1,5 @@
 import { ErpFixedAssetsWorkspace } from "@/components/enterprise/erp-fixed-assets-workspace";
+import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableErpFixedAssetsWorkspace,
   getErpFixedAssetsWorkspace
@@ -7,6 +8,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function FinanceFixedAssetsPage() {
+  await requireEnterprisePermission(["finance.manage"]);
   const workspace = await getErpFixedAssetsWorkspace().catch((error: unknown) =>
     buildUnavailableErpFixedAssetsWorkspace(
       error instanceof Error

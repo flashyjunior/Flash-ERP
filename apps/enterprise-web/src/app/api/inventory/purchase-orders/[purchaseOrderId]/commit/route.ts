@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { commitPurchaseOrder } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -10,6 +11,7 @@ type RouteContext = {
 
 export async function POST(_request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.purchase-order.manage"]);
     const { purchaseOrderId } = await context.params;
     const response = await commitPurchaseOrder(decodeURIComponent(purchaseOrderId));
 
@@ -22,7 +24,7 @@ export async function POST(_request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not commit the purchase order."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }

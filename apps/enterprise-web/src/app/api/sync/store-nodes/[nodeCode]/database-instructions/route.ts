@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 
+import {
+  assertEnterprisePermission,
+  EnterpriseAuthError
+} from "@/server/auth/enterprise-session";
 import { requestStoreDatabaseInstruction } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -10,6 +14,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    const session = await assertEnterprisePermission(["sync.monitor"]);
     const { nodeCode } = await context.params;
     const body = (await request.json().catch(() => ({}))) as {
       instructionType?: string | null;
@@ -18,7 +23,10 @@ export async function POST(request: Request, context: RouteContext) {
       operatorName?: string | null;
       note?: string | null;
     };
-    const result = await requestStoreDatabaseInstruction(decodeURIComponent(nodeCode), body);
+    const result = await requestStoreDatabaseInstruction(decodeURIComponent(nodeCode), {
+      ...body,
+      operatorName: session.displayName || session.loginId
+    });
 
     return NextResponse.json(result);
   } catch (error) {
@@ -30,7 +38,7 @@ export async function POST(request: Request, context: RouteContext) {
             : "Flash ERP could not queue that database instruction."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

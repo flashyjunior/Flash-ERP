@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import {
   createEnterprisePromotion,
   type CreateEnterprisePromotionRequest
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
           error instanceof Error ? error.message : "Flash ERP could not create that promotion."
       },
       {
-        status: 400
+        status: error instanceof EnterpriseAuthError ? error.status : 400
       }
     );
   }

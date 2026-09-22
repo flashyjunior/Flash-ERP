@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { assertEnterprisePermission } from "@/server/auth/enterprise-session";
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { createEnterpriseStoreTerminal } from "@/server/repositories/enterprise-stores.repository";
 
 export async function POST(
@@ -42,7 +42,7 @@ export async function POST(
             : "Flash ERP could not register that terminal.",
       },
       {
-        status: 400,
+        status: error instanceof EnterpriseAuthError ? error.status : 400,
       },
     );
   }

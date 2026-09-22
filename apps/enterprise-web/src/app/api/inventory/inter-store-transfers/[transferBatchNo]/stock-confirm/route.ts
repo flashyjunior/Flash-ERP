@@ -11,6 +11,10 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(
+      ["inventory.transfer.issue", "inventory.transfer.receive"],
+      { any: true }
+    );
     const payload = (await request.json()) as { direction?: string | null };
     const direction = payload.direction === "RECEIPT" ? "RECEIPT" : "ISSUE";
     const session = await assertEnterprisePermission([

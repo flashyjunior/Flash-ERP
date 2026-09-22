@@ -5,7 +5,7 @@ import { upsertFuelPump } from "@/server/repositories/erp-fuel-operations.reposi
 
 export async function POST(request: Request) {
   try {
-    await assertEnterprisePermission(["settings.company.manage"]);
+    await assertEnterprisePermission(["fuel.hq.manage"]);
     const payload = await request.json();
     const response = await upsertFuelPump(payload);
 

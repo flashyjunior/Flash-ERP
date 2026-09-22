@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { InventoryCountVarianceTaskRequest } from "@flash-erp/sync-core";
 
+import { assertEnterprisePermission, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { requestInventoryCountVarianceTask } from "@/server/repositories/store-sync.repository";
 
 type RouteContext = {
@@ -12,6 +13,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    await assertEnterprisePermission(["inventory.count.commit"]);
     const { locationCode } = await context.params;
     const payload = (await request.json()) as Partial<InventoryCountVarianceTaskRequest>;
 
@@ -51,7 +53,7 @@ export async function POST(request: Request, context: RouteContext) {
             ? error.message
             : "Flash ERP could not queue the count-variance task."
       },
-      { status: 500 }
+      { status: error instanceof EnterpriseAuthError ? error.status : 500 }
     );
   }
 }
