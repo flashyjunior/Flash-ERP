@@ -918,6 +918,29 @@ export function ensureProductVariantSalesOrderDepositSchemaCompatibility() {
           ALTER TABLE [dbo].[SalesOrder]
             ADD [balanceAmount] DECIMAL(18, 2) NOT NULL
               CONSTRAINT [SalesOrder_balanceAmount_df] DEFAULT 0;
+
+          IF COL_LENGTH(N'dbo.SalesOrder', N'paidAmount') IS NOT NULL
+          BEGIN
+            EXEC(N'
+              UPDATE [dbo].[SalesOrder]
+              SET [balanceAmount] = CASE
+                WHEN [totalAmount] > [paidAmount] THEN [totalAmount] - [paidAmount]
+                ELSE 0
+              END
+              WHERE [status] = N''OPEN'';
+            ');
+          END
+          ELSE
+          BEGIN
+            EXEC(N'
+              UPDATE [dbo].[SalesOrder]
+              SET [balanceAmount] = CASE
+                WHEN [totalAmount] > [depositAmount] THEN [totalAmount] - [depositAmount]
+                ELSE 0
+              END
+              WHERE [status] = N''OPEN'';
+            ');
+          END
         END
       `);
       await prisma.$executeRawUnsafe(`
@@ -954,12 +977,6 @@ export function ensureProductVariantSalesOrderDepositSchemaCompatibility() {
           ALTER TABLE [dbo].[SalesOrder]
             ADD [depositPaidAt] DATETIME2(3) NULL;
         END
-      `);
-      await prisma.$executeRawUnsafe(`
-        UPDATE [dbo].[SalesOrder]
-        SET [balanceAmount] = [totalAmount]
-        WHERE [balanceAmount] = 0
-          AND [status] = N'OPEN';
       `);
     } else {
       await prisma.$executeRawUnsafe(
@@ -1005,9 +1022,37 @@ export function ensureProductVariantSalesOrderDepositSchemaCompatibility() {
       await prisma.$executeRawUnsafe(
         'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "depositAmount" DECIMAL(18, 2) NOT NULL DEFAULT 0'
       );
-      await prisma.$executeRawUnsafe(
-        'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "balanceAmount" DECIMAL(18, 2) NOT NULL DEFAULT 0'
-      );
+      await prisma.$executeRawUnsafe(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'SalesOrder'
+              AND column_name = 'balanceAmount'
+          ) THEN
+            ALTER TABLE "SalesOrder"
+              ADD COLUMN "balanceAmount" DECIMAL(18, 2) NOT NULL DEFAULT 0;
+
+            IF EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'SalesOrder'
+                AND column_name = 'paidAmount'
+            ) THEN
+              UPDATE "SalesOrder"
+              SET "balanceAmount" = GREATEST("totalAmount" - "paidAmount", 0)
+              WHERE "status" = 'OPEN';
+            ELSE
+              UPDATE "SalesOrder"
+              SET "balanceAmount" = GREATEST("totalAmount" - "depositAmount", 0)
+              WHERE "status" = 'OPEN';
+            END IF;
+          END IF;
+        END $$;
+      `);
       await prisma.$executeRawUnsafe(
         'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "depositTenderMethodCodeSnapshot" TEXT'
       );
@@ -1022,12 +1067,6 @@ export function ensureProductVariantSalesOrderDepositSchemaCompatibility() {
       );
       await prisma.$executeRawUnsafe(
         'ALTER TABLE "SalesOrder" ADD COLUMN IF NOT EXISTS "depositPaidAt" TIMESTAMP(3)'
-      );
-      await prisma.$executeRawUnsafe(
-        `UPDATE "SalesOrder"
-         SET "balanceAmount" = "totalAmount"
-         WHERE "balanceAmount" = 0
-           AND "status" = 'OPEN'`
       );
     }
   })().catch((error) => {
