@@ -3496,9 +3496,13 @@ export function ModernDesktopApp() {
       recentTransactions: nextSnapshot.recentTransactions.length,
     });
     setSnapshot(nextSnapshot);
-    setPaymentDrafts([
-      defaultPaymentDraft(nextSnapshot, nextSnapshot.activeBasket),
-    ]);
+    setPaymentDrafts((drafts) =>
+      saleMode === "SALES_ORDER" && nextSnapshot.activeBasket
+        ? drafts.length > 0
+          ? drafts
+          : [defaultPaymentDraft(nextSnapshot, nextSnapshot.activeBasket, "0.00")]
+        : [defaultPaymentDraft(nextSnapshot, nextSnapshot.activeBasket)],
+    );
     if (!nextSnapshot.activeBasket?.customerId) {
       setSelectedCustomer(null);
     }
@@ -3554,6 +3558,7 @@ export function ModernDesktopApp() {
     inventoryLocation,
     refreshRuntimeStatus,
     runtime,
+    saleMode,
     transferDestinationLocation,
     transferSourceStore,
   ]);
@@ -3561,9 +3566,19 @@ export function ModernDesktopApp() {
   const applyActionResult = useCallback((result: StoreSyncActionResult) => {
     setSnapshot(result.snapshot);
     setNotice(result.message);
-    setPaymentDrafts([
-      defaultPaymentDraft(result.snapshot, result.snapshot.activeBasket),
-    ]);
+    setPaymentDrafts((drafts) =>
+      saleMode === "SALES_ORDER" && result.snapshot.activeBasket
+        ? drafts.length > 0
+          ? drafts
+          : [
+              defaultPaymentDraft(
+                result.snapshot,
+                result.snapshot.activeBasket,
+                "0.00",
+              ),
+            ]
+        : [defaultPaymentDraft(result.snapshot, result.snapshot.activeBasket)],
+    );
     if (!result.snapshot.activeBasket?.customerId) {
       setSelectedCustomer(null);
     }
@@ -3575,7 +3590,7 @@ export function ModernDesktopApp() {
       setTransactionDetailsOpen(false);
       setOpenPriceDraft(null);
     }
-  }, []);
+  }, [saleMode]);
 
   const runAction = useCallback(
     async (
@@ -6121,9 +6136,11 @@ export function ModernDesktopApp() {
       });
 
       setSnapshot(result.snapshot);
-      setPaymentDrafts([
-        defaultPaymentDraft(result.snapshot, result.snapshot.activeBasket),
-      ]);
+      setPaymentDrafts((drafts) =>
+        saleMode === "SALES_ORDER"
+          ? drafts
+          : [defaultPaymentDraft(result.snapshot, result.snapshot.activeBasket)],
+      );
 
       setNotice(
         rate !== null
@@ -6141,8 +6158,18 @@ export function ModernDesktopApp() {
     }
   }
 
+  function activateSaleMode() {
+    setSaleMode("SALE");
+    setPaymentDrafts([
+      defaultPaymentDraft(snapshot, snapshot?.activeBasket ?? null),
+    ]);
+  }
+
   async function activateSalesOrderMode() {
     setSaleMode("SALES_ORDER");
+    setPaymentDrafts([
+      defaultPaymentDraft(snapshot, snapshot?.activeBasket ?? null, "0.00"),
+    ]);
 
     if (!runtime) {
       return;
@@ -6164,6 +6191,9 @@ export function ModernDesktopApp() {
       }
 
       await attachCustomer(otherCustomer);
+      setPaymentDrafts([
+        defaultPaymentDraft(snapshot, snapshot?.activeBasket ?? null, "0.00"),
+      ]);
       setNotice(`Sales order mode loaded ${otherCustomer.fullName}.`);
     } catch (nextError) {
       setError(
@@ -6178,6 +6208,9 @@ export function ModernDesktopApp() {
 
   function activateLayawayMode() {
     setSaleMode("LAYAWAY");
+    setPaymentDrafts([
+      defaultPaymentDraft(snapshot, snapshot?.activeBasket ?? null),
+    ]);
     setNotice(
       "Layaway mode is on. Select a registered customer and enter the opening deposit.",
     );
@@ -8319,7 +8352,6 @@ export function ModernDesktopApp() {
             setCatalogDepartment={setCatalogDepartment}
             setCatalogQuery={setCatalogQuery}
             setCustomerQuery={setCustomerQuery}
-            setSaleMode={setSaleMode}
             setLayawayExpiresAt={setLayawayExpiresAt}
             setSelectedAccountCustomer={setSelectedAccountCustomer}
             setLineQuantityDrafts={setLineQuantityDrafts}
@@ -8370,6 +8402,7 @@ export function ModernDesktopApp() {
             addReceiptLineToBasket={addReceiptLineToBasket}
             addPaymentRow={addPaymentRow}
             applyPosDiscountRate={applyPosDiscountRate}
+            activateSaleMode={activateSaleMode}
             activateSalesOrderMode={activateSalesOrderMode}
             activateLayawayMode={activateLayawayMode}
             closeShift={closeShift}
@@ -15562,7 +15595,6 @@ function POSWorkspace(props: {
   setCatalogDepartment: (value: string) => void;
   setCatalogCategory: (value: string) => void;
   setCustomerQuery: (value: string) => void;
-  setSaleMode: (value: SaleMode) => void;
   setLayawayExpiresAt: (value: string) => void;
   setAccountCustomerQuery: (value: string) => void;
   setAccountPanelOpen: (value: boolean) => void;
@@ -15606,6 +15638,7 @@ function POSWorkspace(props: {
   addCatalogItem: (item: StoreCatalogBrowseItem) => Promise<void>;
   checkoutBasket: () => Promise<void>;
   applyPosDiscountRate: (lineId: string, value: string) => Promise<void>;
+  activateSaleMode: () => void;
   activateSalesOrderMode: () => Promise<void>;
   activateLayawayMode: () => void;
   cancelSalesOrder: (order: StoreSalesOrderSummary) => Promise<void>;
@@ -16989,7 +17022,7 @@ function POSWorkspace(props: {
           <button
             className={`rms-action-button${props.saleMode === "SALE" ? " is-selected" : ""}`}
             disabled={props.isBusy || isReadOnlyVoid || isReadOnlySalesOrder}
-            onClick={() => props.setSaleMode("SALE")}
+            onClick={props.activateSaleMode}
             type="button"
           >
             Sale mode

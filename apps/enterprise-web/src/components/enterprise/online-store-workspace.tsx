@@ -3923,10 +3923,17 @@ export function OnlineStoreWorkspace({
   useEffect(() => {
     setPaymentDrafts((drafts) =>
       drafts.length === 1
-        ? [{ ...drafts[0], tenderMethodCode: drafts[0].tenderMethodCode || defaultTenderCode, amount: payableTotal.toFixed(2) }]
+        ? [{
+            ...drafts[0],
+            tenderMethodCode: drafts[0].tenderMethodCode || defaultTenderCode,
+            amount:
+              saleMode === "SALES_ORDER" && !fulfillingSalesOrderId
+                ? drafts[0].amount
+                : payableTotal.toFixed(2)
+          }]
         : drafts
     );
-  }, [defaultTenderCode, fulfillingSalesOrderId, payableTotal]);
+  }, [defaultTenderCode, fulfillingSalesOrderId, payableTotal, saleMode]);
 
   useEffect(() => {
     if (accountPaymentTenderCode && nonCreditTenderMethods.some((tender) => tender.tenderMethodCode === accountPaymentTenderCode)) {
@@ -4270,6 +4277,7 @@ export function OnlineStoreWorkspace({
     setSaleMode("SALES_ORDER");
     setLayawayExpiresAt("");
     setLayawayPolicyOverrideApproved(false);
+    setPaymentDrafts([createPaymentDraft(defaultTenderCode, "0.00")]);
 
     const otherCustomer = customers.find(
       (customer) => customer.customerType.trim().toUpperCase() === "OTHER"

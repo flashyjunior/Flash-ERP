@@ -39,6 +39,7 @@
     "acceptance:store-pricing-search": "tsx scripts/store-pricing-product-search-gate.ts",
     "acceptance:enterprise-authorization": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/enterprise-navigation-permissions-gate.ts && tsx scripts/enterprise-navigation-route-security-gate.ts && tsx scripts/enterprise-direct-route-security-gate.ts && tsx scripts/enterprise-finance-fuel-permissions-gate.ts && tsx scripts/enterprise-mutation-route-auth-gate.ts && tsx scripts/enterprise-sync-admin-route-auth-gate.ts",
     "acceptance:sales-order-payments": "node --experimental-sqlite --import tsx scripts/sales-order-payment-attribution-gate.ts",
+    "acceptance:sales-order-balance": "tsx scripts/sales-order-balance-regression-gate.ts",
     "acceptance:desktop-stability": "tsx scripts/desktop-stability-gates.ts",
     "acceptance:parity": "tsx scripts/rms-parity-closure-gates.ts && npm run acceptance:online-store-parity",
     "acceptance:online-store-parity": "tsx scripts/online-store-desktop-parity-gate.ts",
