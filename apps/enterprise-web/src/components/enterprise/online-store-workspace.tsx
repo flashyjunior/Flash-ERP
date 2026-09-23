@@ -61,6 +61,7 @@ type ReportId =
   | "products"
   | "serialsBatches"
   | "orders"
+  | "orderCollections"
   | "layaways"
   | "layawayPayments"
   | "tenders"
@@ -3463,6 +3464,7 @@ export function OnlineStoreWorkspace({
   const reportProductRows = activeReportBundle.productRows;
   const reportSerialBatchRows = activeReportBundle.serialBatchRows;
   const reportSalesOrderRows = activeReportBundle.salesOrderRows;
+  const reportSalesOrderCollectionRows = activeReportBundle.salesOrderCollectionRows;
   const reportLayawayRows = activeReportBundle.layawayRows;
   const reportLayawayPaymentRows = activeReportBundle.layawayPaymentRows;
   const reportTenderRows = activeReportBundle.tenderRows;
@@ -3478,6 +3480,8 @@ export function OnlineStoreWorkspace({
           ? reportSerialBatchRows.length
         : activeReport === "orders"
           ? reportSalesOrderRows.length
+          : activeReport === "orderCollections"
+            ? reportSalesOrderCollectionRows.length
           : activeReport === "layaways"
             ? reportLayawayRows.length
             : activeReport === "layawayPayments"
@@ -5299,6 +5303,26 @@ export function OnlineStoreWorkspace({
       return;
     }
 
+    if (activeReport === "orderCollections") {
+      downloadCsv(baseName, [
+        ["Order", "Status", "Customer", "Deposit date", "Fulfilment date", "Sales recognized", "Opening deposits", "Prior deposits applied", "Balance collected", "Expected tender", "Outstanding"],
+        ...reportSalesOrderCollectionRows.map((row) => [
+          row.orderNo,
+          row.status,
+          row.customerName,
+          row.depositPaidAt,
+          row.fulfilledAt,
+          row.salesRecognizedAmount,
+          row.openingDepositCollectedAmount,
+          row.priorDepositAppliedAmount,
+          row.balanceCollectedAmount,
+          row.expectedTenderAmount,
+          row.outstandingBalanceAmount
+        ])
+      ]);
+      return;
+    }
+
     if (activeReport === "layaways") {
       downloadCsv(baseName, [
         ["Layaway", "Status", "Customer", "Total", "Paid", "Outstanding", "Age days", "Ageing", "Reservation", "Reserved base qty", "Cancellation fee", "Refunded", "Created", "Expires"],
@@ -5464,6 +5488,19 @@ export function OnlineStoreWorkspace({
                     formatMoney(row.balanceAmount, currencyCode)
                   ])
                 }
+              : activeReport === "orderCollections"
+                ? {
+                    headers: ["Order", "Sales", "Opening deposit", "Prior deposit", "Balance collected", "Expected tender", "Outstanding"],
+                    rows: reportSalesOrderCollectionRows.map((row) => [
+                      row.orderNo,
+                      formatMoney(row.salesRecognizedAmount, currencyCode),
+                      formatMoney(row.openingDepositCollectedAmount, currencyCode),
+                      formatMoney(row.priorDepositAppliedAmount, currencyCode),
+                      formatMoney(row.balanceCollectedAmount, currencyCode),
+                      formatMoney(row.expectedTenderAmount, currencyCode),
+                      formatMoney(row.outstandingBalanceAmount, currencyCode)
+                    ])
+                  }
               : activeReport === "layaways"
                 ? {
                     headers: ["Layaway", "Status", "Customer", "Outstanding", "Ageing", "Reservation", "Refunded"],
@@ -11497,6 +11534,16 @@ export function OnlineStoreWorkspace({
                 <button className="rms-button is-primary" onClick={exportActiveReport} type="button">Export CSV</button>
               </div>
               {reportMessage ? <p className="rms-inline-message">{reportMessage}</p> : null}
+              {activeReport === "orderCollections" ? (
+                <div className="rms-stat-grid">
+                  <DocumentStat label="Sales recognized" value={formatMoney(activeReportBundle.summary.salesOrderRecognizedAmount, currencyCode)} />
+                  <DocumentStat label="Opening deposits" value={formatMoney(activeReportBundle.summary.salesOrderOpeningDepositAmount, currencyCode)} />
+                  <DocumentStat label="Prior deposits applied" value={formatMoney(activeReportBundle.summary.salesOrderPriorDepositAppliedAmount, currencyCode)} />
+                  <DocumentStat label="Balance collected" value={formatMoney(activeReportBundle.summary.salesOrderBalanceCollectedAmount, currencyCode)} />
+                  <DocumentStat label="Expected tender" value={formatMoney(activeReportBundle.summary.salesOrderExpectedTenderAmount, currencyCode)} />
+                  <DocumentStat label="Outstanding" value={formatMoney(activeReportBundle.summary.salesOrderOutstandingAmount, currencyCode)} />
+                </div>
+              ) : null}
               {activeReport === "sales" ? (
                 <div className="rms-table rms-report-table">
                   <div className="rms-table-head"><span>Receipt</span><span>Type</span><span>Items</span><span>Total</span><span>Cashier</span></div>
@@ -11537,6 +11584,22 @@ export function OnlineStoreWorkspace({
                     <div className="rms-table-row" key={row.orderId}><strong>{row.orderNo}<small>{row.customerName}</small></strong><span>{row.status}</span><span>{formatMoney(row.totalAmount, currencyCode)}</span><span>{formatMoney(row.depositAmount, currencyCode)}</span><b>{formatMoney(row.balanceAmount, currencyCode)}</b></div>
                   ))}
                   {!reportSalesOrderRows.length ? <EmptyState title="No sales orders" detail="No sales orders match the current report filter." /> : null}
+                </div>
+              ) : null}
+              {activeReport === "orderCollections" ? (
+                <div className="rms-table rms-report-table">
+                  <div className="rms-table-head"><span>Order</span><span>Sales</span><span>Prior deposit</span><span>Balance collected</span><span>Expected tender</span><span>Outstanding</span></div>
+                  {reportSalesOrderCollectionRows.map((row) => (
+                    <div className="rms-table-row" key={row.orderId}>
+                      <strong>{row.orderNo}<small>{row.customerName} · {row.fulfilledAt ? `fulfilled ${formatRelative(row.fulfilledAt)}` : `deposit ${formatRelative(row.depositPaidAt)}`}</small></strong>
+                      <span>{formatMoney(row.salesRecognizedAmount, currencyCode)}</span>
+                      <span>{formatMoney(row.priorDepositAppliedAmount, currencyCode)}</span>
+                      <span>{formatMoney(row.balanceCollectedAmount, currencyCode)}</span>
+                      <b>{formatMoney(row.expectedTenderAmount, currencyCode)}</b>
+                      <span>{formatMoney(row.outstandingBalanceAmount, currencyCode)}</span>
+                    </div>
+                  ))}
+                  {!reportSalesOrderCollectionRows.length ? <EmptyState title="No sales-order collection events" detail="No deposits or fulfilments match the selected period." /> : null}
                 </div>
               ) : null}
               {activeReport === "layaways" ? (

@@ -26,6 +26,7 @@ import {
   PosTransactionType,
   PurchaseOrderStatus,
   RecordStatus,
+  reconcileSalesOrderCollections,
   SalesOrderStatus,
   SecurityLogKind,
   SecurityLogSeverity,
@@ -1821,6 +1822,7 @@ export type OnlineStoreReportId =
   | "products"
   | "serialsBatches"
   | "orders"
+  | "orderCollections"
   | "layaways"
   | "layawayPayments"
   | "tenders"
@@ -1905,6 +1907,13 @@ const defaultOnlineReportDefinitions: OnlineStoreReportDefinition[] = [
     label: "Sales Orders",
     group: "Sales",
     description: "Sales order deposits, outstanding balances, and fulfilment status.",
+    parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "customerQuery", "productQuery", "limit"]
+  },
+  {
+    reportId: "orderCollections",
+    label: "Sales Order Reconciliation",
+    group: "Sales",
+    description: "Recognised sales bridged to opening deposits, prior deposits, and fulfilment collections.",
     parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "customerQuery", "productQuery", "limit"]
   },
   {
@@ -2713,6 +2722,12 @@ export type OnlineStoreWorkspaceData = {
       taxAmount: number;
       tenderedAmount: number;
       inventoryStockValue: number;
+      salesOrderRecognizedAmount: number;
+      salesOrderOpeningDepositAmount: number;
+      salesOrderPriorDepositAppliedAmount: number;
+      salesOrderBalanceCollectedAmount: number;
+      salesOrderExpectedTenderAmount: number;
+      salesOrderOutstandingAmount: number;
     };
     salesRows: Array<{
       transactionNo: string;
@@ -2781,6 +2796,22 @@ export type OnlineStoreWorkspaceData = {
       createdAt: string;
       fulfilledAt: string | null;
       cancelledAt: string | null;
+    }>;
+    salesOrderCollectionRows: Array<{
+      orderId: string;
+      orderNo: string;
+      status: string;
+      customerNo: string | null;
+      customerName: string;
+      depositPaidAt: string | null;
+      fulfilledAt: string | null;
+      activityAt: string;
+      salesRecognizedAmount: number;
+      openingDepositCollectedAmount: number;
+      priorDepositAppliedAmount: number;
+      balanceCollectedAmount: number;
+      expectedTenderAmount: number;
+      outstandingBalanceAmount: number;
     }>;
     layawayRows: Array<{
       orderId: string;
@@ -2889,13 +2920,20 @@ const emptyOnlineStoreCollections = {
       discountAmount: 0,
       taxAmount: 0,
       tenderedAmount: 0,
-      inventoryStockValue: 0
+      inventoryStockValue: 0,
+      salesOrderRecognizedAmount: 0,
+      salesOrderOpeningDepositAmount: 0,
+      salesOrderPriorDepositAppliedAmount: 0,
+      salesOrderBalanceCollectedAmount: 0,
+      salesOrderExpectedTenderAmount: 0,
+      salesOrderOutstandingAmount: 0
     },
     salesRows: [],
     tenderRows: [],
     productRows: [],
     serialBatchRows: [],
     salesOrderRows: [],
+    salesOrderCollectionRows: [],
     layawayRows: [],
     layawayPaymentRows: [],
     shiftRows: [],
@@ -6124,6 +6162,47 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           ]
         : [];
     });
+  const initialSalesOrderCollectionRows = mappedSalesOrders
+    .filter((order) => order.orderType !== "LAYAWAY")
+    .map((order) => {
+      const reconciliation = reconcileSalesOrderCollections(order, {
+        dateFrom: formatDateInput(startOfDay),
+        dateTo: formatDateInput(startOfDay)
+      });
+
+      if (!reconciliation) {
+        return null;
+      }
+
+      return {
+        orderId: order.orderId,
+        orderNo: order.orderNo,
+        status: order.status,
+        customerNo: order.customerNo,
+        customerName: order.customerName,
+        depositPaidAt: order.depositPaidAt,
+        fulfilledAt: order.fulfilledAt,
+        activityAt: reconciliation.fulfilmentInPeriod && order.fulfilledAt ? order.fulfilledAt : order.depositPaidAt ?? order.createdAt,
+        salesRecognizedAmount: reconciliation.salesRecognizedAmount,
+        openingDepositCollectedAmount: reconciliation.openingDepositCollectedAmount,
+        priorDepositAppliedAmount: reconciliation.priorDepositAppliedAmount,
+        balanceCollectedAmount: reconciliation.balanceCollectedAmount,
+        expectedTenderAmount: reconciliation.expectedTenderAmount,
+        outstandingBalanceAmount: reconciliation.outstandingBalanceAmount
+      };
+    })
+    .filter((row): row is OnlineStoreWorkspaceData["reports"]["salesOrderCollectionRows"][number] => row !== null);
+  const initialCollectionTotals = initialSalesOrderCollectionRows.reduce(
+    (totals, row) => ({
+      recognized: totals.recognized + row.salesRecognizedAmount,
+      openingDeposit: totals.openingDeposit + row.openingDepositCollectedAmount,
+      priorDeposit: totals.priorDeposit + row.priorDepositAppliedAmount,
+      balanceCollected: totals.balanceCollected + row.balanceCollectedAmount,
+      expectedTender: totals.expectedTender + row.expectedTenderAmount,
+      outstanding: totals.outstanding + row.outstandingBalanceAmount
+    }),
+    { recognized: 0, openingDeposit: 0, priorDeposit: 0, balanceCollected: 0, expectedTender: 0, outstanding: 0 }
+  );
   const reports: OnlineStoreWorkspaceData["reports"] = {
     summary: {
       salesCount: reportTransactions.filter((transaction) => transaction.transactionType === PosTransactionType.SALE).length,
@@ -6134,7 +6213,13 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       discountAmount: toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.discountAmount), 0)),
       taxAmount: toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.taxAmount), 0)),
       tenderedAmount: toMoney(reportTenderRows.reduce((sum, row) => sum + row.netAmount, 0)),
-      inventoryStockValue: toMoney(reportInventoryRows.reduce((sum, row) => sum + row.stockValue, 0))
+      inventoryStockValue: toMoney(reportInventoryRows.reduce((sum, row) => sum + row.stockValue, 0)),
+      salesOrderRecognizedAmount: toMoney(initialCollectionTotals.recognized),
+      salesOrderOpeningDepositAmount: toMoney(initialCollectionTotals.openingDeposit),
+      salesOrderPriorDepositAppliedAmount: toMoney(initialCollectionTotals.priorDeposit),
+      salesOrderBalanceCollectedAmount: toMoney(initialCollectionTotals.balanceCollected),
+      salesOrderExpectedTenderAmount: toMoney(initialCollectionTotals.expectedTender),
+      salesOrderOutstandingAmount: toMoney(initialCollectionTotals.outstanding)
     },
     salesRows: reportSalesRows,
     tenderRows: reportTenderRows,
@@ -6160,6 +6245,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       fulfilledAt: order.fulfilledAt,
       cancelledAt: order.cancelledAt
     })),
+    salesOrderCollectionRows: initialSalesOrderCollectionRows,
     layawayRows: reportLayawayRows,
     layawayPaymentRows: reportLayawayPaymentRows,
     shiftRows: shiftSummaries.map((shift) => ({
@@ -6596,26 +6682,33 @@ export async function browseOnlineStoreReports(
   const salesOrderWhere: Prisma.SalesOrderWhereInput = {
     retailOrgId: session.retailOrgId,
     storeId: store.id,
-    ...((dateFrom || dateTo) && criteria.reportId !== "layawayPayments"
-      ? {
-          createdAt: {
-            ...(dateFrom ? { gte: dateFrom } : {}),
-            ...(dateTo ? { lte: dateTo } : {})
-          }
-        }
-      : {}),
+    AND: [
+      ...((dateFrom || dateTo) && criteria.reportId !== "layawayPayments"
+        ? [
+            {
+              OR: [
+                { createdAt: { ...(dateFrom ? { gte: dateFrom } : {}), ...(dateTo ? { lte: dateTo } : {}) } },
+                { depositPaidAt: { ...(dateFrom ? { gte: dateFrom } : {}), ...(dateTo ? { lte: dateTo } : {}) } },
+                { fulfilledAt: { ...(dateFrom ? { gte: dateFrom } : {}), ...(dateTo ? { lte: dateTo } : {}) } }
+              ]
+            }
+          ]
+        : []),
+      ...(criteria.customerQuery
+        ? [
+            {
+              OR: [
+                { customerNoSnapshot: { contains: criteria.customerQuery } },
+                { customerNameSnapshot: { contains: criteria.customerQuery } },
+                { customer: { customerNo: { contains: criteria.customerQuery } } },
+                { customer: { fullName: { contains: criteria.customerQuery } } }
+              ]
+            }
+          ]
+        : [])
+    ],
     ...(criteria.cashierCode && criteria.reportId !== "layawayPayments"
       ? { operatorName: { contains: criteria.cashierCode } }
-      : {}),
-    ...(criteria.customerQuery
-      ? {
-          OR: [
-            { customerNoSnapshot: { contains: criteria.customerQuery } },
-            { customerNameSnapshot: { contains: criteria.customerQuery } },
-            { customer: { customerNo: { contains: criteria.customerQuery } } },
-            { customer: { fullName: { contains: criteria.customerQuery } } }
-          ]
-        }
       : {}),
     ...(criteria.productQuery
       ? {
@@ -6861,6 +6954,7 @@ export async function browseOnlineStoreReports(
         depositTenderMethodNameSnapshot: true,
         depositPaymentMethodSnapshot: true,
         depositReference: true,
+        depositPaidAt: true,
         minimumDepositAmount: true,
         reservationStatus: true,
         layawayExpiresAt: true,
@@ -7104,6 +7198,55 @@ export async function browseOnlineStoreReports(
         }
       ];
     });
+  const salesOrderCollectionRows = salesOrderReportRows
+    .filter((order) => order.orderType !== "LAYAWAY")
+    .map((order) => {
+      const reconciliation = reconcileSalesOrderCollections(
+        {
+          status: order.status,
+          totalAmount: Number(order.totalAmount),
+          depositAmount: Number(order.depositAmount),
+          balanceAmount: Number(order.balanceAmount),
+          depositPaidAt: order.depositPaidAt,
+          fulfilledAt: order.fulfilledAt
+        },
+        { dateFrom, dateTo }
+      );
+
+      if (!reconciliation) {
+        return null;
+      }
+
+      return {
+        orderId: order.id,
+        orderNo: order.orderNo,
+        status: order.status,
+        customerNo: order.customerNoSnapshot,
+        customerName: order.customerNameSnapshot ?? "Customer",
+        depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+        fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
+        activityAt: reconciliation.fulfilmentInPeriod && order.fulfilledAt ? order.fulfilledAt.toISOString() : order.depositPaidAt?.toISOString() ?? order.createdAt.toISOString(),
+        salesRecognizedAmount: reconciliation.salesRecognizedAmount,
+        openingDepositCollectedAmount: reconciliation.openingDepositCollectedAmount,
+        priorDepositAppliedAmount: reconciliation.priorDepositAppliedAmount,
+        balanceCollectedAmount: reconciliation.balanceCollectedAmount,
+        expectedTenderAmount: reconciliation.expectedTenderAmount,
+        outstandingBalanceAmount: reconciliation.outstandingBalanceAmount
+      };
+    })
+    .filter((row): row is OnlineStoreWorkspaceData["reports"]["salesOrderCollectionRows"][number] => row !== null)
+    .sort((left, right) => right.activityAt.localeCompare(left.activityAt));
+  const salesOrderCollectionTotals = salesOrderCollectionRows.reduce(
+    (totals, row) => ({
+      recognized: totals.recognized + row.salesRecognizedAmount,
+      openingDeposit: totals.openingDeposit + row.openingDepositCollectedAmount,
+      priorDeposit: totals.priorDeposit + row.priorDepositAppliedAmount,
+      balanceCollected: totals.balanceCollected + row.balanceCollectedAmount,
+      expectedTender: totals.expectedTender + row.expectedTenderAmount,
+      outstanding: totals.outstanding + row.outstandingBalanceAmount
+    }),
+    { recognized: 0, openingDeposit: 0, priorDeposit: 0, balanceCollected: 0, expectedTender: 0, outstanding: 0 }
+  );
   const reports: OnlineStoreWorkspaceData["reports"] = {
     summary: {
       salesCount: transactions.filter((transaction) => transaction.transactionType === PosTransactionType.SALE).length,
@@ -7114,7 +7257,13 @@ export async function browseOnlineStoreReports(
       discountAmount,
       taxAmount,
       tenderedAmount: toMoney([...tenderRowsByKey.values()].reduce((sum, row) => sum + row.netAmount, 0)),
-      inventoryStockValue: toMoney(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0))
+      inventoryStockValue: toMoney(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0)),
+      salesOrderRecognizedAmount: toMoney(salesOrderCollectionTotals.recognized),
+      salesOrderOpeningDepositAmount: toMoney(salesOrderCollectionTotals.openingDeposit),
+      salesOrderPriorDepositAppliedAmount: toMoney(salesOrderCollectionTotals.priorDeposit),
+      salesOrderBalanceCollectedAmount: toMoney(salesOrderCollectionTotals.balanceCollected),
+      salesOrderExpectedTenderAmount: toMoney(salesOrderCollectionTotals.expectedTender),
+      salesOrderOutstandingAmount: toMoney(salesOrderCollectionTotals.outstanding)
     },
     salesRows: transactions.map((transaction) => ({
       transactionNo: transaction.transactionNo,
@@ -7199,6 +7348,7 @@ export async function browseOnlineStoreReports(
         cancelledAt: order.cancelledAt?.toISOString() ?? null
       };
     }),
+    salesOrderCollectionRows,
     layawayRows,
     layawayPaymentRows,
     shiftRows: shifts.map((shift) => {
@@ -12841,6 +12991,7 @@ function normalizeOnlineReportId(value: unknown): OnlineStoreReportId {
   return value === "products" ||
     value === "serialsBatches" ||
     value === "orders" ||
+    value === "orderCollections" ||
     value === "layaways" ||
     value === "layawayPayments" ||
     value === "tenders" ||

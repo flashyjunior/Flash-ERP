@@ -12,6 +12,7 @@ import {
   evaluateLayawayOpening,
   normalizeLayawaySettings,
   normalizePosSellingUnits,
+  reconcileSalesOrderCollections,
   resolvePosSellingUom,
   validateInventoryBatchReceipt,
 } from "@flash-erp/domain";
@@ -176,6 +177,7 @@ import type {
   StoreRecordEodReconciliationRequest,
   StoreStoreExpenseInput,
   StoreSalesOrderSummary,
+  StoreSalesOrderCollectionReconciliationRow,
   StoreDeploymentMode,
   StoreStandaloneBankAccountInput,
   StoreStandaloneCategoryInput,
@@ -7177,6 +7179,90 @@ export class PostgresStoreService {
     )
       .map((row) => this.toSalesOrderSummary(row))
       .slice(0, limit);
+    const collectionWhere = ["1 = 1"];
+    const collectionParams: unknown[] = [];
+    const addCollectionParam = (value: unknown) => {
+      collectionParams.push(value);
+      return `$${collectionParams.length}`;
+    };
+
+    if (dateFrom) {
+      const fromParam = addCollectionParam(dateFrom);
+      collectionWhere.push(`(sales_order.deposit_paid_at >= ${fromParam} OR sales_order.fulfilled_at >= ${fromParam})`);
+    }
+
+    if (dateTo) {
+      const toParam = addCollectionParam(dateTo);
+      collectionWhere.push(`(sales_order.deposit_paid_at <= ${toParam} OR sales_order.fulfilled_at <= ${toParam})`);
+    }
+
+    if (cashierCode) {
+      collectionWhere.push(`UPPER(COALESCE(sales_order.operator_name, '')) = ${addCollectionParam(cashierCode.toUpperCase())}`);
+    }
+
+    if (customerQuery) {
+      const customerParam = addCollectionParam(`%${customerQuery}%`);
+      collectionWhere.push(`(UPPER(COALESCE(sales_order.customer_no, '')) LIKE ${customerParam} OR UPPER(COALESCE(sales_order.customer_name, '')) LIKE ${customerParam})`);
+    }
+
+    if (productQuery) {
+      const productParam = addCollectionParam(`%${productQuery}%`);
+      collectionWhere.push(
+        `EXISTS (
+          SELECT 1
+          FROM pos_transaction_line AS order_line
+          WHERE order_line.pos_transaction_id = sales_order.source_transaction_id
+            AND (
+              UPPER(order_line.product_code_snapshot) LIKE ${productParam}
+              OR UPPER(order_line.product_name_snapshot) LIKE ${productParam}
+            )
+        )`,
+      );
+    }
+
+    const salesOrderCollectionRows = (
+      await this.getSalesOrderRows(`WHERE ${collectionWhere.join(" AND ")}`, collectionParams)
+    )
+      .map((row) => this.toSalesOrderSummary(row))
+      .filter((order) => order.orderType !== "LAYAWAY")
+      .map<StoreSalesOrderCollectionReconciliationRow | null>((order) => {
+        const reconciliation = reconcileSalesOrderCollections(order, { dateFrom, dateTo });
+
+        if (!reconciliation) {
+          return null;
+        }
+
+        return {
+          orderId: order.orderId,
+          orderNo: order.orderNo,
+          customerNo: order.customerNo,
+          customerName: order.customerName,
+          status: order.status,
+          depositPaidAt: order.depositPaidAt,
+          fulfilledAt: order.fulfilledAt,
+          activityAt: reconciliation.fulfilmentInPeriod && order.fulfilledAt ? order.fulfilledAt : order.depositPaidAt ?? order.createdAt,
+          salesRecognizedAmount: reconciliation.salesRecognizedAmount,
+          openingDepositCollectedAmount: reconciliation.openingDepositCollectedAmount,
+          priorDepositAppliedAmount: reconciliation.priorDepositAppliedAmount,
+          balanceCollectedAmount: reconciliation.balanceCollectedAmount,
+          expectedTenderAmount: reconciliation.expectedTenderAmount,
+          outstandingBalanceAmount: reconciliation.outstandingBalanceAmount,
+        };
+      })
+      .filter((row): row is StoreSalesOrderCollectionReconciliationRow => row !== null)
+      .sort((left, right) => right.activityAt.localeCompare(left.activityAt))
+      .slice(0, limit);
+    const salesOrderCollectionTotals = salesOrderCollectionRows.reduce(
+      (totals, row) => ({
+        recognized: totals.recognized + row.salesRecognizedAmount,
+        openingDeposit: totals.openingDeposit + row.openingDepositCollectedAmount,
+        priorDeposit: totals.priorDeposit + row.priorDepositAppliedAmount,
+        balanceCollected: totals.balanceCollected + row.balanceCollectedAmount,
+        expectedTender: totals.expectedTender + row.expectedTenderAmount,
+        outstanding: totals.outstanding + row.outstandingBalanceAmount,
+      }),
+      { recognized: 0, openingDeposit: 0, priorDeposit: 0, balanceCollected: 0, expectedTender: 0, outstanding: 0 },
+    );
 
     return {
       scope,
@@ -7251,12 +7337,19 @@ export class PostgresStoreService {
             .reduce((sum, row) => sum + row.stockValue, 0)
             .toFixed(2),
         ),
+        salesOrderRecognizedAmount: Number(salesOrderCollectionTotals.recognized.toFixed(2)),
+        salesOrderOpeningDepositAmount: Number(salesOrderCollectionTotals.openingDeposit.toFixed(2)),
+        salesOrderPriorDepositAppliedAmount: Number(salesOrderCollectionTotals.priorDeposit.toFixed(2)),
+        salesOrderBalanceCollectedAmount: Number(salesOrderCollectionTotals.balanceCollected.toFixed(2)),
+        salesOrderExpectedTenderAmount: Number(salesOrderCollectionTotals.expectedTender.toFixed(2)),
+        salesOrderOutstandingAmount: Number(salesOrderCollectionTotals.outstanding.toFixed(2)),
       },
       salesRows: mappedSalesRows,
       tenderRows: mappedTenderRows,
       accountPaymentRows: mappedAccountPaymentRows,
       productRows: mappedProductRows,
       salesOrderRows: mappedSalesOrderRows,
+      salesOrderCollectionRows,
       shiftRows: mappedShiftRows,
       inventoryRows: mappedInventoryRows,
       serialBatchRows: mappedSerialBatchRows,

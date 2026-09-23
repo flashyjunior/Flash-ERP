@@ -415,12 +415,15 @@ export type EnterprisePosWorkspaceData = {
     sourceTransactionNo: string;
     customerNo: string | null;
     customerName: string | null;
+    orderType: string;
     status: string;
     totalAmount: number;
     depositAmount: number;
     balanceAmount: number;
     operatorName: string | null;
     fulfilledTransactionNo: string | null;
+    depositPaidAt: string | null;
+    fulfilledAt: string | null;
     createdAt: string;
     createdAtLabel: string;
     updatedAt: string;
@@ -548,7 +551,12 @@ export async function getEnterprisePosWorkspace(
     ...(nodeCodes.length > 0 ? { originNodeCode: { in: nodeCodes } } : {}),
     ...(dateFilter
       ? {
-          OR: [{ createdAt: dateFilter }, { updatedAt: dateFilter }]
+          OR: [
+            { createdAt: dateFilter },
+            { depositPaidAt: dateFilter },
+            { fulfilledAt: dateFilter },
+            { updatedAt: dateFilter }
+          ]
         }
       : {})
   };
@@ -626,16 +634,19 @@ export async function getEnterprisePosWorkspace(
     prisma.salesOrder.findMany({
       where: salesOrderWhere,
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-      take: 16,
+      ...(hasFocusedTransactionFilter ? {} : { take: 16 }),
       select: {
         orderNo: true,
         sourceTransactionNo: true,
+        orderType: true,
         status: true,
         totalAmount: true,
         depositAmount: true,
         balanceAmount: true,
         operatorName: true,
         fulfilledTransactionNo: true,
+        depositPaidAt: true,
+        fulfilledAt: true,
         createdAt: true,
         updatedAt: true,
         customerNoSnapshot: true,
@@ -856,12 +867,15 @@ export async function getEnterprisePosWorkspace(
       sourceTransactionNo: order.sourceTransactionNo,
       customerNo: order.customer?.customerNo ?? order.customerNoSnapshot ?? null,
       customerName: order.customer?.fullName ?? order.customerNameSnapshot ?? null,
+      orderType: order.orderType,
       status: order.status,
       totalAmount: Number(order.totalAmount),
       depositAmount: Number(order.depositAmount),
       balanceAmount: Number(order.balanceAmount),
       operatorName: order.operatorName,
       fulfilledTransactionNo: order.fulfilledTransactionNo,
+      depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+      fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
       createdAt: order.createdAt.toISOString(),
       createdAtLabel: formatRelativeTime(order.createdAt),
       updatedAt: order.updatedAt.toISOString(),

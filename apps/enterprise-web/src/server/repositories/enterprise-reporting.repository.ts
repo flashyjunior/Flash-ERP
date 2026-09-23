@@ -33,6 +33,7 @@ import {
   InventoryMovementType,
   PosTransactionStatus,
   RecordStatus,
+  reconcileSalesOrderCollections,
   SyncNodeType
 } from "@flash-erp/domain";
 
@@ -758,6 +759,23 @@ export type EnterpriseReportingDashboardData = {
     updatedAt: string;
     updatedAtLabel: string;
   }>;
+  salesOrderCollectionRows: Array<{
+    orderNo: string;
+    store: string;
+    storeCode: string;
+    customerNo: string | null;
+    customerName: string | null;
+    status: string;
+    depositPaidAt: string | null;
+    fulfilledAt: string | null;
+    activityAt: string;
+    salesRecognizedAmount: number;
+    openingDepositCollectedAmount: number;
+    priorDepositAppliedAmount: number;
+    balanceCollectedAmount: number;
+    expectedTenderAmount: number;
+    outstandingBalanceAmount: number;
+  }>;
   layawayRows: Array<{
     orderNo: string;
     sourceTransactionNo: string;
@@ -923,6 +941,7 @@ export function buildUnavailableEnterpriseReportingDashboard(
     promotionRows: [],
     exceptionRows: [],
     salesOrderRows: [],
+    salesOrderCollectionRows: [],
     layawayRows: [],
     layawayPaymentRows: [],
     closeoutRows: [],
@@ -2812,6 +2831,38 @@ export async function getEnterpriseReportingDashboard(
       updatedAt: row.updatedAt,
       updatedAtLabel: row.updatedAtLabel
     }));
+  const salesOrderCollectionRows = posWorkspace.salesOrderRows
+    .filter((row) => row.orderType !== "LAYAWAY")
+    .map((row) => {
+      const reconciliation = reconcileSalesOrderCollections(row, {
+        dateFrom: posWorkspace.filters.dateFrom || null,
+        dateTo: posWorkspace.filters.dateTo || null
+      });
+
+      if (!reconciliation) {
+        return null;
+      }
+
+      return {
+        orderNo: row.orderNo,
+        store: row.store,
+        storeCode: row.storeCode,
+        customerNo: row.customerNo,
+        customerName: row.customerName,
+        status: row.status,
+        depositPaidAt: row.depositPaidAt,
+        fulfilledAt: row.fulfilledAt,
+        activityAt: reconciliation.fulfilmentInPeriod && row.fulfilledAt ? row.fulfilledAt : row.depositPaidAt ?? row.createdAt,
+        salesRecognizedAmount: reconciliation.salesRecognizedAmount,
+        openingDepositCollectedAmount: reconciliation.openingDepositCollectedAmount,
+        priorDepositAppliedAmount: reconciliation.priorDepositAppliedAmount,
+        balanceCollectedAmount: reconciliation.balanceCollectedAmount,
+        expectedTenderAmount: reconciliation.expectedTenderAmount,
+        outstandingBalanceAmount: reconciliation.outstandingBalanceAmount
+      };
+    })
+    .filter((row): row is EnterpriseReportingDashboardData["salesOrderCollectionRows"][number] => row !== null)
+    .sort((left, right) => right.activityAt.localeCompare(left.activityAt));
   const closeoutRows = operationsDashboard.reconciliationRows
     .slice()
     .sort((left, right) => {
@@ -3446,6 +3497,7 @@ export async function getEnterpriseReportingDashboard(
     promotionRows,
     exceptionRows,
     salesOrderRows,
+    salesOrderCollectionRows,
     layawayRows: layawayReporting.layawayRows,
     layawayPaymentRows: layawayReporting.layawayPaymentRows,
     closeoutRows,

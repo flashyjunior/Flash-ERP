@@ -922,6 +922,23 @@ export type StoreSalesOrderSummary = {
   updatedAt: string;
 };
 
+export type StoreSalesOrderCollectionReconciliationRow = {
+  orderId: string;
+  orderNo: string;
+  customerNo: string | null;
+  customerName: string | null;
+  status: StoreSalesOrderStatus;
+  depositPaidAt: string | null;
+  fulfilledAt: string | null;
+  activityAt: string;
+  salesRecognizedAmount: number;
+  openingDepositCollectedAmount: number;
+  priorDepositAppliedAmount: number;
+  balanceCollectedAmount: number;
+  expectedTenderAmount: number;
+  outstandingBalanceAmount: number;
+};
+
 export type StoreEodReconciliationSummary = {
   reconciliationId: string;
   reconciliationNo: string;
@@ -2162,6 +2179,12 @@ export type StoreReportSummary = {
   tenderedAmount: number;
   accountPaymentsAmount: number;
   inventoryStockValue: number;
+  salesOrderRecognizedAmount: number;
+  salesOrderOpeningDepositAmount: number;
+  salesOrderPriorDepositAppliedAmount: number;
+  salesOrderBalanceCollectedAmount: number;
+  salesOrderExpectedTenderAmount: number;
+  salesOrderOutstandingAmount: number;
 };
 
 export type StoreReportResult = {
@@ -2174,6 +2197,7 @@ export type StoreReportResult = {
   accountPaymentRows: StoreAccountPaymentReportRow[];
   productRows: StoreProductSalesReportRow[];
   salesOrderRows: StoreSalesOrderSummary[];
+  salesOrderCollectionRows: StoreSalesOrderCollectionReconciliationRow[];
   shiftRows: StoreShiftReportRow[];
   inventoryRows: StoreInventoryReportRow[];
   serialBatchRows: StoreSerialBatchSalesReportRow[];

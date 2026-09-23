@@ -34,6 +34,7 @@ type InventoryRiskRow = EnterpriseReportingDashboardData["inventoryRiskRows"][nu
 type PromotionRow = EnterpriseReportingDashboardData["promotionRows"][number];
 type ExceptionRow = EnterpriseReportingDashboardData["exceptionRows"][number];
 type SalesOrderRow = EnterpriseReportingDashboardData["salesOrderRows"][number];
+type SalesOrderCollectionRow = EnterpriseReportingDashboardData["salesOrderCollectionRows"][number];
 type LayawayRow = EnterpriseReportingDashboardData["layawayRows"][number];
 type LayawayPaymentRow = EnterpriseReportingDashboardData["layawayPaymentRows"][number];
 type CloseoutRow = EnterpriseReportingDashboardData["closeoutRows"][number];
@@ -82,6 +83,7 @@ type ReportId =
   | "expenseTracking"
   | "storePerformance"
   | "salesOrders"
+  | "salesOrderCollections"
   | "layawayAgeing"
   | "layawayPayments"
   | "closeouts"
@@ -149,6 +151,7 @@ const reportIds: ReportId[] = [
   "expenseTracking",
   "storePerformance",
   "salesOrders",
+  "salesOrderCollections",
   "layawayAgeing",
   "layawayPayments",
   "closeouts",
@@ -199,6 +202,7 @@ const reportsWithStoreScope = new Set<ReportId>([
   "expenseTracking",
   "storePerformance",
   "salesOrders",
+  "salesOrderCollections",
   "layawayAgeing",
   "layawayPayments",
   "closeouts",
@@ -756,6 +760,23 @@ const salesOrderFilter: FilterFn<SalesOrderRow> = (row, _columnId, filterValue) 
     .toLowerCase()
     .includes(query);
 };
+
+const salesOrderCollectionFilter: FilterFn<SalesOrderCollectionRow> = (
+  row,
+  _columnId,
+  filterValue
+) =>
+  matchesReportQuery(
+    [
+      row.original.orderNo,
+      row.original.store,
+      row.original.storeCode,
+      row.original.customerNo,
+      row.original.customerName,
+      row.original.status
+    ],
+    filterValue
+  );
 
 const layawayFilter: FilterFn<LayawayRow> = (row, _columnId, filterValue) => {
   const query = String(filterValue ?? "").trim().toLowerCase();
@@ -1838,6 +1859,32 @@ export function EnterpriseReportingDashboard({
           disableTruncate: true
         }
       }
+    ],
+    [currencyFormatter]
+  );
+
+  const salesOrderCollectionColumns = useMemo<ColumnDef<SalesOrderCollectionRow>[]>(
+    () => [
+      {
+        accessorKey: "orderNo",
+        header: "Order",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.orderNo}</p>
+            <p className="truncate text-xs text-stone-500">{row.original.customerName ?? row.original.customerNo ?? "Customer"}</p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      { accessorKey: "store", header: "Store" },
+      { accessorKey: "depositPaidAt", header: "Deposit date", cell: ({ row }) => row.original.depositPaidAt ? new Date(row.original.depositPaidAt).toLocaleString() : "Not collected" },
+      { accessorKey: "fulfilledAt", header: "Fulfilment date", cell: ({ row }) => row.original.fulfilledAt ? new Date(row.original.fulfilledAt).toLocaleString() : "Not fulfilled" },
+      { accessorKey: "salesRecognizedAmount", header: "Sales recognized", cell: ({ row }) => currencyFormatter.format(row.original.salesRecognizedAmount) },
+      { accessorKey: "openingDepositCollectedAmount", header: "Opening deposits", cell: ({ row }) => currencyFormatter.format(row.original.openingDepositCollectedAmount) },
+      { accessorKey: "priorDepositAppliedAmount", header: "Prior deposits applied", cell: ({ row }) => currencyFormatter.format(row.original.priorDepositAppliedAmount) },
+      { accessorKey: "balanceCollectedAmount", header: "Balance collected", cell: ({ row }) => currencyFormatter.format(row.original.balanceCollectedAmount) },
+      { accessorKey: "expectedTenderAmount", header: "Expected tender", cell: ({ row }) => currencyFormatter.format(row.original.expectedTenderAmount) },
+      { accessorKey: "outstandingBalanceAmount", header: "Outstanding", cell: ({ row }) => currencyFormatter.format(row.original.outstandingBalanceAmount) }
     ],
     [currencyFormatter]
   );
@@ -3170,6 +3217,12 @@ export function EnterpriseReportingDashboard({
             rowCount: dashboard.salesOrderRows.length,
           },
           {
+            id: "salesOrderCollections",
+            label: "Sales order reconciliation",
+            description: "Bridge recognised sales to deposits, fulfilment balances, and expected tender.",
+            rowCount: dashboard.salesOrderCollectionRows.length,
+          },
+          {
             id: "layawayAgeing",
             label: "Layaway accounts",
             description: "Balances, payment counts, stock reservations, ageing, cancellations, and refunds.",
@@ -3324,6 +3377,8 @@ export function EnterpriseReportingDashboard({
         return buildChoiceOptions(dashboard.slowMovingItemRows.map((row) => row.riskBand));
       case "salesOrders":
         return buildChoiceOptions(dashboard.salesOrderRows.map((row) => row.status));
+      case "salesOrderCollections":
+        return buildChoiceOptions(dashboard.salesOrderCollectionRows.map((row) => row.status));
       case "layawayAgeing":
         return buildChoiceOptions(
           dashboard.layawayRows.flatMap((row) => [row.status, row.reservationStatus, row.ageingBucket])
@@ -4267,6 +4322,23 @@ export function EnterpriseReportingDashboard({
             globalFilterFn={salesOrderFilter}
             initialPageSize={12}
             searchPlaceholder="Search orders, stores, customers, or basket references"
+          />
+        );
+      case "salesOrderCollections":
+        return (
+          <SharedDataGrid
+            columns={salesOrderCollectionColumns}
+            data={dashboard.salesOrderCollectionRows.filter(
+              (row) =>
+                matchesStoreScope([row.storeCode, row.store]) &&
+                matchesDate(row.activityAt) &&
+                matchesChoice(filters.status, [row.status])
+            )}
+            emptyLabel="No sales-order collection events are available for this period."
+            exportFileName="flash-erp-sales-order-reconciliation"
+            globalFilterFn={salesOrderCollectionFilter}
+            initialPageSize={12}
+            searchPlaceholder="Search orders, stores, or customers"
           />
         );
       case "layawayAgeing":
