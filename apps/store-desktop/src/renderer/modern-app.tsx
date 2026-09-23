@@ -116,6 +116,7 @@ type ReportKind =
   | "tenders"
   | "products"
   | "orders"
+  | "order-collections"
   | "inventory"
   | "serials-batches"
   | "shifts"
@@ -127,6 +128,7 @@ type ReportWorkspace =
   | "report-tenders"
   | "report-products"
   | "report-orders"
+  | "report-order-collections"
   | "report-inventory"
   | "report-serials-batches"
   | "report-shifts"
@@ -509,6 +511,13 @@ const reportWorkspaceItems: Array<{
     detail: "Deposits and balances",
     scope: "STORE",
     reportKind: "orders",
+  },
+  {
+    id: "report-order-collections",
+    label: "Order Collections",
+    detail: "Sales to tender bridge",
+    scope: "STORE",
+    reportKind: "order-collections",
   },
   {
     id: "report-inventory",
@@ -20301,28 +20310,24 @@ function ReportsView(props: {
 
       {props.report ? (
         <>
-          <div className="rms-stat-grid">
-            <Stat
-              label="Net sales"
-              value={formatMoney(props.report.summary.netSalesAmount)}
-            />
-            <Stat
-              label="Sales tenders"
-              value={formatMoney(props.report.summary.tenderedAmount)}
-            />
-            <Stat
-              label="Account payments"
-              value={formatMoney(props.report.summary.accountPaymentsAmount)}
-            />
-            <Stat
-              label="Tax"
-              value={formatMoney(props.report.summary.taxAmount)}
-            />
-            <Stat
-              label="Stock value"
-              value={formatMoney(props.report.summary.inventoryStockValue)}
-            />
-          </div>
+          {activeReportKind === "order-collections" ? (
+            <div className="rms-stat-grid">
+              <Stat label="Sales recognized" value={formatMoney(props.report.summary.salesOrderRecognizedAmount)} />
+              <Stat label="Opening deposits" value={formatMoney(props.report.summary.salesOrderOpeningDepositAmount)} />
+              <Stat label="Prior deposits applied" value={formatMoney(props.report.summary.salesOrderPriorDepositAppliedAmount)} />
+              <Stat label="Balance collected" value={formatMoney(props.report.summary.salesOrderBalanceCollectedAmount)} />
+              <Stat label="Expected tender" value={formatMoney(props.report.summary.salesOrderExpectedTenderAmount)} />
+              <Stat label="Outstanding" value={formatMoney(props.report.summary.salesOrderOutstandingAmount)} />
+            </div>
+          ) : (
+            <div className="rms-stat-grid">
+              <Stat label="Net sales" value={formatMoney(props.report.summary.netSalesAmount)} />
+              <Stat label="Sales tenders" value={formatMoney(props.report.summary.tenderedAmount)} />
+              <Stat label="Account payments" value={formatMoney(props.report.summary.accountPaymentsAmount)} />
+              <Stat label="Tax" value={formatMoney(props.report.summary.taxAmount)} />
+              <Stat label="Stock value" value={formatMoney(props.report.summary.inventoryStockValue)} />
+            </div>
+          )}
           <ReportDataTable
             rows={tableRows}
             emptyLabel={`${exportLabel} has no rows`}
@@ -25882,6 +25887,20 @@ function reportRowsForExport(report: StoreReportResult, kind: ReportKind) {
         Reference: row.depositReference ?? "",
         Fulfilled: row.fulfilledAt ? formatDate(row.fulfilledAt) : "",
         "Fulfilled Receipt": row.fulfilledTransactionNo ?? "",
+      }));
+    case "order-collections":
+      return report.salesOrderCollectionRows.map((row) => ({
+        "Order No": row.orderNo,
+        Status: row.status,
+        Customer: row.customerName ?? "Customer",
+        "Deposit Date": row.depositPaidAt ? formatDate(row.depositPaidAt) : "",
+        "Fulfilment Date": row.fulfilledAt ? formatDate(row.fulfilledAt) : "",
+        "Sales Recognized": row.salesRecognizedAmount,
+        "Opening Deposits": row.openingDepositCollectedAmount,
+        "Prior Deposits Applied": row.priorDepositAppliedAmount,
+        "Balance Collected": row.balanceCollectedAmount,
+        "Expected Tender": row.expectedTenderAmount,
+        Outstanding: row.outstandingBalanceAmount,
       }));
     case "inventory":
       return report.inventoryRows.map((row) => ({

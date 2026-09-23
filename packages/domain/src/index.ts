@@ -3,6 +3,7 @@ export * from "./security-permissions.js";
 export * from "./sync-ownership.js";
 export * from "./prisma-enums.js";
 export * from "./inventory-expiry.js";
+export * from "./sales-order-collections.js";
 export * from "./layaway-settings.js";
 export * from "./layaway.js";
 export * from "./pos-selling-uom.js";
