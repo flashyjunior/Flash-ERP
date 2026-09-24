@@ -23,6 +23,25 @@ export type SalesOrderCollectionReconciliation = {
   outstandingBalanceAmount: number;
 };
 
+export type SalesOrderCollectionPaymentAttribution = {
+  paymentPurpose: string;
+  receivedCashierCode?: string | null;
+  receivedAt?: string | Date | null;
+};
+
+export type SalesOrderCollectionAttributionSource = SalesOrderCollectionSource & {
+  operatorName?: string | null;
+  fulfilledCashierCode?: string | null;
+  payments?: SalesOrderCollectionPaymentAttribution[];
+};
+
+export type SalesOrderCollectionAttribution = {
+  orderCreatedBy: string | null;
+  depositCollectedBy: string | null;
+  saleCompletedBy: string | null;
+  balanceCollectedBy: string | null;
+};
+
 function toTimestamp(value: string | Date | null | undefined, endOfDay = false) {
   if (!value) {
     return null;
@@ -63,6 +82,67 @@ function dateKey(value: string | Date | null | undefined) {
 
 function money(value: number) {
   return Number(Math.max(0, Number(value) || 0).toFixed(2));
+}
+
+function cleanIdentity(value: string | null | undefined) {
+  const normalized = value?.trim();
+  return normalized || null;
+}
+
+function paymentTimestamp(payment: SalesOrderCollectionPaymentAttribution) {
+  return toTimestamp(payment.receivedAt) ?? 0;
+}
+
+export function resolveSalesOrderCollectionAttribution(
+  source: SalesOrderCollectionAttributionSource,
+): SalesOrderCollectionAttribution {
+  const payments = [...(source.payments ?? [])].sort(
+    (left, right) => paymentTimestamp(left) - paymentTimestamp(right),
+  );
+  const explicitDeposit = payments.find(
+    (payment) => payment.paymentPurpose === "SALES_ORDER_DEPOSIT",
+  );
+  const explicitBalance = [...payments].reverse().find(
+    (payment) => payment.paymentPurpose === "SALES_ORDER_BALANCE",
+  );
+  const legacyPayments = payments.filter(
+    (payment) => payment.paymentPurpose === "TRANSACTION_SETTLEMENT",
+  );
+  const depositTimestamp = toTimestamp(source.depositPaidAt);
+  const legacyDeposit = legacyPayments.find(
+    (payment) => depositTimestamp === null || paymentTimestamp(payment) <= depositTimestamp,
+  );
+  const legacyBalance = [...legacyPayments]
+    .reverse()
+    .find(
+      (payment) =>
+        depositTimestamp === null || paymentTimestamp(payment) > depositTimestamp,
+    );
+  const orderCreatedBy = cleanIdentity(source.operatorName);
+  const fulfilledCashier = cleanIdentity(source.fulfilledCashierCode);
+  const depositCollectedBy =
+    cleanIdentity(explicitDeposit?.receivedCashierCode) ??
+    cleanIdentity(legacyDeposit?.receivedCashierCode) ??
+    (money(source.depositAmount) > 0 ? orderCreatedBy : null);
+  const calculatedBalanceCollected = money(
+    source.totalAmount - source.depositAmount - source.balanceAmount,
+  );
+  const balanceCollectedBy =
+    cleanIdentity(explicitBalance?.receivedCashierCode) ??
+    cleanIdentity(legacyBalance?.receivedCashierCode) ??
+    (source.status.toUpperCase() === "FULFILLED" && calculatedBalanceCollected > 0
+      ? fulfilledCashier
+      : null);
+
+  return {
+    orderCreatedBy,
+    depositCollectedBy,
+    saleCompletedBy:
+      source.status.toUpperCase() === "FULFILLED"
+        ? fulfilledCashier ?? balanceCollectedBy
+        : null,
+    balanceCollectedBy,
+  };
 }
 
 export function reconcileSalesOrderCollections(

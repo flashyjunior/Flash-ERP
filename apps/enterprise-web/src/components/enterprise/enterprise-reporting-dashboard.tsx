@@ -773,7 +773,11 @@ const salesOrderCollectionFilter: FilterFn<SalesOrderCollectionRow> = (
       row.original.storeCode,
       row.original.customerNo,
       row.original.customerName,
-      row.original.status
+      row.original.status,
+      row.original.orderCreatedBy,
+      row.original.depositCollectedBy,
+      row.original.saleCompletedBy,
+      row.original.balanceCollectedBy
     ],
     filterValue
   );
@@ -1877,6 +1881,10 @@ export function EnterpriseReportingDashboard({
         meta: { disableTruncate: true }
       },
       { accessorKey: "store", header: "Store" },
+      { accessorKey: "orderCreatedBy", header: "Order created by", cell: ({ row }) => row.original.orderCreatedBy ?? "Unassigned" },
+      { accessorKey: "depositCollectedBy", header: "Deposit collected by", cell: ({ row }) => row.original.depositCollectedBy ?? "Unassigned" },
+      { accessorKey: "saleCompletedBy", header: "Sale completed by", cell: ({ row }) => row.original.saleCompletedBy ?? "Not fulfilled" },
+      { accessorKey: "balanceCollectedBy", header: "Balance collected by", cell: ({ row }) => row.original.balanceCollectedBy ?? "Not collected" },
       { accessorKey: "depositPaidAt", header: "Deposit date", cell: ({ row }) => row.original.depositPaidAt ? new Date(row.original.depositPaidAt).toLocaleString() : "Not collected" },
       { accessorKey: "fulfilledAt", header: "Fulfilment date", cell: ({ row }) => row.original.fulfilledAt ? new Date(row.original.fulfilledAt).toLocaleString() : "Not fulfilled" },
       { accessorKey: "salesRecognizedAmount", header: "Sales recognized", cell: ({ row }) => currencyFormatter.format(row.original.salesRecognizedAmount) },

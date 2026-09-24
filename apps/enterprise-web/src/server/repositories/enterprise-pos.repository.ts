@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { readJsonObject, readJsonStringArray } from "./json-field";
+import { getSalesOrderCollectionAttributionMap } from "../reporting/sales-order-collection-attribution";
 
 import { prisma } from "@/lib/db/prisma";
 import {
@@ -421,6 +422,10 @@ export type EnterprisePosWorkspaceData = {
     depositAmount: number;
     balanceAmount: number;
     operatorName: string | null;
+    orderCreatedBy: string | null;
+    depositCollectedBy: string | null;
+    saleCompletedBy: string | null;
+    balanceCollectedBy: string | null;
     fulfilledTransactionNo: string | null;
     depositPaidAt: string | null;
     fulfilledAt: string | null;
@@ -636,7 +641,9 @@ export async function getEnterprisePosWorkspace(
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
       ...(hasFocusedTransactionFilter ? {} : { take: 16 }),
       select: {
+        id: true,
         orderNo: true,
+        sourceTransactionId: true,
         sourceTransactionNo: true,
         orderType: true,
         status: true,
@@ -644,6 +651,7 @@ export async function getEnterprisePosWorkspace(
         depositAmount: true,
         balanceAmount: true,
         operatorName: true,
+        fulfilledTransactionId: true,
         fulfilledTransactionNo: true,
         depositPaidAt: true,
         fulfilledAt: true,
@@ -710,6 +718,21 @@ export async function getEnterprisePosWorkspace(
       }
     })
   ]);
+
+  const salesOrderAttributionById = await getSalesOrderCollectionAttributionMap(
+    enterpriseNode.retailOrgId,
+    recentSalesOrders.map((order) => ({
+      id: order.id,
+      sourceTransactionId: order.sourceTransactionId,
+      fulfilledTransactionId: order.fulfilledTransactionId,
+      status: order.status,
+      totalAmount: Number(order.totalAmount),
+      depositAmount: Number(order.depositAmount),
+      balanceAmount: Number(order.balanceAmount),
+      depositPaidAt: order.depositPaidAt,
+      operatorName: order.operatorName,
+    })),
+  );
 
   const completedTransactions = transactionAggregate._count._all;
   const postedRevenue = Number(transactionAggregate._sum.totalAmount ?? 0);
@@ -859,28 +882,36 @@ export async function getEnterprisePosWorkspace(
         completedAtLabel: formatRelativeTime(completedAt)
       };
     }),
-    salesOrderRows: recentSalesOrders.map((order) => ({
-      orderNo: order.orderNo,
-      store: order.store.name,
-      storeCode: order.store.code,
-      terminal: order.terminal?.code ?? null,
-      sourceTransactionNo: order.sourceTransactionNo,
-      customerNo: order.customer?.customerNo ?? order.customerNoSnapshot ?? null,
-      customerName: order.customer?.fullName ?? order.customerNameSnapshot ?? null,
-      orderType: order.orderType,
-      status: order.status,
-      totalAmount: Number(order.totalAmount),
-      depositAmount: Number(order.depositAmount),
-      balanceAmount: Number(order.balanceAmount),
-      operatorName: order.operatorName,
-      fulfilledTransactionNo: order.fulfilledTransactionNo,
-      depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
-      fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
-      createdAt: order.createdAt.toISOString(),
-      createdAtLabel: formatRelativeTime(order.createdAt),
-      updatedAt: order.updatedAt.toISOString(),
-      updatedAtLabel: formatRelativeTime(order.updatedAt)
-    })),
+    salesOrderRows: recentSalesOrders.map((order) => {
+      const attribution = salesOrderAttributionById.get(order.id);
+
+      return {
+        orderNo: order.orderNo,
+        store: order.store.name,
+        storeCode: order.store.code,
+        terminal: order.terminal?.code ?? null,
+        sourceTransactionNo: order.sourceTransactionNo,
+        customerNo: order.customer?.customerNo ?? order.customerNoSnapshot ?? null,
+        customerName: order.customer?.fullName ?? order.customerNameSnapshot ?? null,
+        orderType: order.orderType,
+        status: order.status,
+        totalAmount: Number(order.totalAmount),
+        depositAmount: Number(order.depositAmount),
+        balanceAmount: Number(order.balanceAmount),
+        operatorName: order.operatorName,
+        orderCreatedBy: attribution?.orderCreatedBy ?? null,
+        depositCollectedBy: attribution?.depositCollectedBy ?? null,
+        saleCompletedBy: attribution?.saleCompletedBy ?? null,
+        balanceCollectedBy: attribution?.balanceCollectedBy ?? null,
+        fulfilledTransactionNo: order.fulfilledTransactionNo,
+        depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
+        fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
+        createdAt: order.createdAt.toISOString(),
+        createdAtLabel: formatRelativeTime(order.createdAt),
+        updatedAt: order.updatedAt.toISOString(),
+        updatedAtLabel: formatRelativeTime(order.updatedAt)
+      };
+    }),
     exceptionRows: recentExceptions.map((event) => {
       const sourceNode = byNodeCode.get(event.sourceNodeCode);
       const payload = getPayloadRecord(event.payload);
@@ -1466,7 +1497,7 @@ export async function getEnterpriseSalesOrderDetail(
           in:
             order.orderType === "LAYAWAY"
               ? ["LAYAWAY_DEPOSIT", "LAYAWAY_INSTALLMENT", "LAYAWAY_REFUND"]
-              : ["SALES_ORDER_DEPOSIT", "TRANSACTION_SETTLEMENT"]
+              : ["SALES_ORDER_DEPOSIT", "SALES_ORDER_BALANCE", "TRANSACTION_SETTLEMENT"]
         }
       },
       orderBy: [{ receivedAt: "asc" }, { id: "asc" }],

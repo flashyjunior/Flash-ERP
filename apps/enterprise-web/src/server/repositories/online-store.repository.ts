@@ -57,6 +57,7 @@ import { defaultAccountPaymentReceiptTemplateHtml } from "@/lib/templates/therma
 import { getEnterpriseSession, requireEnterpriseSession } from "@/server/auth/enterprise-session";
 import { deriveEcommercePaymentProjection } from "@/server/ecommerce/ecommerce-payment-state";
 import { resolveStoreReceiptTemplateSelection } from "@/server/repositories/receipt-template-support";
+import { getSalesOrderCollectionAttributionMap } from "@/server/reporting/sales-order-collection-attribution";
 import {
   ensureAlternateUomSellingSchemaCompatibility,
   ensureInventoryLocationSalesOrderSchemaCompatibility,
@@ -2803,6 +2804,10 @@ export type OnlineStoreWorkspaceData = {
       status: string;
       customerNo: string | null;
       customerName: string;
+      orderCreatedBy: string | null;
+      depositCollectedBy: string | null;
+      saleCompletedBy: string | null;
+      balanceCollectedBy: string | null;
       depositPaidAt: string | null;
       fulfilledAt: string | null;
       activityAt: string;
@@ -4576,6 +4581,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         refundedAmount: true,
         operatorName: true,
         note: true,
+        fulfilledTransactionId: true,
         fulfilledTransactionNo: true,
         createdAt: true,
         fulfilledAt: true,
@@ -5893,6 +5899,20 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         serialNumbers: readStringArrayJson(line.serialNumbersSnapshot) ?? []
       }))
     }));
+  const initialSalesOrderAttributionById = await getSalesOrderCollectionAttributionMap(
+    assignment.session.retailOrgId,
+    salesOrders.map((order) => ({
+      id: order.id,
+      sourceTransactionId: order.sourceTransactionId,
+      fulfilledTransactionId: order.fulfilledTransactionId,
+      status: order.status,
+      totalAmount: Number(order.totalAmount),
+      depositAmount: Number(order.depositAmount),
+      balanceAmount: Number(order.balanceAmount),
+      depositPaidAt: order.depositPaidAt,
+      operatorName: order.operatorName,
+    })),
+  );
   const mappedSalesOrders: OnlineStoreWorkspaceData["salesOrders"] = salesOrders.map((order) => {
     const orderLines = salesOrderLineRowsByTransactionId.get(order.sourceTransactionId) ?? [];
 
@@ -6174,12 +6194,18 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         return null;
       }
 
+      const attribution = initialSalesOrderAttributionById.get(order.orderId);
+
       return {
         orderId: order.orderId,
         orderNo: order.orderNo,
         status: order.status,
         customerNo: order.customerNo,
         customerName: order.customerName,
+        orderCreatedBy: attribution?.orderCreatedBy ?? null,
+        depositCollectedBy: attribution?.depositCollectedBy ?? null,
+        saleCompletedBy: attribution?.saleCompletedBy ?? null,
+        balanceCollectedBy: attribution?.balanceCollectedBy ?? null,
         depositPaidAt: order.depositPaidAt,
         fulfilledAt: order.fulfilledAt,
         activityAt: reconciliation.fulfilmentInPeriod && order.fulfilledAt ? order.fulfilledAt : order.depositPaidAt ?? order.createdAt,
@@ -6707,7 +6733,7 @@ export async function browseOnlineStoreReports(
           ]
         : [])
     ],
-    ...(criteria.cashierCode && criteria.reportId !== "layawayPayments"
+    ...(criteria.cashierCode && criteria.reportId !== "layawayPayments" && criteria.reportId !== "orderCollections"
       ? { operatorName: { contains: criteria.cashierCode } }
       : {}),
     ...(criteria.productQuery
@@ -6962,6 +6988,7 @@ export async function browseOnlineStoreReports(
         cancellationFeeAmount: true,
         refundedAmount: true,
         operatorName: true,
+        fulfilledTransactionId: true,
         fulfilledTransactionNo: true,
         createdAt: true,
         fulfilledAt: true,
@@ -6975,6 +7002,20 @@ export async function browseOnlineStoreReports(
       }
     })
   ]);
+  const salesOrderReportAttributionById = await getSalesOrderCollectionAttributionMap(
+    session.retailOrgId,
+    salesOrderReportRows.map((order) => ({
+      id: order.id,
+      sourceTransactionId: order.sourceTransactionId,
+      fulfilledTransactionId: order.fulfilledTransactionId,
+      status: order.status,
+      totalAmount: Number(order.totalAmount),
+      depositAmount: Number(order.depositAmount),
+      balanceAmount: Number(order.balanceAmount),
+      depositPaidAt: order.depositPaidAt,
+      operatorName: order.operatorName,
+    })),
+  );
   const salesOrderReportLineCounts =
     salesOrderReportRows.length > 0
       ? await prisma.salesOrderLine.groupBy({
@@ -7217,12 +7258,18 @@ export async function browseOnlineStoreReports(
         return null;
       }
 
+      const attribution = salesOrderReportAttributionById.get(order.id);
+
       return {
         orderId: order.id,
         orderNo: order.orderNo,
         status: order.status,
         customerNo: order.customerNoSnapshot,
         customerName: order.customerNameSnapshot ?? "Customer",
+        orderCreatedBy: attribution?.orderCreatedBy ?? null,
+        depositCollectedBy: attribution?.depositCollectedBy ?? null,
+        saleCompletedBy: attribution?.saleCompletedBy ?? null,
+        balanceCollectedBy: attribution?.balanceCollectedBy ?? null,
         depositPaidAt: order.depositPaidAt?.toISOString() ?? null,
         fulfilledAt: order.fulfilledAt?.toISOString() ?? null,
         activityAt: reconciliation.fulfilmentInPeriod && order.fulfilledAt ? order.fulfilledAt.toISOString() : order.depositPaidAt?.toISOString() ?? order.createdAt.toISOString(),
@@ -7235,6 +7282,11 @@ export async function browseOnlineStoreReports(
       };
     })
     .filter((row): row is OnlineStoreWorkspaceData["reports"]["salesOrderCollectionRows"][number] => row !== null)
+    .filter((row) => {
+      const cashier = criteria.cashierCode?.toLowerCase();
+      return !cashier || [row.orderCreatedBy, row.depositCollectedBy, row.saleCompletedBy, row.balanceCollectedBy]
+        .some((value) => value?.toLowerCase().includes(cashier));
+    })
     .sort((left, right) => right.activityAt.localeCompare(left.activityAt));
   const salesOrderCollectionTotals = salesOrderCollectionRows.reduce(
     (totals, row) => ({
