@@ -65,6 +65,7 @@
     "acceptance:trial-lifecycle": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/trial-workspace-lifecycle-gate.ts && tsc -p scripts/tsconfig.trial-provisioner.json --noEmit",
     "acceptance:trial-sample-data": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/trial-sample-data-gate.ts",
     "acceptance:enterprise-password-recovery": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/enterprise-password-recovery-gate.ts",
+    "acceptance:license-renewal": "tsx scripts/enterprise-license-renewal-gate.ts",
     "acceptance:trial-lifecycle:disposable": "tsx scripts/trial-workspace-disposable-test.ts",
     "acceptance:trial-signup:browser": "playwright test tests/e2e/public-trial-signup.spec.ts --project=enterprise-browser",
     "acceptance:sync-chaos": "tsx scripts/sync-chaos-reconciliation-gate.ts",

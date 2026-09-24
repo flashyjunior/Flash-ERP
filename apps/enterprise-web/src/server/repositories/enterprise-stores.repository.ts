@@ -198,6 +198,10 @@ function normalizeCodeList(values: unknown) {
   return normalized;
 }
 
+function normalizeLicenseLookupKey(value: string) {
+  return value.trim().toUpperCase();
+}
+
 function normalizeIdList(values: unknown) {
   const source =
     typeof values === "string"
@@ -2940,12 +2944,8 @@ export async function upsertEnterpriseStoreInventoryLocation(
 export async function renewEnterpriseLicenses(
   input: RenewEnterpriseLicensesRequest,
 ): Promise<RenewEnterpriseLicensesResponse> {
-  const storeCodes = normalizeCodeList(input.storeCodes).map((code) =>
-    normalizeStoreCode(code),
-  );
-  const terminalCodes = normalizeCodeList(input.terminalCodes).map((code) =>
-    normalizeCode(code, "terminal code"),
-  );
+  const storeCodes = normalizeCodeList(input.storeCodes);
+  const terminalCodes = normalizeCodeList(input.terminalCodes);
   const terminalIds = normalizeIdList(input.terminalIds);
   const includeAllTerminals = input.includeAllTerminals ?? false;
   const licenseStatus = normalizeLicenseStatus(input.licenseStatus);
@@ -2956,8 +2956,9 @@ export async function renewEnterpriseLicenses(
       ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
       : null);
   const sharedLicenseKey = normalizeOptionalText(input.licenseKey);
-  const storeLicenseKeys = normalizeLicenseKeyMap(input.storeLicenseKeys, (value) =>
-    normalizeStoreCode(value),
+  const storeLicenseKeys = normalizeLicenseKeyMap(
+    input.storeLicenseKeys,
+    normalizeLicenseLookupKey,
   );
   const terminalLicenseKeys = normalizeLicenseKeyMap(input.terminalLicenseKeys, (value) =>
     value.trim(),
@@ -3013,8 +3014,11 @@ export async function renewEnterpriseLicenses(
               },
             })
           : [];
+      const foundStoreCodes = new Set(
+        stores.map((store) => normalizeLicenseLookupKey(store.code)),
+      );
       const missingStoreCodes = storeCodes.filter(
-        (code) => !stores.some((store) => store.code === code),
+        (code) => !foundStoreCodes.has(normalizeLicenseLookupKey(code)),
       );
 
       if (missingStoreCodes.length > 0) {
@@ -3069,8 +3073,11 @@ export async function renewEnterpriseLicenses(
               },
             })
           : [];
+      const foundTerminalCodes = new Set(
+        terminals.map((terminal) => normalizeLicenseLookupKey(terminal.code)),
+      );
       const missingTerminalCodes = terminalCodes.filter(
-        (code) => !terminals.some((terminal) => terminal.code === code),
+        (code) => !foundTerminalCodes.has(normalizeLicenseLookupKey(code)),
       );
 
       if (missingTerminalCodes.length > 0) {
@@ -3081,7 +3088,7 @@ export async function renewEnterpriseLicenses(
 
       for (const store of stores) {
         const licenseKey =
-          storeLicenseKeys.get(store.code) ??
+          storeLicenseKeys.get(normalizeLicenseLookupKey(store.code)) ??
           sharedLicenseKey ??
           (licenseNeedsKey ? generateLicenseKey("STORE", store.code) : null);
         await tx.store.update({
