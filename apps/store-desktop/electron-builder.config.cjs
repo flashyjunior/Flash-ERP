@@ -1,4 +1,4 @@
-const updateUrl = "https://updates.flashcodesolutions.com/flash-erp/store-desktop/";
+const updateUrl = "https://flashcodesolutions.com.gh/rms-update/erp/";
 const allowUnsignedWindowsBuild =
   process.env.FLASH_ERP_ALLOW_UNSIGNED_WINDOWS_BUILD === "1";
 
@@ -6,7 +6,7 @@ module.exports = {
   appId: "com.flashcodesolutions.erp.storedesktop",
   productName: "Flash ERP Store Desktop",
   electronVersion: "38.1.0",
-  artifactName: "${productName}-${version}-${arch}.${ext}",
+  artifactName: "Flash_ERP_Store_Desktop-${version}-${arch}.${ext}",
   directories: {
     output: "release"
   },

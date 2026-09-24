@@ -338,7 +338,7 @@ const defaultDesktopConnectionConfig: StoreDesktopConnectionConfig = {
   userDataPath: "",
   syncBaseUrl: "",
   updateFeedUrl:
-    "https://updates.flashcodesolutions.com/flash-erp/store-desktop/",
+    "https://flashcodesolutions.com.gh/rms-update/erp/",
 };
 
 const workspaceItems: Array<{
