@@ -41,6 +41,7 @@
     "acceptance:sales-order-payments": "node --experimental-sqlite --import tsx scripts/sales-order-payment-attribution-gate.ts",
     "acceptance:sales-order-balance": "tsx scripts/sales-order-balance-regression-gate.ts",
     "acceptance:sales-order-collections": "tsx scripts/sales-order-collections-reconciliation-gate.ts",
+    "acceptance:desktop-update-artifact": "tsx scripts/desktop-update-artifact-name-gate.ts",
     "acceptance:desktop-stability": "tsx scripts/desktop-stability-gates.ts",
     "acceptance:parity": "tsx scripts/rms-parity-closure-gates.ts && npm run acceptance:online-store-parity",
     "acceptance:online-store-parity": "tsx scripts/online-store-desktop-parity-gate.ts",
@@ -115,7 +116,9 @@
   },
   "allowScripts": {
     "@prisma/engines@7.7.0": true,
+    "electron@38.8.6": true,
     "esbuild@0.27.7": true,
+    "node@24.16.0": true,
     "prisma@7.7.0": true,
     "sharp@0.34.5": true
   }

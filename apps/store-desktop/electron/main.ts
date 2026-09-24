@@ -192,7 +192,7 @@ const desktopConnectionConfigEnvKeys = [
   "FLASH_ERP_DESKTOP_UPDATE_URL"
 ] as const;
 const defaultDesktopUpdateFeedUrl =
-  "https://updates.flashcodesolutions.com/flash-erp/store-desktop/";
+  "https://flashcodesolutions.com.gh/rms-update/erp/";
 const desktopUpdateCheckIntervalMs = 6 * 60 * 60 * 1000;
 const rendererReadyTimeoutMs = 8_000;
 const rendererHeartbeatWarningMs = 35_000;
