@@ -5305,11 +5305,15 @@ export function OnlineStoreWorkspace({
 
     if (activeReport === "orderCollections") {
       downloadCsv(baseName, [
-        ["Order", "Status", "Customer", "Deposit date", "Fulfilment date", "Sales recognized", "Opening deposits", "Prior deposits applied", "Balance collected", "Expected tender", "Outstanding"],
+        ["Order", "Status", "Customer", "Order created by", "Deposit collected by", "Sale completed by", "Balance collected by", "Deposit date", "Fulfilment date", "Sales recognized", "Opening deposits", "Prior deposits applied", "Balance collected", "Expected tender", "Outstanding"],
         ...reportSalesOrderCollectionRows.map((row) => [
           row.orderNo,
           row.status,
           row.customerName,
+          row.orderCreatedBy,
+          row.depositCollectedBy,
+          row.saleCompletedBy,
+          row.balanceCollectedBy,
           row.depositPaidAt,
           row.fulfilledAt,
           row.salesRecognizedAmount,
@@ -5490,9 +5494,13 @@ export function OnlineStoreWorkspace({
                 }
               : activeReport === "orderCollections"
                 ? {
-                    headers: ["Order", "Sales", "Opening deposit", "Prior deposit", "Balance collected", "Expected tender", "Outstanding"],
+                    headers: ["Order", "Created by", "Deposit collector", "Sale completed by", "Balance collector", "Sales", "Opening deposit", "Prior deposit", "Balance collected", "Expected tender", "Outstanding"],
                     rows: reportSalesOrderCollectionRows.map((row) => [
                       row.orderNo,
+                      row.orderCreatedBy ?? "Unassigned",
+                      row.depositCollectedBy ?? "Unassigned",
+                      row.saleCompletedBy ?? "Not fulfilled",
+                      row.balanceCollectedBy ?? "Not collected",
                       formatMoney(row.salesRecognizedAmount, currencyCode),
                       formatMoney(row.openingDepositCollectedAmount, currencyCode),
                       formatMoney(row.priorDepositAppliedAmount, currencyCode),
@@ -11591,10 +11599,10 @@ export function OnlineStoreWorkspace({
                   <div className="rms-table-head"><span>Order</span><span>Sales</span><span>Prior deposit</span><span>Balance collected</span><span>Expected tender</span><span>Outstanding</span></div>
                   {reportSalesOrderCollectionRows.map((row) => (
                     <div className="rms-table-row" key={row.orderId}>
-                      <strong>{row.orderNo}<small>{row.customerName} · {row.fulfilledAt ? `fulfilled ${formatRelative(row.fulfilledAt)}` : `deposit ${formatRelative(row.depositPaidAt)}`}</small></strong>
-                      <span>{formatMoney(row.salesRecognizedAmount, currencyCode)}</span>
-                      <span>{formatMoney(row.priorDepositAppliedAmount, currencyCode)}</span>
-                      <span>{formatMoney(row.balanceCollectedAmount, currencyCode)}</span>
+                      <strong>{row.orderNo}<small>{row.customerName} · created by {row.orderCreatedBy ?? "Unassigned"}</small></strong>
+                      <span>{formatMoney(row.salesRecognizedAmount, currencyCode)}<small>{row.saleCompletedBy ? `Completed by ${row.saleCompletedBy}` : "Not fulfilled"}</small></span>
+                      <span>{formatMoney(row.priorDepositAppliedAmount, currencyCode)}<small>Collected by {row.depositCollectedBy ?? "Unassigned"}</small></span>
+                      <span>{formatMoney(row.balanceCollectedAmount, currencyCode)}<small>{row.balanceCollectedBy ? `Collected by ${row.balanceCollectedBy}` : "Not collected"}</small></span>
                       <b>{formatMoney(row.expectedTenderAmount, currencyCode)}</b>
                       <span>{formatMoney(row.outstandingBalanceAmount, currencyCode)}</span>
                     </div>

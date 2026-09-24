@@ -20,6 +20,25 @@ export type SalesOrderCollectionReconciliation = {
   expectedTenderAmount: number;
   outstandingBalanceAmount: number;
 };
+export type SalesOrderCollectionPaymentAttribution = {
+  paymentPurpose: string;
+  receivedCashierCode?: string | null;
+  receivedAt?: string | Date | null;
+};
+export type SalesOrderCollectionAttributionSource = SalesOrderCollectionSource & {
+  operatorName?: string | null;
+  fulfilledCashierCode?: string | null;
+  payments?: SalesOrderCollectionPaymentAttribution[];
+};
+export type SalesOrderCollectionAttribution = {
+  orderCreatedBy: string | null;
+  depositCollectedBy: string | null;
+  saleCompletedBy: string | null;
+  balanceCollectedBy: string | null;
+};
+export declare function resolveSalesOrderCollectionAttribution(
+  source: SalesOrderCollectionAttributionSource,
+): SalesOrderCollectionAttribution;
 export declare function reconcileSalesOrderCollections(
   source: SalesOrderCollectionSource,
   period?: SalesOrderCollectionPeriod,

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { reconcileSalesOrderCollections } from "../packages/domain/src/sales-order-collections.js";
+import {
+  reconcileSalesOrderCollections,
+  resolveSalesOrderCollectionAttribution,
+} from "../packages/domain/src/sales-order-collections.js";
 
 const order = {
   status: "FULFILLED",
@@ -48,6 +51,46 @@ const wholePeriod = reconcileSalesOrderCollections(order, { dateFrom: "2026-09-0
 assert.equal(wholePeriod?.expectedTenderAmount, 1000);
 assert.equal(wholePeriod?.priorDepositAppliedAmount, 500);
 
+assert.deepEqual(
+  resolveSalesOrderCollectionAttribution({
+    ...order,
+    operatorName: "ORDER-CASHIER",
+    fulfilledCashierCode: "FULFILMENT-CASHIER",
+    payments: [
+      {
+        paymentPurpose: "SALES_ORDER_DEPOSIT",
+        receivedCashierCode: "DEPOSIT-CASHIER",
+        receivedAt: "2026-09-01T10:00:00.000Z",
+      },
+      {
+        paymentPurpose: "SALES_ORDER_BALANCE",
+        receivedCashierCode: "BALANCE-CASHIER",
+        receivedAt: "2026-09-22T14:00:00.000Z",
+      },
+    ],
+  }),
+  {
+    orderCreatedBy: "ORDER-CASHIER",
+    depositCollectedBy: "DEPOSIT-CASHIER",
+    saleCompletedBy: "FULFILMENT-CASHIER",
+    balanceCollectedBy: "BALANCE-CASHIER",
+  },
+);
+
+assert.deepEqual(
+  resolveSalesOrderCollectionAttribution({
+    ...order,
+    operatorName: "LEGACY-ORDER-CASHIER",
+    fulfilledCashierCode: "LEGACY-FULFILMENT-CASHIER",
+  }),
+  {
+    orderCreatedBy: "LEGACY-ORDER-CASHIER",
+    depositCollectedBy: "LEGACY-ORDER-CASHIER",
+    saleCompletedBy: "LEGACY-FULFILMENT-CASHIER",
+    balanceCollectedBy: "LEGACY-FULFILMENT-CASHIER",
+  },
+);
+
 for (const relativePath of [
   "apps/enterprise-web/src/server/repositories/enterprise-reporting.repository.ts",
   "apps/enterprise-web/src/server/repositories/online-store.repository.ts",
@@ -58,6 +101,8 @@ for (const relativePath of [
 ]) {
   const source = readFileSync(path.resolve(relativePath), "utf8");
   assert.match(source, /salesOrderCollectionRows|order-collections/);
+  assert.match(source, /depositCollectedBy|deposit_collected_by/);
+  assert.match(source, /balanceCollectedBy|balance_collected_by/);
 }
 
 for (const relativePath of [

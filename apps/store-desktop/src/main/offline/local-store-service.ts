@@ -695,6 +695,9 @@ type SalesOrderRow = {
   line_count: number | string;
   item_count: number | string;
   operator_name: string | null;
+  deposit_collected_by: string | null;
+  sale_completed_by: string | null;
+  balance_collected_by: string | null;
   note: string | null;
   fulfilled_transaction_id: string | null;
   fulfilled_transaction_no: string | null;
@@ -8072,7 +8075,12 @@ export class LocalStoreService {
         const matchesDateTo = !dateTo || orderDate <= dateTo;
         const matchesCashier =
           !cashierCode ||
-          (order.operatorName ?? "").toUpperCase() === cashierCode.toUpperCase();
+          [
+            order.operatorName,
+            order.depositCollectedBy,
+            order.saleCompletedBy,
+            order.balanceCollectedBy,
+          ].some((value) => (value ?? "").toUpperCase() === cashierCode.toUpperCase());
         const customerText = `${order.customerNo ?? ""} ${order.customerName ?? ""}`.toUpperCase();
         const matchesCustomer = !customerQuery || customerText.includes(customerQuery);
 
@@ -8084,7 +8092,12 @@ export class LocalStoreService {
       .filter((order) => {
         const matchesCashier =
           !cashierCode ||
-          (order.operatorName ?? "").toUpperCase() === cashierCode.toUpperCase();
+          [
+            order.operatorName,
+            order.depositCollectedBy,
+            order.saleCompletedBy,
+            order.balanceCollectedBy,
+          ].some((value) => (value ?? "").toUpperCase() === cashierCode.toUpperCase());
         const customerText = `${order.customerNo ?? ""} ${order.customerName ?? ""}`.toUpperCase();
 
         return matchesCashier && (!customerQuery || customerText.includes(customerQuery));
@@ -8102,6 +8115,10 @@ export class LocalStoreService {
           customerNo: order.customerNo,
           customerName: order.customerName,
           status: order.status,
+          orderCreatedBy: order.operatorName,
+          depositCollectedBy: order.depositCollectedBy,
+          saleCompletedBy: order.saleCompletedBy,
+          balanceCollectedBy: order.balanceCollectedBy,
           depositPaidAt: order.depositPaidAt,
           fulfilledAt: order.fulfilledAt,
           activityAt:
@@ -15284,6 +15301,28 @@ export class LocalStoreService {
           COUNT(line.id) AS line_count,
           COALESCE(SUM(line.quantity), 0) AS item_count,
           sales_order.operator_name AS operator_name,
+          (
+            SELECT payment.received_cashier_code
+            FROM pos_payment AS payment
+            WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+              AND payment.payment_purpose = 'SALES_ORDER_DEPOSIT'
+            ORDER BY payment.received_at ASC, payment.id ASC
+            LIMIT 1
+          ) AS deposit_collected_by,
+          (
+            SELECT transaction_row.cashier_code
+            FROM pos_transaction AS transaction_row
+            WHERE transaction_row.id = sales_order.fulfilled_transaction_id
+            LIMIT 1
+          ) AS sale_completed_by,
+          (
+            SELECT payment.received_cashier_code
+            FROM pos_payment AS payment
+            WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+              AND payment.payment_purpose = 'SALES_ORDER_BALANCE'
+            ORDER BY payment.received_at DESC, payment.id DESC
+            LIMIT 1
+          ) AS balance_collected_by,
           sales_order.note AS note,
           sales_order.fulfilled_transaction_id AS fulfilled_transaction_id,
           sales_order.fulfilled_transaction_no AS fulfilled_transaction_no,
@@ -27694,6 +27733,28 @@ export class LocalStoreService {
           COUNT(line.id) AS line_count,
           COALESCE(SUM(line.quantity), 0) AS item_count,
           sales_order.operator_name AS operator_name,
+          (
+            SELECT payment.received_cashier_code
+            FROM pos_payment AS payment
+            WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+              AND payment.payment_purpose = 'SALES_ORDER_DEPOSIT'
+            ORDER BY payment.received_at ASC, payment.id ASC
+            LIMIT 1
+          ) AS deposit_collected_by,
+          (
+            SELECT transaction_row.cashier_code
+            FROM pos_transaction AS transaction_row
+            WHERE transaction_row.id = sales_order.fulfilled_transaction_id
+            LIMIT 1
+          ) AS sale_completed_by,
+          (
+            SELECT payment.received_cashier_code
+            FROM pos_payment AS payment
+            WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+              AND payment.payment_purpose = 'SALES_ORDER_BALANCE'
+            ORDER BY payment.received_at DESC, payment.id DESC
+            LIMIT 1
+          ) AS balance_collected_by,
           sales_order.note AS note,
           sales_order.fulfilled_transaction_id AS fulfilled_transaction_id,
           sales_order.fulfilled_transaction_no AS fulfilled_transaction_no,
@@ -27783,6 +27844,28 @@ export class LocalStoreService {
           COUNT(line.id) AS line_count,
           COALESCE(SUM(line.quantity), 0) AS item_count,
           sales_order.operator_name AS operator_name,
+          (
+            SELECT payment.received_cashier_code
+            FROM pos_payment AS payment
+            WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+              AND payment.payment_purpose = 'SALES_ORDER_DEPOSIT'
+            ORDER BY payment.received_at ASC, payment.id ASC
+            LIMIT 1
+          ) AS deposit_collected_by,
+          (
+            SELECT transaction_row.cashier_code
+            FROM pos_transaction AS transaction_row
+            WHERE transaction_row.id = sales_order.fulfilled_transaction_id
+            LIMIT 1
+          ) AS sale_completed_by,
+          (
+            SELECT payment.received_cashier_code
+            FROM pos_payment AS payment
+            WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+              AND payment.payment_purpose = 'SALES_ORDER_BALANCE'
+            ORDER BY payment.received_at DESC, payment.id DESC
+            LIMIT 1
+          ) AS balance_collected_by,
           sales_order.note AS note,
           sales_order.fulfilled_transaction_id AS fulfilled_transaction_id,
           sales_order.fulfilled_transaction_no AS fulfilled_transaction_no,
@@ -27876,6 +27959,16 @@ export class LocalStoreService {
       lineCount: asNumber(row.line_count),
       itemCount: Number(asNumber(row.item_count).toFixed(3)),
       operatorName: row.operator_name,
+      depositCollectedBy:
+        row.deposit_collected_by ??
+        (asNumber(row.deposit_amount) > 0 ? row.operator_name : null),
+      saleCompletedBy: row.sale_completed_by ?? row.balance_collected_by,
+      balanceCollectedBy:
+        row.balance_collected_by ??
+        (row.status === "FULFILLED" &&
+        asNumber(row.total_amount) - asNumber(row.deposit_amount) - asNumber(row.balance_amount) > 0
+          ? row.sale_completed_by
+          : null),
       note: row.note,
       fulfilledTransactionId: row.fulfilled_transaction_id,
       fulfilledTransactionNo: row.fulfilled_transaction_no,

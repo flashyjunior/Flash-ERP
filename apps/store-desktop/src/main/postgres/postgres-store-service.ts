@@ -607,6 +607,9 @@ type SalesOrderRow = {
   line_count: string | number;
   item_count: string | number;
   operator_name: string | null;
+  deposit_collected_by: string | null;
+  sale_completed_by: string | null;
+  balance_collected_by: string | null;
   note: string | null;
   fulfilled_transaction_id: string | null;
   fulfilled_transaction_no: string | null;
@@ -7196,10 +7199,6 @@ export class PostgresStoreService {
       collectionWhere.push(`(sales_order.deposit_paid_at <= ${toParam} OR sales_order.fulfilled_at <= ${toParam})`);
     }
 
-    if (cashierCode) {
-      collectionWhere.push(`UPPER(COALESCE(sales_order.operator_name, '')) = ${addCollectionParam(cashierCode.toUpperCase())}`);
-    }
-
     if (customerQuery) {
       const customerParam = addCollectionParam(`%${customerQuery}%`);
       collectionWhere.push(`(UPPER(COALESCE(sales_order.customer_no, '')) LIKE ${customerParam} OR UPPER(COALESCE(sales_order.customer_name, '')) LIKE ${customerParam})`);
@@ -7225,6 +7224,10 @@ export class PostgresStoreService {
     )
       .map((row) => this.toSalesOrderSummary(row))
       .filter((order) => order.orderType !== "LAYAWAY")
+      .filter((order) =>
+        !cashierCode || [order.operatorName, order.depositCollectedBy, order.saleCompletedBy, order.balanceCollectedBy]
+          .some((value) => (value ?? "").toUpperCase() === cashierCode.toUpperCase()),
+      )
       .map<StoreSalesOrderCollectionReconciliationRow | null>((order) => {
         const reconciliation = reconcileSalesOrderCollections(order, { dateFrom, dateTo });
 
@@ -7238,6 +7241,10 @@ export class PostgresStoreService {
           customerNo: order.customerNo,
           customerName: order.customerName,
           status: order.status,
+          orderCreatedBy: order.operatorName,
+          depositCollectedBy: order.depositCollectedBy,
+          saleCompletedBy: order.saleCompletedBy,
+          balanceCollectedBy: order.balanceCollectedBy,
           depositPaidAt: order.depositPaidAt,
           fulfilledAt: order.fulfilledAt,
           activityAt: reconciliation.fulfilmentInPeriod && order.fulfilledAt ? order.fulfilledAt : order.depositPaidAt ?? order.createdAt,
@@ -11063,6 +11070,28 @@ export class PostgresStoreService {
         COUNT(line.id) AS line_count,
         COALESCE(SUM(line.quantity), 0) AS item_count,
         sales_order.operator_name,
+        (
+          SELECT payment.received_cashier_code
+          FROM pos_payment AS payment
+          WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+            AND payment.payment_purpose = 'SALES_ORDER_DEPOSIT'
+          ORDER BY payment.received_at ASC, payment.id ASC
+          LIMIT 1
+        ) AS deposit_collected_by,
+        (
+          SELECT transaction_row.cashier_code
+          FROM pos_transaction AS transaction_row
+          WHERE transaction_row.id = sales_order.fulfilled_transaction_id
+          LIMIT 1
+        ) AS sale_completed_by,
+        (
+          SELECT payment.received_cashier_code
+          FROM pos_payment AS payment
+          WHERE payment.pos_transaction_id = sales_order.source_transaction_id
+            AND payment.payment_purpose = 'SALES_ORDER_BALANCE'
+          ORDER BY payment.received_at DESC, payment.id DESC
+          LIMIT 1
+        ) AS balance_collected_by,
         sales_order.note,
         sales_order.fulfilled_transaction_id,
         sales_order.fulfilled_transaction_no,
@@ -11158,6 +11187,16 @@ export class PostgresStoreService {
       lineCount: Math.trunc(asNumber(row.line_count)),
       itemCount: Number(asNumber(row.item_count).toFixed(3)),
       operatorName: row.operator_name,
+      depositCollectedBy:
+        row.deposit_collected_by ??
+        (asNumber(row.deposit_amount) > 0 ? row.operator_name : null),
+      saleCompletedBy: row.sale_completed_by ?? row.balance_collected_by,
+      balanceCollectedBy:
+        row.balance_collected_by ??
+        (row.status === "FULFILLED" &&
+        asNumber(row.total_amount) - asNumber(row.deposit_amount) - asNumber(row.balance_amount) > 0
+          ? row.sale_completed_by
+          : null),
       note: row.note,
       fulfilledTransactionId: row.fulfilled_transaction_id,
       fulfilledTransactionNo: row.fulfilled_transaction_no,

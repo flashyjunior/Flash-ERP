@@ -37,6 +37,65 @@ function money(value) {
   return Number(Math.max(0, Number(value) || 0).toFixed(2));
 }
 
+function cleanIdentity(value) {
+  const normalized = value?.trim();
+  return normalized || null;
+}
+
+function paymentTimestamp(payment) {
+  return toTimestamp(payment.receivedAt) ?? 0;
+}
+
+export function resolveSalesOrderCollectionAttribution(source) {
+  const payments = [...(source.payments ?? [])].sort(
+    (left, right) => paymentTimestamp(left) - paymentTimestamp(right),
+  );
+  const explicitDeposit = payments.find(
+    (payment) => payment.paymentPurpose === "SALES_ORDER_DEPOSIT",
+  );
+  const explicitBalance = [...payments].reverse().find(
+    (payment) => payment.paymentPurpose === "SALES_ORDER_BALANCE",
+  );
+  const legacyPayments = payments.filter(
+    (payment) => payment.paymentPurpose === "TRANSACTION_SETTLEMENT",
+  );
+  const depositTimestamp = toTimestamp(source.depositPaidAt);
+  const legacyDeposit = legacyPayments.find(
+    (payment) => depositTimestamp === null || paymentTimestamp(payment) <= depositTimestamp,
+  );
+  const legacyBalance = [...legacyPayments]
+    .reverse()
+    .find(
+      (payment) =>
+        depositTimestamp === null || paymentTimestamp(payment) > depositTimestamp,
+    );
+  const orderCreatedBy = cleanIdentity(source.operatorName);
+  const fulfilledCashier = cleanIdentity(source.fulfilledCashierCode);
+  const depositCollectedBy =
+    cleanIdentity(explicitDeposit?.receivedCashierCode) ??
+    cleanIdentity(legacyDeposit?.receivedCashierCode) ??
+    (money(source.depositAmount) > 0 ? orderCreatedBy : null);
+  const calculatedBalanceCollected = money(
+    source.totalAmount - source.depositAmount - source.balanceAmount,
+  );
+  const balanceCollectedBy =
+    cleanIdentity(explicitBalance?.receivedCashierCode) ??
+    cleanIdentity(legacyBalance?.receivedCashierCode) ??
+    (source.status.toUpperCase() === "FULFILLED" && calculatedBalanceCollected > 0
+      ? fulfilledCashier
+      : null);
+
+  return {
+    orderCreatedBy,
+    depositCollectedBy,
+    saleCompletedBy:
+      source.status.toUpperCase() === "FULFILLED"
+        ? fulfilledCashier ?? balanceCollectedBy
+        : null,
+    balanceCollectedBy,
+  };
+}
+
 export function reconcileSalesOrderCollections(source, period = {}) {
   const depositCollectedInPeriod = isInPeriod(source.depositPaidAt, period);
   const fulfilmentInPeriod =

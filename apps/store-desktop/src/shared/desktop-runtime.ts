@@ -912,6 +912,9 @@ export type StoreSalesOrderSummary = {
   lineCount: number;
   itemCount: number;
   operatorName: string | null;
+  depositCollectedBy: string | null;
+  saleCompletedBy: string | null;
+  balanceCollectedBy: string | null;
   note: string | null;
   fulfilledTransactionId: string | null;
   fulfilledTransactionNo: string | null;
@@ -928,6 +931,10 @@ export type StoreSalesOrderCollectionReconciliationRow = {
   customerNo: string | null;
   customerName: string | null;
   status: StoreSalesOrderStatus;
+  orderCreatedBy: string | null;
+  depositCollectedBy: string | null;
+  saleCompletedBy: string | null;
+  balanceCollectedBy: string | null;
   depositPaidAt: string | null;
   fulfilledAt: string | null;
   activityAt: string;
