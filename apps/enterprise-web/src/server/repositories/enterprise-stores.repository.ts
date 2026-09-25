@@ -987,6 +987,24 @@ export type CreateEnterpriseStoreTerminalResponse = {
   serverProcessedAt: string;
 };
 
+export type UpdateEnterpriseStoreTerminalRequest = {
+  terminalCode: string;
+  terminalName: string;
+  status?: string | null;
+};
+
+export type UpdateEnterpriseStoreTerminalResponse = {
+  storeCode: string;
+  previousTerminalCode: string;
+  terminalCode: string;
+  terminalName: string;
+  terminalStatus: string;
+  licenseStatus: string;
+  nodeCodes: string[];
+  message: string;
+  serverProcessedAt: string;
+};
+
 export type UpdateEnterpriseStoreRequest = {
   storeName: string;
   shortName?: string | null;
@@ -2433,6 +2451,139 @@ export async function createEnterpriseStoreTerminal(
     throw toStoreMutationError(
       error,
       "Flash ERP could not register that terminal.",
+    );
+  }
+}
+
+export async function updateEnterpriseStoreTerminal(
+  storeCodeInput: string,
+  currentTerminalCodeInput: string,
+  input: UpdateEnterpriseStoreTerminalRequest,
+): Promise<UpdateEnterpriseStoreTerminalResponse> {
+  const storeCode = normalizeStoreCode(storeCodeInput);
+  const previousTerminalCode = normalizeCode(
+    currentTerminalCodeInput,
+    "current terminal code",
+  );
+  const terminalCode = normalizeCode(input.terminalCode, "terminal code");
+  const terminalName = normalizeRequiredText(input.terminalName, "terminal name");
+  const terminalStatus = normalizeRecordStatus(input.status ?? RecordStatus.ACTIVE);
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const enterpriseNode = await tx.syncNode.findFirst({
+        where: {
+          nodeType: SyncNodeType.ENTERPRISE,
+          isPrimary: true,
+          status: RecordStatus.ACTIVE,
+        },
+        select: {
+          retailOrgId: true,
+        },
+      });
+
+      if (!enterpriseNode) {
+        throw new Error("No primary enterprise node is available for terminal maintenance.");
+      }
+
+      const store = await tx.store.findFirst({
+        where: {
+          retailOrgId: enterpriseNode.retailOrgId,
+          code: storeCode,
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+        },
+      });
+
+      if (!store) {
+        throw new Error(`Flash ERP could not find store "${storeCode}".`);
+      }
+
+      const terminal = await tx.terminal.findUnique({
+        where: {
+          storeId_code: {
+            storeId: store.id,
+            code: previousTerminalCode,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (!terminal) {
+        throw new Error(
+          `Flash ERP could not find terminal "${previousTerminalCode}" for ${store.name}.`,
+        );
+      }
+
+      if (terminalCode !== previousTerminalCode) {
+        const conflictingTerminal = await tx.terminal.findUnique({
+          where: {
+            storeId_code: {
+              storeId: store.id,
+              code: terminalCode,
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        if (conflictingTerminal && conflictingTerminal.id !== terminal.id) {
+          throw new Error(
+            `Terminal "${terminalCode}" is already registered for ${store.name}.`,
+          );
+        }
+      }
+
+      const updatedTerminal = await tx.terminal.update({
+        where: {
+          id: terminal.id,
+        },
+        data: {
+          code: terminalCode,
+          name: terminalName,
+          status: terminalStatus,
+        },
+        select: {
+          code: true,
+          name: true,
+          status: true,
+          licenseStatus: true,
+          syncNodes: {
+            orderBy: {
+              code: "asc",
+            },
+            select: {
+              code: true,
+            },
+          },
+        },
+      });
+
+      return {
+        storeCode: store.code,
+        previousTerminalCode,
+        terminalCode: updatedTerminal.code,
+        terminalName: updatedTerminal.name,
+        terminalStatus: updatedTerminal.status,
+        licenseStatus: updatedTerminal.licenseStatus,
+        nodeCodes: updatedTerminal.syncNodes.map((node) => node.code),
+        message:
+          terminalCode === previousTerminalCode
+            ? `Flash ERP updated ${updatedTerminal.name}. Its node binding, licence, and sync history were preserved.`
+            : `Flash ERP changed terminal ${previousTerminalCode} to ${updatedTerminal.code}. Its node binding, licence, and sync history were preserved; retry the blocked shop sync now.`,
+        serverProcessedAt: new Date().toISOString(),
+      };
+    });
+  } catch (error) {
+    throw toStoreMutationError(
+      error,
+      "Flash ERP could not update that terminal.",
     );
   }
 }

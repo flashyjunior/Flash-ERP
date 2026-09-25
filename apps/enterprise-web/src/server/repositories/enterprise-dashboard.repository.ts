@@ -58,6 +58,7 @@ export type EnterpriseSyncDashboardData = {
     downstreamQueue: number;
     lastSync: string;
     posture: SyncPosture;
+    postureReasons: string[];
   }>;
   publicationTargets: Array<{
     storeCode: string;
@@ -120,10 +121,12 @@ function classifyPosture(input: {
   upstreamQueue: number;
   downstreamQueue: number;
   escalatedEventCount: number;
+  reportedHealth: string | null;
 }) {
   const staleMinutes = minutesSince(input.lastSyncAt);
 
   if (
+    input.reportedHealth === "attention" ||
     input.escalatedEventCount > 0 ||
     staleMinutes >= 120 ||
     input.upstreamQueue >= 250 ||
@@ -132,11 +135,53 @@ function classifyPosture(input: {
     return "Attention" as const;
   }
 
-  if (staleMinutes >= 30 || input.upstreamQueue >= 50 || input.downstreamQueue >= 8) {
+  if (
+    input.reportedHealth === "lagging" ||
+    staleMinutes >= 30 ||
+    input.upstreamQueue >= 50 ||
+    input.downstreamQueue >= 8
+  ) {
     return "Lagging" as const;
   }
 
   return "Healthy" as const;
+}
+
+function describePosture(input: {
+  lastSyncAt: Date | null;
+  upstreamQueue: number;
+  downstreamQueue: number;
+  escalatedEventCount: number;
+  reportedHealth: string | null;
+}) {
+  const reasons: string[] = [];
+  const staleMinutes = minutesSince(input.lastSyncAt);
+
+  if (input.reportedHealth === "attention") {
+    reasons.push("The Store Desktop reported its local sync health as Attention.");
+  } else if (input.reportedHealth === "lagging") {
+    reasons.push("The Store Desktop reported its local sync health as Lagging.");
+  }
+
+  if (input.escalatedEventCount > 0) {
+    reasons.push(`${input.escalatedEventCount} failed or dead-letter event(s) require operator review.`);
+  }
+
+  if (!input.lastSyncAt) {
+    reasons.push("No heartbeat, store sync, or enterprise checkpoint has ever been confirmed.");
+  } else if (staleMinutes >= 30) {
+    reasons.push(`The last confirmed sync was ${formatRelativeTime(input.lastSyncAt).toLowerCase()}.`);
+  }
+
+  if (input.upstreamQueue > 0) {
+    reasons.push(`${input.upstreamQueue} upstream event(s) are queued or in flight at the shop.`);
+  }
+
+  if (input.downstreamQueue > 0) {
+    reasons.push(`${input.downstreamQueue} downstream packet(s) are still waiting for the shop.`);
+  }
+
+  return reasons.length > 0 ? reasons : ["No active sync condition requires operator action."];
 }
 
 function postureRank(value: SyncPosture) {
@@ -506,12 +551,14 @@ export async function getEnterpriseSyncDashboard(): Promise<EnterpriseSyncDashbo
     const downstreamQueue = node.lastTelemetryAt
       ? node.lastReportedDownstreamQueued ?? 0
       : (downstreamQueueCountByTarget.get(node.code) ?? 0);
-    const posture = classifyPosture({
+    const postureInput = {
       lastSyncAt,
       upstreamQueue,
       downstreamQueue,
-      escalatedEventCount
-    });
+      escalatedEventCount,
+      reportedHealth: node.lastReportedHealth
+    };
+    const posture = classifyPosture(postureInput);
 
     return {
       store: node.store?.name ?? node.name,
@@ -521,6 +568,7 @@ export async function getEnterpriseSyncDashboard(): Promise<EnterpriseSyncDashbo
       lastSyncAt,
       lastSync: formatRelativeTime(lastSyncAt),
       posture,
+      postureReasons: describePosture(postureInput),
       escalatedEventCount,
       staleMinutes: minutesSince(lastSyncAt),
       reportedHealth: node.lastReportedHealth
@@ -617,7 +665,8 @@ export async function getEnterpriseSyncDashboard(): Promise<EnterpriseSyncDashbo
       upstreamQueue: row.upstreamQueue,
       downstreamQueue: row.downstreamQueue,
       lastSync: row.lastSync,
-      posture: row.posture
+      posture: row.posture,
+      postureReasons: row.postureReasons
     })),
     publicationTargets: [...publicationTargetByStoreCode.values()],
     priorities,

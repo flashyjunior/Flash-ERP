@@ -6048,8 +6048,15 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     customerName: transaction.customerNameSnapshot ?? "Walk-in",
     lineCount: transaction.lines.length,
     productPreview: transaction.lines.map((line) => line.productNameSnapshot).join(", "),
-    totalAmount: Number(transaction.totalAmount),
-    paidAmount: Number(transaction.paidAmount)
+    totalAmount: signedTransactionAmount({
+      transactionType: transaction.transactionType,
+      amount: Number(transaction.totalAmount)
+    }),
+    paidAmount: signedPaymentAmount({
+      transactionType: transaction.transactionType,
+      totalAmount: Number(transaction.totalAmount),
+      paymentAmount: Number(transaction.paidAmount)
+    })
   }));
   const reportTenderRows = [...reportTenderMap.values()].sort((left, right) => right.netAmount - left.netAmount);
   const reportProductRows = [...reportProductMap.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount));
@@ -6115,7 +6122,17 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     })
     .filter((row): row is NonNullable<typeof row> => row !== null)
     .sort((left, right) => Math.abs(right.stockValue) - Math.abs(left.stockValue));
-  const reportNetSalesAmount = toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.totalAmount), 0));
+  const reportNetSalesAmount = toMoney(
+    reportTransactions.reduce(
+      (sum, transaction) =>
+        sum +
+        signedTransactionAmount({
+          transactionType: transaction.transactionType,
+          amount: Number(transaction.totalAmount)
+        }),
+      0
+    )
+  );
   const layawayOrders = salesOrders.filter((order) => order.orderType === "LAYAWAY");
   const layawayOrderBySourceTransactionId = new Map(
     layawayOrders.map((order) => [order.sourceTransactionId, order] as const)
@@ -6236,8 +6253,28 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       exchangeCount: reportTransactions.filter((transaction) => transaction.transactionType === PosTransactionType.EXCHANGE).length,
       netSalesAmount: reportNetSalesAmount,
       returnAmount: reportReturnAmount,
-      discountAmount: toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.discountAmount), 0)),
-      taxAmount: toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.taxAmount), 0)),
+      discountAmount: toMoney(
+        reportTransactions.reduce(
+          (sum, transaction) =>
+            sum +
+            signedTransactionAmount({
+              transactionType: transaction.transactionType,
+              amount: Number(transaction.discountAmount)
+            }),
+          0
+        )
+      ),
+      taxAmount: toMoney(
+        reportTransactions.reduce(
+          (sum, transaction) =>
+            sum +
+            signedTransactionAmount({
+              transactionType: transaction.transactionType,
+              amount: Number(transaction.taxAmount)
+            }),
+          0
+        )
+      ),
       tenderedAmount: toMoney(reportTenderRows.reduce((sum, row) => sum + row.netAmount, 0)),
       inventoryStockValue: toMoney(reportInventoryRows.reduce((sum, row) => sum + row.stockValue, 0)),
       salesOrderRecognizedAmount: toMoney(initialCollectionTotals.recognized),
@@ -6964,7 +7001,10 @@ export async function browseOnlineStoreReports(
     prisma.salesOrder.findMany({
       where: salesOrderWhere,
       orderBy: [{ createdAt: "desc" }, { orderNo: "desc" }],
-      take: criteria.limit,
+      take:
+        criteria.reportId === "orderCollections"
+          ? Math.min(criteria.limit * 10, 1000)
+          : criteria.limit,
       select: {
         id: true,
         orderNo: true,
@@ -7287,7 +7327,8 @@ export async function browseOnlineStoreReports(
       return !cashier || [row.orderCreatedBy, row.depositCollectedBy, row.saleCompletedBy, row.balanceCollectedBy]
         .some((value) => value?.toLowerCase().includes(cashier));
     })
-    .sort((left, right) => right.activityAt.localeCompare(left.activityAt));
+    .sort((left, right) => right.activityAt.localeCompare(left.activityAt))
+    .slice(0, criteria.limit);
   const salesOrderCollectionTotals = salesOrderCollectionRows.reduce(
     (totals, row) => ({
       recognized: totals.recognized + row.salesRecognizedAmount,
@@ -7326,8 +7367,15 @@ export async function browseOnlineStoreReports(
       customerName: transaction.customerNameSnapshot ?? "Walk-in",
       lineCount: transaction.lines.length,
       productPreview: transaction.lines.map((line) => line.productNameSnapshot).join(", "),
-      totalAmount: Number(transaction.totalAmount),
-      paidAmount: Number(transaction.paidAmount)
+      totalAmount: signedTransactionAmount({
+        transactionType: transaction.transactionType,
+        amount: Number(transaction.totalAmount)
+      }),
+      paidAmount: signedPaymentAmount({
+        transactionType: transaction.transactionType,
+        totalAmount: Number(transaction.totalAmount),
+        paymentAmount: Number(transaction.paidAmount)
+      })
     })),
     tenderRows: [...tenderRowsByKey.values()].sort((left, right) => right.netAmount - left.netAmount),
     productRows: [...productRowsByKey.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount)),
@@ -7623,6 +7671,7 @@ export type CreateOnlineStoreSalesOrderRequest = {
   note?: string | null;
   layawayExpiresAt?: string | null;
   policyOverrideApproved?: boolean | null;
+  managerOverride?: OnlineStoreManagerOverrideRequest | null;
 };
 
 export type CreateOnlineStoreSalesOrderResponse = {
@@ -7750,6 +7799,7 @@ export type OpenOnlineStoreShiftResponse = {
 export type RecordOnlineStoreEodResponse = {
   reconciliationNo: string;
   varianceAmount: number;
+  shift: OnlineShiftSummary;
   message: string;
   serverProcessedAt: string;
 };
@@ -8507,11 +8557,20 @@ async function prepareOnlineStoreBasketLines(
         })),
       serialized: product.isSerialized
     });
-    const requestedPrice = Number(line.unitPrice ?? sellingUom.unitPrice);
+    const standardUnitPrice = toMoney(sellingUom.unitPrice);
+    const requestedPrice = Number(line.unitPrice ?? standardUnitPrice);
+    const hasRequestedPrice = Number.isFinite(requestedPrice) && requestedPrice > 0;
+    const normalizedRequestedPrice = hasRequestedPrice
+      ? toMoney(requestedPrice)
+      : standardUnitPrice;
+    const manualPriceOverride =
+      !product.mustEnterPriceAtPos &&
+      hasRequestedPrice &&
+      Math.abs(normalizedRequestedPrice - standardUnitPrice) > 0.005;
     const unitPrice =
-      product.mustEnterPriceAtPos && Number.isFinite(requestedPrice) && requestedPrice > 0
-        ? toMoney(requestedPrice)
-        : toMoney(sellingUom.unitPrice);
+      (product.mustEnterPriceAtPos || manualPriceOverride) && hasRequestedPrice
+        ? normalizedRequestedPrice
+        : standardUnitPrice;
     const amounts = calculateOnlineSaleLineAmounts({
       quantity,
       unitPrice,
@@ -8540,6 +8599,8 @@ async function prepareOnlineStoreBasketLines(
       unitPrice,
       appliedPromotionCode: null as string | null,
       appliedPromotionName: null as string | null,
+      manualPriceOverride,
+      skipAutomaticPromotion: manualPriceOverride,
       ...amounts
     };
   });
@@ -10795,6 +10856,21 @@ export async function createOnlineStoreSalesOrder(
       lineInputs,
       "Add at least one product before saving a sales order."
     );
+    const priceOverrideLineCount = preparedLines.filter(
+      (line) => line.manualPriceOverride
+    ).length;
+    const managerApproval =
+      priceOverrideLineCount > 0
+        ? await requireOnlineManagerApproval({
+            session,
+            currentUser: user,
+            store,
+            managerOverride: input.managerOverride,
+            permissionCodes: ["pos.override.price"],
+            purpose: "approving Online POS sales-order price overrides",
+            requireSupervisorEligible: true
+          })
+        : null;
     const promotions = await getOnlinePromotionPolicies(tx, session.retailOrgId);
     const configuredPricedLines = applyOnlineConfiguredPosDiscounts(
       preparedLines,
@@ -11175,6 +11251,15 @@ export async function createOnlineStoreSalesOrder(
           paidAmount,
           balanceAmount,
           reservationStatus: layawayOpening?.reservationStatus ?? "NOT_APPLICABLE",
+          priceOverrideApproval: managerApproval
+            ? {
+                approvalType: managerApproval.approvalType,
+                supervisorLoginId: managerApproval.supervisorLoginId,
+                permissionCodes: managerApproval.permissionCodes,
+                note: managerApproval.note,
+                lineCount: priceOverrideLineCount
+              }
+            : null
         } satisfies Prisma.InputJsonValue)
       }
     });
@@ -14584,9 +14669,18 @@ export async function recordOnlineStoreEod(
       }
     });
 
+    const closedShift: OnlineShiftSummary = {
+      ...shiftSummary,
+      status: PosShiftStatus.CLOSED,
+      closedAt: shift.closedAt?.toISOString() ?? timestamp.toISOString(),
+      declaredCashAmount,
+      varianceAmount
+    };
+
     return {
       reconciliationNo: reconciliation.reconciliationNo,
       varianceAmount,
+      shift: closedShift,
       message: `${reconciliation.reconciliationNo} reconciled ${shift.shiftNo} with cash variance ${varianceAmount.toFixed(2)}.`,
       serverProcessedAt: new Date().toISOString()
     };

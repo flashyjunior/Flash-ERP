@@ -14982,11 +14982,10 @@ function DashboardWorkspace({
   const netSalesAmount =
     dashboardReport?.summary.netSalesAmount ??
     (supervisorView ? openShiftNetSales : (activeShift?.netSalesAmount ?? 0));
-  const totalRefundAmount = Math.abs(
-    returnRows.reduce(
-      (sum, transaction) => sum + Math.min(0, transaction.totalAmount),
-      0,
-    ),
+  const totalRefundAmount = Number(
+    returnRows
+      .reduce((sum, transaction) => sum + Math.abs(transaction.totalAmount), 0)
+      .toFixed(2),
   );
   const voidCount = returnRows.filter(
     (transaction) => transaction.sourceTransactionNo,
@@ -15043,9 +15042,7 @@ function DashboardWorkspace({
       amount: 0,
       count: 0,
     };
-    current.amount = Number(
-      (current.amount + Math.abs(tender.netAmount)).toFixed(2),
-    );
+    current.amount = Number((current.amount + tender.netAmount).toFixed(2));
     current.count += tender.transactionCount;
     tenderTotalsByKey.set(key, current);
   }
@@ -15062,16 +15059,15 @@ function DashboardWorkspace({
       amount: 0,
       count: 0,
     };
-    current.amount = Number(
-      (current.amount + Math.abs(tender.netAmount)).toFixed(2),
-    );
+    current.amount = Number((current.amount + tender.netAmount).toFixed(2));
     current.count += tender.transactionCount;
     tenderTotalsByKey.set(key, current);
   }
   const tenderBreakdown = [...tenderTotalsByKey.values()].sort(
     (left, right) => right.amount - left.amount,
   );
-  const tenderTotal = tenderBreakdown.reduce(
+  const tenderChartRows = tenderBreakdown.filter((tender) => tender.amount > 0);
+  const tenderTotal = tenderChartRows.reduce(
     (sum, tender) => sum + tender.amount,
     0,
   );
@@ -15087,7 +15083,7 @@ function DashboardWorkspace({
   let tenderCursor = 0;
   const tenderGradient =
     tenderTotal > 0
-      ? tenderBreakdown
+      ? tenderChartRows
           .map((tender, index) => {
             const nextCursor =
               tenderCursor + (tender.amount / tenderTotal) * 100;
@@ -15098,8 +15094,8 @@ function DashboardWorkspace({
           .join(", ")
       : "#cbd5e1 0 100%";
   const topTenderPercent =
-    tenderTotal > 0 && tenderBreakdown[0]
-      ? Math.round((tenderBreakdown[0].amount / tenderTotal) * 100)
+    tenderTotal > 0 && tenderChartRows[0]
+      ? Math.round((tenderChartRows[0].amount / tenderTotal) * 100)
       : 0;
   const inventoryLocations = snapshot?.inventoryLocations ?? [];
   const lowStockLocations = inventoryLocations.filter(
@@ -15380,7 +15376,7 @@ function DashboardWorkspace({
               }}
             >
               <strong>{topTenderPercent}%</strong>
-              <span>{tenderBreakdown[0]?.name ?? "No tender"}</span>
+              <span>{tenderChartRows[0]?.name ?? "No tender"}</span>
             </div>
             <div className="rms-dashboard-tender-list">
               {tenderBreakdown.length ? (

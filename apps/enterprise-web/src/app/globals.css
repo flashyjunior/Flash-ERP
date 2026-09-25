@@ -3260,7 +3260,8 @@ option {
 }
 
 .rms-online-desktop .rms-report-detail {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   overflow: auto;
 }
@@ -3302,6 +3303,22 @@ option {
 .rms-online-desktop .rms-report-table .rms-table-row,
 .rms-online-desktop .rms-report-table .rms-table-head {
   grid-template-columns: minmax(180px, 1.4fr) repeat(4, minmax(92px, 0.75fr));
+}
+
+.rms-online-desktop .rms-order-collections-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.rms-online-desktop .rms-order-collections-table .rms-table-row,
+.rms-online-desktop .rms-order-collections-table .rms-table-head {
+  grid-template-columns: minmax(220px, 1.5fr) repeat(5, minmax(130px, 0.8fr));
+  min-width: 1050px;
+}
+
+@media (min-width: 1500px) {
+  .rms-online-desktop .rms-order-collections-stats {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
 }
 
 .rms-online-desktop .rms-report-table .rms-table-row strong {

@@ -36,6 +36,7 @@ export async function POST(request: Request) {
       note: body?.note ?? null,
       layawayExpiresAt: body?.layawayExpiresAt ?? null,
       policyOverrideApproved: body?.policyOverrideApproved === true,
+      managerOverride: body?.managerOverride ?? null,
     });
 
     return NextResponse.json(response);

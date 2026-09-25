@@ -45,11 +45,20 @@ const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.
 const syncNodeDetail = requireFile(
   "apps/enterprise-web/src/components/enterprise/enterprise-sync-node-detail.tsx"
 );
+const syncNodeRepository = requireFile(
+  "apps/enterprise-web/src/server/repositories/enterprise-sync-node.repository.ts"
+);
 const syncDashboard = requireFile(
   "apps/enterprise-web/src/components/enterprise/enterprise-sync-dashboard.tsx"
 );
+const syncDashboardRepository = requireFile(
+  "apps/enterprise-web/src/server/repositories/enterprise-dashboard.repository.ts"
+);
 const masterDataPublicationRoute = requireFile(
   "apps/enterprise-web/src/app/api/sync/master-data-publications/route.ts"
+);
+const nodeMasterDataPublicationRoute = requireFile(
+  "apps/enterprise-web/src/app/api/sync/store-nodes/[nodeCode]/publish-master-data/route.ts"
 );
 const deployBuild = requireFile("scripts/build-enterprise-web-deploy.mjs");
 const syncDocs = requireFile("docs/09-sync-hardening-and-observability.md");
@@ -187,10 +196,20 @@ requireIncludes(
   "const selectedStoreIds = new Set<string>()",
   "multi-shop publication must prevent duplicate desktop targets for one shop."
 );
-requireExcludes(
+requireIncludes(
   syncNodeDetail,
   "publish-master-data",
-  "manual master-data publication must not remain attached to an individual shop node."
+  "shop node detail must expose governed per-shop master-data publication."
+);
+requireIncludes(
+  nodeMasterDataPublicationRoute,
+  "operatorName: session.displayName || session.loginId",
+  "per-shop publication must attribute the authenticated HQ operator."
+);
+requireExcludes(
+  nodeMasterDataPublicationRoute,
+  "body.operatorName",
+  "per-shop publication must not trust a browser-supplied operator name."
 );
 requireIncludes(
   syncDashboard,
@@ -221,6 +240,31 @@ requireIncludes(
   syncDashboard,
   "Queue master data",
   "HQ command center must expose the multi-shop manual publication workspace."
+);
+requireIncludes(
+  syncDashboard,
+  "postureReasons",
+  "the shop grid must explain why a node needs attention."
+);
+requireIncludes(
+  syncDashboardRepository,
+  "describePosture",
+  "the shop grid must derive concrete posture reasons from live sync state."
+);
+requireIncludes(
+  syncNodeDetail,
+  "initialPageSize={50}",
+  "node event history must show a useful first page instead of only ten rows."
+);
+requireIncludes(
+  syncNodeDetail,
+  "latest 200",
+  "node event history must disclose its bounded history window."
+);
+requireIncludes(
+  syncNodeRepository,
+  "take: 200",
+  "node event history must load a bounded troubleshooting window."
 );
 
 for (const [source, label] of [

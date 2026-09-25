@@ -101,24 +101,70 @@ function latestDate(...values: Array<Date | null | undefined>) {
 
 function classifyPosture(input: {
   lastSyncAt: Date | null;
+  upstreamPending: number;
   downstreamPending: number;
   downstreamEscalated: number;
+  reportedHealth: string | null;
 }) {
   const staleMinutes = minutesSince(input.lastSyncAt);
 
   if (
+    input.reportedHealth === "attention" ||
     input.downstreamEscalated > 0 ||
     staleMinutes >= 120 ||
+    input.upstreamPending >= 250 ||
     input.downstreamPending >= 20
   ) {
     return "Attention" as const;
   }
 
-  if (staleMinutes >= 30 || input.downstreamPending >= 8) {
+  if (
+    input.reportedHealth === "lagging" ||
+    staleMinutes >= 30 ||
+    input.upstreamPending >= 50 ||
+    input.downstreamPending >= 8
+  ) {
     return "Lagging" as const;
   }
 
   return "Healthy" as const;
+}
+
+function describePosture(input: {
+  lastSyncAt: Date | null;
+  upstreamPending: number;
+  downstreamPending: number;
+  downstreamEscalated: number;
+  reportedHealth: string | null;
+}) {
+  const reasons: string[] = [];
+  const staleMinutes = minutesSince(input.lastSyncAt);
+
+  if (input.reportedHealth === "attention") {
+    reasons.push("The Store Desktop reported its local sync health as Attention.");
+  } else if (input.reportedHealth === "lagging") {
+    reasons.push("The Store Desktop reported its local sync health as Lagging.");
+  }
+
+  if (input.downstreamEscalated > 0) {
+    reasons.push(`${input.downstreamEscalated} failed or dead-letter packet(s) require replay or review.`);
+  }
+
+  if (!input.lastSyncAt) {
+    reasons.push("No heartbeat, store sync, or enterprise checkpoint has ever been confirmed.");
+  } else if (staleMinutes >= 30) {
+    reasons.push(`The last confirmed sync was ${formatRelativeTime(input.lastSyncAt).toLowerCase()}.`);
+  }
+
+  if (input.upstreamPending > 0) {
+    reasons.push(`${input.upstreamPending} upstream event(s) are queued or in flight at the shop.`);
+  }
+
+  if (input.downstreamPending > 0) {
+    reasons.push(`${input.downstreamPending} downstream packet(s) are still waiting for the shop.`);
+  }
+
+  return reasons.length > 0 ? reasons : ["No active sync condition requires operator action."];
 }
 
 function toIsoString(value: Date | null) {
@@ -357,6 +403,7 @@ export type EnterpriseSyncNodeDetailData = {
     lastAppliedAtLabel: string;
   } | null;
   syncPostureMessages: string[];
+  postureReasons: string[];
   recoveryPriorities: string[];
   operatorActions: Array<{
     id: string;
@@ -562,7 +609,7 @@ export async function getEnterpriseSyncNodeDetail(
         sourceNodeCode: nodeCode
       },
       orderBy: [{ receivedAt: "desc" }, { id: "desc" }],
-      take: 10,
+      take: 200,
       select: {
         id: true,
         aggregateType: true,
@@ -582,7 +629,7 @@ export async function getEnterpriseSyncNodeDetail(
         targetNodeCode: nodeCode
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 12,
+      take: 200,
       select: {
         id: true,
         aggregateType: true,
@@ -607,7 +654,7 @@ export async function getEnterpriseSyncNodeDetail(
         }
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      take: 6,
+      take: 50,
       select: {
         id: true,
         aggregateType: true,
@@ -659,16 +706,26 @@ export async function getEnterpriseSyncNodeDetail(
       }
     : null;
   const reportedDownstreamQueued = storeTelemetry?.downstreamQueued ?? 0;
+  const reportedUpstreamPending =
+    (storeTelemetry?.upstreamQueued ?? 0) + (storeTelemetry?.upstreamInFlight ?? 0);
   const effectiveDownstreamPending = Math.max(
     downstreamPending,
     reportedDownstreamQueued
   );
   const effectiveEscalations = Math.max(storeTelemetry?.deadLetter ?? 0, downstreamEscalated);
-  const posture = classifyPosture({
-    lastSyncAt: latestDate(storeNode.lastHeartbeatAt, storeNode.lastReportedLastSyncAt, lastCheckpointAt),
+  const lastSyncAt = latestDate(
+    storeNode.lastHeartbeatAt,
+    storeNode.lastReportedLastSyncAt,
+    lastCheckpointAt
+  );
+  const postureInput = {
+    lastSyncAt,
+    upstreamPending: reportedUpstreamPending,
     downstreamPending: effectiveDownstreamPending,
-    downstreamEscalated: effectiveEscalations
-  });
+    downstreamEscalated: effectiveEscalations,
+    reportedHealth: storeTelemetry?.health ?? null
+  };
+  const posture = classifyPosture(postureInput);
   const checkpointLabel = formatRelativeTime(lastCheckpointAt);
 
   return {
@@ -713,6 +770,7 @@ export async function getEnterpriseSyncNodeDetail(
       `${downstreamPending} enterprise-owned downstream packet(s) are still waiting for acknowledgement, while the desktop last reported ${reportedDownstreamQueued} local downstream packet(s). ${downstreamAcknowledged} packet(s) have already been acknowledged back to enterprise.`,
       "Enterprise shows the last confirmed checkpoint here, while the store desktop remains the authority for local queue state during full offline periods."
     ],
+    postureReasons: describePosture(postureInput),
     recoveryPriorities: buildRecoveryPriorities({
       storeName: storeNode.store?.name ?? storeNode.name,
       posture,

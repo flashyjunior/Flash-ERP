@@ -49,6 +49,25 @@ const catalogFilter: FilterFn<InventoryCatalogRow> = (row, _columnId, filterValu
     .includes(query);
 };
 
+const productFilter: FilterFn<ProductRow> = (row, _columnId, filterValue) => {
+  const query = String(filterValue ?? "").trim().toLowerCase();
+
+  if (!query) {
+    return true;
+  }
+
+  return [
+    row.original.productCode,
+    row.original.sku ?? "",
+    row.original.name,
+    row.original.status,
+    row.original.unitOfMeasure
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
+};
+
 function buildProductSelection(
   products: ProductRow[],
   catalog?: InventoryCatalogRow | null
@@ -218,6 +237,20 @@ export function EnterpriseInventoryCatalogWorkspace({
 
     return [...grouped.entries()];
   }, [filteredStores]);
+  const catalogMembershipByProductCode = useMemo(() => {
+    const memberships = new Map<string, string[]>();
+
+    for (const catalog of workspace.inventoryCatalogRows) {
+      for (const product of catalog.productLinks) {
+        memberships.set(product.productCode, [
+          ...(memberships.get(product.productCode) ?? []),
+          catalog.name
+        ]);
+      }
+    }
+
+    return memberships;
+  }, [workspace.inventoryCatalogRows]);
 
   const catalogColumns = useMemo<ColumnDef<InventoryCatalogRow>[]>(
     () => [
@@ -240,7 +273,7 @@ export function EnterpriseInventoryCatalogWorkspace({
         cell: ({ row }) => (
           <div className="min-w-0">
             <p className="font-medium text-stone-800">
-              {numberFormatter.format(row.original.productCount)}
+              {numberFormatter.format(row.original.productCount)} of {numberFormatter.format(workspace.productRows.length)} linked
             </p>
             <p className="truncate text-xs text-stone-500">{row.original.productSummary}</p>
           </div>
@@ -310,7 +343,55 @@ export function EnterpriseInventoryCatalogWorkspace({
         )
       }
     ],
-    []
+    [workspace.productRows.length]
+  );
+  const productColumns = useMemo<ColumnDef<ProductRow>[]>(
+    () => [
+      {
+        accessorKey: "name",
+        header: "Product",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="font-medium text-stone-900">{row.original.name}</p>
+            <p className="text-xs text-stone-500">
+              {row.original.productCode}{row.original.sku ? ` · ${row.original.sku}` : ""}
+            </p>
+          </div>
+        ),
+        meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getLicenseTone(row.original.status)}`}>
+            {row.original.status}
+          </span>
+        )
+      },
+      {
+        accessorKey: "unitOfMeasure",
+        header: "UOM"
+      },
+      {
+        accessorKey: "defaultPrice",
+        header: "Default price",
+        cell: ({ row }) => row.original.defaultPrice === null
+          ? "Not set"
+          : numberFormatter.format(row.original.defaultPrice)
+      },
+      {
+        id: "catalogs",
+        header: "Catalog membership",
+        cell: ({ row }) => {
+          const memberships = catalogMembershipByProductCode.get(row.original.productCode) ?? [];
+
+          return memberships.length ? memberships.join(", ") : "Not linked";
+        },
+        meta: { disableTruncate: true }
+      }
+    ],
+    [catalogMembershipByProductCode]
   );
 
   function openCatalogDialog(catalog?: InventoryCatalogRow | null) {
@@ -486,6 +567,25 @@ export function EnterpriseInventoryCatalogWorkspace({
           </button>
         }
       />
+
+      <div className="space-y-3">
+        <div>
+          <h2 className="text-lg font-semibold text-stone-950">All products</h2>
+          <p className="text-sm text-stone-600">
+            Every non-deleted product in this business, including products not yet linked to a catalog.
+          </p>
+        </div>
+        <SharedDataGrid
+          columns={productColumns}
+          data={workspace.productRows}
+          emptyLabel="No products are registered for this business."
+          exportFileName="flash-erp-inventory-catalog-products"
+          globalFilterFn={productFilter}
+          initialPageSize={50}
+          pageSizeOptions={[25, 50, 100, 250, 500]}
+          searchPlaceholder="Search all products by name, code, SKU, status, or UOM"
+        />
+      </div>
 
       <section className="glass-panel rounded-[1.25rem] p-4">
         <p className="text-sm leading-6 text-stone-600">{workspace.statusMessage}</p>
