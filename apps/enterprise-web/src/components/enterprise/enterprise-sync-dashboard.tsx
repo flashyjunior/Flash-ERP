@@ -39,6 +39,7 @@ type EnterpriseSyncDashboardData = {
     downstreamQueue: number;
     lastSync: string;
     posture: SyncPosture;
+    postureReasons: string[];
   }>;
   publicationTargets: Array<{
     storeCode: string;
@@ -149,7 +150,12 @@ const storeFilter: FilterFn<StoreNodeRow> = (row, _columnId, filterValue) => {
     return true;
   }
 
-  return [row.original.store, row.original.nodeCode, row.original.posture]
+  return [
+    row.original.store,
+    row.original.nodeCode,
+    row.original.posture,
+    ...row.original.postureReasons
+  ]
     .join(" ")
     .toLowerCase()
     .includes(query);
@@ -606,6 +612,20 @@ export function EnterpriseSyncDashboard({
         accessorKey: "posture",
         header: "Posture",
         cell: ({ row }) => <PostureBadge value={row.original.posture} />,
+        meta: {
+          disableTruncate: true
+        }
+      },
+      {
+        accessorKey: "postureReasons",
+        header: "Why",
+        cell: ({ row }) => (
+          <div className="min-w-64 space-y-1 text-xs leading-5 text-stone-600">
+            {row.original.postureReasons.map((reason) => (
+              <p key={reason}>{reason}</p>
+            ))}
+          </div>
+        ),
         meta: {
           disableTruncate: true
         }

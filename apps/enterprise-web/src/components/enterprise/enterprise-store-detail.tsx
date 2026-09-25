@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   Boxes,
   MonitorSmartphone,
+  Pencil,
   Plus,
   RefreshCcw,
   Store,
@@ -233,6 +234,167 @@ const terminalFilter: FilterFn<TerminalRow> = (
     .toLowerCase()
     .includes(query);
 };
+
+function TerminalEditDialog({
+  storeCode,
+  terminal,
+}: {
+  storeCode: string;
+  terminal: TerminalRow;
+}) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [terminalCode, setTerminalCode] = useState(terminal.terminalCode);
+  const [terminalName, setTerminalName] = useState(terminal.terminalName);
+  const [terminalStatus, setTerminalStatus] = useState(terminal.terminalStatus);
+  const [submitState, setSubmitState] = useState<{
+    status: "idle" | "submitting" | "success" | "error";
+    message: string | null;
+  }>({ status: "idle", message: null });
+
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen);
+
+    if (nextOpen) {
+      setTerminalCode(terminal.terminalCode);
+      setTerminalName(terminal.terminalName);
+      setTerminalStatus(terminal.terminalStatus);
+      setSubmitState({ status: "idle", message: null });
+    }
+  }
+
+  async function handleSubmit() {
+    if (!terminalCode.trim() || !terminalName.trim()) {
+      setSubmitState({
+        status: "error",
+        message: "Enter the terminal code and name before saving.",
+      });
+      return;
+    }
+
+    setSubmitState({
+      status: "submitting",
+      message: "Flash ERP is updating the terminal identity.",
+    });
+
+    try {
+      const response = await fetch(
+        `/api/stores/${encodeURIComponent(storeCode)}/terminals/${encodeURIComponent(terminal.terminalCode)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            terminalCode: terminalCode.trim(),
+            terminalName: terminalName.trim(),
+            status: terminalStatus,
+          }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Flash ERP could not update that terminal.");
+      }
+
+      setSubmitState({
+        status: "success",
+        message: payload.message ?? "Flash ERP updated the terminal.",
+      });
+      window.setTimeout(() => {
+        setOpen(false);
+        router.refresh();
+      }, 700);
+    } catch (error) {
+      setSubmitState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Flash ERP could not update that terminal.",
+      });
+    }
+  }
+
+  return (
+    <ActionDialog
+      description="Align this HQ terminal code with the code configured at the shop. Existing node binding, licensing, and history remain attached."
+      onOpenChange={handleOpenChange}
+      open={open}
+      title={`Edit ${terminal.terminalName}`}
+      triggerClassName="px-3 py-1.5 text-xs"
+      triggerIcon={Pencil}
+      triggerLabel="Edit"
+      widthClassName="max-w-xl"
+    >
+      <div className="space-y-5">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="space-y-2 text-sm text-stone-700">
+            <span className="block font-semibold text-stone-900">Terminal code</span>
+            <input
+              className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+              disabled={submitState.status === "submitting"}
+              onChange={(event) => setTerminalCode(event.target.value)}
+              value={terminalCode}
+            />
+          </label>
+          <label className="space-y-2 text-sm text-stone-700">
+            <span className="block font-semibold text-stone-900">Terminal name</span>
+            <input
+              className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+              disabled={submitState.status === "submitting"}
+              onChange={(event) => setTerminalName(event.target.value)}
+              value={terminalName}
+            />
+          </label>
+        </div>
+        <label className="block max-w-xs space-y-2 text-sm text-stone-700">
+          <span className="block font-semibold text-stone-900">Status</span>
+          <select
+            className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 outline-none transition focus:border-[var(--brand)]"
+            disabled={submitState.status === "submitting"}
+            onChange={(event) => setTerminalStatus(event.target.value)}
+            value={terminalStatus}
+          >
+            <option value="ACTIVE">Active</option>
+            <option value="INACTIVE">Inactive</option>
+            <option value="ARCHIVED">Archived</option>
+          </select>
+        </label>
+        {submitState.message ? (
+          <p
+            className={
+              submitState.status === "error"
+                ? "text-sm font-medium text-red-700"
+                : "text-sm font-medium text-stone-600"
+            }
+          >
+            {submitState.message}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <button
+            className="rounded-xl border border-stone-300 bg-white px-4 py-2 text-sm font-semibold text-stone-700"
+            disabled={submitState.status === "submitting"}
+            onClick={() => setOpen(false)}
+            type="button"
+          >
+            Cancel
+          </button>
+          <button
+            className="rounded-xl bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            disabled={submitState.status === "submitting"}
+            onClick={() => void handleSubmit()}
+            type="button"
+          >
+            Save terminal
+          </button>
+        </div>
+      </div>
+    </ActionDialog>
+  );
+}
 
 export function EnterpriseStoreDetail({
   detail,
@@ -578,11 +740,22 @@ export function EnterpriseStoreDetail({
           renderTimestamp(
             row.original.lastHeartbeatAt,
             row.original.lastHeartbeatAtLabel,
-          ),
+        ),
+        meta: { disableTruncate: true },
+      },
+      {
+        id: "actions",
+        header: "Actions",
+        cell: ({ row }) => (
+          <TerminalEditDialog
+            storeCode={detail.store.code}
+            terminal={row.original}
+          />
+        ),
         meta: { disableTruncate: true },
       },
     ],
-    [],
+    [detail.store.code],
   );
 
   const transactionColumns = useMemo<ColumnDef<TransactionRow>[]>(

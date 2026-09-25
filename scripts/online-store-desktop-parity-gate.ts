@@ -36,6 +36,7 @@ function requireScript(packageSource: string, scriptName: string) {
 const rootPackage = requireFile("package.json");
 const desktopRuntime = requireFile("apps/store-desktop/src/shared/desktop-runtime.ts");
 const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.tsx");
+const desktopMain = requireFile("apps/store-desktop/electron/main.ts");
 const desktopSqliteService = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
 const desktopPostgresService = requireFile("apps/store-desktop/src/main/postgres/postgres-store-service.ts");
 const desktopMssqlService = requireFile("apps/store-desktop/src/main/mssql/mssql-store-service.ts");
@@ -61,11 +62,162 @@ const enterprisePosRepository = requireFile(
   "apps/enterprise-web/src/server/repositories/enterprise-pos.repository.ts"
 );
 const onlineWorkspace = requireFile("apps/enterprise-web/src/components/enterprise/online-store-workspace.tsx");
+const onlineStyles = requireFile("apps/enterprise-web/src/app/globals.css");
+const enterpriseSecurityPanel = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-security-panel.tsx"
+);
+const enterpriseInventoryCatalogWorkspace = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-inventory-catalog-workspace.tsx"
+);
+const onlineSalesOrderRoute = requireFile(
+  "apps/enterprise-web/src/app/api/online-store/sales-orders/route.ts"
+);
+const enterpriseStoresRepository = requireFile(
+  "apps/enterprise-web/src/server/repositories/enterprise-stores.repository.ts"
+);
+const enterpriseStoreDetail = requireFile(
+  "apps/enterprise-web/src/components/enterprise/enterprise-store-detail.tsx"
+);
+const terminalUpdateRoute = requireFile(
+  "apps/enterprise-web/src/app/api/stores/[storeCode]/terminals/[terminalCode]/route.ts"
+);
 const onlineSpec = requireFile("tests/e2e/online-store-parity.spec.ts");
 const playwrightConfig = requireFile("playwright.config.ts");
 const parityLedger = requireFile("docs/16-online-store-desktop-parity-ledger.md");
 
 requireScript(rootPackage, "acceptance:online-store-parity");
+
+requireIncludes(
+  onlineWorkspace,
+  "reportResultsById[activeReport]",
+  "online reports must keep result data isolated by report."
+);
+requireIncludes(
+  onlineWorkspace,
+  'acceptsParameter("customerQuery")',
+  "online report requests must submit only parameters declared by the active report."
+);
+requireIncludes(
+  onlineWorkspace,
+  "selectReport(definition.reportId)",
+  "online report navigation must restore each report's own criteria and result."
+);
+requireIncludes(
+  onlineRepository,
+  "Math.min(criteria.limit * 10, 1000)",
+  "cashier-scoped sales-order reconciliation must scan beyond the display limit before attribution filtering."
+);
+requireIncludes(
+  onlineRepository,
+  ".slice(0, criteria.limit)",
+  "sales-order reconciliation must apply its display limit after cashier attribution filtering."
+);
+requireIncludes(
+  onlineStyles,
+  ".rms-order-collections-table .rms-table-row",
+  "sales-order reconciliation must define a dedicated six-column table layout."
+);
+requireIncludes(
+  onlineStyles,
+  "flex-direction: column;",
+  "report detail content must flow vertically without a message row consuming the workspace."
+);
+requireIncludes(
+  enterpriseSecurityPanel,
+  "allowPasswordReveal",
+  "HQ user password setup must expose the password visibility control."
+);
+requireIncludes(
+  enterpriseSecurityPanel,
+  'aria-label={isPasswordVisible ? "Hide password" : "Show password"}',
+  "the HQ password visibility control must remain accessible."
+);
+requireIncludes(
+  enterpriseInventoryCatalogWorkspace,
+  "Every non-deleted product in this business",
+  "inventory catalogs must expose the complete business product master for audit."
+);
+requireIncludes(
+  enterpriseInventoryCatalogWorkspace,
+  "of {numberFormatter.format(workspace.productRows.length)} linked",
+  "inventory catalog counts must distinguish linked products from all available products."
+);
+
+requireIncludes(
+  onlineRepository,
+  "totalAmount: signedTransactionAmount({",
+  "online sales rows must present returns with a negative sales value."
+);
+requireExcludes(
+  onlineRepository,
+  "const reportNetSalesAmount = toMoney(reportTransactions.reduce((sum, transaction) => sum + Number(transaction.totalAmount), 0));",
+  "online report summaries must not add positive return receipts to net sales."
+);
+requireIncludes(
+  desktopRenderer,
+  "const tenderChartRows = tenderBreakdown.filter((tender) => tender.amount > 0);",
+  "desktop tender charts must use the positive remainder after sale and return tenders net off."
+);
+requireExcludes(
+  desktopRenderer,
+  "Math.abs(tender.netAmount)",
+  "desktop tender summaries must not turn return tenders into positive collections."
+);
+requireExcludes(
+  desktopRenderer,
+  "Math.min(0, transaction.totalAmount)",
+  "desktop refund cards must recognize positive stored return totals."
+);
+requireIncludes(
+  desktopMain,
+  "snapshot.recentClosedShifts[0] ?? snapshot.activeShift ?? null",
+  "desktop Z reports must prefer the shift that was just closed."
+);
+requireIncludes(
+  onlineRepository,
+  "shift: closedShift",
+  "online EOD must return the authoritative server-side closed-shift totals."
+);
+requireIncludes(
+  onlineWorkspace,
+  "const closedShift = payload.shift ?? null;",
+  "online Z reports must print the authoritative shift returned by EOD."
+);
+requireIncludes(
+  onlineRepository,
+  "approving Online POS sales-order price overrides",
+  "online sales-order price changes must use the manager price-override permission."
+);
+requireIncludes(
+  onlineSalesOrderRoute,
+  "managerOverride: body?.managerOverride ?? null",
+  "online sales-order routes must forward manager approval credentials."
+);
+requireIncludes(
+  onlineWorkspace,
+  "managerOverride: buildManagerOverridePayload()",
+  "online sales-order UI must submit the manager approval payload."
+);
+requireIncludes(
+  enterpriseStoresRepository,
+  "export async function updateEnterpriseStoreTerminal(",
+  "HQ must update a terminal in place when its shop code was configured incorrectly."
+);
+requireIncludes(
+  enterpriseStoresRepository,
+  "Its node binding, licence, and sync history were preserved",
+  "terminal code correction must preserve the existing terminal identity."
+);
+requireIncludes(
+  enterpriseStoreDetail,
+  "Align this HQ terminal code with the code configured at the shop.",
+  "the store workspace must expose terminal-code correction guidance."
+);
+requireIncludes(
+  terminalUpdateRoute,
+  'assertEnterprisePermission(["master.store.manage"])',
+  "terminal correction must remain protected by store-management permission."
+);
 
 for (const desktopAnchor of [
   "StoreSyncSnapshot",

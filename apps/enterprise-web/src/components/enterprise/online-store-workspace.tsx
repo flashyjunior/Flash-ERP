@@ -68,6 +68,19 @@ type ReportId =
   | "inventory"
   | "banking"
   | "shifts";
+type ReportCriteriaDraft = {
+  dateFrom: string;
+  dateTo: string;
+  scope: "CASHIER" | "STORE";
+  cashierCode: string;
+  shiftId: string;
+  searchQuery: string;
+  customerQuery: string;
+  productQuery: string;
+  tenderMethodCode: string;
+  locationId: string;
+  limit: string;
+};
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
 type InventoryStockSection = "inventory-browser" | "batch-register";
 type InventoryReceivingSection = "purchase-orders" | "goods-receipts" | "supplier-returns";
@@ -84,6 +97,43 @@ type ReceiptHistoryKind = "SALES" | "SALES_ORDER" | "ACCOUNT_PAYMENT";
 type ShiftReportKind = "X" | "Z";
 type PurchaseOrderDialogMode = "view" | "receive" | null;
 type SupplierReturnReason = "DAMAGED" | "REJECTED_AT_RECEIPT" | "QUALITY_HOLD" | "SHORT_EXPIRY" | "WRONG_ITEM" | "OTHER";
+
+const reportIds = new Set<ReportId>([
+  "sales",
+  "products",
+  "serialsBatches",
+  "orders",
+  "orderCollections",
+  "layaways",
+  "layawayPayments",
+  "tenders",
+  "inventory",
+  "banking",
+  "shifts"
+]);
+
+function normalizeReportId(value: string | null | undefined): ReportId {
+  return value && reportIds.has(value as ReportId) ? (value as ReportId) : "sales";
+}
+
+function createReportCriteriaDraft(
+  date: string,
+  criteria?: OnlineStoreWorkspaceData["reporting"]["lastCriteria"]
+): ReportCriteriaDraft {
+  return {
+    dateFrom: criteria?.dateFrom ?? date,
+    dateTo: criteria?.dateTo ?? date,
+    scope: criteria?.scope === "STORE" ? "STORE" : "CASHIER",
+    cashierCode: criteria?.cashierCode ?? "",
+    shiftId: criteria?.shiftId ?? "",
+    searchQuery: criteria?.searchQuery ?? "",
+    customerQuery: criteria?.customerQuery ?? "",
+    productQuery: criteria?.productQuery ?? "",
+    tenderMethodCode: criteria?.tenderMethodCode ?? "",
+    locationId: criteria?.locationId ?? "",
+    limit: String(criteria?.limit ?? 100)
+  };
+}
 
 const clockFormatter = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
@@ -2376,6 +2426,8 @@ export function OnlineStoreWorkspace({
     defaultSalesLocationId;
   const configuredShiftOpeningFloat = (workspace.optionSettings?.shiftFloatPromptAmount ?? 0).toFixed(2);
   const initialReportCriteria = workspace.reporting.lastCriteria;
+  const initialReportId = normalizeReportId(initialReportCriteria.reportId);
+  const initialReportDraft = createReportCriteriaDraft(activeDate, initialReportCriteria);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(() =>
     initialWorkspace === "ecommerce" && workspace.capabilities.canAccessEcommerceConsole
       ? "ecommerce"
@@ -2389,7 +2441,7 @@ export function OnlineStoreWorkspace({
   const [isCreatingSampleData, setIsCreatingSampleData] = useState(false);
   const [sampleDataMessage, setSampleDataMessage] = useState("");
   const [managerTab, setManagerTab] = useState<ManagerTab>("shift");
-  const [activeReport, setActiveReport] = useState<ReportId>("sales");
+  const [activeReport, setActiveReport] = useState<ReportId>(initialReportId);
   const [inventoryTab, setInventoryTab] = useState<InventoryTab>("stock");
   const [activeStockSection, setActiveStockSection] = useState<InventoryStockSection>("inventory-browser");
   const [inventoryDrillDown, setInventoryDrillDown] = useState<{
@@ -2409,18 +2461,21 @@ export function OnlineStoreWorkspace({
   const inventoryStartupAlertCheckedRef = useRef(false);
   const [dashboardDateFrom, setDashboardDateFrom] = useState(activeDate);
   const [dashboardDateTo, setDashboardDateTo] = useState(activeDate);
-  const [reportDateFrom, setReportDateFrom] = useState(initialReportCriteria.dateFrom ?? activeDate);
-  const [reportDateTo, setReportDateTo] = useState(initialReportCriteria.dateTo ?? activeDate);
-  const [reportScope, setReportScope] = useState<"CASHIER" | "STORE">(initialReportCriteria.scope ?? "CASHIER");
-  const [reportCashierCode, setReportCashierCode] = useState(initialReportCriteria.cashierCode ?? "");
-  const [reportShiftId, setReportShiftId] = useState(initialReportCriteria.shiftId ?? "");
-  const [reportQuery, setReportQuery] = useState(initialReportCriteria.searchQuery ?? "");
-  const [reportCustomerQuery, setReportCustomerQuery] = useState(initialReportCriteria.customerQuery ?? "");
-  const [reportProductQuery, setReportProductQuery] = useState(initialReportCriteria.productQuery ?? "");
-  const [reportTenderMethodCode, setReportTenderMethodCode] = useState(initialReportCriteria.tenderMethodCode ?? "");
-  const [reportLocationId, setReportLocationId] = useState(initialReportCriteria.locationId ?? "");
-  const [reportLimit, setReportLimit] = useState(String(initialReportCriteria.limit ?? 100));
-  const [reportResult, setReportResult] = useState<BrowseOnlineStoreReportsResponse | null>(null);
+  const [reportDateFrom, setReportDateFrom] = useState(initialReportDraft.dateFrom);
+  const [reportDateTo, setReportDateTo] = useState(initialReportDraft.dateTo);
+  const [reportScope, setReportScope] = useState<"CASHIER" | "STORE">(initialReportDraft.scope);
+  const [reportCashierCode, setReportCashierCode] = useState(initialReportDraft.cashierCode);
+  const [reportShiftId, setReportShiftId] = useState(initialReportDraft.shiftId);
+  const [reportQuery, setReportQuery] = useState(initialReportDraft.searchQuery);
+  const [reportCustomerQuery, setReportCustomerQuery] = useState(initialReportDraft.customerQuery);
+  const [reportProductQuery, setReportProductQuery] = useState(initialReportDraft.productQuery);
+  const [reportTenderMethodCode, setReportTenderMethodCode] = useState(initialReportDraft.tenderMethodCode);
+  const [reportLocationId, setReportLocationId] = useState(initialReportDraft.locationId);
+  const [reportLimit, setReportLimit] = useState(initialReportDraft.limit);
+  const [reportDraftsById, setReportDraftsById] = useState<Partial<Record<ReportId, ReportCriteriaDraft>>>(() => ({
+    [initialReportId]: initialReportDraft
+  }));
+  const [reportResultsById, setReportResultsById] = useState<Partial<Record<ReportId, BrowseOnlineStoreReportsResponse>>>({});
   const [reportMessage, setReportMessage] = useState("");
   const [isLoadingReport, setIsLoadingReport] = useState(false);
   const [managerOverrideCode, setManagerOverrideCode] = useState("");
@@ -2793,9 +2848,13 @@ export function OnlineStoreWorkspace({
   const dashboardTenderRows = [...dashboardTenderTotals.values()].sort(
     (left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount)
   );
-  const tenderMixTotal = dashboardTenderRows.reduce((sum, row) => sum + Math.abs(row.netAmount), 0);
-  const primaryTender = dashboardTenderRows[0] ?? null;
-  const primaryTenderPercent = primaryTender && tenderMixTotal > 0 ? Math.round((Math.abs(primaryTender.netAmount) / tenderMixTotal) * 100) : 0;
+  const dashboardTenderChartRows = dashboardTenderRows.filter((row) => row.netAmount > 0);
+  const tenderMixTotal = dashboardTenderChartRows.reduce((sum, row) => sum + row.netAmount, 0);
+  const primaryTender = dashboardTenderChartRows[0] ?? dashboardTenderRows[0] ?? null;
+  const primaryTenderPercent =
+    primaryTender && primaryTender.netAmount > 0 && tenderMixTotal > 0
+      ? Math.round((primaryTender.netAmount / tenderMixTotal) * 100)
+      : 0;
   const chartWidth = 640;
   const chartHeight = 210;
   const chartPadX = 28;
@@ -2818,11 +2877,11 @@ export function OnlineStoreWorkspace({
   ].join(" ");
   const tenderPalette = ["#147ad6", "#2f7d4d", "#d9901f", "#8170bd", "#279094", "#b84848"];
   const tenderGradient =
-    dashboardTenderRows.length && tenderMixTotal > 0
-      ? dashboardTenderRows
+    dashboardTenderChartRows.length && tenderMixTotal > 0
+      ? dashboardTenderChartRows
           .reduce(
             (segments, row, index) => {
-              const nextPercent = segments.current + (Math.abs(row.netAmount) / tenderMixTotal) * 100;
+              const nextPercent = segments.current + (row.netAmount / tenderMixTotal) * 100;
               segments.values.push(`${tenderPalette[index % tenderPalette.length]} ${segments.current}% ${nextPercent}%`);
               segments.current = nextPercent;
               return segments;
@@ -3442,8 +3501,9 @@ export function OnlineStoreWorkspace({
     submittedAt: sessions[0]?.submittedAt ?? new Date().toISOString(),
     locationName: sessions[0]?.locationName ?? "",
   }));
-  const activeReportBundle = reportResult?.reports ?? workspace.reports;
-  const activeReporting = reportResult?.reporting ?? workspace.reporting;
+  const activeReportResult = reportResultsById[activeReport] ?? null;
+  const activeReportBundle = activeReportResult?.reports ?? workspace.reports;
+  const activeReporting = activeReportResult?.reporting ?? workspace.reporting;
   const activeReportDefinition =
     activeReporting.definitions.find((definition) => definition.reportId === activeReport) ??
     activeReporting.definitions[0] ??
@@ -4128,6 +4188,55 @@ export function OnlineStoreWorkspace({
     }
   }
 
+  function getCurrentReportDraft(): ReportCriteriaDraft {
+    return {
+      dateFrom: reportDateFrom,
+      dateTo: reportDateTo,
+      scope: reportScope,
+      cashierCode: reportCashierCode,
+      shiftId: reportShiftId,
+      searchQuery: reportQuery,
+      customerQuery: reportCustomerQuery,
+      productQuery: reportProductQuery,
+      tenderMethodCode: reportTenderMethodCode,
+      locationId: reportLocationId,
+      limit: reportLimit
+    };
+  }
+
+  function applyReportDraft(draft: ReportCriteriaDraft) {
+    setReportDateFrom(draft.dateFrom);
+    setReportDateTo(draft.dateTo);
+    setReportScope(draft.scope);
+    setReportCashierCode(draft.cashierCode);
+    setReportShiftId(draft.shiftId);
+    setReportQuery(draft.searchQuery);
+    setReportCustomerQuery(draft.customerQuery);
+    setReportProductQuery(draft.productQuery);
+    setReportTenderMethodCode(draft.tenderMethodCode);
+    setReportLocationId(draft.locationId);
+    setReportLimit(draft.limit);
+  }
+
+  function selectReport(nextReport: ReportId) {
+    if (nextReport === activeReport || isLoadingReport) {
+      return;
+    }
+
+    const currentDraft = getCurrentReportDraft();
+    const nextDraft = reportDraftsById[nextReport] ?? createReportCriteriaDraft(activeDate);
+
+    setReportDraftsById((current) => ({
+      ...current,
+      [activeReport]: currentDraft,
+      [nextReport]: current[nextReport] ?? nextDraft
+    }));
+    setActiveReport(nextReport);
+    applyReportDraft(nextDraft);
+    setManagerOverridePassword("");
+    setReportMessage(reportResultsById[nextReport] ? `Loaded ${nextReport} report.` : "");
+  }
+
   function renderReportParameter(parameterId: string) {
     const parameter = reportParameterById.get(parameterId);
     const label = parameter?.label ?? parameterId;
@@ -4641,7 +4750,8 @@ export function OnlineStoreWorkspace({
               ? new Date(layawayExpiresAt).toISOString()
               : null,
           policyOverrideApproved:
-            saleMode === "LAYAWAY" && layawayPolicyOverrideApproved
+            saleMode === "LAYAWAY" && layawayPolicyOverrideApproved,
+          managerOverride: buildManagerOverridePayload()
         })
       });
       const payload = (await response.json()) as Partial<CreateOnlineStoreSalesOrderResponse> & {
@@ -5168,6 +5278,9 @@ export function OnlineStoreWorkspace({
   }
 
   async function loadActiveReport() {
+    const requestedReportId = activeReport;
+    const acceptsParameter = (parameterId: string) => activeReportParameterIds.includes(parameterId);
+
     setIsLoadingReport(true);
     setReportMessage("Loading report...");
 
@@ -5178,19 +5291,22 @@ export function OnlineStoreWorkspace({
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          reportId: activeReport,
-          scope: reportScope,
-          dateFrom: reportDateFrom || null,
-          dateTo: reportDateTo || null,
-          cashierCode: reportCashierCode || null,
-          shiftId: reportShiftId || null,
-          searchQuery: reportQuery || null,
-          customerQuery: reportCustomerQuery || null,
-          productQuery: reportProductQuery || null,
-          tenderMethodCode: reportTenderMethodCode || null,
-          locationId: reportLocationId || null,
-          limit: Number(reportLimit) || 100,
-          managerOverride: buildManagerOverridePayload()
+          reportId: requestedReportId,
+          scope: acceptsParameter("scope") ? reportScope : "CASHIER",
+          dateFrom: acceptsParameter("dateFrom") ? reportDateFrom || null : null,
+          dateTo: acceptsParameter("dateTo") ? reportDateTo || null : null,
+          cashierCode: acceptsParameter("cashierCode") ? reportCashierCode || null : null,
+          shiftId: acceptsParameter("shiftId") ? reportShiftId || null : null,
+          searchQuery: acceptsParameter("searchQuery") ? reportQuery || null : null,
+          customerQuery: acceptsParameter("customerQuery") ? reportCustomerQuery || null : null,
+          productQuery: acceptsParameter("productQuery") ? reportProductQuery || null : null,
+          tenderMethodCode: acceptsParameter("tenderMethodCode") ? reportTenderMethodCode || null : null,
+          locationId: acceptsParameter("locationId") ? reportLocationId || null : null,
+          limit: acceptsParameter("limit") ? Number(reportLimit) || 100 : 100,
+          managerOverride:
+            acceptsParameter("scope") && reportScope === "STORE"
+              ? buildManagerOverridePayload()
+              : null
         })
       });
       const payload = (await response.json()) as Partial<BrowseOnlineStoreReportsResponse> & {
@@ -5202,22 +5318,19 @@ export function OnlineStoreWorkspace({
       }
 
       const criteria = payload.reporting.lastCriteria;
+      const normalizedDraft = createReportCriteriaDraft(activeDate, criteria);
 
-      setReportResult(payload as BrowseOnlineStoreReportsResponse);
-      setActiveReport(criteria.reportId ?? activeReport);
-      setReportScope(criteria.scope === "STORE" ? "STORE" : "CASHIER");
-      setReportDateFrom(criteria.dateFrom ?? "");
-      setReportDateTo(criteria.dateTo ?? "");
-      setReportCashierCode(criteria.cashierCode ?? "");
-      setReportShiftId(criteria.shiftId ?? "");
-      setReportQuery(criteria.searchQuery ?? "");
-      setReportCustomerQuery(criteria.customerQuery ?? "");
-      setReportProductQuery(criteria.productQuery ?? "");
-      setReportTenderMethodCode(criteria.tenderMethodCode ?? "");
-      setReportLocationId(criteria.locationId ?? "");
-      setReportLimit(String(criteria.limit ?? 100));
+      setReportResultsById((current) => ({
+        ...current,
+        [requestedReportId]: payload as BrowseOnlineStoreReportsResponse
+      }));
+      setReportDraftsById((current) => ({
+        ...current,
+        [requestedReportId]: normalizedDraft
+      }));
+      applyReportDraft(normalizedDraft);
       setManagerOverridePassword("");
-      setReportMessage(`Loaded ${criteria.reportId} report.`);
+      setReportMessage(`Loaded ${requestedReportId} report.`);
     } catch (error) {
       setReportMessage(error instanceof Error ? error.message : "Flash ERP could not load that report.");
     } finally {
@@ -6218,16 +6331,7 @@ export function OnlineStoreWorkspace({
         throw new Error(payload.message ?? "Flash ERP could not record EOD.");
       }
 
-      const closedAt = new Date().toISOString();
-      const closedShift = activeShift
-        ? {
-            ...activeShift,
-            status: "CLOSED",
-            closedAt,
-            declaredCashAmount: Number(eodDeclaredCash),
-            varianceAmount: payload.varianceAmount ?? activeShift.varianceAmount
-          }
-        : null;
+      const closedShift = payload.shift ?? null;
 
       setManagerMessage(payload.message ?? `Recorded ${payload.reconciliationNo}.`);
       setShiftCloseDialogOpen(false);
@@ -9656,7 +9760,7 @@ export function OnlineStoreWorkspace({
                 <button className="rms-action-button is-report" disabled={!currentShift} onClick={() => {
                   if (printShiftReport("X")) {
                     setActiveDrawer("report");
-                    setActiveReport("sales");
+                    selectReport("sales");
                   }
                 }} type="button">X report</button>
                 {!currentShift ? (
@@ -10122,9 +10226,9 @@ export function OnlineStoreWorkspace({
                   <button className="rms-button" onClick={() => setActiveDrawer(null)} type="button">Close</button>
                 </div>
                 <div className="rms-receipt-filters is-report-filter">
-                  <button className={activeReport === "sales" ? "rms-row-button is-selected" : "rms-row-button"} onClick={() => setActiveReport("sales")} type="button">Sales</button>
-                  <button className={activeReport === "products" ? "rms-row-button is-selected" : "rms-row-button"} onClick={() => setActiveReport("products")} type="button">Products</button>
-                  <button className={activeReport === "tenders" ? "rms-row-button is-selected" : "rms-row-button"} onClick={() => setActiveReport("tenders")} type="button">Tenders</button>
+                  <button className={activeReport === "sales" ? "rms-row-button is-selected" : "rms-row-button"} onClick={() => selectReport("sales")} type="button">Sales</button>
+                  <button className={activeReport === "products" ? "rms-row-button is-selected" : "rms-row-button"} onClick={() => selectReport("products")} type="button">Products</button>
+                  <button className={activeReport === "tenders" ? "rms-row-button is-selected" : "rms-row-button"} onClick={() => selectReport("tenders")} type="button">Tenders</button>
                   <button className="rms-button is-primary" disabled={!currentShift} onClick={() => printShiftReport("X")} type="button">Print X report</button>
                 </div>
                 <div className="rms-dashboard-mini-grid">
@@ -11512,7 +11616,7 @@ export function OnlineStoreWorkspace({
                 <details key={group} open>
                   <summary>{group}</summary>
                   {definitions.map((definition) => (
-                    <button className={activeReport === definition.reportId ? "is-active" : ""} key={definition.reportId} onClick={() => setActiveReport(definition.reportId)} type="button">■ {definition.label}</button>
+                    <button className={activeReport === definition.reportId ? "is-active" : ""} disabled={isLoadingReport} key={definition.reportId} onClick={() => selectReport(definition.reportId)} type="button">■ {definition.label}</button>
                   ))}
                 </details>
               ))}
@@ -11521,7 +11625,7 @@ export function OnlineStoreWorkspace({
               <div className="rms-panel-title"><span>{reportDateFrom === reportDateTo ? reportDateFrom : `${reportDateFrom} to ${reportDateTo}`}</span><h2>{activeReportDefinition?.label ?? activeReport.toUpperCase()}</h2><StatusPill>{`${activeReportRowCount} row(s)`}</StatusPill></div>
               <div className="rms-report-toolbar">
                 {activeReportParameterIds.map((parameterId) => renderReportParameter(parameterId))}
-                {reportScope === "STORE" ? (
+                {activeReportParameterIds.includes("scope") && reportScope === "STORE" ? (
                   <>
                     <label>
                       <span>Manager</span>
@@ -11543,7 +11647,7 @@ export function OnlineStoreWorkspace({
               </div>
               {reportMessage ? <p className="rms-inline-message">{reportMessage}</p> : null}
               {activeReport === "orderCollections" ? (
-                <div className="rms-stat-grid">
+                <div className="rms-stat-grid rms-order-collections-stats">
                   <DocumentStat label="Sales recognized" value={formatMoney(activeReportBundle.summary.salesOrderRecognizedAmount, currencyCode)} />
                   <DocumentStat label="Opening deposits" value={formatMoney(activeReportBundle.summary.salesOrderOpeningDepositAmount, currencyCode)} />
                   <DocumentStat label="Prior deposits applied" value={formatMoney(activeReportBundle.summary.salesOrderPriorDepositAppliedAmount, currencyCode)} />
@@ -11595,7 +11699,7 @@ export function OnlineStoreWorkspace({
                 </div>
               ) : null}
               {activeReport === "orderCollections" ? (
-                <div className="rms-table rms-report-table">
+                <div className="rms-table rms-report-table rms-order-collections-table">
                   <div className="rms-table-head"><span>Order</span><span>Sales</span><span>Prior deposit</span><span>Balance collected</span><span>Expected tender</span><span>Outstanding</span></div>
                   {reportSalesOrderCollectionRows.map((row) => (
                     <div className="rms-table-row" key={row.orderId}>

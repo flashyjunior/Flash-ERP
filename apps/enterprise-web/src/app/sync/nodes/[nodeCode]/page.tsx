@@ -11,7 +11,7 @@ export default async function SyncNodeDetailPage({
 }: {
   params: Promise<{ nodeCode: string }>;
 }) {
-  await requireEnterprisePermission(["sync.monitor"]);
+  const session = await requireEnterprisePermission(["sync.monitor"]);
   const { nodeCode } = await params;
   const detail = await getEnterpriseSyncNodeDetail(nodeCode);
 
@@ -19,5 +19,10 @@ export default async function SyncNodeDetailPage({
     notFound();
   }
 
-  return <EnterpriseSyncNodeDetail detail={detail} />;
+  return (
+    <EnterpriseSyncNodeDetail
+      canPublishMasterData={session.permissionCodes.includes("sync.admin.reseed")}
+      detail={detail}
+    />
+  );
 }

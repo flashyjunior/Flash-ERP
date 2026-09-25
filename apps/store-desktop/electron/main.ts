@@ -3906,7 +3906,7 @@ async function openShiftReportPrintWindow(input: StoreShiftReportPrintRequest) {
 
   const shift: StoreShiftSummary | null =
     input.reportType === "Z"
-      ? snapshot.activeShift ?? snapshot.recentClosedShifts[0] ?? null
+      ? snapshot.recentClosedShifts[0] ?? snapshot.activeShift ?? null
       : snapshot.activeShift ?? null;
 
   if (!shift) {

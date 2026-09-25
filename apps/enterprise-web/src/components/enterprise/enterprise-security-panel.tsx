@@ -1,9 +1,9 @@
 "use client";
 
 import type { ColumnDef } from "@tanstack/react-table";
-import { ShieldCheck, UserCog } from "lucide-react";
+import { Eye, EyeOff, ShieldCheck, UserCog } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { startTransition, useEffect, useMemo, useState } from "react";
+import { startTransition, useEffect, useId, useMemo, useState } from "react";
 
 import { ActionDialog } from "@/components/dialogs/action-dialog";
 import { SharedDataGrid } from "@/components/data-grid/data-grid";
@@ -84,7 +84,8 @@ function DialogTextInput({
   onChange,
   placeholder,
   type = "text",
-  disabled = false
+  disabled = false,
+  allowPasswordReveal = false
 }: {
   label: string;
   value: string;
@@ -92,19 +93,40 @@ function DialogTextInput({
   placeholder?: string;
   type?: "text" | "email" | "password";
   disabled?: boolean;
+  allowPasswordReveal?: boolean;
 }) {
+  const inputId = useId();
+  const [isPasswordVisible, setIsPasswordVisible] = useState(false);
+  const canRevealPassword = type === "password" && allowPasswordReveal;
+
   return (
-    <label className="space-y-2 text-sm text-stone-700">
-      <span className="block font-semibold text-stone-900">{label}</span>
-      <input
-        className="w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)] disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500"
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        type={type}
-        value={value}
-      />
-    </label>
+    <div className="space-y-2 text-sm text-stone-700">
+      <label className="block font-semibold text-stone-900" htmlFor={inputId}>{label}</label>
+      <div className="relative">
+        <input
+          className={`w-full rounded-2xl border border-stone-200 bg-white px-4 py-3 outline-none transition focus:border-[var(--brand)] focus:shadow-[0_0_0_4px_rgba(37,99,235,0.08)] disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500 ${canRevealPassword ? "pr-12" : ""}`}
+          disabled={disabled}
+          id={inputId}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          type={canRevealPassword && isPasswordVisible ? "text" : type}
+          value={value}
+        />
+        {canRevealPassword ? (
+          <button
+            aria-label={isPasswordVisible ? "Hide password" : "Show password"}
+            aria-pressed={isPasswordVisible}
+            className="absolute inset-y-0 right-1 flex w-10 items-center justify-center text-stone-500 transition hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={disabled}
+            onClick={() => setIsPasswordVisible((current) => !current)}
+            title={isPasswordVisible ? "Hide password" : "Show password"}
+            type="button"
+          >
+            {isPasswordVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -1269,6 +1291,7 @@ export function EnterpriseSecurityPanel({
               </div>
 
               <DialogTextInput
+                allowPasswordReveal
                 label={editingUserId ? "Reset password (optional)" : "Temporary password"}
                 onChange={(value) => setUserDraft((current) => ({ ...current, password: value }))}
                 placeholder={editingUserId ? "Leave blank to keep existing password" : "Set a password"}
