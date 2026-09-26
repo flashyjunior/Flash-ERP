@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, 
 import { useRouter } from "next/navigation";
 import { calculatePosBaseQuantity } from "@flash-erp/domain";
 import { applyAutomaticPromotions, calculateLoyaltyRedemption } from "@flash-erp/sync-core";
-import { Database, FileSpreadsheet, Trash2 } from "lucide-react";
+import { Database, FileSpreadsheet, Trash2, X } from "lucide-react";
 import type { SheetData } from "write-excel-file/browser";
 
 import {
@@ -81,6 +81,12 @@ type ReportCriteriaDraft = {
   locationId: string;
   limit: string;
 };
+type TenderReportRow = OnlineStoreWorkspaceData["reports"]["tenderRows"][number];
+type TenderTypeTotal = {
+  key: string;
+  label: string;
+  amount: number;
+};
 type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
 type InventoryStockSection = "inventory-browser" | "batch-register";
 type InventoryReceivingSection = "purchase-orders" | "goods-receipts" | "supplier-returns";
@@ -115,6 +121,39 @@ const reportIds = new Set<ReportId>([
 
 function normalizeReportId(value: string | null | undefined): ReportId {
   return value && reportIds.has(value as ReportId) ? (value as ReportId) : "sales";
+}
+
+function summarizeTenderRows(rows: TenderReportRow[]) {
+  const byTender = new Map<string, TenderTypeTotal>();
+
+  for (const row of rows) {
+    const key = row.tenderMethodCode ?? row.paymentMethod;
+    const label = row.tenderMethodName ?? row.paymentMethod;
+    const current = byTender.get(key);
+
+    byTender.set(key, {
+      key,
+      label,
+      amount: Number(((current?.amount ?? 0) + row.amount).toFixed(2))
+    });
+  }
+
+  return {
+    netAmount: Number(rows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
+    byTender: [...byTender.values()].sort((left, right) => left.label.localeCompare(right.label))
+  };
+}
+
+function tenderSourceLabel(row: TenderReportRow) {
+  if (row.salesOrderNo) {
+    return `Sales order ${row.salesOrderNo}`;
+  }
+
+  if (row.sourceTransactionNo) {
+    return `Source receipt ${row.sourceTransactionNo}`;
+  }
+
+  return row.paymentPurpose === "TRANSACTION_SETTLEMENT" ? "Direct sale" : "Sales order collection";
 }
 
 function createReportCriteriaDraft(
@@ -2634,6 +2673,7 @@ export function OnlineStoreWorkspace({
   const [transferSourceStoreId, setTransferSourceStoreId] = useState(workspace.transferStores[0]?.storeId ?? "");
   const [transferDestinationLocationId, setTransferDestinationLocationId] = useState(defaultReceivingLocationId);
   const [transferQuantity, setTransferQuantity] = useState("1");
+  const [transferProductSearch, setTransferProductSearch] = useState("");
   const [transferUnitOfMeasure, setTransferUnitOfMeasure] = useState("");
   const [transferReference, setTransferReference] = useState("");
   const [transferRequiredDate, setTransferRequiredDate] = useState(activeDate);
@@ -3219,6 +3259,16 @@ export function OnlineStoreWorkspace({
     )
   );
   const selectedInventoryProduct = workspace.inventoryProducts.find((product) => product.productId === inventoryProductId) ?? null;
+  const filteredTransferProducts = workspace.inventoryProducts.filter((product) => {
+    const query = transferProductSearch.trim().toLowerCase();
+
+    return (
+      !query ||
+      [product.productName, product.productCode, product.sku]
+        .filter(Boolean)
+        .some((value) => value?.toLowerCase().includes(query))
+    );
+  }).slice(0, 100);
   const selectedInventoryRow = selectedInventoryProduct
     ? workspace.inventoryRows.find(
         (row) => row.productId === selectedInventoryProduct.productId && (!inventoryLocationId || row.locationId === inventoryLocationId)
@@ -3531,6 +3581,8 @@ export function OnlineStoreWorkspace({
   const reportLayawayRows = activeReportBundle.layawayRows;
   const reportLayawayPaymentRows = activeReportBundle.layawayPaymentRows;
   const reportTenderRows = activeReportBundle.tenderRows;
+  const workspaceTenderTotals = summarizeTenderRows(workspace.reports.tenderRows);
+  const reportTenderTotals = summarizeTenderRows(reportTenderRows);
   const reportInventoryRows = activeReportBundle.inventoryRows;
   const reportBankingRows = activeReportBundle.bankingRows;
   const reportShiftRows = activeReportBundle.shiftRows;
@@ -5487,10 +5539,11 @@ export function OnlineStoreWorkspace({
 
     if (activeReport === "tenders") {
       downloadCsv(baseName, [
-        ["Receipt", "Type", "Source receipt", "Received", "Customer", "Cashier", "Terminal", "Shift", "Tender", "Code", "Method", "Purpose", "Reference", "Amount"],
+        ["Receipt", "Type", "Sales order", "Source receipt", "Received", "Customer", "Cashier", "Terminal", "Shift", "Tender", "Code", "Method", "Purpose", "Reference", "Amount"],
         ...reportTenderRows.map((row) => [
           row.transactionNo,
           row.transactionType,
+          row.salesOrderNo,
           row.sourceTransactionNo,
           row.occurredAt,
           row.customerName,
@@ -5503,7 +5556,11 @@ export function OnlineStoreWorkspace({
           row.paymentPurpose,
           row.reference,
           row.amount
-        ])
+        ]),
+        [],
+        ["Tender totals", "Amount"],
+        ...reportTenderTotals.byTender.map((total) => [total.label, total.amount]),
+        ["Net collections", reportTenderTotals.netAmount]
       ]);
       return;
     }
@@ -5663,16 +5720,20 @@ export function OnlineStoreWorkspace({
                   : activeReport === "tenders"
                     ? {
                         headers: ["Receipt", "Type", "Received", "Customer", "Cashier", "Tender", "Purpose", "Amount"],
-                        rows: reportTenderRows.map((row) => [
-                          row.transactionNo,
-                          row.transactionType,
-                          new Date(row.occurredAt).toLocaleString(),
-                          row.customerName,
-                          row.cashierCode ?? "Unassigned",
-                          row.tenderMethodName ?? row.paymentMethod,
-                          row.paymentPurpose,
-                          formatMoney(row.amount, currencyCode)
-                        ])
+                rows: [
+                  ...reportTenderRows.map((row) => [
+                    row.transactionNo,
+                    row.transactionType,
+                    new Date(row.occurredAt).toLocaleString(),
+                    row.customerName,
+                    row.cashierCode ?? "Unassigned",
+                    row.tenderMethodName ?? row.paymentMethod,
+                    row.paymentPurpose,
+                    formatMoney(row.amount, currencyCode)
+                  ]),
+                  ...reportTenderTotals.byTender.map((total) => ["Tender total", "", "", "", "", total.label, "", formatMoney(total.amount, currencyCode)]),
+                  ["Net collections", "", "", "", "", "", "", formatMoney(reportTenderTotals.netAmount, currencyCode)]
+                ]
                       }
             : activeReport === "inventory"
               ? {
@@ -7140,6 +7201,8 @@ export function OnlineStoreWorkspace({
     setTransferDriverName("");
     setTransferDriverContact("");
     setTransferQuantity("1");
+    setTransferProductSearch("");
+    setInventoryProductId("");
     setTransferUnitOfMeasure("");
     setTransferNote("");
     setActiveTransferEntryTab("header");
@@ -7195,6 +7258,9 @@ export function OnlineStoreWorkspace({
         baseUnitOfMeasure: line.baseUnitOfMeasure
       }))
     );
+    setTransferProductSearch("");
+    setInventoryProductId("");
+    setTransferUnitOfMeasure("");
     setActiveTransferEntryTab("details");
     setTransferRequestDialogOpen(true);
   }
@@ -7346,6 +7412,7 @@ export function OnlineStoreWorkspace({
       }
     ]);
     setInventoryProductId("");
+    setTransferProductSearch("");
     setTransferUnitOfMeasure("");
     setTransferQuantity("1");
   }
@@ -10287,12 +10354,18 @@ export function OnlineStoreWorkspace({
                   </div>
                 ) : null}
                 {activeReport === "tenders" ? (
-                  <div className="rms-table rms-report-table">
-                    <div className="rms-table-head"><span>Receipt</span><span>Customer</span><span>Tender</span><span>Collected by</span><span>Amount</span></div>
-                    {workspace.reports.tenderRows.map((row) => (
-                      <div className="rms-table-row" key={row.paymentId}><strong>{row.transactionNo}<small>{row.transactionType} · {new Date(row.occurredAt).toLocaleString()}</small></strong><span>{row.customerName}<small>{row.sourceTransactionNo ?? "Direct sale"}</small></span><span>{row.tenderMethodName ?? row.paymentMethod}<small>{row.paymentPurpose} · {row.reference ?? "No reference"}</small></span><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || "No shift"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b></div>
-                    ))}
-                  </div>
+                  <>
+                    <div className="rms-dashboard-mini-grid">
+                      <div><span>Net collections</span><strong>{formatMoney(workspaceTenderTotals.netAmount, currencyCode)}</strong></div>
+                      {workspaceTenderTotals.byTender.map((total) => <div key={total.key}><span>{total.label}</span><strong>{formatMoney(total.amount, currencyCode)}</strong></div>)}
+                    </div>
+                    <div className="rms-table rms-report-table">
+                      <div className="rms-table-head"><span>Receipt</span><span>Customer</span><span>Tender</span><span>Collected by</span><span>Amount</span></div>
+                      {workspace.reports.tenderRows.map((row) => (
+                        <div className="rms-table-row" key={row.paymentId}><strong>{row.transactionNo}<small>{row.transactionType} · {new Date(row.occurredAt).toLocaleString()}</small></strong><span>{row.customerName}<small>{tenderSourceLabel(row)}</small></span><span>{row.tenderMethodName ?? row.paymentMethod}<small>{row.paymentPurpose} · {row.reference ?? "No reference"}</small></span><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || "No shift"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b></div>
+                      ))}
+                    </div>
+                  </>
                 ) : null}
               </section>
             ) : null}
@@ -11006,15 +11079,15 @@ export function OnlineStoreWorkspace({
                   </div>
                   {transferRequestDialogOpen ? (
                     <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-                      <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog">
-                        <div className="rms-panel-title">
+                      <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog rms-transfer-entry-dialog">
+                        <div className="rms-panel-title rms-transfer-dialog-header">
                           <div>
                             <span>{transferCreationMode === "DIRECT_OUT" ? "Transfer out" : "Stock request"}</span>
                             <h2>{activeTransferDraftBatchNo ? "Amend transfer draft" : "New transfer"}</h2>
                           </div>
-                          <button className="rms-button" onClick={() => setTransferRequestDialogOpen(false)} type="button">Close</button>
+                          <button aria-label="Close transfer dialog" className="rms-icon-button rms-dialog-close" onClick={() => setTransferRequestDialogOpen(false)} title="Close" type="button"><X aria-hidden="true" size={18} /></button>
                         </div>
-                        <div className="rms-workspace-tabs rms-dialog-tabs" role="tablist" aria-label="Transfer direction">
+                        <div className="rms-transfer-mode-switch" role="tablist" aria-label="Transfer direction">
                           <button
                             aria-selected={transferCreationMode === "REQUEST_IN"}
                             className={transferCreationMode === "REQUEST_IN" ? "is-active" : ""}
@@ -11036,13 +11109,17 @@ export function OnlineStoreWorkspace({
                             Direct transfer out
                           </button>
                         </div>
-                        <div className="rms-workspace-tabs rms-dialog-tabs">
+                        <div className="rms-transfer-step-tabs" role="tablist" aria-label="Transfer entry">
                           {(["header", "details"] as TransferEntryTab[]).map((tab) => (
-                            <button className={activeTransferEntryTab === tab ? "is-active" : ""} key={tab} onClick={() => setActiveTransferEntryTab(tab)} type="button">{tab.toUpperCase()}</button>
+                            <button aria-selected={activeTransferEntryTab === tab} className={activeTransferEntryTab === tab ? "is-active" : ""} key={tab} onClick={() => setActiveTransferEntryTab(tab)} role="tab" type="button">
+                              {tab === "header" ? "Header" : "Items"}
+                              {tab === "details" ? <span>{transferRequestLines.length}</span> : null}
+                            </button>
                           ))}
                         </div>
-                        {activeTransferEntryTab === "header" ? (
-                          <div className="rms-form-grid rms-transfer-header-grid">
+                        <div className="rms-transfer-dialog-body">
+                          {activeTransferEntryTab === "header" ? (
+                            <div className="rms-form-grid rms-transfer-header-grid">
                             <label><span>{transferCreationMode === "DIRECT_OUT" ? "Destination shop" : "Source store"}</span><select onChange={(event) => setTransferSourceStoreId(event.target.value)} value={transferSourceStoreId}><option value="">{transferCreationMode === "DIRECT_OUT" ? "Select destination" : "Select source"}</option>{workspace.transferStores.map((store) => <option key={store.storeId} value={store.storeId}>{store.storeName}</option>)}</select></label>
                             <label><span>{transferCreationMode === "DIRECT_OUT" ? "Issue from" : "Receive into"}</span><select onChange={(event) => setTransferDestinationLocationId(event.target.value)} value={selectedTransferDestinationLocation?.locationId ?? transferDestinationLocationId}>{workspace.inventoryLocations.map((location) => <option key={location.locationId} value={location.locationId}>{location.locationName}</option>)}</select></label>
                             <label><span>Required date</span><input onChange={(event) => setTransferRequiredDate(event.target.value)} type="date" value={transferRequiredDate} /></label>
@@ -11052,18 +11129,44 @@ export function OnlineStoreWorkspace({
                             <label><span>Vehicle no.</span><input onChange={(event) => setTransferVehicleRegistrationNo(event.target.value)} value={transferVehicleRegistrationNo} /></label>
                             <label><span>Driver</span><input onChange={(event) => setTransferDriverName(event.target.value)} value={transferDriverName} /></label>
                             <label><span>Driver contact</span><input onChange={(event) => setTransferDriverContact(event.target.value)} value={transferDriverContact} /></label>
-                            <label><span>Note</span><input onChange={(event) => setTransferNote(event.target.value)} value={transferNote} /></label>
-                          </div>
-                        ) : null}
-                        {activeTransferEntryTab === "details" ? (
-                          <div className="rms-transfer-detail-pane">
-                            <div className="rms-form-grid rms-transfer-line-entry">
-                              <label><span>Product</span><select onChange={(event) => { const productId = event.target.value; const product = workspace.inventoryProducts.find((item) => item.productId === productId); setInventoryProductId(productId); setTransferUnitOfMeasure(product?.baseUnitOfMeasure ?? ""); }} value={inventoryProductId}><option value="">Select item</option>{workspace.inventoryProducts.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {product.productCode}</option>)}</select></label>
+                            <label className="rms-transfer-note-field"><span>Note</span><input onChange={(event) => setTransferNote(event.target.value)} value={transferNote} /></label>
+                            </div>
+                          ) : null}
+                          {activeTransferEntryTab === "details" ? (
+                            <div className="rms-transfer-detail-pane">
+                              <div className="rms-form-grid rms-transfer-line-entry is-uom">
+                              <label className="rms-transfer-product-field">
+                                <span>Product</span>
+                                <input
+                                  aria-label="Search transfer products"
+                                  onChange={(event) => {
+                                    setTransferProductSearch(event.target.value);
+                                    setInventoryProductId("");
+                                    setTransferUnitOfMeasure("");
+                                  }}
+                                  placeholder="Search name, code, or SKU"
+                                  value={transferProductSearch}
+                                />
+                                <select
+                                  aria-label="Transfer product results"
+                                  onChange={(event) => {
+                                    const productId = event.target.value;
+                                    const product = workspace.inventoryProducts.find((item) => item.productId === productId);
+                                    setInventoryProductId(productId);
+                                    setTransferProductSearch(product?.productName ?? "");
+                                    setTransferUnitOfMeasure(product?.baseUnitOfMeasure ?? "");
+                                  }}
+                                  value={inventoryProductId}
+                                >
+                                  <option value="">{filteredTransferProducts.length ? "Select matching item" : "No matching products"}</option>
+                                  {filteredTransferProducts.map((product) => <option key={product.productId} value={product.productId}>{product.productName} · {product.productCode}{product.sku ? ` · ${product.sku}` : ""}</option>)}
+                                </select>
+                              </label>
                               <label><span>Unit</span><select disabled={!selectedInventoryProduct} onChange={(event) => setTransferUnitOfMeasure(event.target.value)} value={transferUnitOfMeasure}>{(selectedInventoryProduct?.uomConversions.length ? selectedInventoryProduct.uomConversions : selectedInventoryProduct ? [{ uomCode: selectedInventoryProduct.baseUnitOfMeasure, uomName: selectedInventoryProduct.baseUnitOfMeasure, conversionFactor: 1 }] : []).map((unit) => <option key={unit.uomCode} value={unit.uomCode}>{unit.uomName} ({unit.uomCode}){unit.conversionFactor !== 1 ? ` = ${formatNumber.format(unit.conversionFactor)} ${selectedInventoryProduct?.baseUnitOfMeasure}` : ""}</option>)}</select></label>
                               <label><span>Quantity</span><input min="0.001" onChange={(event) => setTransferQuantity(event.target.value)} step="0.001" type="number" value={transferQuantity} /></label>
                               <button className="rms-button" onClick={addTransferRequestLine} type="button">Add line</button>
-                            </div>
-                            <div className="rms-table rms-stock-request-line-table">
+                              </div>
+                              <div className="rms-table rms-stock-request-line-table">
                               <div className="rms-table-head"><span>Item</span><span>Qty</span><span>Remove</span></div>
                               {transferRequestLines.map((line) => (
                                 <div className="rms-table-row" key={line.id}>
@@ -11095,10 +11198,11 @@ export function OnlineStoreWorkspace({
                                 </div>
                               ))}
                               {!transferRequestLines.length ? <EmptyState title="No request lines" /> : null}
+                              </div>
                             </div>
-                          </div>
-                        ) : null}
-                        <div className="rms-dialog-actions">
+                          ) : null}
+                        </div>
+                        <div className="rms-dialog-actions rms-transfer-dialog-actions">
                           <button className="rms-button" onClick={() => setTransferRequestDialogOpen(false)} type="button">Cancel</button>
                           <button className="rms-button is-primary" disabled={isPostingInventory || !transferRequestLines.length} onClick={() => void postTransferRequest()} type="button">{isPostingInventory ? "Saving..." : "Save draft"}</button>
                         </div>
@@ -11789,13 +11893,19 @@ export function OnlineStoreWorkspace({
                 </div>
               ) : null}
               {activeReport === "tenders" ? (
-                <div className="rms-table rms-report-table">
-                  <div className="rms-table-head"><span>Receipt</span><span>Customer</span><span>Tender</span><span>Collected by</span><span>Amount</span></div>
-                  {reportTenderRows.map((row) => (
-                    <div className="rms-table-row" key={row.paymentId}><strong>{row.transactionNo}<small>{row.transactionType} · {new Date(row.occurredAt).toLocaleString()}</small></strong><span>{row.customerName}<small>{row.sourceTransactionNo ?? "Direct sale"}</small></span><span>{row.tenderMethodName ?? row.paymentMethod}<small>{row.paymentPurpose} · {row.reference ?? "No reference"}</small></span><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || "No shift"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b></div>
-                  ))}
-                  {!reportTenderRows.length ? <EmptyState title="No tender rows" detail="No tender movement matches the current search." /> : null}
-                </div>
+                <>
+                  <div className="rms-dashboard-mini-grid">
+                    <div><span>Net collections</span><strong>{formatMoney(reportTenderTotals.netAmount, currencyCode)}</strong></div>
+                    {reportTenderTotals.byTender.map((total) => <div key={total.key}><span>{total.label}</span><strong>{formatMoney(total.amount, currencyCode)}</strong></div>)}
+                  </div>
+                  <div className="rms-table rms-report-table">
+                    <div className="rms-table-head"><span>Receipt</span><span>Customer</span><span>Tender</span><span>Collected by</span><span>Amount</span></div>
+                    {reportTenderRows.map((row) => (
+                      <div className="rms-table-row" key={row.paymentId}><strong>{row.transactionNo}<small>{row.transactionType} · {new Date(row.occurredAt).toLocaleString()}</small></strong><span>{row.customerName}<small>{tenderSourceLabel(row)}</small></span><span>{row.tenderMethodName ?? row.paymentMethod}<small>{row.paymentPurpose} · {row.reference ?? "No reference"}</small></span><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || "No shift"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b></div>
+                    ))}
+                    {!reportTenderRows.length ? <EmptyState title="No tender rows" detail="No tender movement matches the current search." /> : null}
+                  </div>
+                </>
               ) : null}
               {activeReport === "inventory" ? (
                 <div className="rms-table rms-report-table">

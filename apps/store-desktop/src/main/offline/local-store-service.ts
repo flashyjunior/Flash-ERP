@@ -598,6 +598,7 @@ type ReportTenderRow = {
   transaction_no: string;
   transaction_type: "SALE" | "RETURN" | "EXCHANGE";
   source_transaction_no: string | null;
+  sales_order_no: string | null;
   occurred_at: string;
   cashier_code: string | null;
   terminal_code: string | null;
@@ -7714,6 +7715,7 @@ export class LocalStoreService {
           txn.transaction_no AS transaction_no,
           txn.transaction_type AS transaction_type,
           txn.source_transaction_no AS source_transaction_no,
+          sales_order.order_no AS sales_order_no,
           payment.received_at AS occurred_at,
           COALESCE(payment.received_cashier_code, txn.cashier_code, shift.cashier_code) AS cashier_code,
           COALESCE(payment.received_terminal_code, shift.terminal_code) AS terminal_code,
@@ -7738,6 +7740,9 @@ export class LocalStoreService {
           ON customer.id = txn.customer_id
         LEFT JOIN pos_shift AS shift
           ON shift.id = COALESCE(payment.received_shift_id, txn.shift_id)
+        LEFT JOIN sales_order
+          ON sales_order.source_transaction_id = txn.id
+          OR sales_order.fulfilled_transaction_id = txn.id
         WHERE ${tenderWhere.join(" AND ")}
         ORDER BY payment.received_at DESC, txn.transaction_no DESC, payment.id DESC
         LIMIT ?`,
@@ -7965,6 +7970,7 @@ export class LocalStoreService {
       transactionNo: row.transaction_no,
       transactionType: row.transaction_type,
       sourceTransactionNo: row.source_transaction_no,
+      salesOrderNo: row.sales_order_no,
       occurredAt: row.occurred_at,
       cashierCode: row.cashier_code,
       terminalCode: row.terminal_code,

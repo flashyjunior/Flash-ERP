@@ -2086,6 +2086,7 @@ export type StoreTenderReportRow = {
   transactionNo: string;
   transactionType: "SALE" | "RETURN" | "EXCHANGE";
   sourceTransactionNo: string | null;
+  salesOrderNo: string | null;
   occurredAt: string;
   cashierCode: string | null;
   terminalCode: string | null;

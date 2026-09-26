@@ -2747,6 +2747,7 @@ export type OnlineStoreWorkspaceData = {
       transactionNo: string;
       transactionType: string;
       sourceTransactionNo: string | null;
+      salesOrderNo: string | null;
       occurredAt: string;
       cashierCode: string | null;
       terminalCode: string | null;
@@ -5987,11 +5988,37 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     note: entry.note,
     occurredAt: entry.occurredAt.toISOString()
   }));
+  const reportSalesOrderReferences =
+    reportPayments.length > 0
+      ? await prisma.salesOrder.findMany({
+          where: {
+            retailOrgId: assignment.session.retailOrgId,
+            OR: [
+              { sourceTransactionId: { in: reportPayments.map((payment) => payment.posTransactionId) } },
+              { fulfilledTransactionId: { in: reportPayments.map((payment) => payment.posTransactionId) } }
+            ]
+          },
+          select: {
+            orderNo: true,
+            sourceTransactionId: true,
+            fulfilledTransactionId: true
+          }
+        })
+      : [];
+  const reportSalesOrderNoByTransactionId = new Map<string, string>();
+
+  for (const order of reportSalesOrderReferences) {
+    reportSalesOrderNoByTransactionId.set(order.sourceTransactionId, order.orderNo);
+    if (order.fulfilledTransactionId) {
+      reportSalesOrderNoByTransactionId.set(order.fulfilledTransactionId, order.orderNo);
+    }
+  }
   const reportTenderRows: OnlineStoreWorkspaceData["reports"]["tenderRows"] = reportPayments.map((payment) => ({
     paymentId: payment.id,
     transactionNo: payment.posTransaction.transactionNo,
     transactionType: payment.posTransaction.transactionType,
     sourceTransactionNo: payment.posTransaction.sourceTransactionNo,
+    salesOrderNo: reportSalesOrderNoByTransactionId.get(payment.posTransactionId) ?? null,
     occurredAt: payment.receivedAt.toISOString(),
     cashierCode: payment.receivedCashierCodeSnapshot ?? payment.posTransaction.cashierCodeSnapshot,
     terminalCode: payment.receivedTerminalCodeSnapshot,
@@ -7098,11 +7125,37 @@ export async function browseOnlineStoreReports(
       }
     ] as const)
   );
+  const reportSalesOrderReferences =
+    reportPayments.length > 0
+      ? await prisma.salesOrder.findMany({
+          where: {
+            retailOrgId: session.retailOrgId,
+            OR: [
+              { sourceTransactionId: { in: reportPayments.map((payment) => payment.posTransactionId) } },
+              { fulfilledTransactionId: { in: reportPayments.map((payment) => payment.posTransactionId) } }
+            ]
+          },
+          select: {
+            orderNo: true,
+            sourceTransactionId: true,
+            fulfilledTransactionId: true
+          }
+        })
+      : [];
+  const reportSalesOrderNoByTransactionId = new Map<string, string>();
+
+  for (const order of reportSalesOrderReferences) {
+    reportSalesOrderNoByTransactionId.set(order.sourceTransactionId, order.orderNo);
+    if (order.fulfilledTransactionId) {
+      reportSalesOrderNoByTransactionId.set(order.fulfilledTransactionId, order.orderNo);
+    }
+  }
   const tenderRows: OnlineStoreWorkspaceData["reports"]["tenderRows"] = reportPayments.map((payment) => ({
     paymentId: payment.id,
     transactionNo: payment.posTransaction.transactionNo,
     transactionType: payment.posTransaction.transactionType,
     sourceTransactionNo: payment.posTransaction.sourceTransactionNo,
+    salesOrderNo: reportSalesOrderNoByTransactionId.get(payment.posTransactionId) ?? null,
     occurredAt: payment.receivedAt.toISOString(),
     cashierCode: payment.receivedCashierCodeSnapshot ?? payment.posTransaction.cashierCodeSnapshot,
     terminalCode: payment.receivedTerminalCodeSnapshot,

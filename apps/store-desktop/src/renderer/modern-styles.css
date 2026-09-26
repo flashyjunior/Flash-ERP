@@ -5661,3 +5661,271 @@ label.rms-colour-custom-picker span {
     display: none;
   }
 }
+
+/* Transfer workspace */
+.rms-stock-request-panel > .rms-panel-title {
+  border-bottom: 1px solid #dce6de;
+  padding-bottom: 12px;
+}
+
+.rms-stock-request-panel > .rms-filter-row {
+  gap: 10px;
+  border: 1px solid #d8e4db;
+  border-radius: 7px;
+  background: #f8fbf9;
+  padding: 10px;
+}
+
+.rms-stock-request-table {
+  border: 1px solid #d8e4db;
+  border-radius: 7px;
+  overflow-x: auto;
+}
+
+.rms-stock-request-table .rms-table-head,
+.rms-stock-request-table .rms-table-row {
+  min-width: 1020px;
+  align-items: center;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(140px, 0.85fr) minmax(140px, 0.85fr) minmax(150px, 0.9fr) 78px 104px 52px 66px 52px;
+}
+
+.rms-stock-request-table .rms-table-head > span {
+  white-space: nowrap;
+}
+
+.rms-transfer-entry-dialog {
+  width: min(920px, calc(100vw - 32px));
+  height: auto;
+  min-height: 0;
+  max-height: min(760px, calc(100vh - 32px));
+  grid-template-rows: auto auto auto minmax(210px, 1fr) auto;
+  gap: 0;
+  overflow: hidden;
+  background: #fff;
+  padding: 0;
+}
+
+.rms-transfer-dialog-header {
+  min-height: 72px;
+  border-bottom: 1px solid #dce6de;
+  padding: 16px 20px 14px;
+}
+
+.rms-transfer-dialog-header h2 {
+  margin-top: 2px;
+  font-size: 20px;
+}
+
+.rms-dialog-close {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  border-color: #d2ddd4;
+  background: #fff;
+  color: #405247;
+}
+
+.rms-dialog-close:hover {
+  border-color: #aebdb1;
+  background: #f2f6f3;
+}
+
+.rms-transfer-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(430px, calc(100% - 40px));
+  gap: 4px;
+  margin: 14px 20px 10px;
+  border: 1px solid #d8e3da;
+  border-radius: 7px;
+  background: #edf3ee;
+  padding: 4px;
+}
+
+.rms-transfer-mode-switch button {
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: #4c5f52;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.rms-transfer-mode-switch button.is-active {
+  border-color: #cbd9ce;
+  background: #fff;
+  color: #167348;
+  box-shadow: 0 1px 3px rgba(29, 56, 39, 0.12);
+}
+
+.rms-transfer-mode-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.rms-transfer-step-tabs {
+  display: flex;
+  gap: 24px;
+  min-height: 42px;
+  border-bottom: 1px solid #dce6de;
+  padding: 0 20px;
+}
+
+.rms-transfer-step-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 72px;
+  min-height: 42px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #657568;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.rms-transfer-step-tabs button.is-active {
+  border-bottom-color: #188657;
+  color: #145f40;
+}
+
+.rms-transfer-step-tabs button > span {
+  display: inline-grid;
+  min-width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 6px;
+  background: #e5eee7;
+  padding: 0 5px;
+  color: #355644;
+  font-size: 11px;
+}
+
+.rms-transfer-dialog-body {
+  min-height: 210px;
+  overflow: auto;
+  padding: 18px 20px 20px;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-header-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  align-content: start;
+  align-items: end;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-header-grid label,
+.rms-transfer-entry-dialog .rms-transfer-line-entry label {
+  min-width: 0;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-note-field {
+  grid-column: 1 / -1;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-detail-pane {
+  gap: 14px;
+  overflow: visible;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-line-entry {
+  align-items: end;
+  gap: 12px;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-line-entry.is-simple {
+  grid-template-columns: minmax(260px, 1fr) 130px auto;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-line-entry.is-uom {
+  grid-template-columns: minmax(250px, 1.4fr) minmax(150px, 0.7fr) 120px auto;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-product-field {
+  display: grid;
+  align-self: stretch;
+  gap: 6px;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-product-field > input,
+.rms-transfer-entry-dialog .rms-transfer-product-field > select {
+  width: 100%;
+  min-width: 0;
+}
+
+.rms-transfer-entry-dialog .rms-transfer-line-entry > .rms-button {
+  width: auto;
+  min-width: 100px;
+  min-height: 38px;
+}
+
+.rms-transfer-entry-dialog .rms-stock-request-line-table {
+  max-height: 330px;
+  border: 1px solid #dce6de;
+  border-radius: 7px;
+}
+
+.rms-transfer-summary-footer {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 8px;
+  align-items: stretch;
+  border: 0;
+  border-top: 1px solid #dce6de;
+  border-radius: 0;
+  background: #f8fbf9;
+  margin: 0;
+  padding: 12px 20px;
+}
+
+.rms-transfer-summary-footer > .rms-button {
+  min-width: 160px;
+  min-height: 44px;
+}
+
+@media (max-width: 760px) {
+  .rms-transfer-entry-dialog {
+    width: min(100%, calc(100vw - 16px));
+    max-height: calc(100vh - 16px);
+  }
+
+  .rms-transfer-dialog-header {
+    padding: 14px 14px 12px;
+  }
+
+  .rms-transfer-mode-switch {
+    width: calc(100% - 28px);
+    margin: 12px 14px 8px;
+  }
+
+  .rms-transfer-step-tabs {
+    padding: 0 14px;
+  }
+
+  .rms-transfer-dialog-body {
+    padding: 14px;
+  }
+
+  .rms-transfer-entry-dialog .rms-transfer-header-grid,
+  .rms-transfer-entry-dialog .rms-transfer-line-entry.is-simple,
+  .rms-transfer-entry-dialog .rms-transfer-line-entry.is-uom {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rms-transfer-entry-dialog .rms-transfer-line-entry > .rms-button {
+    width: 100%;
+  }
+
+  .rms-transfer-summary-footer {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 12px 14px;
+  }
+
+  .rms-transfer-summary-footer > .rms-button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+}

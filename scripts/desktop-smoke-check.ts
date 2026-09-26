@@ -156,13 +156,13 @@ requireIncludes(
 );
 requireIncludes(
   rendererSource,
-  'className="rms-dialog rms-wide-dialog rms-stock-request-dialog"',
-  "stock request uses the full-size document dialog",
+  'className="rms-dialog rms-wide-dialog rms-stock-request-dialog rms-transfer-entry-dialog"',
+  "transfer entry uses its dedicated compact dialog layout",
 );
 requireIncludes(
   rendererStyles,
-  ".rms-stock-request-dialog > .rms-workspace-tabs",
-  "stock request tabs retain normal control height",
+  ".rms-transfer-entry-dialog",
+  "transfer entry has dedicated responsive dialog styling",
 );
 requireIncludes(
   rendererStyles,
