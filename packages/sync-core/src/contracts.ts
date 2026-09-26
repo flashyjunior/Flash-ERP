@@ -1775,6 +1775,7 @@ export type StoreInterStoreTransferRequestedPayload = {
   requestNo: string;
   transferBatchNo?: string | null;
   lineNo?: number | null;
+  direction?: "REQUEST_IN" | "DIRECT_OUT";
   storeCode: string;
   terminalCode: string;
   sourceStoreCode: string;

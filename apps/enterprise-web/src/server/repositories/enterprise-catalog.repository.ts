@@ -913,8 +913,13 @@ export function buildUnavailableEnterpriseCatalogWorkspace(
   };
 }
 
+type EnterpriseCatalogWorkspaceLoadOptions = {
+  includeAllProducts?: boolean;
+};
+
 export async function getEnterpriseCatalogWorkspace(
   input?: EnterprisePageInput,
+  options?: EnterpriseCatalogWorkspaceLoadOptions,
 ): Promise<EnterpriseCatalogWorkspaceData> {
   await ensureProductVariantSalesOrderDepositSchemaCompatibility();
 
@@ -928,6 +933,7 @@ export async function getEnterpriseCatalogWorkspace(
   }
 
   const productPage = normalizeEnterprisePageInput(input);
+  const includeAllProducts = options?.includeAllProducts === true;
   const productBaseWhere: Prisma.ProductWhereInput = {
     retailOrgId: enterpriseNode.retailOrgId,
     deletedAt: null,
@@ -965,8 +971,12 @@ export async function getEnterpriseCatalogWorkspace(
     prisma.product.findMany({
       where: productListWhere,
       orderBy: [{ name: "asc" }, { code: "asc" }],
-      skip: productPage.skip,
-      take: productPage.pageSize,
+      ...(includeAllProducts
+        ? {}
+        : {
+            skip: productPage.skip,
+            take: productPage.pageSize,
+          }),
       select: {
         code: true,
         sku: true,
@@ -1254,7 +1264,15 @@ export async function getEnterpriseCatalogWorkspace(
         store.region ??
         "Ungrouped",
     })),
-    productPage: buildEnterprisePageInfo(productPage, productTotal),
+    productPage: includeAllProducts
+      ? {
+          page: 1,
+          pageSize: products.length || productPage.pageSize,
+          search: productPage.search,
+          totalRows: productTotal,
+          totalPages: productTotal === 0 ? 0 : 1,
+        }
+      : buildEnterprisePageInfo(productPage, productTotal),
     unitOfMeasureRows: unitOfMeasures.map((unit) => ({
       uomCode: unit.code,
       name: unit.name,
@@ -1343,6 +1361,10 @@ export async function getEnterpriseCatalogWorkspace(
     statusMessage: `Live Flash ERP catalog workspace from ${enterpriseNode.name} in ${enterpriseNode.retailOrg.name}. Use this workspace to move between master data, pricing coverage, and downstream publication posture.`,
     refreshedAt: new Date().toISOString(),
   };
+}
+
+export async function getEnterpriseInventoryCatalogWorkspace(): Promise<EnterpriseCatalogWorkspaceData> {
+  return getEnterpriseCatalogWorkspace(undefined, { includeAllProducts: true });
 }
 
 export type EnterpriseProductDetailData = {

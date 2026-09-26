@@ -69,6 +69,12 @@ const enterpriseSecurityPanel = requireFile(
 const enterpriseInventoryCatalogWorkspace = requireFile(
   "apps/enterprise-web/src/components/enterprise/enterprise-inventory-catalog-workspace.tsx"
 );
+const enterpriseCatalogRepository = requireFile(
+  "apps/enterprise-web/src/server/repositories/enterprise-catalog.repository.ts"
+);
+const enterpriseSettingsPage = requireFile(
+  "apps/enterprise-web/src/app/settings/[view]/page.tsx"
+);
 const onlineSalesOrderRoute = requireFile(
   "apps/enterprise-web/src/app/api/online-store/sales-orders/route.ts"
 );
@@ -141,6 +147,21 @@ requireIncludes(
   enterpriseInventoryCatalogWorkspace,
   "of {numberFormatter.format(workspace.productRows.length)} linked",
   "inventory catalog counts must distinguish linked products from all available products."
+);
+requireIncludes(
+  enterpriseCatalogRepository,
+  "return getEnterpriseCatalogWorkspace(undefined, { includeAllProducts: true });",
+  "the inventory-catalog editor loader must request the complete product master."
+);
+requireIncludes(
+  enterpriseCatalogRepository,
+  "...(includeAllProducts",
+  "the catalog repository must bypass product paging only for the inventory-catalog editor."
+);
+requireIncludes(
+  enterpriseSettingsPage,
+  "getEnterpriseInventoryCatalogWorkspace()",
+  "inventory-catalog settings must use the complete-product loader instead of the default product page."
 );
 
 requireIncludes(
@@ -375,6 +396,18 @@ for (const onlineRepositoryAnchor of [
   );
 }
 
+for (const directTransferAnchor of [
+  'direction === "DIRECT_OUT"',
+  '"inventory.transfer.issue"',
+  "direct inter-store transfer out"
+]) {
+  requireIncludes(
+    onlineRepository,
+    directTransferAnchor,
+    `online-store repository must retain direct transfer-out behavior: ${directTransferAnchor}.`
+  );
+}
+
 for (const onlineUiAnchor of [
   "workspace.branding.companyLogoUrl",
   "rms-nav-icon",
@@ -400,6 +433,14 @@ for (const onlineUiAnchor of [
   "rms-top-product-feature"
 ]) {
   requireIncludes(onlineWorkspace, onlineUiAnchor, `online-store UI must retain ${onlineUiAnchor}.`);
+}
+
+for (const directTransferUiAnchor of ["Direct transfer out", "direction: transferCreationMode"]) {
+  requireIncludes(
+    onlineWorkspace,
+    directTransferUiAnchor,
+    `online-store workspace must retain direct transfer-out control: ${directTransferUiAnchor}.`
+  );
 }
 
 requireIncludes(

@@ -173,12 +173,6 @@ export const enterpriseSettingsMenuItems = [
     href: "/settings/receipt-templates",
     requiredPermissions: ["settings.receipt-template.manage"]
   },
-  {
-    key: "retail-users",
-    label: "Retail Users",
-    href: "/settings/retail-users",
-    requiredPermissions: ["settings.retail-user.manage"]
-  }
 ] as const;
 
 export const enterpriseFinanceSettingsMenuItems = [
@@ -654,6 +648,12 @@ export const enterpriseSecurityMenuItems = [
     requiredPermissions: ["security.user.manage"]
   },
   {
+    key: "retail-users",
+    label: "Retail Users",
+    href: "/settings/retail-users",
+    requiredPermissions: ["settings.retail-user.manage"]
+  },
+  {
     key: "roles-privileges",
     label: "Roles & Privileges",
     href: "/security/roles-privileges",
@@ -843,7 +843,8 @@ export const enterpriseNavigationSections: readonly EnterpriseNavigationSection[
       "security.online-user.view",
       "security.password-policy.manage",
       "security.log.view",
-      "security.data-purge.execute"
+      "security.data-purge.execute",
+      "settings.retail-user.manage"
     ],
     items: enterpriseSecurityMenuItems
   },

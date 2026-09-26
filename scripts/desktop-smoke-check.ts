@@ -118,7 +118,11 @@ requireIncludes(
   "the public sign-in page can stream saved company media without authentication",
 );
 requireIncludes(mainSource, "FLASH_ERP_DESKTOP_UPDATE_URL", "runtime config stores update feed URL");
-requireIncludes(builderConfig, "updates.flashcodesolutions.com", "packager keeps first-run update metadata");
+requireIncludes(
+  builderConfig,
+  "https://flashcodesolutions.com.gh/rms-update/erp/",
+  "packager keeps the production desktop update feed",
+);
 requireIncludes(mainSource, "runtime status unavailable", "runtime status fails soft");
 requireIncludes(mainSource, "flash-erp:get-store-runtime-status", "runtime status IPC is registered");
 requireIncludes(preloadSource, "getStoreRuntimeStatus", "preload exposes runtime status");

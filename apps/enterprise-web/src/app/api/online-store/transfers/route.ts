@@ -7,6 +7,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const response = await createOnlineStoreTransferRequest({
       transferBatchNo: body?.transferBatchNo ?? null,
+      direction: body?.direction === "DIRECT_OUT" ? "DIRECT_OUT" : "REQUEST_IN",
       sourceStoreId: body?.sourceStoreId ?? "",
       destinationInventoryLocationId: body?.destinationInventoryLocationId ?? null,
       productId: body?.productId ?? "",
