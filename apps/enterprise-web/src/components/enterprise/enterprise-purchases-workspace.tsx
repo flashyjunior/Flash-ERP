@@ -1,7 +1,7 @@
 "use client";
 
 import type { ColumnDef, FilterFn } from "@tanstack/react-table";
-import { AlertTriangle, Bot, FileText, PackageCheck, Plus, Printer, Send, Truck } from "lucide-react";
+import { AlertTriangle, Bot, Check, ChevronDown, FileText, PackageCheck, Plus, Printer, Search, Send, Truck } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -20,6 +20,7 @@ const quantityFormatter = new Intl.NumberFormat("en-US", {
 type PurchaseOrderRow = EnterprisePurchasesWorkspaceData["purchaseOrderRows"][number];
 type GoodsReceiptRow = EnterprisePurchasesWorkspaceData["goodsReceiptRows"][number];
 type PredictivePurchaseRow = EnterprisePurchasesWorkspaceData["predictiveRows"][number];
+type PurchaseProductOption = EnterprisePurchasesWorkspaceData["productOptions"][number];
 type TemplateTokenValue =
   | string
   | number
@@ -28,6 +29,95 @@ type TemplateTokenValue =
   | {
       rawHtml: string;
     };
+
+function PurchaseProductCombobox({
+  options,
+  query,
+  value,
+  onQueryChange,
+  onValueChange
+}: {
+  options: PurchaseProductOption[];
+  query: string;
+  value: string;
+  onQueryChange: (query: string) => void;
+  onValueChange: (productCode: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const selectedProduct = options.find((product) => product.productCode === value) ?? null;
+  const visibleOptions = options.slice(0, 50);
+
+  return (
+    <div className="relative">
+      <div className="relative">
+        <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-stone-400" />
+        <input
+          aria-autocomplete="list"
+          aria-controls="purchase-product-options"
+          aria-expanded={isOpen}
+          className="w-full rounded-xl border border-stone-200 bg-white py-2 pl-9 pr-10 text-sm font-medium text-stone-800 outline-none focus:border-stone-400"
+          onBlur={() => window.setTimeout(() => setIsOpen(false), 120)}
+          onChange={(event) => {
+            onQueryChange(event.target.value);
+            onValueChange("");
+            setIsOpen(true);
+          }}
+          onFocus={() => setIsOpen(true)}
+          placeholder="Search product, code, or SKU"
+          role="combobox"
+          value={query}
+        />
+        <button
+          aria-label="Show product options"
+          className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-stone-500 hover:bg-stone-100"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => setIsOpen((current) => !current)}
+          type="button"
+        >
+          <ChevronDown className="h-4 w-4" />
+        </button>
+      </div>
+      {isOpen ? (
+        <div
+          className="absolute z-30 mt-1 max-h-72 w-full overflow-y-auto rounded-xl border border-stone-200 bg-white p-1 shadow-xl"
+          id="purchase-product-options"
+          role="listbox"
+        >
+          {visibleOptions.length ? visibleOptions.map((product) => {
+            const isSelected = product.productCode === value;
+            return (
+              <button
+                aria-selected={isSelected}
+                className="flex w-full items-start justify-between gap-3 rounded-lg px-3 py-2 text-left hover:bg-stone-100"
+                key={product.productCode}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onValueChange(product.productCode);
+                  onQueryChange(product.productName);
+                  setIsOpen(false);
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold text-stone-900">{product.productName}</span>
+                  <span className="block truncate text-xs text-stone-500">{product.productCode}{product.sku ? ` / ${product.sku}` : ""}</span>
+                </span>
+                {isSelected ? <Check aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" /> : null}
+              </button>
+            );
+          }) : (
+            <p className="px-3 py-4 text-sm text-stone-500">No matching products.</p>
+          )}
+          {options.length > visibleOptions.length ? (
+            <p className="border-t border-stone-100 px-3 py-2 text-xs text-stone-500">Keep typing to narrow the results.</p>
+          ) : null}
+        </div>
+      ) : null}
+      {selectedProduct ? <p className="mt-1 text-xs text-emerald-700">Selected: {selectedProduct.productName}</p> : null}
+    </div>
+  );
+}
 
 function MetricCard({
   icon: Icon,
@@ -1719,31 +1809,13 @@ export function EnterprisePurchasesWorkspace({
                   ) : (
                     <div className="space-y-4">
                       <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_8rem_8rem_auto]">
-                        <div className="grid gap-2">
-                          <input
-                            className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                            onChange={(event) => {
-                              setProductSearch(event.target.value);
-                              setProductCode("");
-                            }}
-                            placeholder="Search product, code, or SKU"
-                            value={productSearch}
-                          />
-                          <select
-                            className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
-                            onChange={(event) => setProductCode(event.target.value)}
-                            value={productCode}
-                          >
-                            <option value="">
-                              {filteredProductOptions.length ? "Select item" : "No matching products"}
-                            </option>
-                            {filteredProductOptions.map((product) => (
-                              <option key={product.productCode} value={product.productCode}>
-                                {product.productName} ({product.productCode}{product.sku ? ` / ${product.sku}` : ""})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
+                        <PurchaseProductCombobox
+                          onQueryChange={setProductSearch}
+                          onValueChange={setProductCode}
+                          options={filteredProductOptions}
+                          query={productSearch}
+                          value={productCode}
+                        />
                         <input
                           className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-800 outline-none"
                           min="0.001"
