@@ -36,6 +36,7 @@ function requireScript(packageSource: string, scriptName: string) {
 const rootPackage = requireFile("package.json");
 const desktopRuntime = requireFile("apps/store-desktop/src/shared/desktop-runtime.ts");
 const desktopRenderer = requireFile("apps/store-desktop/src/renderer/modern-app.tsx");
+const desktopStyles = requireFile("apps/store-desktop/src/renderer/modern-styles.css");
 const desktopMain = requireFile("apps/store-desktop/electron/main.ts");
 const desktopSqliteService = requireFile("apps/store-desktop/src/main/offline/local-store-service.ts");
 const desktopPostgresService = requireFile("apps/store-desktop/src/main/postgres/postgres-store-service.ts");
@@ -92,6 +93,63 @@ const playwrightConfig = requireFile("playwright.config.ts");
 const parityLedger = requireFile("docs/16-online-store-desktop-parity-ledger.md");
 
 requireScript(rootPackage, "acceptance:online-store-parity");
+
+for (const [source, surface] of [
+  [onlineWorkspace, "online store"],
+  [desktopRenderer, "Store Desktop"],
+] as const) {
+  requireIncludes(
+    source,
+    "rms-transfer-mode-switch",
+    `${surface} transfer direction must use the compact segmented control.`,
+  );
+  requireIncludes(
+    source,
+    "rms-transfer-step-tabs",
+    `${surface} transfer form must expose clear Header and Items steps.`,
+  );
+  requireIncludes(
+    source,
+    "rms-transfer-dialog-body",
+    `${surface} transfer form must keep its content in a bounded scroll region.`,
+  );
+  requireIncludes(
+    source,
+    'aria-label="Close transfer dialog"',
+    `${surface} transfer dialog must use an accessible close control.`,
+  );
+  requireIncludes(
+    source,
+    'aria-label="Search transfer products"',
+    `${surface} transfer lines must provide a searchable product input.`,
+  );
+  requireIncludes(
+    source,
+    'aria-label="Transfer product results"',
+    `${surface} transfer product search must expose its filtered results.`,
+  );
+  requireIncludes(
+    source,
+    "filteredTransferProducts",
+    `${surface} transfer product results must be filtered from the entered query.`,
+  );
+}
+
+for (const [source, surface] of [
+  [onlineStyles, "online store"],
+  [desktopStyles, "Store Desktop"],
+] as const) {
+  requireIncludes(
+    source,
+    "width: min(920px, calc(100vw - 32px));",
+    `${surface} transfer dialog must use the compact desktop width.`,
+  );
+  requireIncludes(
+    source,
+    "grid-template-columns: repeat(2, minmax(0, 1fr));",
+    `${surface} transfer header must retain a readable two-column layout.`,
+  );
+}
 
 requireIncludes(
   onlineWorkspace,

@@ -2943,6 +2943,15 @@ function PrintIcon() {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg aria-hidden="true" className="rms-action-svg" viewBox="0 0 24 24">
+      <path d="m6 6 12 12" />
+      <path d="M18 6 6 18" />
+    </svg>
+  );
+}
+
 function TrashIcon() {
   return (
     <svg aria-hidden="true" className="rms-trash-svg" viewBox="0 0 24 24">
@@ -20187,6 +20196,29 @@ function StorePosSettingsWorkspace({
   );
 }
 
+function summarizeStoreTenderRows(rows: StoreReportResult["tenderRows"]) {
+  const byTender = new Map<string, { key: string; label: string; amount: number }>();
+
+  for (const row of rows) {
+    const key = row.tenderMethodCode ?? row.paymentMethod;
+    const label = row.tenderMethodName ?? row.paymentMethod;
+    const current = byTender.get(key);
+
+    byTender.set(key, {
+      key,
+      label,
+      amount: Number(((current?.amount ?? 0) + row.amount).toFixed(2)),
+    });
+  }
+
+  return {
+    netAmount: Number(rows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
+    byTender: [...byTender.values()].sort((left, right) =>
+      left.label.localeCompare(right.label),
+    ),
+  };
+}
+
 function ReportsView(props: {
   snapshot: StoreSyncSnapshot | null;
   report: StoreReportResult | null;
@@ -20212,6 +20244,7 @@ function ReportsView(props: {
   const tableRows = props.report
     ? reportRowsForExport(props.report, activeReportKind)
     : [];
+  const tenderTotals = summarizeStoreTenderRows(props.report?.tenderRows ?? []);
 
   return (
     <div className="rms-report-view">
@@ -20317,6 +20350,13 @@ function ReportsView(props: {
               <Stat label="Balance collected" value={formatMoney(props.report.summary.salesOrderBalanceCollectedAmount)} />
               <Stat label="Expected tender" value={formatMoney(props.report.summary.salesOrderExpectedTenderAmount)} />
               <Stat label="Outstanding" value={formatMoney(props.report.summary.salesOrderOutstandingAmount)} />
+            </div>
+          ) : activeReportKind === "tenders" ? (
+            <div className="rms-stat-grid">
+              <Stat label="Net collections" value={formatMoney(tenderTotals.netAmount)} />
+              {tenderTotals.byTender.map((total) => (
+                <Stat key={total.key} label={total.label} value={formatMoney(total.amount)} />
+              ))}
             </div>
           ) : (
             <div className="rms-stat-grid">
@@ -20535,6 +20575,7 @@ function InventoryWorkspace(props: {
     useState<TransferDirectionFilter>("ALL");
   const [transferRequestReference, setTransferRequestReference] = useState("");
   const [transferRequestNote, setTransferRequestNote] = useState("");
+  const [transferProductSearch, setTransferProductSearch] = useState("");
   const [transferRequiredDate, setTransferRequiredDate] = useState(
     new Date().toISOString().slice(0, 10),
   );
@@ -20766,6 +20807,15 @@ function InventoryWorkspace(props: {
   const selectedTransferProduct = requestableProducts.find(
     (item) => item.productCode === props.transferProductCode,
   );
+  const filteredTransferProducts = requestableProducts.filter((item) => {
+    const query = transferProductSearch.trim().toLowerCase();
+
+    return (
+      !query ||
+      item.productCode.toLowerCase().includes(query) ||
+      item.productName.toLowerCase().includes(query)
+    );
+  }).slice(0, 100);
   const selectedLocalPurchaseProduct = requestableProducts.find(
     (item) => item.productCode === localPurchaseOrderDraft.productCode,
   );
@@ -21052,6 +21102,9 @@ function InventoryWorkspace(props: {
     setTransferRequestLines([]);
     setTransferRequestReference("");
     setTransferRequestNote("");
+    setTransferProductSearch("");
+    props.setTransferProductCode("");
+    props.setTransferUnitOfMeasure("");
     setTransferRequiredDate(new Date().toISOString().slice(0, 10));
     setActiveTransferEntryTab("header");
   }
@@ -21103,6 +21156,9 @@ function InventoryWorkspace(props: {
         unitPrice: requestableProductMap.get(line.productCode)?.unitPrice ?? 0,
       })),
     );
+    setTransferProductSearch("");
+    props.setTransferProductCode("");
+    props.setTransferUnitOfMeasure("");
     setActiveTransferEntryTab("details");
     setTransferRequestDialogOpen(true);
   }
@@ -21259,6 +21315,7 @@ function InventoryWorkspace(props: {
       },
     ]);
     props.setTransferProductCode("");
+    setTransferProductSearch("");
     props.setTransferUnitOfMeasure("");
     props.setTransferQuantity("1");
   }
@@ -23827,8 +23884,8 @@ function InventoryWorkspace(props: {
 
         {transferRequestDialogOpen ? (
           <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
-            <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog">
-              <div className="rms-panel-title">
+            <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog rms-transfer-entry-dialog">
+              <div className="rms-panel-title rms-transfer-dialog-header">
                 <div>
                   <span>
                     {transferCreationMode === "DIRECT_OUT"
@@ -23844,15 +23901,17 @@ function InventoryWorkspace(props: {
                   </h2>
                 </div>
                 <button
-                  className="rms-button"
+                  aria-label="Close transfer dialog"
+                  className="rms-icon-button rms-dialog-close"
                   onClick={() => setTransferRequestDialogOpen(false)}
+                  title="Close"
                   type="button"
                 >
-                  Close
+                  <CloseIcon />
                 </button>
               </div>
               <div
-                className="rms-workspace-tabs rms-dialog-tabs"
+                className="rms-transfer-mode-switch"
                 role="tablist"
                 aria-label="Transfer direction"
               >
@@ -23878,26 +23937,28 @@ function InventoryWorkspace(props: {
                 </button>
               </div>
               <div
-                className="rms-workspace-tabs"
+                className="rms-transfer-step-tabs"
                 role="tablist"
                 aria-label="Stock request entry"
               >
                 {(["header", "details"] as const).map((tab) => (
                   <button
                     aria-selected={activeTransferEntryTab === tab}
-                    className={`rms-tab-button${activeTransferEntryTab === tab ? " is-active" : ""}`}
+                    className={activeTransferEntryTab === tab ? "is-active" : ""}
                     key={tab}
                     onClick={() => setActiveTransferEntryTab(tab)}
                     role="tab"
                     type="button"
                   >
-                    {tab === "header" ? "Header" : "Details"}
+                    {tab === "header" ? "Header" : "Items"}
+                    {tab === "details" ? <span>{transferRequestLines.length}</span> : null}
                   </button>
                 ))}
               </div>
 
-              {activeTransferEntryTab === "header" ? (
-                <div className="rms-form-grid rms-stock-request-header-form">
+              <div className="rms-transfer-dialog-body">
+                {activeTransferEntryTab === "header" ? (
+                  <div className="rms-form-grid rms-stock-request-header-form rms-transfer-header-grid">
                   <label>
                     <span>
                       {transferCreationMode === "DIRECT_OUT"
@@ -23972,7 +24033,7 @@ function InventoryWorkspace(props: {
                       value={transferRequiredDate}
                     />
                   </label>
-                  <label className="rms-form-span-2">
+                  <label className="rms-form-span-2 rms-transfer-note-field">
                     <span>Note</span>
                     <input
                       onChange={(event) =>
@@ -23982,19 +24043,31 @@ function InventoryWorkspace(props: {
                       value={transferRequestNote}
                     />
                   </label>
-                </div>
-              ) : (
-                <div className="rms-stock-request-details">
-                  <div className="rms-form-grid rms-stock-request-line-form">
-                    <label>
+                  </div>
+                ) : (
+                  <div className="rms-stock-request-details rms-transfer-detail-pane">
+                    <div className="rms-form-grid rms-stock-request-line-form rms-transfer-line-entry is-uom">
+                    <label className="rms-transfer-product-field">
                       <span>Item</span>
+                      <input
+                        aria-label="Search transfer products"
+                        onChange={(event) => {
+                          setTransferProductSearch(event.target.value);
+                          props.setTransferProductCode("");
+                          props.setTransferUnitOfMeasure("");
+                        }}
+                        placeholder="Search product name or code"
+                        value={transferProductSearch}
+                      />
                       <select
+                        aria-label="Transfer product results"
                         onChange={(event) => {
                           const productCode = event.target.value;
                           const product = requestableProducts.find(
                             (item) => item.productCode === productCode,
                           );
                           props.setTransferProductCode(productCode);
+                          setTransferProductSearch(product?.productName ?? "");
                           props.setTransferUnitOfMeasure(
                             product?.baseUnitOfMeasure ||
                               product?.unitOfMeasure ||
@@ -24003,8 +24076,12 @@ function InventoryWorkspace(props: {
                         }}
                         value={props.transferProductCode}
                       >
-                        <option value="">Select item</option>
-                        {requestableProducts.map((item) => (
+                        <option value="">
+                          {filteredTransferProducts.length
+                            ? "Select matching item"
+                            : "No matching products"}
+                        </option>
+                        {filteredTransferProducts.map((item) => (
                           <option
                             key={item.productCode}
                             value={item.productCode}
@@ -24072,8 +24149,8 @@ function InventoryWorkspace(props: {
                     >
                       Add line
                     </button>
-                  </div>
-                  <div className="rms-table rms-stock-request-line-table">
+                    </div>
+                    <div className="rms-table rms-stock-request-line-table">
                     <div className="rms-table-head">
                       <span>Item</span>
                       <span>Code</span>
@@ -24140,11 +24217,12 @@ function InventoryWorkspace(props: {
                         detail="Add the requested items before saving."
                       />
                     )}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
-              <div className="rms-total-strip">
+              <div className="rms-total-strip rms-transfer-summary-footer">
                 <Stat
                   label="Line count"
                   value={formatNumber(transferRequestLines.length)}
@@ -25923,10 +26001,12 @@ function reportRowsForExport(report: StoreReportResult, kind: ReportKind) {
         Total: row.totalAmount,
         Paid: row.paidAmount,
       }));
-    case "tenders":
-      return report.tenderRows.map((row) => ({
+    case "tenders": {
+      const totals = summarizeStoreTenderRows(report.tenderRows);
+      const detailRows = report.tenderRows.map((row) => ({
         "Receipt No": row.transactionNo,
         Type: row.transactionType,
+        "Sales Order": row.salesOrderNo ?? "",
         "Source Receipt": row.sourceTransactionNo ?? "",
         Date: formatDate(row.occurredAt),
         Cashier: row.cashierCode ?? "",
@@ -25941,6 +26021,47 @@ function reportRowsForExport(report: StoreReportResult, kind: ReportKind) {
         Reference: row.reference ?? "",
         Amount: row.amount,
       }));
+
+      return [
+        ...detailRows,
+        ...totals.byTender.map((total) => ({
+          "Receipt No": "TENDER TOTAL",
+          Type: "",
+          "Sales Order": "",
+          "Source Receipt": "",
+          Date: "",
+          Cashier: "",
+          Terminal: "",
+          Shift: "",
+          "Customer No": "",
+          Customer: "",
+          "Payment Method": "",
+          "Tender Code": total.key,
+          Tender: total.label,
+          Purpose: "",
+          Reference: "",
+          Amount: total.amount,
+        })),
+        {
+          "Receipt No": "NET COLLECTIONS",
+          Type: "",
+          "Sales Order": "",
+          "Source Receipt": "",
+          Date: "",
+          Cashier: "",
+          Terminal: "",
+          Shift: "",
+          "Customer No": "",
+          Customer: "",
+          "Payment Method": "",
+          "Tender Code": "",
+          Tender: "",
+          Purpose: "",
+          Reference: "",
+          Amount: totals.netAmount,
+        },
+      ];
+    }
     case "products":
       return report.productRows.map((row) => ({
         "Product Code": row.productCode,
