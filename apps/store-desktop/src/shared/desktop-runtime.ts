@@ -1662,6 +1662,7 @@ export type StoreInterStoreTransferRequestDraftLineInput = {
 
 export type StoreInterStoreTransferRequestDraftInput = {
   draftId?: string | null;
+  direction?: "REQUEST_IN" | "DIRECT_OUT";
   sourceStoreCode: string;
   sourceLocationCode?: string | null;
   destinationLocationCode: string;
@@ -2081,12 +2082,22 @@ export type StoreSalesReportRow = {
 };
 
 export type StoreTenderReportRow = {
-  source: "SALES" | "ACCOUNT_PAYMENT";
+  paymentId: string;
+  transactionNo: string;
+  transactionType: "SALE" | "RETURN" | "EXCHANGE";
+  sourceTransactionNo: string | null;
+  occurredAt: string;
+  cashierCode: string | null;
+  terminalCode: string | null;
+  shiftNo: string | null;
+  customerNo: string | null;
+  customerName: string | null;
   paymentMethod: SyncPaymentMethod;
   tenderMethodCode: string | null;
   tenderMethodName: string | null;
-  transactionCount: number;
-  netAmount: number;
+  paymentPurpose: string;
+  reference: string | null;
+  amount: number;
 };
 
 export type StoreAccountPaymentReportRow = {

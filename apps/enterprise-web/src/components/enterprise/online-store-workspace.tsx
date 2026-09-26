@@ -85,6 +85,7 @@ type InventoryTab = "stock" | "receiving" | "transfers" | "counts";
 type InventoryStockSection = "inventory-browser" | "batch-register";
 type InventoryReceivingSection = "purchase-orders" | "goods-receipts" | "supplier-returns";
 type TransferEntryTab = "header" | "details";
+type TransferCreationMode = "REQUEST_IN" | "DIRECT_OUT";
 type CountEntryTab = "header" | "sheet" | "variance";
 type PosDrawer = "details" | "held" | "orders" | "account" | "receipts" | "report" | null;
 type SaleMode = "SALE" | "SALES_ORDER" | "LAYAWAY";
@@ -2644,6 +2645,8 @@ export function OnlineStoreWorkspace({
   const [transferNote, setTransferNote] = useState("");
   const [transferRequestDialogOpen, setTransferRequestDialogOpen] = useState(false);
   const [activeTransferDraftBatchNo, setActiveTransferDraftBatchNo] = useState("");
+  const [transferCreationMode, setTransferCreationMode] =
+    useState<TransferCreationMode>("REQUEST_IN");
   const [activeTransferEntryTab, setActiveTransferEntryTab] = useState<TransferEntryTab>("header");
   const [transferRequestLines, setTransferRequestLines] = useState<Array<{
     id: string;
@@ -5484,13 +5487,22 @@ export function OnlineStoreWorkspace({
 
     if (activeReport === "tenders") {
       downloadCsv(baseName, [
-        ["Tender", "Code", "Method", "Payment entries", "Net"],
+        ["Receipt", "Type", "Source receipt", "Received", "Customer", "Cashier", "Terminal", "Shift", "Tender", "Code", "Method", "Purpose", "Reference", "Amount"],
         ...reportTenderRows.map((row) => [
+          row.transactionNo,
+          row.transactionType,
+          row.sourceTransactionNo,
+          row.occurredAt,
+          row.customerName,
+          row.cashierCode,
+          row.terminalCode,
+          row.shiftNo,
           row.tenderMethodName ?? row.paymentMethod,
           row.tenderMethodCode,
           row.paymentMethod,
-          row.transactionCount,
-          row.netAmount
+          row.paymentPurpose,
+          row.reference,
+          row.amount
         ])
       ]);
       return;
@@ -5650,12 +5662,16 @@ export function OnlineStoreWorkspace({
                     }
                   : activeReport === "tenders"
                     ? {
-                        headers: ["Tender", "Method", "Payments", "Net"],
+                        headers: ["Receipt", "Type", "Received", "Customer", "Cashier", "Tender", "Purpose", "Amount"],
                         rows: reportTenderRows.map((row) => [
+                          row.transactionNo,
+                          row.transactionType,
+                          new Date(row.occurredAt).toLocaleString(),
+                          row.customerName,
+                          row.cashierCode ?? "Unassigned",
                           row.tenderMethodName ?? row.paymentMethod,
-                          row.paymentMethod,
-                          String(row.transactionCount),
-                          formatMoney(row.netAmount, currencyCode)
+                          row.paymentPurpose,
+                          formatMoney(row.amount, currencyCode)
                         ])
                       }
             : activeReport === "inventory"
@@ -7114,6 +7130,7 @@ export function OnlineStoreWorkspace({
 
   function resetTransferRequestDraft() {
     setActiveTransferDraftBatchNo("");
+    setTransferCreationMode("REQUEST_IN");
     setTransferRequestLines([]);
     setTransferReference("");
     setTransferRequiredDate(activeDate);
@@ -7135,18 +7152,29 @@ export function OnlineStoreWorkspace({
 
   function openTransferRequestDraft(transfer: TransferDocumentGroup) {
     const firstLine = transfer.lines[0];
-    const sourceStore = workspace.transferStores.find(
-      (store) => store.storeCode === firstLine?.sourceStoreCode
+    const direction: TransferCreationMode =
+      firstLine?.role === "SOURCE" ? "DIRECT_OUT" : "REQUEST_IN";
+    const counterpartyStore = workspace.transferStores.find(
+      (store) =>
+        store.storeCode ===
+        (direction === "DIRECT_OUT"
+          ? firstLine?.destinationStoreCode
+          : firstLine?.sourceStoreCode)
     );
 
-    if (!firstLine || !sourceStore) {
+    if (!firstLine || !counterpartyStore) {
       setInventoryMessage("Flash ERP could not load that transfer request draft for amendment.");
       return;
     }
 
     setActiveTransferDraftBatchNo(transfer.documentNo);
-    setTransferSourceStoreId(sourceStore.storeId);
-    setTransferDestinationLocationId(firstLine.destinationLocationId);
+    setTransferCreationMode(direction);
+    setTransferSourceStoreId(counterpartyStore.storeId);
+    setTransferDestinationLocationId(
+      direction === "DIRECT_OUT"
+        ? firstLine.sourceLocationId
+        : firstLine.destinationLocationId
+    );
     setTransferReference(firstLine.externalReference ?? "");
     setTransferRequiredDate(firstLine.requiredAt?.slice(0, 10) ?? activeDate);
     setTransferDeliveryNoteNo(firstLine.deliveryNoteNo ?? "");
@@ -7336,7 +7364,11 @@ export function OnlineStoreWorkspace({
           : [];
 
     if (!transferSourceStoreId || !selectedTransferDestinationLocation || !lines.length) {
-      setInventoryMessage("Choose source, destination, and at least one item before requesting transfer.");
+      setInventoryMessage(
+        transferCreationMode === "DIRECT_OUT"
+          ? "Choose destination shop, source location, and at least one item before creating the transfer out."
+          : "Choose source shop, destination location, and at least one item before requesting transfer."
+      );
       return;
     }
 
@@ -7358,6 +7390,7 @@ export function OnlineStoreWorkspace({
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          direction: transferCreationMode,
           sourceStoreId: transferSourceStoreId,
           destinationInventoryLocationId: selectedTransferDestinationLocation.locationId,
           lines,
@@ -10255,9 +10288,9 @@ export function OnlineStoreWorkspace({
                 ) : null}
                 {activeReport === "tenders" ? (
                   <div className="rms-table rms-report-table">
-                    <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Payments</span><span>Net</span></div>
-                    {(currentShift?.tenderTotals ?? workspace.reports.tenderRows).map((row) => (
-                      <div className="rms-table-row" key={`${row.paymentMethod}:${row.tenderMethodCode}`}><strong>{row.tenderMethodName ?? row.paymentMethod}<small>{row.tenderMethodCode ?? "unmapped"}</small></strong><span>{row.paymentMethod}</span><span>{row.transactionCount}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
+                    <div className="rms-table-head"><span>Receipt</span><span>Customer</span><span>Tender</span><span>Collected by</span><span>Amount</span></div>
+                    {workspace.reports.tenderRows.map((row) => (
+                      <div className="rms-table-row" key={row.paymentId}><strong>{row.transactionNo}<small>{row.transactionType} · {new Date(row.occurredAt).toLocaleString()}</small></strong><span>{row.customerName}<small>{row.sourceTransactionNo ?? "Direct sale"}</small></span><span>{row.tenderMethodName ?? row.paymentMethod}<small>{row.paymentPurpose} · {row.reference ?? "No reference"}</small></span><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || "No shift"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b></div>
                     ))}
                   </div>
                 ) : null}
@@ -10975,8 +11008,33 @@ export function OnlineStoreWorkspace({
                     <div className="rms-modal-backdrop" role="dialog" aria-modal="true">
                       <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog">
                         <div className="rms-panel-title">
-                          <div><span>Stock request</span><h2>{activeTransferDraftBatchNo ? "Amend transfer draft" : "New transfer"}</h2></div>
+                          <div>
+                            <span>{transferCreationMode === "DIRECT_OUT" ? "Transfer out" : "Stock request"}</span>
+                            <h2>{activeTransferDraftBatchNo ? "Amend transfer draft" : "New transfer"}</h2>
+                          </div>
                           <button className="rms-button" onClick={() => setTransferRequestDialogOpen(false)} type="button">Close</button>
+                        </div>
+                        <div className="rms-workspace-tabs rms-dialog-tabs" role="tablist" aria-label="Transfer direction">
+                          <button
+                            aria-selected={transferCreationMode === "REQUEST_IN"}
+                            className={transferCreationMode === "REQUEST_IN" ? "is-active" : ""}
+                            disabled={Boolean(activeTransferDraftBatchNo)}
+                            onClick={() => setTransferCreationMode("REQUEST_IN")}
+                            role="tab"
+                            type="button"
+                          >
+                            Request stock
+                          </button>
+                          <button
+                            aria-selected={transferCreationMode === "DIRECT_OUT"}
+                            className={transferCreationMode === "DIRECT_OUT" ? "is-active" : ""}
+                            disabled={Boolean(activeTransferDraftBatchNo)}
+                            onClick={() => setTransferCreationMode("DIRECT_OUT")}
+                            role="tab"
+                            type="button"
+                          >
+                            Direct transfer out
+                          </button>
                         </div>
                         <div className="rms-workspace-tabs rms-dialog-tabs">
                           {(["header", "details"] as TransferEntryTab[]).map((tab) => (
@@ -10985,8 +11043,8 @@ export function OnlineStoreWorkspace({
                         </div>
                         {activeTransferEntryTab === "header" ? (
                           <div className="rms-form-grid rms-transfer-header-grid">
-                            <label><span>Source store</span><select onChange={(event) => setTransferSourceStoreId(event.target.value)} value={transferSourceStoreId}><option value="">Select source</option>{workspace.transferStores.map((store) => <option key={store.storeId} value={store.storeId}>{store.storeName}</option>)}</select></label>
-                            <label><span>Destination</span><select onChange={(event) => setTransferDestinationLocationId(event.target.value)} value={selectedTransferDestinationLocation?.locationId ?? transferDestinationLocationId}>{workspace.inventoryLocations.map((location) => <option key={location.locationId} value={location.locationId}>{location.locationName}</option>)}</select></label>
+                            <label><span>{transferCreationMode === "DIRECT_OUT" ? "Destination shop" : "Source store"}</span><select onChange={(event) => setTransferSourceStoreId(event.target.value)} value={transferSourceStoreId}><option value="">{transferCreationMode === "DIRECT_OUT" ? "Select destination" : "Select source"}</option>{workspace.transferStores.map((store) => <option key={store.storeId} value={store.storeId}>{store.storeName}</option>)}</select></label>
+                            <label><span>{transferCreationMode === "DIRECT_OUT" ? "Issue from" : "Receive into"}</span><select onChange={(event) => setTransferDestinationLocationId(event.target.value)} value={selectedTransferDestinationLocation?.locationId ?? transferDestinationLocationId}>{workspace.inventoryLocations.map((location) => <option key={location.locationId} value={location.locationId}>{location.locationName}</option>)}</select></label>
                             <label><span>Required date</span><input onChange={(event) => setTransferRequiredDate(event.target.value)} type="date" value={transferRequiredDate} /></label>
                             <label><span>Reference</span><input onChange={(event) => setTransferReference(event.target.value)} value={transferReference} /></label>
                             <label><span>Waybill no.</span><input onChange={(event) => setTransferDeliveryNoteNo(event.target.value)} value={transferDeliveryNoteNo} /></label>
@@ -11050,9 +11108,7 @@ export function OnlineStoreWorkspace({
                   <div className="rms-table rms-stock-request-table">
                     <div className="rms-table-head"><span>Transfer</span><span>Source</span><span>Destination</span><span>Status</span><span>Requested</span><span>Outstanding</span><span>View</span><span>{transferProcessHeader}</span><span /><span /></div>
                     {transferDocumentGroups.map((transfer) => {
-                      const canEditDraft =
-                        transfer.statusLabel === "DRAFT" &&
-                        transfer.lines.every((line) => line.role === "DESTINATION");
+                      const canEditDraft = transfer.statusLabel === "DRAFT";
                       const canIssueTransfer =
                         transfer.statusLabel !== "DRAFT" &&
                         transfer.lines.some((line) => line.role === "SOURCE") &&
@@ -11734,9 +11790,9 @@ export function OnlineStoreWorkspace({
               ) : null}
               {activeReport === "tenders" ? (
                 <div className="rms-table rms-report-table">
-                  <div className="rms-table-head"><span>Tender</span><span>Method</span><span>Payments</span><span>Net</span></div>
+                  <div className="rms-table-head"><span>Receipt</span><span>Customer</span><span>Tender</span><span>Collected by</span><span>Amount</span></div>
                   {reportTenderRows.map((row) => (
-                    <div className="rms-table-row" key={`${row.paymentMethod}:${row.tenderMethodCode}`}><strong>{row.tenderMethodName ?? row.paymentMethod}<small>{row.tenderMethodCode ?? "unmapped"}</small></strong><span>{row.paymentMethod}</span><span>{row.transactionCount}</span><b>{formatMoney(row.netAmount, currencyCode)}</b></div>
+                    <div className="rms-table-row" key={row.paymentId}><strong>{row.transactionNo}<small>{row.transactionType} · {new Date(row.occurredAt).toLocaleString()}</small></strong><span>{row.customerName}<small>{row.sourceTransactionNo ?? "Direct sale"}</small></span><span>{row.tenderMethodName ?? row.paymentMethod}<small>{row.paymentPurpose} · {row.reference ?? "No reference"}</small></span><span>{row.cashierCode ?? "Unassigned"}<small>{[row.shiftNo, row.terminalCode].filter(Boolean).join(" / ") || "No shift"}</small></span><b>{formatMoney(row.amount, currencyCode)}</b></div>
                   ))}
                   {!reportTenderRows.length ? <EmptyState title="No tender rows" detail="No tender movement matches the current search." /> : null}
                 </div>

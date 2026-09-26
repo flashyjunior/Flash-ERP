@@ -1935,7 +1935,7 @@ const defaultOnlineReportDefinitions: OnlineStoreReportDefinition[] = [
     reportId: "tenders",
     label: "Tenders",
     group: "Banking",
-    description: "Tender mix filtered by date, cashier, shift, and tender method.",
+    description: "Transaction-level tender detail filtered by date, cashier, shift, and tender method.",
     parameterIds: ["dateFrom", "dateTo", "scope", "cashierCode", "shiftId", "tenderMethodCode", "limit"]
   },
   {
@@ -2743,11 +2743,21 @@ export type OnlineStoreWorkspaceData = {
       paidAmount: number;
     }>;
     tenderRows: Array<{
+      paymentId: string;
+      transactionNo: string;
+      transactionType: string;
+      sourceTransactionNo: string | null;
+      occurredAt: string;
+      cashierCode: string | null;
+      terminalCode: string | null;
+      shiftNo: string | null;
+      customerName: string;
       paymentMethod: string;
       tenderMethodCode: string | null;
       tenderMethodName: string | null;
-      transactionCount: number;
-      netAmount: number;
+      paymentPurpose: string;
+      reference: string | null;
+      amount: number;
     }>;
     productRows: Array<{
       productCode: string;
@@ -5367,8 +5377,12 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
         receivedAt: true,
         posTransaction: {
           select: {
+            transactionNo: true,
             transactionType: true,
-            totalAmount: true
+            sourceTransactionNo: true,
+            totalAmount: true,
+            customerNameSnapshot: true,
+            cashierCodeSnapshot: true
           }
         }
       }
@@ -5973,30 +5987,29 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     note: entry.note,
     occurredAt: entry.occurredAt.toISOString()
   }));
-  const reportTenderMap = new Map<string, OnlineStoreWorkspaceData["reports"]["tenderRows"][number]>();
+  const reportTenderRows: OnlineStoreWorkspaceData["reports"]["tenderRows"] = reportPayments.map((payment) => ({
+    paymentId: payment.id,
+    transactionNo: payment.posTransaction.transactionNo,
+    transactionType: payment.posTransaction.transactionType,
+    sourceTransactionNo: payment.posTransaction.sourceTransactionNo,
+    occurredAt: payment.receivedAt.toISOString(),
+    cashierCode: payment.receivedCashierCodeSnapshot ?? payment.posTransaction.cashierCodeSnapshot,
+    terminalCode: payment.receivedTerminalCodeSnapshot,
+    shiftNo: payment.receivedShiftNoSnapshot,
+    customerName: payment.posTransaction.customerNameSnapshot ?? "Walk-in",
+    paymentMethod: payment.method,
+    tenderMethodCode: payment.tenderMethodCodeSnapshot,
+    tenderMethodName: payment.tenderMethodNameSnapshot,
+    paymentPurpose: payment.paymentPurpose,
+    reference: payment.reference,
+    amount: signedPaymentAmount({
+      transactionType: payment.posTransaction.transactionType,
+      totalAmount: Number(payment.posTransaction.totalAmount),
+      paymentAmount: Number(payment.amount)
+    })
+  }));
   const reportProductMap = new Map<string, OnlineStoreWorkspaceData["reports"]["productRows"][number]>();
   let reportReturnAmount = 0;
-
-  for (const payment of reportPayments) {
-    const totalAmount = Number(payment.posTransaction.totalAmount);
-    const signedAmount = signedPaymentAmount({
-      transactionType: payment.posTransaction.transactionType,
-      totalAmount,
-      paymentAmount: Number(payment.amount)
-    });
-    const tenderKey = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
-    const current = reportTenderMap.get(tenderKey) ?? {
-      paymentMethod: payment.method,
-      tenderMethodCode: payment.tenderMethodCodeSnapshot,
-      tenderMethodName: payment.tenderMethodNameSnapshot,
-      transactionCount: 0,
-      netAmount: 0
-    };
-
-    current.transactionCount += 1;
-    current.netAmount = toMoney(current.netAmount + signedAmount);
-    reportTenderMap.set(tenderKey, current);
-  }
 
   for (const transaction of reportTransactions) {
     const totalAmount = Number(transaction.totalAmount);
@@ -6058,7 +6071,6 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       paymentAmount: Number(transaction.paidAmount)
     })
   }));
-  const reportTenderRows = [...reportTenderMap.values()].sort((left, right) => right.netAmount - left.netAmount);
   const reportProductRows = [...reportProductMap.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount));
   const reportSerialBatchRows: OnlineStoreWorkspaceData["reports"]["serialBatchRows"] =
     reportTransactions
@@ -6275,7 +6287,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
           0
         )
       ),
-      tenderedAmount: toMoney(reportTenderRows.reduce((sum, row) => sum + row.netAmount, 0)),
+      tenderedAmount: toMoney(reportTenderRows.reduce((sum, row) => sum + row.amount, 0)),
       inventoryStockValue: toMoney(reportInventoryRows.reduce((sum, row) => sum + row.stockValue, 0)),
       salesOrderRecognizedAmount: toMoney(initialCollectionTotals.recognized),
       salesOrderOpeningDepositAmount: toMoney(initialCollectionTotals.openingDeposit),
@@ -6849,8 +6861,12 @@ export async function browseOnlineStoreReports(
         receivedAt: true,
         posTransaction: {
           select: {
+            transactionNo: true,
             transactionType: true,
-            totalAmount: true
+            sourceTransactionNo: true,
+            totalAmount: true,
+            customerNameSnapshot: true,
+            cashierCodeSnapshot: true
           }
         }
       }
@@ -7082,30 +7098,29 @@ export async function browseOnlineStoreReports(
       }
     ] as const)
   );
-  const tenderRowsByKey = new Map<string, OnlineStoreWorkspaceData["reports"]["tenderRows"][number]>();
+  const tenderRows: OnlineStoreWorkspaceData["reports"]["tenderRows"] = reportPayments.map((payment) => ({
+    paymentId: payment.id,
+    transactionNo: payment.posTransaction.transactionNo,
+    transactionType: payment.posTransaction.transactionType,
+    sourceTransactionNo: payment.posTransaction.sourceTransactionNo,
+    occurredAt: payment.receivedAt.toISOString(),
+    cashierCode: payment.receivedCashierCodeSnapshot ?? payment.posTransaction.cashierCodeSnapshot,
+    terminalCode: payment.receivedTerminalCodeSnapshot,
+    shiftNo: payment.receivedShiftNoSnapshot,
+    customerName: payment.posTransaction.customerNameSnapshot ?? "Walk-in",
+    paymentMethod: payment.method,
+    tenderMethodCode: payment.tenderMethodCodeSnapshot,
+    tenderMethodName: payment.tenderMethodNameSnapshot,
+    paymentPurpose: payment.paymentPurpose,
+    reference: payment.reference,
+    amount: signedPaymentAmount({
+      transactionType: payment.posTransaction.transactionType,
+      totalAmount: Number(payment.posTransaction.totalAmount),
+      paymentAmount: Number(payment.amount)
+    })
+  }));
   const productRowsByKey = new Map<string, OnlineStoreWorkspaceData["reports"]["productRows"][number]>();
   let returnAmount = 0;
-
-  for (const payment of reportPayments) {
-    const totalAmount = Number(payment.posTransaction.totalAmount);
-    const signedAmount = signedPaymentAmount({
-      transactionType: payment.posTransaction.transactionType,
-      totalAmount,
-      paymentAmount: Number(payment.amount)
-    });
-    const key = `${payment.method}:${payment.tenderMethodCodeSnapshot ?? payment.tenderMethodNameSnapshot ?? "unmapped"}`;
-    const current = tenderRowsByKey.get(key) ?? {
-      paymentMethod: payment.method,
-      tenderMethodCode: payment.tenderMethodCodeSnapshot,
-      tenderMethodName: payment.tenderMethodNameSnapshot,
-      transactionCount: 0,
-      netAmount: 0
-    };
-
-    current.transactionCount += 1;
-    current.netAmount = toMoney(current.netAmount + signedAmount);
-    tenderRowsByKey.set(key, current);
-  }
 
   for (const transaction of transactions) {
     const totalAmount = Number(transaction.totalAmount);
@@ -7349,7 +7364,7 @@ export async function browseOnlineStoreReports(
       returnAmount,
       discountAmount,
       taxAmount,
-      tenderedAmount: toMoney([...tenderRowsByKey.values()].reduce((sum, row) => sum + row.netAmount, 0)),
+      tenderedAmount: toMoney(tenderRows.reduce((sum, row) => sum + row.amount, 0)),
       inventoryStockValue: toMoney(inventoryRows.reduce((sum, row) => sum + row.stockValue, 0)),
       salesOrderRecognizedAmount: toMoney(salesOrderCollectionTotals.recognized),
       salesOrderOpeningDepositAmount: toMoney(salesOrderCollectionTotals.openingDeposit),
@@ -7377,7 +7392,7 @@ export async function browseOnlineStoreReports(
         paymentAmount: Number(transaction.paidAmount)
       })
     })),
-    tenderRows: [...tenderRowsByKey.values()].sort((left, right) => right.netAmount - left.netAmount),
+    tenderRows,
     productRows: [...productRowsByKey.values()].sort((left, right) => Math.abs(right.netAmount) - Math.abs(left.netAmount)),
     serialBatchRows: transactions
       .flatMap((transaction) =>
@@ -7861,6 +7876,7 @@ export type CreateOnlineStoreSupplierReturnResponse = {
 
 export type CreateOnlineStoreTransferRequest = {
   transferBatchNo?: string | null;
+  direction?: "REQUEST_IN" | "DIRECT_OUT" | null;
   sourceStoreId: string;
   destinationInventoryLocationId?: string | null;
   productId?: string | null;
@@ -16117,12 +16133,24 @@ export async function commitOnlineStoreStockCount(
 export async function createOnlineStoreTransferRequest(
   input: CreateOnlineStoreTransferRequest
 ): Promise<CreateOnlineStoreTransferResponse> {
+  const direction =
+    input.direction === "DIRECT_OUT" ? "DIRECT_OUT" : "REQUEST_IN";
   const { session, user, store } = await requireOnlineStoreForOperation(
-    "requesting an inter-store transfer online"
+    direction === "DIRECT_OUT"
+      ? "creating a direct inter-store transfer out online"
+      : "requesting an inter-store transfer online"
   );
+  const requiredPermission =
+    direction === "DIRECT_OUT"
+      ? "inventory.transfer.issue"
+      : "inventory.transfer.request";
 
-  if (!sessionHasAllPermissions(session, ["inventory.transfer.request"])) {
-    throw new Error("Flash ERP requires transfer request privileges before requesting stock.");
+  if (!sessionHasAllPermissions(session, [requiredPermission])) {
+    throw new Error(
+      direction === "DIRECT_OUT"
+        ? "Flash ERP requires transfer issue privileges before creating a direct transfer out."
+        : "Flash ERP requires transfer request privileges before requesting stock."
+    );
   }
 
   const lineInputs =
@@ -16142,7 +16170,7 @@ export async function createOnlineStoreTransferRequest(
     throw new Error("Add at least one item before creating a transfer request.");
   }
 
-  const [sourceStore, products, destinationLocation] = await Promise.all([
+  const [counterpartyStore, products, localLocation] = await Promise.all([
     prisma.store.findFirst({
       where: {
         retailOrgId: session.retailOrgId,
@@ -16211,12 +16239,16 @@ export async function createOnlineStoreTransferRequest(
       retailOrgId: session.retailOrgId,
       storeId: store.id,
       locationId: input.destinationInventoryLocationId ?? null,
-      receiving: true
+      receiving: direction === "REQUEST_IN"
     })
   ]);
 
-  if (!sourceStore?.inventoryLocations[0]) {
-    throw new Error("Choose an active source store with an inventory location.");
+  if (!counterpartyStore?.inventoryLocations[0]) {
+    throw new Error(
+      direction === "DIRECT_OUT"
+        ? "Choose an active destination store with an inventory location."
+        : "Choose an active source store with an inventory location."
+    );
   }
 
   if (products.length !== productIds.length) {
@@ -16229,6 +16261,14 @@ export async function createOnlineStoreTransferRequest(
   const requiredAt = optionalText(input.requiredAt);
   const requiredAtDate = requiredAt ? new Date(`${requiredAt}T00:00:00`) : null;
   const requestedTransferBatchNo = optionalText(input.transferBatchNo);
+  const counterpartyLocation = counterpartyStore.inventoryLocations[0];
+  const sourceStore = direction === "DIRECT_OUT" ? store : counterpartyStore;
+  const destinationStore =
+    direction === "DIRECT_OUT" ? counterpartyStore : store;
+  const sourceLocation =
+    direction === "DIRECT_OUT" ? localLocation : counterpartyLocation;
+  const destinationLocation =
+    direction === "DIRECT_OUT" ? counterpartyLocation : localLocation;
 
   return prisma.$transaction(async (tx) => {
     const now = new Date();
@@ -16241,6 +16281,7 @@ export async function createOnlineStoreTransferRequest(
           },
           select: {
             id: true,
+            sourceStoreId: true,
             destinationStoreId: true,
             origin: true,
             status: true
@@ -16255,7 +16296,9 @@ export async function createOnlineStoreTransferRequest(
     if (
       existingDrafts.some(
         (draft) =>
-          draft.destinationStoreId !== store.id ||
+          (direction === "DIRECT_OUT"
+            ? draft.sourceStoreId !== store.id
+            : draft.destinationStoreId !== store.id) ||
           draft.origin !== InterStoreTransferOrigin.STORE_REQUEST ||
           draft.status !== InterStoreTransferStatus.DRAFT
       )
@@ -16296,8 +16339,8 @@ export async function createOnlineStoreTransferRequest(
         data: {
           retailOrgId: session.retailOrgId,
           sourceStoreId: sourceStore.id,
-          destinationStoreId: store.id,
-          sourceInventoryLocationId: sourceStore.inventoryLocations[0].id,
+          destinationStoreId: destinationStore.id,
+          sourceInventoryLocationId: sourceLocation.id,
           destinationInventoryLocationId: destinationLocation.id,
           productId: product.id,
           transferNo,
@@ -16321,7 +16364,10 @@ export async function createOnlineStoreTransferRequest(
           requestNote: note,
           requestOperatorName: user.displayName,
           requestedByNodeCode: "ONLINE_DIRECT",
-          destinationNodeCode: "ONLINE_DIRECT",
+          sourceNodeCode:
+            direction === "DIRECT_OUT" ? "ONLINE_DIRECT" : null,
+          destinationNodeCode:
+            direction === "REQUEST_IN" ? "ONLINE_DIRECT" : null,
           requiredAt: requiredAtDate && Number.isFinite(requiredAtDate.getTime()) ? requiredAtDate : null
         },
         select: {
@@ -16354,8 +16400,9 @@ export async function createOnlineStoreTransferRequest(
         sourceNodeCode: "ONLINE_DIRECT",
         message: `${user.loginId} ${existingDrafts.length > 0 ? "amended" : "saved"} online transfer draft ${transferBatchNo} for ${store.code}.`,
         detailsJson: serializeJsonField({
+          direction,
           sourceStoreCode: sourceStore.code,
-          destinationStoreCode: store.code,
+          destinationStoreCode: destinationStore.code,
           lineCount: createdTransfers.length,
           quantity: toQuantity(createdTransfers.reduce((sum, line) => sum + line.quantity, 0))
         } satisfies Prisma.InputJsonValue)
@@ -16366,7 +16413,10 @@ export async function createOnlineStoreTransferRequest(
       transferNo: createdTransfers[0]?.transferNo ?? transferBatchNo,
       transferBatchNo,
       createdTransfers,
-      message: `${transferBatchNo} was ${existingDrafts.length > 0 ? "updated" : "saved"} as a ${createdTransfers.length}-line draft. Send it when it is ready for the source shop.`,
+      message:
+        direction === "DIRECT_OUT"
+          ? `${transferBatchNo} was ${existingDrafts.length > 0 ? "updated" : "saved"} as a ${createdTransfers.length}-line direct transfer-out draft. Send it when it is ready for issue.`
+          : `${transferBatchNo} was ${existingDrafts.length > 0 ? "updated" : "saved"} as a ${createdTransfers.length}-line draft. Send it when it is ready for the source shop.`,
       serverProcessedAt: new Date().toISOString()
     };
   });
@@ -16379,10 +16429,6 @@ export async function submitOnlineStoreTransferRequest(
     "sending an inter-store transfer request online"
   );
 
-  if (!sessionHasAllPermissions(session, ["inventory.transfer.request"])) {
-    throw new Error("Flash ERP requires transfer request privileges before sending stock requests.");
-  }
-
   const transferBatchNo = optionalText(transferBatchNoInput);
 
   if (!transferBatchNo) {
@@ -16393,7 +16439,6 @@ export async function submitOnlineStoreTransferRequest(
     const drafts = await tx.interStoreTransfer.findMany({
       where: {
         retailOrgId: session.retailOrgId,
-        destinationStoreId: store.id,
         transferBatchNo
       },
       orderBy: [{ lineNo: "asc" }, { createdAt: "asc" }],
@@ -16403,6 +16448,8 @@ export async function submitOnlineStoreTransferRequest(
         transferBatchNo: true,
         productId: true,
         requestedQuantity: true,
+        sourceStoreId: true,
+        destinationStoreId: true,
         origin: true,
         status: true
       }
@@ -16410,6 +16457,32 @@ export async function submitOnlineStoreTransferRequest(
 
     if (drafts.length === 0) {
       throw new Error("Flash ERP could not find that online transfer request draft.");
+    }
+
+    const direction =
+      drafts.every((draft) => draft.sourceStoreId === store.id)
+        ? "DIRECT_OUT"
+        : drafts.every((draft) => draft.destinationStoreId === store.id)
+          ? "REQUEST_IN"
+          : null;
+
+    if (!direction) {
+      throw new Error(
+        `${transferBatchNo} does not belong to this Online POS shop.`
+      );
+    }
+
+    const requiredPermission =
+      direction === "DIRECT_OUT"
+        ? "inventory.transfer.issue"
+        : "inventory.transfer.request";
+
+    if (!sessionHasAllPermissions(session, [requiredPermission])) {
+      throw new Error(
+        direction === "DIRECT_OUT"
+          ? "Flash ERP requires transfer issue privileges before sending a direct transfer out."
+          : "Flash ERP requires transfer request privileges before sending stock requests."
+      );
     }
 
     if (
@@ -16429,7 +16502,10 @@ export async function submitOnlineStoreTransferRequest(
         status: InterStoreTransferStatus.REQUESTED,
         requestedAt: now,
         requestedByNodeCode: "ONLINE_DIRECT",
-        destinationNodeCode: "ONLINE_DIRECT"
+        sourceNodeCode:
+          direction === "DIRECT_OUT" ? "ONLINE_DIRECT" : undefined,
+        destinationNodeCode:
+          direction === "REQUEST_IN" ? "ONLINE_DIRECT" : undefined
       }
     });
 
@@ -16446,14 +16522,21 @@ export async function submitOnlineStoreTransferRequest(
         kind: SecurityLogKind.AUDIT,
         severity: SecurityLogSeverity.INFO,
         category: "ONLINE_STORE",
-        action: "TRANSFER_REQUEST_SENT",
+        action:
+          direction === "DIRECT_OUT"
+            ? "TRANSFER_OUT_SENT"
+            : "TRANSFER_REQUEST_SENT",
         actorLabel: user.loginId,
         targetType: "Inter-store transfer",
         targetRef: transferBatchNo,
         sourceNodeCode: "ONLINE_DIRECT",
-        message: `${user.loginId} sent online transfer request ${transferBatchNo} from ${store.code}.`,
+        message:
+          direction === "DIRECT_OUT"
+            ? `${user.loginId} sent direct transfer out ${transferBatchNo} from ${store.code}.`
+            : `${user.loginId} sent online transfer request ${transferBatchNo} from ${store.code}.`,
         detailsJson: serializeJsonField({
-          destinationStoreCode: store.code,
+          direction,
+          operatingStoreCode: store.code,
           lineCount: drafts.length,
           quantity: toQuantity(
             drafts.reduce(
@@ -16474,7 +16557,10 @@ export async function submitOnlineStoreTransferRequest(
         productId: transfer.productId,
         quantity: toQuantity(transfer.requestedQuantity)
       })),
-      message: `${transferBatchNo} was sent with ${drafts.length} line(s) and is now pending issue by the source shop.`,
+      message:
+        direction === "DIRECT_OUT"
+          ? `${transferBatchNo} was sent with ${drafts.length} line(s) and is now ready for issue by this shop.`
+          : `${transferBatchNo} was sent with ${drafts.length} line(s) and is now pending issue by the source shop.`,
       serverProcessedAt: now.toISOString()
     };
   });
@@ -16829,9 +16915,13 @@ export async function processOnlineStoreTransfer(
         }
       }
 
-      await tx.interStoreTransfer.update({
+      const updatedTransfer = await tx.interStoreTransfer.updateMany({
         where: {
-          id: transfer.id
+          id: transfer.id,
+          status: transfer.status,
+          sourceInventoryLocationId: selectedSourceLocation.id,
+          issuedQuantity: transfer.issuedQuantity,
+          receivedQuantity: transfer.receivedQuantity
         },
         data: {
           status: nextStatus,
@@ -16855,6 +16945,10 @@ export async function processOnlineStoreTransfer(
           issuedAt: now
         }
       });
+
+      if (updatedTransfer.count !== 1) {
+        throw new Error(`${transfer.transferNo} changed while it was being issued. Refresh and retry the remaining quantity.`);
+      }
 
       await queueInterStoreTransferPublication(tx, {
         transferId: transfer.id,
@@ -17080,9 +17174,13 @@ export async function processOnlineStoreTransfer(
       });
     }
 
-    await tx.interStoreTransfer.update({
+    const updatedTransfer = await tx.interStoreTransfer.updateMany({
       where: {
-        id: transfer.id
+        id: transfer.id,
+        status: transfer.status,
+        destinationInventoryLocationId: transfer.destinationInventoryLocationId,
+        issuedQuantity: transfer.issuedQuantity,
+        receivedQuantity: transfer.receivedQuantity
       },
       data: {
         status: nextStatus,
@@ -17100,6 +17198,10 @@ export async function processOnlineStoreTransfer(
         receivedAt: now
       }
     });
+
+    if (updatedTransfer.count !== 1) {
+      throw new Error(`${transfer.transferNo} changed while it was being received. Refresh and retry the remaining quantity.`);
+    }
 
     await queueInterStoreTransferPublication(tx, {
       transferId: transfer.id,

@@ -13,6 +13,7 @@ export async function PUT(
     ]);
     const response = await createOnlineStoreTransferRequest({
       transferBatchNo: decodeURIComponent(transferId),
+      direction: body?.direction === "DIRECT_OUT" ? "DIRECT_OUT" : "REQUEST_IN",
       sourceStoreId: body?.sourceStoreId ?? "",
       destinationInventoryLocationId: body?.destinationInventoryLocationId ?? null,
       productId: body?.productId ?? "",

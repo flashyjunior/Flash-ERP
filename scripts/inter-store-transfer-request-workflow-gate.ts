@@ -26,6 +26,12 @@ async function main() {
     ),
     "utf8",
   );
+  const onlineStoreRepository = readFileSync(
+    path.resolve(
+      "apps/enterprise-web/src/server/repositories/online-store.repository.ts",
+    ),
+    "utf8",
+  );
 
   for (const label of [
     "Search product",
@@ -55,6 +61,13 @@ async function main() {
   assert.ok(
     rendererStyles.includes(".rms-remote-inventory-dialog .rms-toolbar-actions"),
     "Other shop stock toolbar actions must remain aligned responsively.",
+  );
+  assert.ok(
+    onlineStoreRepository.includes("changed while it was being issued") &&
+      onlineStoreRepository.includes("changed while it was being received") &&
+      onlineStoreRepository.includes("sourceInventoryLocationId: selectedSourceLocation.id") &&
+      onlineStoreRepository.includes("destinationInventoryLocationId: transfer.destinationInventoryLocationId"),
+    "Online transfer issue and receipt must retain optimistic quantity and location guards.",
   );
 
   const temporaryDirectory = mkdtempSync(
@@ -115,9 +128,9 @@ async function main() {
      ) VALUES (?, ?, ?, 1, 1, ?, 'STORE', 'ACTIVE', '', NULL, NULL, 1, 1, ?)`,
   ).run(
     "accra-central-sales-floor",
-    "accra-central",
-    "Accra Central",
-    "Accra Central Sales Floor",
+    "warehouse-hub",
+    "Warehouse Hub",
+    "Warehouse Hub Sales Floor",
     new Date().toISOString(),
   );
 
@@ -126,7 +139,7 @@ async function main() {
   ).isStandaloneDeployment = () => false;
 
   const saved = await service.saveInterStoreTransferRequestDraft({
-    sourceStoreCode: "ACCRA-CENTRAL",
+    sourceStoreCode: "WAREHOUSE-HUB",
     destinationLocationCode: "SHOP-FLOOR",
     externalReference: "TRANSFER-GATE",
     lines: [
@@ -139,7 +152,7 @@ async function main() {
   assert.ok(draft, "Expected one saved transfer request draft.");
   assert.equal(saved.snapshot.transferRequestDrafts.length, 1);
   assert.equal(draft.status, "DRAFT");
-  assert.equal(draft.sourceStoreCode, "accra-central");
+  assert.equal(draft.sourceStoreCode, "warehouse-hub");
   assert.equal(draft.sourceLocationCode, "accra-central-sales-floor");
   assert.equal(draft.lines.length, 2);
   assert.deepEqual(
@@ -157,7 +170,7 @@ async function main() {
 
   const amended = await service.saveInterStoreTransferRequestDraft({
     draftId: draft.draftId,
-    sourceStoreCode: "accra-central",
+    sourceStoreCode: "warehouse-hub",
     destinationLocationCode: "SHOP-FLOOR",
     externalReference: "TRANSFER-GATE-AMENDED",
     lines: [
@@ -201,11 +214,48 @@ async function main() {
     payloads.map((payload) => payload.lineNo).sort(),
     [1, 2],
   );
-  assert.ok(payloads.every((payload) => payload.sourceStoreCode === "accra-central"));
+  assert.ok(payloads.every((payload) => payload.sourceStoreCode === "warehouse-hub"));
   assert.ok(
     payloads.every((payload) => payload.sourceLocationCode === undefined),
     "The requesting shop must not choose or publish a source location.",
   );
+
+  const directSaved = await service.saveInterStoreTransferRequestDraft({
+    direction: "DIRECT_OUT",
+    sourceStoreCode: "WAREHOUSE-HUB",
+    destinationLocationCode: "BACKROOM",
+    externalReference: "DIRECT-OUT-GATE",
+    lines: [
+      { productCode: "TRANSFER-GATE-A", quantity: 1, unitOfMeasure: "EA" },
+    ],
+  });
+  const directDraft = directSaved.snapshot.transferRequestDrafts.find(
+    (candidate) => candidate.externalReference === "DIRECT-OUT-GATE",
+  );
+  assert.ok(directDraft, "Expected one direct transfer-out draft.");
+  assert.equal(directDraft.sourceStoreCode, directSaved.snapshot.storeCode);
+  assert.equal(directDraft.sourceLocationCode, "BACKROOM");
+  assert.equal(directDraft.destinationStoreCode, "warehouse-hub");
+  assert.equal(
+    directDraft.destinationLocationCode,
+    "accra-central-sales-floor",
+  );
+
+  await service.submitInterStoreTransferRequestDraft(directDraft.draftId);
+  const directPublication = db
+    .prepare(
+      `SELECT payload_json
+       FROM sync_outbox
+       WHERE event_type = 'inter-store-transfer.requested'
+         AND aggregate_id = ?`,
+    )
+    .get(directDraft.lines[0]?.lineId) as { payload_json: string } | undefined;
+  assert.ok(directPublication, "Expected a queued direct transfer-out publication.");
+  const directPayload = JSON.parse(directPublication.payload_json);
+  assert.equal(directPayload.direction, "DIRECT_OUT");
+  assert.equal(directPayload.sourceStoreCode, directSaved.snapshot.storeCode);
+  assert.equal(directPayload.sourceLocationCode, "BACKROOM");
+  assert.equal(directPayload.destinationLocationCode, "accra-central-sales-floor");
   db.prepare(
     `INSERT INTO sync_outbox (
        id, target_node_code, aggregate_type, aggregate_id, event_type,
@@ -294,13 +344,114 @@ async function main() {
   assert.equal(issuedTransfer.source_location_name, "Backroom");
   assert.equal(Number(issuedTransfer.issued_quantity), 4);
   assert.equal(Number(backroomBalance.quantity_on_hand), 6);
+
+  db.prepare(
+    `UPDATE inter_store_transfer_snapshot
+     SET role = 'DESTINATION', updated_at = ?
+     WHERE id = ?`,
+  ).run(new Date().toISOString(), issueTransferId);
+
+  assert.throws(
+    () => service.receiveInterStoreTransfer({ transferId: issueTransferId, quantity: 5 }),
+    /Only 4\.000 unit\(s\) remain to receive/,
+    "A destination must not receive more stock than the source has issued.",
+  );
+
+  service.receiveInterStoreTransfer({ transferId: issueTransferId, quantity: 2 });
+  service.receiveInterStoreTransfer({ transferId: issueTransferId, quantity: 2 });
+
+  const partiallyReceivedTransfer = db
+    .prepare(
+      `SELECT transfer.status, transfer.issued_quantity, transfer.received_quantity,
+              transfer.outstanding_issue_quantity, transfer.outstanding_receipt_quantity,
+              source.quantity_on_hand AS source_quantity_on_hand,
+              destination.quantity_on_hand AS destination_quantity_on_hand,
+              product.quantity_on_hand AS product_quantity_on_hand
+       FROM inter_store_transfer_snapshot transfer
+       INNER JOIN inventory_location_balance source
+         ON source.location_code = transfer.source_location_code
+        AND source.product_code = transfer.product_code
+       INNER JOIN inventory_location_balance destination
+         ON destination.location_code = transfer.destination_location_code
+        AND destination.product_code = transfer.product_code
+       INNER JOIN product_snapshot product
+         ON product.product_code = transfer.product_code
+       WHERE transfer.id = ?`,
+    )
+    .get(issueTransferId) as {
+    status: string;
+    issued_quantity: number;
+    received_quantity: number;
+    outstanding_issue_quantity: number;
+    outstanding_receipt_quantity: number;
+    source_quantity_on_hand: number;
+    destination_quantity_on_hand: number;
+    product_quantity_on_hand: number;
+  };
+  assert.equal(partiallyReceivedTransfer.status, "PART_RECEIVED");
+  assert.equal(Number(partiallyReceivedTransfer.issued_quantity), 4);
+  assert.equal(Number(partiallyReceivedTransfer.received_quantity), 4);
+  assert.equal(Number(partiallyReceivedTransfer.outstanding_issue_quantity), 1);
+  assert.equal(Number(partiallyReceivedTransfer.outstanding_receipt_quantity), 0);
+  assert.equal(Number(partiallyReceivedTransfer.source_quantity_on_hand), 6);
+  assert.equal(Number(partiallyReceivedTransfer.destination_quantity_on_hand), 4);
+  assert.equal(Number(partiallyReceivedTransfer.product_quantity_on_hand), 10);
+
+  db.prepare(
+    `UPDATE inter_store_transfer_snapshot
+     SET role = 'SOURCE', updated_at = ?
+     WHERE id = ?`,
+  ).run(new Date().toISOString(), issueTransferId);
+  service.issueInterStoreTransfer({
+    transferId: issueTransferId,
+    sourceLocationCode: "BACKROOM",
+    quantity: 1,
+  });
+  db.prepare(
+    `UPDATE inter_store_transfer_snapshot
+     SET role = 'DESTINATION', updated_at = ?
+     WHERE id = ?`,
+  ).run(new Date().toISOString(), issueTransferId);
+  service.receiveInterStoreTransfer({ transferId: issueTransferId, quantity: 1 });
+
+  const completedTransfer = db
+    .prepare(
+      `SELECT transfer.status, transfer.issued_quantity, transfer.received_quantity,
+              source.quantity_on_hand AS source_quantity_on_hand,
+              destination.quantity_on_hand AS destination_quantity_on_hand,
+              product.quantity_on_hand AS product_quantity_on_hand
+       FROM inter_store_transfer_snapshot transfer
+       INNER JOIN inventory_location_balance source
+         ON source.location_code = transfer.source_location_code
+        AND source.product_code = transfer.product_code
+       INNER JOIN inventory_location_balance destination
+         ON destination.location_code = transfer.destination_location_code
+        AND destination.product_code = transfer.product_code
+       INNER JOIN product_snapshot product
+         ON product.product_code = transfer.product_code
+       WHERE transfer.id = ?`,
+    )
+    .get(issueTransferId) as {
+    status: string;
+    issued_quantity: number;
+    received_quantity: number;
+    source_quantity_on_hand: number;
+    destination_quantity_on_hand: number;
+    product_quantity_on_hand: number;
+  };
+  assert.equal(completedTransfer.status, "RECEIVED");
+  assert.equal(Number(completedTransfer.issued_quantity), 5);
+  assert.equal(Number(completedTransfer.received_quantity), 5);
+  assert.equal(Number(completedTransfer.source_quantity_on_hand), 5);
+  assert.equal(Number(completedTransfer.destination_quantity_on_hand), 5);
+  assert.equal(Number(completedTransfer.product_quantity_on_hand), 10);
   } finally {
     service.close();
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 
   console.log(
-    "Inter-store transfer request gate passed: shop-level lookup and requesting, compact request forms, one amendable multi-line draft, separate send, priority publication, and source-selected dispatch all agree.",
+    "Inter-store transfer request gate passed: requesting, priority publication, guarded issue and receipt, partial completion, final receipt, and stock conservation all agree.",
   );
 }
 

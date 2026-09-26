@@ -35,8 +35,14 @@ type ReportResult = {
     paidAmount: number;
   }>;
   tenderRows: Array<{
-    netAmount: number;
-    transactionCount: number;
+    paymentId: string;
+    transactionNo: string;
+    occurredAt: string;
+    cashierCode: string | null;
+    shiftNo: string | null;
+    paymentPurpose: string;
+    reference: string | null;
+    amount: number;
   }>;
 };
 
@@ -176,15 +182,31 @@ try {
   assert.equal(mondayReport.summary.tenderedAmount, 2000);
   assert.equal(mondayReport.summary.netSalesAmount, 0);
   assert.deepEqual(
-    mondayReport.tenderRows.map((row) => [row.netAmount, row.transactionCount]),
-    [[2000, 1]],
+    mondayReport.tenderRows.map((row) => [
+      row.paymentId,
+      row.transactionNo,
+      row.cashierCode,
+      row.shiftNo,
+      row.paymentPurpose,
+      row.reference,
+      row.amount,
+    ]),
+    [["deposit-payment", "POS-GATE-0001", "cashier-monday", "SHIFT-MONDAY", "SALES_ORDER_DEPOSIT", "DEP-GATE-0001", 2000]],
   );
   assert.equal(fridayReport.summary.tenderedAmount, 3000);
   assert.equal(fridayReport.summary.netSalesAmount, 5000);
   assert.equal(fridayReport.salesRows[0]?.paidAmount, 5000);
   assert.deepEqual(
-    fridayReport.tenderRows.map((row) => [row.netAmount, row.transactionCount]),
-    [[3000, 1]],
+    fridayReport.tenderRows.map((row) => [
+      row.paymentId,
+      row.transactionNo,
+      row.cashierCode,
+      row.shiftNo,
+      row.paymentPurpose,
+      row.reference,
+      row.amount,
+    ]),
+    [["balance-payment", "POS-GATE-0001", "cashier-friday", "SHIFT-FRIDAY", "SALES_ORDER_BALANCE", "BAL-GATE-0001", 3000]],
   );
 
   const enterpriseOperationsSource = readFileSync(

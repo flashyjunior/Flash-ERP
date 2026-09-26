@@ -494,7 +494,7 @@ const reportWorkspaceItems: Array<{
   {
     id: "report-tenders",
     label: "Tenders",
-    detail: "Tender totals",
+    detail: "Transaction tender detail",
     scope: "STORE",
     reportKind: "tenders",
   },
@@ -3010,6 +3010,7 @@ type TransferDocumentGroup = {
   lines: StoreInterStoreTransferSummary[];
 };
 type TransferDirectionFilter = "ALL" | "IN" | "OUT";
+type TransferCreationMode = "REQUEST_IN" | "DIRECT_OUT";
 
 function getTransferDocumentKey(transfer: StoreInterStoreTransferSummary) {
   return transfer.transferBatchNo ?? transfer.transferNo;
@@ -6942,6 +6943,7 @@ export function ModernDesktopApp() {
 
   async function createTransferRequest(input?: {
     draftId?: string | null;
+    direction?: TransferCreationMode;
     sourceStoreCode?: string;
     destinationLocationCode?: string;
     productCode?: string;
@@ -6964,6 +6966,7 @@ export function ModernDesktopApp() {
     const result = await runAction((desktopRuntime) =>
       desktopRuntime.saveInterStoreTransferRequestDraft({
         draftId: input?.draftId ?? null,
+        direction: input?.direction ?? "REQUEST_IN",
         sourceStoreCode: input?.sourceStoreCode ?? transferSourceStore,
         destinationLocationCode:
           input?.destinationLocationCode ?? transferDestinationLocation,
@@ -15042,8 +15045,8 @@ function DashboardWorkspace({
       amount: 0,
       count: 0,
     };
-    current.amount = Number((current.amount + tender.netAmount).toFixed(2));
-    current.count += tender.transactionCount;
+    current.amount = Number((current.amount + tender.amount).toFixed(2));
+    current.count += 1;
     tenderTotalsByKey.set(key, current);
   }
   for (const tender of visibleTenderTotals) {
@@ -20426,6 +20429,7 @@ function InventoryWorkspace(props: {
   commitStockCount: (sessionIds: string[], sessionNo: string) => Promise<void>;
   createTransferRequest: (input?: {
     draftId?: string | null;
+    direction?: TransferCreationMode;
     sourceStoreCode?: string;
     destinationLocationCode?: string;
     productCode?: string;
@@ -20481,6 +20485,7 @@ function InventoryWorkspace(props: {
   const canCreateStandalonePurchaseOrder =
     standaloneInventory && capabilities?.supervisorEligible === true;
   const canRequestTransfer = capabilities?.canRequestTransfer === true;
+  const canDirectTransfer = capabilities?.canIssueTransfer === true;
   const canSubmitCount = capabilities?.canSubmitCount === true;
   const inventorySerialDraft = props.inventorySerialDraft;
   const selectedInventorySerials = parseSerialDraft(
@@ -20519,6 +20524,8 @@ function InventoryWorkspace(props: {
   const [activeTransferDraftId, setActiveTransferDraftId] = useState<
     string | null
   >(null);
+  const [transferCreationMode, setTransferCreationMode] =
+    useState<TransferCreationMode>("REQUEST_IN");
   const [selectedRemoteInventoryKeys, setSelectedRemoteInventoryKeys] =
     useState<Set<string>>(() => new Set());
   const [transferHistoryFrom, setTransferHistoryFrom] = useState("");
@@ -21041,6 +21048,7 @@ function InventoryWorkspace(props: {
 
   function resetTransferRequestDraft() {
     setActiveTransferDraftId(null);
+    setTransferCreationMode(canRequestTransfer ? "REQUEST_IN" : "DIRECT_OUT");
     setTransferRequestLines([]);
     setTransferRequestReference("");
     setTransferRequestNote("");
@@ -21051,6 +21059,11 @@ function InventoryWorkspace(props: {
   function openTransferRequestDraft(
     draft: StoreInterStoreTransferRequestDraftSummary,
   ) {
+    const direction: TransferCreationMode =
+      draft.sourceStoreCode.toUpperCase() ===
+      (props.snapshot?.storeCode ?? "").toUpperCase()
+        ? "DIRECT_OUT"
+        : "REQUEST_IN";
     const requiredDate = draft.note?.match(
       /(?:^|\|\s*)Required (\d{4}-\d{2}-\d{2})/,
     )?.[1];
@@ -21061,8 +21074,17 @@ function InventoryWorkspace(props: {
       .join(" | ");
 
     setActiveTransferDraftId(draft.draftId);
-    props.setTransferSourceStore(draft.sourceStoreCode);
-    props.setTransferDestinationLocation(draft.destinationLocationCode);
+    setTransferCreationMode(direction);
+    props.setTransferSourceStore(
+      direction === "DIRECT_OUT"
+        ? draft.destinationStoreCode
+        : draft.sourceStoreCode,
+    );
+    props.setTransferDestinationLocation(
+      direction === "DIRECT_OUT"
+        ? draft.sourceLocationCode
+        : draft.destinationLocationCode,
+    );
     setTransferRequestReference(draft.externalReference ?? "");
     setTransferRequestNote(note);
     setTransferRequiredDate(
@@ -21393,6 +21415,7 @@ function InventoryWorkspace(props: {
 
     const saved = await props.createTransferRequest({
       draftId: activeTransferDraftId,
+      direction: transferCreationMode,
       sourceStoreCode: props.transferSourceStore,
       destinationLocationCode: props.transferDestinationLocation,
       lines: transferRequestLines.map((line) => ({
@@ -23620,7 +23643,7 @@ function InventoryWorkspace(props: {
                 Lookup HQ
               </button>
             ) : null}
-            {canRequestTransfer ? (
+            {canRequestTransfer || canDirectTransfer ? (
               <button
                 className="rms-button is-primary"
                 disabled={props.isBusy}
@@ -23807,9 +23830,17 @@ function InventoryWorkspace(props: {
             <section className="rms-dialog rms-wide-dialog rms-stock-request-dialog">
               <div className="rms-panel-title">
                 <div>
-                  <span>Stock request</span>
+                  <span>
+                    {transferCreationMode === "DIRECT_OUT"
+                      ? "Direct transfer out"
+                      : "Stock request"}
+                  </span>
                   <h2>
-                    {activeTransferDraftId ? "Amend request draft" : "Create request"}
+                    {activeTransferDraftId
+                      ? "Amend transfer draft"
+                      : transferCreationMode === "DIRECT_OUT"
+                        ? "Create transfer out"
+                        : "Create request"}
                   </h2>
                 </div>
                 <button
@@ -23818,6 +23849,32 @@ function InventoryWorkspace(props: {
                   type="button"
                 >
                   Close
+                </button>
+              </div>
+              <div
+                className="rms-workspace-tabs rms-dialog-tabs"
+                role="tablist"
+                aria-label="Transfer direction"
+              >
+                <button
+                  aria-selected={transferCreationMode === "REQUEST_IN"}
+                  className={transferCreationMode === "REQUEST_IN" ? "is-active" : ""}
+                  disabled={Boolean(activeTransferDraftId) || !canRequestTransfer}
+                  onClick={() => setTransferCreationMode("REQUEST_IN")}
+                  role="tab"
+                  type="button"
+                >
+                  Request stock
+                </button>
+                <button
+                  aria-selected={transferCreationMode === "DIRECT_OUT"}
+                  className={transferCreationMode === "DIRECT_OUT" ? "is-active" : ""}
+                  disabled={Boolean(activeTransferDraftId) || !canDirectTransfer}
+                  onClick={() => setTransferCreationMode("DIRECT_OUT")}
+                  role="tab"
+                  type="button"
+                >
+                  Direct transfer out
                 </button>
               </div>
               <div
@@ -23842,14 +23899,22 @@ function InventoryWorkspace(props: {
               {activeTransferEntryTab === "header" ? (
                 <div className="rms-form-grid rms-stock-request-header-form">
                   <label>
-                    <span>Source shop</span>
+                    <span>
+                      {transferCreationMode === "DIRECT_OUT"
+                        ? "Destination shop"
+                        : "Source shop"}
+                    </span>
                     <select
                       onChange={(event) =>
                         props.setTransferSourceStore(event.target.value)
                       }
                       value={props.transferSourceStore}
                     >
-                      <option value="">Select source shop</option>
+                      <option value="">
+                        {transferCreationMode === "DIRECT_OUT"
+                          ? "Select destination shop"
+                          : "Select source shop"}
+                      </option>
                       {remoteStoreOptions.map(([storeCode, storeName]) => (
                         <option
                           key={storeCode}
@@ -23861,14 +23926,22 @@ function InventoryWorkspace(props: {
                     </select>
                   </label>
                   <label>
-                    <span>Ship to</span>
+                    <span>
+                      {transferCreationMode === "DIRECT_OUT"
+                        ? "Issue from"
+                        : "Ship to"}
+                    </span>
                     <select
                       onChange={(event) =>
                         props.setTransferDestinationLocation(event.target.value)
                       }
                       value={props.transferDestinationLocation}
                     >
-                      <option value="">Destination location</option>
+                      <option value="">
+                        {transferCreationMode === "DIRECT_OUT"
+                          ? "Source location"
+                          : "Destination location"}
+                      </option>
                       {props.snapshot?.inventoryLocations.map((location) => (
                         <option
                           key={location.locationCode}
@@ -24077,7 +24150,11 @@ function InventoryWorkspace(props: {
                   value={formatNumber(transferRequestLines.length)}
                 />
                 <Stat
-                  label="Request qty"
+                  label={
+                    transferCreationMode === "DIRECT_OUT"
+                      ? "Transfer qty"
+                      : "Request qty"
+                  }
                   value={`${formatNumber(
                     transferRequestLines.reduce(
                       (sum, line) => sum + line.baseQuantity,
@@ -24100,7 +24177,9 @@ function InventoryWorkspace(props: {
                   onClick={() => void saveTransferRequestLines()}
                   type="button"
                 >
-                  Save draft
+                  {transferCreationMode === "DIRECT_OUT"
+                    ? "Save transfer draft"
+                    : "Save request draft"}
                 </button>
               </div>
             </section>
@@ -25846,12 +25925,21 @@ function reportRowsForExport(report: StoreReportResult, kind: ReportKind) {
       }));
     case "tenders":
       return report.tenderRows.map((row) => ({
-        Source: row.source,
+        "Receipt No": row.transactionNo,
+        Type: row.transactionType,
+        "Source Receipt": row.sourceTransactionNo ?? "",
+        Date: formatDate(row.occurredAt),
+        Cashier: row.cashierCode ?? "",
+        Terminal: row.terminalCode ?? "",
+        Shift: row.shiftNo ?? "",
+        "Customer No": row.customerNo ?? "",
+        Customer: row.customerName ?? "Walk-in",
         "Payment Method": row.paymentMethod,
         "Tender Code": row.tenderMethodCode ?? "",
         Tender: row.tenderMethodName ?? row.paymentMethod,
-        "Payment Lines": row.transactionCount,
-        Amount: row.netAmount,
+        Purpose: row.paymentPurpose,
+        Reference: row.reference ?? "",
+        Amount: row.amount,
       }));
     case "products":
       return report.productRows.map((row) => ({

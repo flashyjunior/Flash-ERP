@@ -6734,6 +6734,10 @@ function parseStoreInterStoreTransferRequestedPayload(
     ),
     transferBatchNo: readOptionalString(payload, "transferBatchNo"),
     lineNo: readOptionalNumber(payload, "lineNo"),
+    direction:
+      readOptionalString(payload, "direction") === "DIRECT_OUT"
+        ? "DIRECT_OUT"
+        : "REQUEST_IN",
     storeCode: readRequiredString(
       payload,
       "storeCode",
@@ -12044,65 +12048,123 @@ async function projectStoreInterStoreTransferRequest(
     return true;
   }
 
-  const destinationLocation = await tx.inventoryLocation.findFirst({
-    where: {
-      retailOrgId: target.storeNode.retailOrgId,
-      storeId: target.storeNode.store.id,
-      code: payload.destinationLocationCode,
-      status: RecordStatus.ACTIVE,
-    },
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      storeId: true,
-    },
-  });
+  const isDirectOut = payload.direction === "DIRECT_OUT";
+  const currentStore = target.storeNode.store;
+  let sourceStore: { id: string; code: string; name: string };
+  let destinationStore: { id: string; code: string; name: string };
+  let sourceLocation: { id: string; code: string; name: string; storeId: string | null };
+  let destinationLocation: { id: string; code: string; name: string; storeId: string | null };
 
-  if (!destinationLocation) {
-    throw new StoreProjectionError(
-      "DEPENDENCY_MISSING",
-      `Flash ERP could not find destination location "${payload.destinationLocationCode}" for "${target.storeNode.store.code}".`,
-      false,
-    );
-  }
-
-  const sourceStore = await tx.store.findFirst({
-    where: {
-      retailOrgId: target.storeNode.retailOrgId,
-      code: payload.sourceStoreCode,
-      status: RecordStatus.ACTIVE,
-      id: { not: target.storeNode.store.id },
-    },
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      inventoryLocations: {
-        where: { status: RecordStatus.ACTIVE },
-        orderBy: [
-          { useForSalesDefault: "desc" },
-          { useForReceivingDefault: "desc" },
-          { name: "asc" },
-        ],
-        take: 1,
+  if (isDirectOut) {
+    const [localSourceLocation, remoteDestinationLocation] = await Promise.all([
+      tx.inventoryLocation.findFirst({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          storeId: currentStore.id,
+          code: payload.sourceLocationCode ?? undefined,
+          status: RecordStatus.ACTIVE,
+        },
+        select: { id: true, code: true, name: true, storeId: true },
+      }),
+      tx.inventoryLocation.findFirst({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          code: payload.destinationLocationCode,
+          status: RecordStatus.ACTIVE,
+          storeId: { not: currentStore.id },
+        },
         select: {
           id: true,
           code: true,
           name: true,
+          storeId: true,
+          store: { select: { id: true, code: true, name: true } },
         },
-      },
-    },
-  });
+      }),
+    ]);
 
-  const sourceLocation = sourceStore?.inventoryLocations[0];
+    if (!localSourceLocation) {
+      throw new StoreProjectionError(
+        "DEPENDENCY_MISSING",
+        `Flash ERP could not find active source location "${payload.sourceLocationCode ?? ""}" for "${currentStore.code}".`,
+        false,
+      );
+    }
 
-  if (!sourceStore || !sourceLocation) {
-    throw new StoreProjectionError(
-      "DEPENDENCY_MISSING",
-      `Flash ERP could not find active source shop "${payload.sourceStoreCode}" with an inventory location.`,
-      false,
-    );
+    if (!remoteDestinationLocation?.store) {
+      throw new StoreProjectionError(
+        "DEPENDENCY_MISSING",
+        `Flash ERP could not find destination location "${payload.destinationLocationCode}" in another active shop.`,
+        false,
+      );
+    }
+
+    sourceStore = currentStore;
+    sourceLocation = localSourceLocation;
+    destinationStore = remoteDestinationLocation.store;
+    destinationLocation = remoteDestinationLocation;
+  } else {
+    const [localDestinationLocation, remoteSourceStore] = await Promise.all([
+      tx.inventoryLocation.findFirst({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          storeId: currentStore.id,
+          code: payload.destinationLocationCode,
+          status: RecordStatus.ACTIVE,
+        },
+        select: { id: true, code: true, name: true, storeId: true },
+      }),
+      tx.store.findFirst({
+        where: {
+          retailOrgId: target.storeNode.retailOrgId,
+          code: payload.sourceStoreCode,
+          status: RecordStatus.ACTIVE,
+          id: { not: currentStore.id },
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          inventoryLocations: {
+            where: {
+              status: RecordStatus.ACTIVE,
+              ...(payload.sourceLocationCode
+                ? { code: payload.sourceLocationCode }
+                : {}),
+            },
+            orderBy: [
+              { useForSalesDefault: "desc" },
+              { useForReceivingDefault: "desc" },
+              { name: "asc" },
+            ],
+            take: 1,
+            select: { id: true, code: true, name: true, storeId: true },
+          },
+        },
+      }),
+    ]);
+    const remoteSourceLocation = remoteSourceStore?.inventoryLocations[0];
+
+    if (!localDestinationLocation) {
+      throw new StoreProjectionError(
+        "DEPENDENCY_MISSING",
+        `Flash ERP could not find destination location "${payload.destinationLocationCode}" for "${currentStore.code}".`,
+        false,
+      );
+    }
+
+    if (!remoteSourceStore || !remoteSourceLocation) {
+      throw new StoreProjectionError(
+        "DEPENDENCY_MISSING",
+        `Flash ERP could not find active source shop "${payload.sourceStoreCode}" with an inventory location.`,
+        false,
+      );
+    }
+
+    sourceStore = remoteSourceStore;
+    sourceLocation = remoteSourceLocation;
+    destinationStore = currentStore;
+    destinationLocation = localDestinationLocation;
   }
 
   const product = await tx.product.findFirst({
@@ -12174,7 +12236,7 @@ async function projectStoreInterStoreTransferRequest(
       id: payload.requestId,
       retailOrgId: target.storeNode.retailOrgId,
       sourceStoreId: sourceStore.id,
-      destinationStoreId: target.storeNode.store.id,
+      destinationStoreId: destinationStore.id,
       sourceInventoryLocationId: sourceLocation.id,
       destinationInventoryLocationId: destinationLocation.id,
       productId: product.id,
@@ -12197,7 +12259,9 @@ async function projectStoreInterStoreTransferRequest(
       requestOperatorName: payload.operatorName,
       requestNote:
         payload.note?.trim() ||
-        `${target.storeNode.store.code} requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.baseQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceStore.name}. The source shop will select the dispatch location when issuing.`,
+        (isDirectOut
+          ? `${sourceStore.name} initiated a direct transfer of ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.baseQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} to ${destinationStore.name}.`
+          : `${destinationStore.code} requested ${transferUom.requestedUnitQuantity.toFixed(3)} ${transferUom.requestedUnitOfMeasure} (${transferUom.baseQuantity.toFixed(3)} ${transferUom.baseUnitOfMeasure}) of ${product.name} from ${sourceStore.name}. The source shop will select the dispatch location when issuing.`),
       requestedByNodeCode: target.storeNode.code,
       requestedAt: occurredAt,
     },

@@ -7,7 +7,7 @@ import { ErpHrLeaveTypesSettingsWorkspace } from "@/components/enterprise/erp-hr
 import { requireEnterprisePermission } from "@/server/auth/enterprise-session";
 import {
   buildUnavailableEnterpriseCatalogWorkspace,
-  getEnterpriseCatalogWorkspace
+  getEnterpriseInventoryCatalogWorkspace
 } from "@/server/repositories/enterprise-catalog.repository";
 import {
   buildUnavailableEnterpriseSecurityWorkspace,
@@ -86,7 +86,7 @@ export default async function SettingsSubmenuPage({
   }
 
   if (view === "inventory-catalogs") {
-    const workspace = await getEnterpriseCatalogWorkspace().catch((error: unknown) =>
+    const workspace = await getEnterpriseInventoryCatalogWorkspace().catch((error: unknown) =>
       buildUnavailableEnterpriseCatalogWorkspace(
         error instanceof Error
           ? `Unable to load live Flash ERP inventory catalog policy: ${error.message}`

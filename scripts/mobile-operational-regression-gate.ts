@@ -20,14 +20,19 @@ assert.equal(canOpenMobileRoute(session([]), "returns"), false);
 assert.equal(canOpenMobileRoute(session(["hr.leave.manage"]), "account"), true);
 
 async function main() {
-const [cart, api, outbox, login, selfService, receipt, scanner, account, receiptStore, catalogRoute, tenderRoute] = await Promise.all([
+const [cart, api, outbox, login, selfService, receipt, scanner, account, receiptStore, catalogRoute, tenderRoute, dashboardRoute, mobileHome, transferIssueRoute, transferReceiveRoute, onlineStoreRepository] = await Promise.all([
   read("apps/mobile/app/cart.tsx"), read("apps/mobile/lib/mobile-api.ts"),
   read("apps/mobile/app/outbox.tsx"), read("apps/mobile/app/login.tsx"),
   read("apps/mobile/app/self-service.tsx"), read("apps/mobile/app/receipt.tsx"),
   read("apps/mobile/app/scanner.tsx"), read("apps/mobile/app/account.tsx"),
   read("apps/mobile/lib/mobile-receipt-store.ts"),
   read("apps/enterprise-web/src/app/api/catalog/products/route.ts"),
-  read("apps/enterprise-web/src/app/api/online-store/tender-methods/route.ts")
+  read("apps/enterprise-web/src/app/api/online-store/tender-methods/route.ts"),
+  read("apps/enterprise-web/src/app/api/mobile/dashboard/route.ts"),
+  read("apps/mobile/app/index.tsx"),
+  read("apps/enterprise-web/src/app/api/online-store/transfers/[transferId]/issue/route.ts"),
+  read("apps/enterprise-web/src/app/api/online-store/transfers/[transferId]/receive/route.ts"),
+  read("apps/enterprise-web/src/server/repositories/online-store.repository.ts")
 ]);
 // Regression guard: the mobile cart must NEVER send an invented
 // sourceTransactionId (the old `MOBILE-...` idempotency key made HQ look for a
@@ -74,6 +79,20 @@ assert.match(selfService, /preserveEvidenceFile\(assetUri, "expense"\)/);
 assert.match(catalogRoute, /storeProductSellingUnits/);
 assert.match(catalogRoute, /status: "ACTIVE" as const/);
 assert.match(tenderRoute, /requiresReference: true/);
+// Mobile sales analytics follows the same net-sale convention as browser and
+// desktop reports: completed returns and exchange return lines reduce totals.
+assert.match(dashboardRoute, /PosTransactionType\.RETURN/);
+assert.match(dashboardRoute, /PosTransactionType\.EXCHANGE/);
+assert.match(dashboardRoute, /PosTransactionLineIntent\.RETURN/);
+assert.match(dashboardRoute, /signedTransactionAmount/);
+assert.match(dashboardRoute, /signedLineAmount/);
+assert.match(mobileHome, /NET SALES · TODAY AT YOUR SHOP/);
+assert.match(api, /\/api\/online-store\/transfers\/\$\{encodeURIComponent\(transferId\)\}\/issue/);
+assert.match(api, /\/api\/online-store\/transfers\/\$\{encodeURIComponent\(transferId\)\}\/receive/);
+assert.match(transferIssueRoute, /processOnlineStoreTransfer/);
+assert.match(transferReceiveRoute, /processOnlineStoreTransfer/);
+assert.match(onlineStoreRepository, /changed while it was being issued/);
+assert.match(onlineStoreRepository, /changed while it was being received/);
 console.log("Mobile operational regression gate passed.");
 
 }

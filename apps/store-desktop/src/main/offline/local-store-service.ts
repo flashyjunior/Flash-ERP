@@ -594,11 +594,22 @@ type ReportSalesRow = {
 };
 
 type ReportTenderRow = {
+  payment_id: string;
+  transaction_no: string;
+  transaction_type: "SALE" | "RETURN" | "EXCHANGE";
+  source_transaction_no: string | null;
+  occurred_at: string;
+  cashier_code: string | null;
+  terminal_code: string | null;
+  shift_no: string | null;
+  customer_no: string | null;
+  customer_name: string | null;
   method: SyncPaymentMethod;
   tender_method_code: string | null;
   tender_method_name: string | null;
-  transaction_count: number | string;
-  net_amount: number | string;
+  payment_purpose: string;
+  reference: string | null;
+  amount: number | string;
 };
 
 type ReportAccountPaymentRow = {
@@ -7699,35 +7710,39 @@ export class LocalStoreService {
     const tenderRows = this.db
       .prepare(
         `SELECT
-          method,
-          tender_method_code,
-          tender_method_name,
-          COUNT(*) AS transaction_count,
-          SUM(net_amount) AS net_amount
-        FROM (
-          SELECT
-            payment.method AS method,
-            payment.tender_method_code AS tender_method_code,
-            payment.tender_method_name AS tender_method_name,
-            CASE
-              WHEN txn.transaction_type = 'RETURN'
-                OR (txn.transaction_type = 'EXCHANGE' AND COALESCE(txn.total_amount, 0) < 0)
-              THEN payment.amount * -1
-              ELSE payment.amount
-            END AS net_amount
-          FROM pos_payment AS payment
-          INNER JOIN pos_transaction AS txn
-            ON txn.id = payment.pos_transaction_id
-          LEFT JOIN customer
-            ON customer.id = txn.customer_id
-          LEFT JOIN pos_shift AS shift
-            ON shift.id = txn.shift_id
-          WHERE ${tenderWhere.join(" AND ")}
-        )
-        GROUP BY method, tender_method_code, tender_method_name
-        ORDER BY net_amount DESC, method ASC`,
+          payment.id AS payment_id,
+          txn.transaction_no AS transaction_no,
+          txn.transaction_type AS transaction_type,
+          txn.source_transaction_no AS source_transaction_no,
+          payment.received_at AS occurred_at,
+          COALESCE(payment.received_cashier_code, txn.cashier_code, shift.cashier_code) AS cashier_code,
+          COALESCE(payment.received_terminal_code, shift.terminal_code) AS terminal_code,
+          COALESCE(payment.received_shift_no, shift.shift_no) AS shift_no,
+          customer.customer_no AS customer_no,
+          customer.full_name AS customer_name,
+          payment.method AS method,
+          payment.tender_method_code AS tender_method_code,
+          payment.tender_method_name AS tender_method_name,
+          payment.payment_purpose AS payment_purpose,
+          payment.reference AS reference,
+          CASE
+            WHEN txn.transaction_type = 'RETURN'
+              OR (txn.transaction_type = 'EXCHANGE' AND COALESCE(txn.total_amount, 0) < 0)
+            THEN payment.amount * -1
+            ELSE payment.amount
+          END AS amount
+        FROM pos_payment AS payment
+        INNER JOIN pos_transaction AS txn
+          ON txn.id = payment.pos_transaction_id
+        LEFT JOIN customer
+          ON customer.id = txn.customer_id
+        LEFT JOIN pos_shift AS shift
+          ON shift.id = COALESCE(payment.received_shift_id, txn.shift_id)
+        WHERE ${tenderWhere.join(" AND ")}
+        ORDER BY payment.received_at DESC, txn.transaction_no DESC, payment.id DESC
+        LIMIT ?`,
       )
-      .all(...tenderParams) as ReportTenderRow[];
+      .all(...tenderParams, limit) as ReportTenderRow[];
 
     const accountPaymentRows = this.db
       .prepare(
@@ -7946,12 +7961,22 @@ export class LocalStoreService {
       paidAmount: Number(asNumber(row.paid_amount).toFixed(2)),
     }));
     const mappedTenderRows = tenderRows.map<StoreTenderReportRow>((row) => ({
-      source: "SALES",
+      paymentId: row.payment_id,
+      transactionNo: row.transaction_no,
+      transactionType: row.transaction_type,
+      sourceTransactionNo: row.source_transaction_no,
+      occurredAt: row.occurred_at,
+      cashierCode: row.cashier_code,
+      terminalCode: row.terminal_code,
+      shiftNo: row.shift_no,
+      customerNo: row.customer_no,
+      customerName: row.customer_name,
       paymentMethod: row.method,
       tenderMethodCode: row.tender_method_code,
       tenderMethodName: row.tender_method_name,
-      transactionCount: Math.trunc(asNumber(row.transaction_count)),
-      netAmount: Number(asNumber(row.net_amount).toFixed(2)),
+      paymentPurpose: row.payment_purpose,
+      reference: row.reference,
+      amount: Number(asNumber(row.amount).toFixed(2)),
     }));
     const mappedAccountPaymentRows =
       accountPaymentRows.map<StoreAccountPaymentReportRow>((row) => ({
@@ -8208,7 +8233,7 @@ export class LocalStoreService {
         ),
         tenderedAmount: Number(
           mappedTenderRows
-            .reduce((sum, row) => sum + row.netAmount, 0)
+            .reduce((sum, row) => sum + row.amount, 0)
             .toFixed(2),
         ),
         accountPaymentsAmount: Number(
@@ -8475,9 +8500,18 @@ export class LocalStoreService {
   saveInterStoreTransferRequestDraft(
     input: StoreInterStoreTransferRequestDraftInput,
   ): StoreSyncActionResult {
+    const direction =
+      input.direction === "DIRECT_OUT" ? "DIRECT_OUT" : "REQUEST_IN";
     const operatorSession = this.requireActiveOperatorSession({
-      permissionCodes: ["inventory.transfer.request"],
-      purpose: "saving an inter-store transfer request",
+      permissionCodes: [
+        direction === "DIRECT_OUT"
+          ? "inventory.transfer.issue"
+          : "inventory.transfer.request",
+      ],
+      purpose:
+        direction === "DIRECT_OUT"
+          ? "saving a direct inter-store transfer out"
+          : "saving an inter-store transfer request",
     });
     const timestamp = isoNow();
     const sourceStoreCode = input.sourceStoreCode?.trim() ?? "";
@@ -8710,6 +8744,38 @@ export class LocalStoreService {
       const externalReference = input.externalReference?.trim() || null;
       const draftId = existingDraft?.id ?? randomUUID();
       const linesJson = writeTransferRequestDraftLines(lines);
+      const resolvedSourceStoreCode =
+        direction === "DIRECT_OUT"
+          ? storeCode
+          : sourceTarget.source_store_code;
+      const resolvedSourceStoreName =
+        direction === "DIRECT_OUT"
+          ? storeName
+          : sourceTarget.source_store_name;
+      const resolvedSourceLocationCode =
+        direction === "DIRECT_OUT"
+          ? destinationLocation.location_code
+          : sourceTarget.source_location_code;
+      const resolvedSourceLocationName =
+        direction === "DIRECT_OUT"
+          ? destinationLocation.location_name
+          : sourceTarget.source_location_name;
+      const resolvedDestinationStoreCode =
+        direction === "DIRECT_OUT"
+          ? sourceTarget.source_store_code
+          : storeCode;
+      const resolvedDestinationStoreName =
+        direction === "DIRECT_OUT"
+          ? sourceTarget.source_store_name
+          : storeName;
+      const resolvedDestinationLocationCode =
+        direction === "DIRECT_OUT"
+          ? sourceTarget.source_location_code
+          : destinationLocation.location_code;
+      const resolvedDestinationLocationName =
+        direction === "DIRECT_OUT"
+          ? sourceTarget.source_location_name
+          : destinationLocation.location_name;
 
       if (existingDraft) {
         this.db
@@ -8728,14 +8794,14 @@ export class LocalStoreService {
              WHERE id = ? AND status = 'DRAFT'`,
           )
           .run(
-            sourceTarget.source_store_code,
-            sourceTarget.source_store_name,
-            sourceTarget.source_location_code,
-            sourceTarget.source_location_name,
-            storeCode,
-            storeName,
-            destinationLocation.location_code,
-            destinationLocation.location_name,
+            resolvedSourceStoreCode,
+            resolvedSourceStoreName,
+            resolvedSourceLocationCode,
+            resolvedSourceLocationName,
+            resolvedDestinationStoreCode,
+            resolvedDestinationStoreName,
+            resolvedDestinationLocationCode,
+            resolvedDestinationLocationName,
             firstLine.productCode,
             firstLine.productName,
             firstLine.departmentCode,
@@ -8790,14 +8856,14 @@ export class LocalStoreService {
         .run(
           draftId,
           requestNo,
-          sourceTarget.source_store_code,
-          sourceTarget.source_store_name,
-          sourceTarget.source_location_code,
-          sourceTarget.source_location_name,
-          storeCode,
-          storeName,
-          destinationLocation.location_code,
-          destinationLocation.location_name,
+          resolvedSourceStoreCode,
+          resolvedSourceStoreName,
+          resolvedSourceLocationCode,
+          resolvedSourceLocationName,
+          resolvedDestinationStoreCode,
+          resolvedDestinationStoreName,
+          resolvedDestinationLocationCode,
+          resolvedDestinationLocationName,
           firstLine.productCode,
           firstLine.productName,
           firstLine.departmentCode,
@@ -8836,10 +8902,6 @@ export class LocalStoreService {
   }
 
   submitInterStoreTransferRequestDraft(draftId: string): StoreSyncActionResult {
-    this.requireActiveOperatorSession({
-      permissionCodes: ["inventory.transfer.request"],
-      purpose: "submitting an inter-store transfer request",
-    });
     const timestamp = isoNow();
 
     if (!draftId.trim()) {
@@ -8911,6 +8973,22 @@ export class LocalStoreService {
         );
       }
 
+      const direction =
+        draft.source_store_code.toUpperCase() === storeCode.toUpperCase()
+          ? "DIRECT_OUT"
+          : "REQUEST_IN";
+      this.requireActiveOperatorSession({
+        permissionCodes: [
+          direction === "DIRECT_OUT"
+            ? "inventory.transfer.issue"
+            : "inventory.transfer.request",
+        ],
+        purpose:
+          direction === "DIRECT_OUT"
+            ? "submitting a direct inter-store transfer out"
+            : "submitting an inter-store transfer request",
+      });
+
       const lines = readTransferRequestDraftLines(draft.lines_json, {
         lineId: draft.id,
         lineNo: 1,
@@ -8944,9 +9022,12 @@ export class LocalStoreService {
             requestNo: draft.request_no,
             transferBatchNo: draft.request_no,
             lineNo: line.lineNo,
+            direction,
             storeCode,
             terminalCode,
             sourceStoreCode: draft.source_store_code,
+            sourceLocationCode:
+              direction === "DIRECT_OUT" ? draft.source_location_code : undefined,
             destinationLocationCode: draft.destination_location_code,
             productCode: line.productCode,
             quantity: line.requestedUnitQuantity,
