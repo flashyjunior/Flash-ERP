@@ -5142,7 +5142,7 @@ export class LocalStoreService {
       openShifts: [],
       recentClosedShifts: [],
       recentStoreShifts: [],
-      activeOperatorSession: null,
+      activeOperatorSession: this.getActiveOperatorSessionSummary(),
       recoveryTasks: [],
       activeBasket: null,
       parkedBaskets: [],
@@ -21111,6 +21111,8 @@ export class LocalStoreService {
     const upstreamProcessed =
       pushResponse.acceptedEventIds.length +
       pushResponse.duplicateEventIds.length;
+    const downstreamAcknowledged =
+      pushResponse.acknowledgedDownstreamEventIds.length;
 
     this.withTransaction(() => {
       this.upsertCheckpoint(
@@ -21142,6 +21144,9 @@ export class LocalStoreService {
 
     const snapshotStartedAtMs = Date.now();
     const snapshot = this.getSyncActionSnapshot(snapshotMode);
+    const upstreamStillPending = this.getPendingUpstreamRows(1).length > 0;
+    const acknowledgementsStillPending =
+      this.getPendingDownstreamAcknowledgements(1).length > 0;
 
     console.info("Store Desktop SQLite sync result snapshot prepared.", {
       ...logContext,
@@ -21158,8 +21163,11 @@ export class LocalStoreService {
       elapsedMs: Date.now() - cycleStartedAtMs,
       upstreamProcessed,
       downstreamApplied,
+      downstreamAcknowledged,
       downstreamPullPasses,
       downstreamLimitReached,
+      upstreamStillPending,
+      acknowledgementsStillPending,
       latestCursor,
     });
 
@@ -21171,8 +21179,11 @@ export class LocalStoreService {
       snapshot,
       upstreamProcessed,
       downstreamApplied,
+      downstreamAcknowledged,
       downstreamPullPasses,
       downstreamLimitReached,
+      upstreamStillPending,
+      acknowledgementsStillPending,
       latestCursor,
     };
   }

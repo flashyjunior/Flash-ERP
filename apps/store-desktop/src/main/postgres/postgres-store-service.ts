@@ -21301,6 +21301,8 @@ export class PostgresStoreService {
     const upstreamProcessed =
       pushResponse.acceptedEventIds.length +
       pushResponse.duplicateEventIds.length;
+    const downstreamAcknowledged =
+      pushResponse.acknowledgedDownstreamEventIds.length;
 
     await this.upsertCheckpoint({
       remoteNodeCode: latestSourceNodeCode,
@@ -21338,6 +21340,11 @@ export class PostgresStoreService {
       ],
     );
 
+    const upstreamStillPending =
+      (await this.getPendingUpstreamRows(1)).length > 0;
+    const acknowledgementsStillPending =
+      (await this.getPendingDownstreamAcknowledgements(1)).length > 0;
+
     return {
       message:
         upstreamProcessed > 0 || downstreamApplied > 0
@@ -21346,8 +21353,11 @@ export class PostgresStoreService {
       snapshot: await this.getSyncSnapshot(),
       upstreamProcessed,
       downstreamApplied,
+      downstreamAcknowledged,
       downstreamPullPasses,
       downstreamLimitReached,
+      upstreamStillPending,
+      acknowledgementsStillPending,
       latestCursor,
     };
   }

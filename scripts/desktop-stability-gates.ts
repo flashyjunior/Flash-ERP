@@ -46,6 +46,57 @@ requireIncludes(mainProcess, "render-process-gone", "main process must recover c
 requireIncludes(mainProcess, "desktopWindowRecoveryInFlight", "main process must track in-flight recovery.");
 requireIncludes(mainProcess, "flash-erp:get-desktop-window-status", "main process must expose window status IPC.");
 requireIncludes(mainProcess, "flash-erp:recover-desktop-window", "main process must expose recovery IPC.");
+requireIncludes(mainProcess, "verifyDesktopUpdateFeedMetadata", "automatic updates must validate metadata before entering the native updater.");
+requireIncludes(mainProcess, "new AbortController()", "update metadata probes must have a bounded timeout.");
+requireIncludes(mainProcess, "desktopUpdateCheckInFlight", "overlapping update checks must be coalesced.");
+requireIncludes(mainProcess, "FLASH_ERP_DESKTOP_AUTO_UPDATE_CHECKS", "automatic update checks must require an explicit opt-in.");
+requireIncludes(mainProcess, "resolvePackagedSyncRuntimeRoot", "packaged sync runtime selection must be explicit.");
+requireIncludes(mainProcess, "spawn(nodeRuntimePath, [entryPath, encodedInput]", "scheduled sync must launch Node directly.");
+if (mainProcess.includes('spawn("powershell.exe"') || mainProcess.includes("launcherScriptPath")) {
+  throw new Error("Desktop stability gate failed: scheduled sync must not block on a PowerShell launcher.");
+}
+
+const syncRuntimeResolutionSource = mainProcess.slice(
+  mainProcess.indexOf("function resolvePackagedSyncRuntimeRoot"),
+  mainProcess.indexOf("function getPackagedSyncRuntimeStageRoot"),
+);
+if (
+  syncRuntimeResolutionSource.indexOf("isPackagedSyncRuntimeComplete(candidate)") < 0 ||
+  syncRuntimeResolutionSource.indexOf("isPackagedSyncRuntimeComplete(candidate)") >
+    syncRuntimeResolutionSource.indexOf("ensurePackagedSyncRuntimeRoot()")
+) {
+  throw new Error(
+    "Desktop stability gate failed: packaged sync files must be used directly before profile staging is attempted.",
+  );
+}
+
+const updateCheckSource = mainProcess.slice(
+  mainProcess.indexOf("async function checkForDesktopUpdate"),
+  mainProcess.indexOf("function installDesktopUpdate"),
+);
+if (
+  updateCheckSource.indexOf("await verifyDesktopUpdateFeedMetadata()") < 0 ||
+  updateCheckSource.indexOf("await verifyDesktopUpdateFeedMetadata()") >
+    updateCheckSource.indexOf("await autoUpdater.checkForUpdates()")
+) {
+  throw new Error(
+    "Desktop stability gate failed: update metadata preflight must finish before the native updater starts.",
+  );
+}
+
+const scheduledUpdateSource = mainProcess.slice(
+  mainProcess.indexOf("function scheduleDesktopUpdateChecks"),
+  mainProcess.indexOf("async function requireStoreClient"),
+);
+if (
+  scheduledUpdateSource.indexOf("areAutomaticDesktopUpdateChecksEnabled()") < 0 ||
+  scheduledUpdateSource.indexOf("areAutomaticDesktopUpdateChecksEnabled()") >
+    scheduledUpdateSource.indexOf("setTimeout(() =>")
+) {
+  throw new Error(
+    "Desktop stability gate failed: automatic update checks must be opted into before any timer is scheduled.",
+  );
+}
 
 requireIncludes(preload, "notifyRendererReady", "preload must expose renderer-ready IPC.");
 requireIncludes(preload, "reportRendererHeartbeat", "preload must expose renderer heartbeat IPC.");
@@ -56,9 +107,16 @@ requireIncludes(renderer, "Sync snapshot refresh", "renderer must timeout stalle
 requireIncludes(renderer, "loginIdInputRef", "renderer must restore sign-in input focus.");
 requireIncludes(renderer, "notifyRendererReady", "renderer must report ready state.");
 requireIncludes(renderer, "reportRendererHeartbeat", "renderer must send heartbeats.");
+requireIncludes(renderer, "signed-in-startup-snapshot-complete", "renderer recovery must restore the persisted signed-in snapshot.");
 requireIncludes(renderer, "Renderer watchdog", "runtime UI must expose watchdog status.");
 requireIncludes(renderer, "stale heartbeats", "runtime UI must show stale heartbeat diagnostics.");
 requireIncludes(renderer, "Recover", "runtime UI must expose manual recovery.");
+
+if (renderer.includes("return runtime.onDesktopUpdateStatus?.(")) {
+  throw new Error(
+    "Desktop stability gate failed: automatic updater events must not rerender the full POS shell.",
+  );
+}
 
 requireIncludes(soakDoc, "renderer watchdog", "soak plan must include renderer watchdog evidence.");
 requireIncludes(soakDoc, "stale heartbeat", "soak plan must include stale heartbeat evidence.");

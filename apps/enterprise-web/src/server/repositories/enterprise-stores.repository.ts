@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readJsonObject, serializeJsonField } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
+import { signedPosTransactionAmount } from "@/server/repositories/pos-transaction-sign";
 import {
   ensureEnterpriseStarterReceiptTemplate,
   resolveStoreReceiptTemplateSelection,
@@ -3436,6 +3437,8 @@ export type EnterpriseStoreDetailData = {
   }>;
   recentTransactions: Array<{
     transactionNo: string;
+    transactionType: string;
+    sourceTransactionNo: string | null;
     totalAmount: number;
     completedAt: string | null;
     completedAtLabel: string;
@@ -3715,6 +3718,8 @@ export async function getEnterpriseStoreDetail(
       take: 6,
       select: {
         transactionNo: true,
+        transactionType: true,
+        sourceTransactionNo: true,
         totalAmount: true,
         completedAt: true,
         createdAt: true,
@@ -3910,7 +3915,12 @@ export async function getEnterpriseStoreDetail(
 
       return {
         transactionNo: transaction.transactionNo,
-        totalAmount: Number(transaction.totalAmount),
+        transactionType: transaction.transactionType,
+        sourceTransactionNo: transaction.sourceTransactionNo,
+        totalAmount: signedPosTransactionAmount(
+          transaction.transactionType,
+          Number(transaction.totalAmount),
+        ),
         completedAt: toIsoString(completedAt),
         completedAtLabel: formatRelativeTime(completedAt),
       };

@@ -6,6 +6,7 @@ import path from "node:path";
 import sql from "mssql";
 
 import { MssqlStoreService } from "../apps/store-desktop/src/main/mssql/mssql-store-service.js";
+import { runBoundedStoreSyncDrain } from "../apps/store-desktop/src/shared/store-sync-drain.js";
 import type {
   StoreInventoryLedgerRecordedPayload,
   StorePosShiftClosedPayload,
@@ -1351,14 +1352,40 @@ async function main() {
   });
   const syncStartedAt = new Date().toISOString();
 
-  try {
-    await service.runSyncCycle({
-      trigger: "startup",
-      drainDownstream: true,
-      snapshotMode: "status",
-    });
-  } finally {
-    await service.close();
+  const drainResult = await (async () => {
+    try {
+      return await runBoundedStoreSyncDrain({
+        drainQueues: true,
+        maxCycles: 250,
+        maxDurationMs: 300_000,
+        pauseMs: 25,
+        runCycle: () => service.runSyncCycle({
+          trigger: "startup",
+          drainDownstream: false,
+          snapshotMode: "status",
+        }),
+      });
+    } finally {
+      await service.close();
+    }
+  })();
+
+  if (drainResult.syncDrainStopReason !== "caught-up") {
+    throw new Error(
+      `The MSSQL store sync drain stopped as ${drainResult.syncDrainStopReason ?? "unknown"} instead of catching up.`,
+    );
+  }
+
+  if ((drainResult.syncDrainCycles ?? 0) < 2) {
+    throw new Error("The MSSQL certification did not exercise more than one bounded sync chunk.");
+  }
+
+  if (
+    drainResult.upstreamStillPending ||
+    drainResult.acknowledgementsStillPending ||
+    drainResult.downstreamLimitReached
+  ) {
+    throw new Error("The MSSQL certification finished with eligible sync work still pending.");
   }
 
   await verifyCertification({
@@ -1374,7 +1401,7 @@ async function main() {
   });
 
   console.log(
-    `SQL Server store-server sync certification passed for ${storeNodeCode} against MSSQL-backed HQ.`
+    `SQL Server store-server sync certification passed for ${storeNodeCode} against MSSQL-backed HQ across ${drainResult.syncDrainCycles} bounded chunk(s).`
   );
 }
 

@@ -187,7 +187,12 @@ export function EnterprisePosWorkspace({
         cell: ({ row }) => (
           <div className="min-w-0">
             <p className="truncate font-medium text-stone-900">{row.original.transactionNo}</p>
-            <p className="truncate text-xs text-stone-500">{row.original.productSummary}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.productSummary}
+              {row.original.sourceTransactionNo
+                ? ` / Source ${row.original.sourceTransactionNo}`
+                : ""}
+            </p>
             {row.original.promotionSummary ? (
               <p className="truncate text-xs text-emerald-700">
                 Promotion: {row.original.promotionSummary}
@@ -195,6 +200,14 @@ export function EnterprisePosWorkspace({
             ) : null}
           </div>
         ),
+        meta: {
+          disableTruncate: true
+        }
+      },
+      {
+        accessorKey: "transactionType",
+        header: "Type",
+        cell: ({ row }) => <StatusBadge value={row.original.transactionType} />,
         meta: {
           disableTruncate: true
         }

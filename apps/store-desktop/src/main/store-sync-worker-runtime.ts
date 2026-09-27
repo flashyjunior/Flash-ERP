@@ -13,6 +13,7 @@ import type {
   StoreSyncActionResult,
   StoreSyncRunOptions,
 } from "../shared/desktop-runtime.js";
+import { runBoundedStoreSyncDrain } from "../shared/store-sync-drain.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,9 +61,31 @@ function readWorkerSyncInput(): StoreSyncRunOptions {
 
 function readWorkerTimeoutMs() {
   const parsed = Number(process.env.FLASH_ERP_DESKTOP_SYNC_WORKER_TIMEOUT_MS);
-  return Number.isInteger(parsed) && parsed >= 5_000 && parsed <= 120_000
+  return Number.isInteger(parsed) && parsed >= 5_000 && parsed <= 610_000
     ? parsed
-    : 25_000;
+    : 310_000;
+}
+
+function readDrainCycleLimit() {
+  const parsed = Number(process.env.FLASH_ERP_DESKTOP_DETACHED_SYNC_CYCLES);
+  return Number.isInteger(parsed) && parsed > 0
+    ? Math.min(parsed, 500)
+    : 250;
+}
+
+function readDrainBudgetMs(workerTimeoutMs: number) {
+  const parsed = Number(process.env.FLASH_ERP_DESKTOP_SYNC_DRAIN_BUDGET_MS);
+  const configured = Number.isInteger(parsed) && parsed >= 5_000
+    ? parsed
+    : 300_000;
+  return Math.min(configured, Math.max(1_000, workerTimeoutMs - 2_000));
+}
+
+function readDrainPauseMs() {
+  const parsed = Number(process.env.FLASH_ERP_DESKTOP_SYNC_DRAIN_PAUSE_MS);
+  return Number.isInteger(parsed) && parsed >= 0
+    ? Math.min(parsed, 2_000)
+    : 150;
 }
 
 function withWorkerTimeout<T>(promise: Promise<T>, timeoutMs: number) {
@@ -176,14 +199,32 @@ async function main() {
     console.info("Store Desktop isolated sync worker started.", {
       trigger: input.trigger ?? "manual",
       snapshotMode: input.snapshotMode ?? "status",
-      drainDownstream: input.drainDownstream === true,
+      drainQueues: input.drainDownstream === true,
     });
 
     const result = await withWorkerTimeout(
-      runtime.runSyncCycle({
-        ...input,
-        drainDownstream: input.drainDownstream === true,
-        snapshotMode: input.snapshotMode ?? "status",
+      runBoundedStoreSyncDrain({
+        drainQueues: input.drainDownstream === true,
+        maxCycles:
+          input.drainDownstream === true ? readDrainCycleLimit() : 1,
+        maxDurationMs: readDrainBudgetMs(workerTimeoutMs),
+        pauseMs: readDrainPauseMs(),
+        runCycle: () => runtime.runSyncCycle({
+          ...input,
+          drainDownstream: false,
+          snapshotMode: input.snapshotMode ?? "status",
+        }),
+        onCycleCompleted: ({ cycle, result: cycleResult, pendingWork }) => {
+          console.info("Store Desktop isolated sync chunk completed.", {
+            cycle,
+            pendingWork,
+            upstreamProcessed: cycleResult.upstreamProcessed ?? null,
+            downstreamApplied: cycleResult.downstreamApplied ?? null,
+            downstreamAcknowledged:
+              cycleResult.downstreamAcknowledged ?? null,
+            latestCursor: cycleResult.latestCursor ?? null,
+          });
+        },
       }),
       workerTimeoutMs,
     );
@@ -197,8 +238,14 @@ async function main() {
       message: result.message,
       upstreamProcessed: result.upstreamProcessed ?? null,
       downstreamApplied: result.downstreamApplied ?? null,
+      downstreamAcknowledged: result.downstreamAcknowledged ?? null,
       downstreamPullPasses: result.downstreamPullPasses ?? null,
       downstreamLimitReached: result.downstreamLimitReached ?? null,
+      upstreamStillPending: result.upstreamStillPending ?? null,
+      acknowledgementsStillPending:
+        result.acknowledgementsStillPending ?? null,
+      drainCycles: result.syncDrainCycles ?? 1,
+      drainStopReason: result.syncDrainStopReason ?? "single-cycle",
       latestCursor: result.latestCursor ?? null,
     });
   } finally {
