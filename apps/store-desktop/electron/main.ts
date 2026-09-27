@@ -171,7 +171,6 @@ let lastDesktopWindowLoadFailure: string | null = null;
 let desktopWindowRecoveryInFlight = false;
 let rendererReadyTimer: NodeJS.Timeout | null = null;
 let rendererWatchdogTimer: NodeJS.Timeout | null = null;
-let unresponsiveRecoveryTimer: NodeJS.Timeout | null = null;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let detachedSyncCycleInFlight: Promise<void> | null = null;
 let activeDetachedSyncWorkerPidPath: string | null = null;
@@ -205,9 +204,7 @@ const defaultDesktopUpdateFeedUrl =
 const desktopUpdateCheckIntervalMs = 6 * 60 * 60 * 1000;
 const rendererReadyTimeoutMs = 8_000;
 const rendererHeartbeatWarningMs = 35_000;
-const rendererHeartbeatRecoveryMs = 90_000;
 const rendererRecoveryCooldownMs = 30_000;
-const unresponsiveRecoveryMs = 12_000;
 const localSyncCycleRequestTimeoutMs = readDesktopDurationMs(
   "FLASH_ERP_DESKTOP_SYNC_REQUEST_TIMEOUT_MS",
   30_000,
@@ -2493,9 +2490,6 @@ function startRendererWatchdog() {
       });
     }
 
-    if (heartbeatAgeMs >= rendererHeartbeatRecoveryMs) {
-      void recoverDesktopWindow("renderer-heartbeat-stale");
-    }
   }, 15_000);
 }
 
@@ -2534,10 +2528,6 @@ async function recoverDesktopWindow(reason = "operator-requested"): Promise<Stor
       recoveryCount: desktopWindowRecoveryCount
     });
     clearRendererReadyTimer();
-    if (unresponsiveRecoveryTimer) {
-      clearTimeout(unresponsiveRecoveryTimer);
-      unresponsiveRecoveryTimer = null;
-    }
 
     if (window.isMinimized()) {
       window.restore();
@@ -3353,22 +3343,13 @@ function createWindow() {
   );
 
   window.webContents.on("unresponsive", () => {
-    console.error("Store Desktop window became unresponsive.");
-    if (unresponsiveRecoveryTimer) {
-      clearTimeout(unresponsiveRecoveryTimer);
-    }
-    unresponsiveRecoveryTimer = setTimeout(() => {
-      unresponsiveRecoveryTimer = null;
-      void recoverDesktopWindow("renderer-unresponsive");
-    }, unresponsiveRecoveryMs);
+    console.error(
+      "Store Desktop window became unresponsive. The watchdog will preserve the signed-in session and in-progress work instead of reloading the renderer."
+    );
   });
 
   window.webContents.on("responsive", () => {
-    if (unresponsiveRecoveryTimer) {
-      clearTimeout(unresponsiveRecoveryTimer);
-      unresponsiveRecoveryTimer = null;
-      console.info("Store Desktop renderer became responsive before recovery was needed.");
-    }
+    console.info("Store Desktop renderer became responsive again.");
   });
 
   window.webContents.on("did-finish-load", () => {
@@ -3428,10 +3409,6 @@ function createWindow() {
   window.on("closed", () => {
     clearTimeout(revealWindowFallback);
     clearRendererReadyTimer();
-    if (unresponsiveRecoveryTimer) {
-      clearTimeout(unresponsiveRecoveryTimer);
-      unresponsiveRecoveryTimer = null;
-    }
     if (windowStateSaveTimer) {
       clearTimeout(windowStateSaveTimer);
       windowStateSaveTimer = null;
@@ -4681,10 +4658,6 @@ app.on("before-quit", () => {
     rendererWatchdogTimer = null;
   }
   clearRendererReadyTimer();
-  if (unresponsiveRecoveryTimer) {
-    clearTimeout(unresponsiveRecoveryTimer);
-    unresponsiveRecoveryTimer = null;
-  }
   stopStoreServerProcess();
   void storeServerHandle?.close();
   storeServerHandle = null;

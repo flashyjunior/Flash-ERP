@@ -44,6 +44,7 @@
     "acceptance:sales-order-collections": "tsx scripts/sales-order-collections-reconciliation-gate.ts",
     "acceptance:desktop-update-artifact": "tsx scripts/desktop-update-artifact-name-gate.ts",
     "acceptance:desktop-stability": "tsx scripts/desktop-stability-gates.ts",
+    "acceptance:desktop-session-continuity": "tsx scripts/desktop-session-continuity-gate.ts",
     "acceptance:parity": "tsx scripts/rms-parity-closure-gates.ts && npm run acceptance:online-store-parity",
     "acceptance:online-store-parity": "tsx scripts/online-store-desktop-parity-gate.ts",
     "acceptance:hq-return-netting": "tsx scripts/hq-return-netting-gate.ts",

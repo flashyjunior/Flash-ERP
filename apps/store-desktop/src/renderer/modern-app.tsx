@@ -13,6 +13,7 @@ import { calculatePosBaseQuantity } from "@flash-erp/domain";
 import retailLoginBackgroundUrl from "../assets/retail-login-bg.jpg";
 import { buildGoodsReceiptPrintWindowHtml } from "../shared/receipt-printing";
 import {
+  applyStoreSyncCycleStatusToSnapshot,
   computeNextStoreSyncAt,
   resolveInventoryTransferUom,
 } from "../shared/desktop-runtime";
@@ -4117,19 +4118,9 @@ export function ModernDesktopApp() {
     return runtime.onSyncCycleStatus((status) => {
       syncActionInFlightRef.current = false;
       setIsSyncRunning(false);
-
-      const snapshotRequest = runtime.getSyncSnapshot();
-      void snapshotRequest
-        .then((nextSnapshot) => setSnapshot(nextSnapshot))
-        .catch((nextError) => {
-          runtime.writeDesktopDiagnostic?.(
-            "warn",
-            "sync-render-status-refresh-failed",
-            {
-              message: formatDesktopActionError(nextError),
-            },
-          );
-        });
+      setSnapshot((current) =>
+        applyStoreSyncCycleStatusToSnapshot(current, status),
+      );
 
       const message =
         status.status === "completed"

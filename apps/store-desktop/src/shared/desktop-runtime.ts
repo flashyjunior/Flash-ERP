@@ -2307,6 +2307,41 @@ export type StoreSyncSnapshot = {
   generatedAt: string;
 };
 
+export function applyStoreSyncCycleStatusToSnapshot(
+  snapshot: StoreSyncSnapshot | null,
+  status: StoreSyncCycleStatusEvent,
+): StoreSyncSnapshot | null {
+  if (!snapshot || status.status !== "completed") {
+    return snapshot;
+  }
+
+  const completedAt = status.completedAt;
+  const syncPolicy = {
+    ...snapshot.syncPolicy,
+    nextScheduledSyncAt: snapshot.syncPolicy.autoSyncEnabled
+      ? computeNextStoreSyncAt({
+          policy: snapshot.syncPolicy,
+          baseAt: completedAt,
+        })
+      : null,
+    lastManualSyncAt:
+      status.trigger === "manual" || status.trigger === "tray"
+        ? completedAt
+        : snapshot.syncPolicy.lastManualSyncAt,
+    lastAutoSyncAt:
+      status.trigger === "scheduled"
+        ? completedAt
+        : snapshot.syncPolicy.lastAutoSyncAt,
+  };
+
+  return {
+    ...snapshot,
+    lastSyncAt: completedAt,
+    syncPolicy,
+    generatedAt: completedAt,
+  };
+}
+
 export type StoreSyncActionResult = {
   message: string;
   snapshot: StoreSyncSnapshot;
