@@ -20310,6 +20310,8 @@ export class MssqlStoreService {
     const upstreamProcessed =
       pushResponse.acceptedEventIds.length +
       pushResponse.duplicateEventIds.length;
+    const downstreamAcknowledged =
+      pushResponse.acknowledgedDownstreamEventIds.length;
     await this.upsertCheckpoint(
       latestSourceNodeCode,
       latestDownstreamEventId,
@@ -20334,6 +20336,11 @@ export class MssqlStoreService {
       finishedAt,
     });
 
+    const upstreamStillPending =
+      (await this.getPendingUpstreamRows(1)).length > 0;
+    const acknowledgementsStillPending =
+      (await this.getPendingDownstreamAcknowledgements(1)).length > 0;
+
     return {
       message:
         upstreamProcessed > 0 || downstreamApplied > 0
@@ -20342,8 +20349,11 @@ export class MssqlStoreService {
       snapshot: await this.getSyncSnapshot(),
       upstreamProcessed,
       downstreamApplied,
+      downstreamAcknowledged,
       downstreamPullPasses,
       downstreamLimitReached,
+      upstreamStillPending,
+      acknowledgementsStillPending,
       latestCursor,
     };
   }

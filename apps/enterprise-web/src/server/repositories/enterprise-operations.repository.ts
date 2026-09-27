@@ -4,10 +4,15 @@ import { readJsonObject } from "./json-field";
 import { prisma } from "@/lib/db/prisma";
 import { resolveEnterpriseCurrencyCode } from "@/server/repositories/enterprise-currency";
 import {
+  signedPosTransactionAmount,
+  sumSignedPosTransactionGroups,
+} from "@/server/repositories/pos-transaction-sign";
+import {
   getPredictivePurchaseOrderSnapshot,
   type PredictivePurchaseOrderRow
 } from "@/server/repositories/enterprise-predictive-purchasing.repository";
 import {
+  PosTransactionType,
   PosTransactionStatus,
   RecordStatus,
   SyncEventStatus,
@@ -462,6 +467,8 @@ export type EnterpriseOperationsDashboardData = {
   };
   salesRows: Array<{
     transactionNo: string;
+    transactionType: string;
+    sourceTransactionNo: string | null;
     store: string;
     storeCode: string;
     terminal: string | null;
@@ -781,17 +788,27 @@ export async function getEnterpriseOperationsDashboard(
     },
     ...transactionDateWhere
   };
-  const paymentWhere: Prisma.PosPaymentWhereInput = {
-    posTransaction: {
-      retailOrgId: enterpriseNode.retailOrgId,
-      status: PosTransactionStatus.COMPLETED,
-      deletedAt: null,
-      storeId: {
-        in: salesScopedStoreIds
-      },
-      ...transactionDateWhere
-    }
+  const paymentTransactionWhere: Prisma.PosTransactionWhereInput = {
+    retailOrgId: enterpriseNode.retailOrgId,
+    status: PosTransactionStatus.COMPLETED,
+    deletedAt: null,
+    storeId: {
+      in: salesScopedStoreIds
+    },
+    ...transactionDateWhere
   };
+  const paymentWhere: Prisma.PosPaymentWhereInput = {
+    posTransaction: paymentTransactionWhere
+  };
+  const paymentWhereFor = (
+    transactionFilter: Prisma.PosTransactionWhereInput,
+  ): Prisma.PosPaymentWhereInput => ({
+    ...paymentWhere,
+    posTransaction: {
+      ...paymentTransactionWhere,
+      ...transactionFilter,
+    },
+  });
   const allShopTransactionWhere: Prisma.PosTransactionWhereInput = {
     retailOrgId: enterpriseNode.retailOrgId,
     status: PosTransactionStatus.COMPLETED,
@@ -846,6 +863,8 @@ export async function getEnterpriseOperationsDashboard(
     analyticsTransactions,
     allShopAnalyticsTransactions,
     tenderGroups,
+    returnTenderGroups,
+    negativeExchangeTenderGroups,
     inventoryRows,
     closeoutsPosted,
     bankedAggregate,
@@ -863,7 +882,8 @@ export async function getEnterpriseOperationsDashboard(
     promotionCount,
     predictiveSnapshot
   ] = await Promise.all([
-    prisma.posTransaction.aggregate({
+    prisma.posTransaction.groupBy({
+      by: ["transactionType"],
       where: transactionWhere,
       _count: {
         _all: true
@@ -913,6 +933,8 @@ export async function getEnterpriseOperationsDashboard(
       take: 14,
       select: {
         transactionNo: true,
+        transactionType: true,
+        sourceTransactionNo: true,
         totalAmount: true,
         completedAt: true,
         createdAt: true,
@@ -959,6 +981,7 @@ export async function getEnterpriseOperationsDashboard(
       take: 5000,
       select: {
         totalAmount: true,
+        transactionType: true,
         completedAt: true,
         createdAt: true,
         customerNameSnapshot: true,
@@ -982,6 +1005,7 @@ export async function getEnterpriseOperationsDashboard(
       take: 5000,
       select: {
         totalAmount: true,
+        transactionType: true,
         completedAt: true,
         createdAt: true,
         customerNameSnapshot: true,
@@ -995,7 +1019,15 @@ export async function getEnterpriseOperationsDashboard(
     }),
     prisma.posPayment.groupBy({
       by: ["method", "tenderMethodCodeSnapshot", "tenderMethodNameSnapshot"],
-      where: paymentWhere,
+      where: paymentWhereFor({
+        OR: [
+          { transactionType: PosTransactionType.SALE },
+          {
+            transactionType: PosTransactionType.EXCHANGE,
+            totalAmount: { gte: 0 },
+          },
+        ],
+      }),
       _count: {
         _all: true
       },
@@ -1007,6 +1039,21 @@ export async function getEnterpriseOperationsDashboard(
           amount: "desc"
         }
       }
+    }),
+    prisma.posPayment.groupBy({
+      by: ["method", "tenderMethodCodeSnapshot", "tenderMethodNameSnapshot"],
+      where: paymentWhereFor({ transactionType: PosTransactionType.RETURN }),
+      _count: { _all: true },
+      _sum: { amount: true },
+    }),
+    prisma.posPayment.groupBy({
+      by: ["method", "tenderMethodCodeSnapshot", "tenderMethodNameSnapshot"],
+      where: paymentWhereFor({
+        transactionType: PosTransactionType.EXCHANGE,
+        totalAmount: { lt: 0 },
+      }),
+      _count: { _all: true },
+      _sum: { amount: true },
     }),
     prisma.inventoryLedgerEntry.findMany({
       where: inventoryWhere,
@@ -1106,7 +1153,7 @@ export async function getEnterpriseOperationsDashboard(
       }
     }),
     prisma.posTransaction.groupBy({
-      by: ["storeId"],
+      by: ["storeId", "transactionType"],
       where: transactionWhere,
       _count: {
         _all: true
@@ -1184,9 +1231,57 @@ export async function getEnterpriseOperationsDashboard(
     getPredictivePurchaseOrderSnapshot({ storeCode: selectedStoreCode || null, limit: 8 })
   ]);
 
-  const transactionGroupByStoreId = new Map(
-    transactionGroups.map((group) => [group.storeId ?? "unassigned", group] as const)
-  );
+  const transactionGroupByStoreId = new Map<
+    string,
+    {
+      completedTransactions: number;
+      salesValue: number;
+      paidAmount: number;
+      taxAmount: number;
+      discountAmount: number;
+      lastCompletedAt: Date | null;
+      lastCreatedAt: Date | null;
+    }
+  >();
+
+  for (const group of transactionGroups) {
+    const storeId = group.storeId ?? "unassigned";
+    const current = transactionGroupByStoreId.get(storeId) ?? {
+      completedTransactions: 0,
+      salesValue: 0,
+      paidAmount: 0,
+      taxAmount: 0,
+      discountAmount: 0,
+      lastCompletedAt: null,
+      lastCreatedAt: null,
+    };
+    current.completedTransactions += group._count._all;
+    current.salesValue += signedPosTransactionAmount(
+      group.transactionType,
+      Number(group._sum.totalAmount ?? 0),
+    );
+    current.paidAmount += signedPosTransactionAmount(
+      group.transactionType,
+      Number(group._sum.paidAmount ?? 0),
+    );
+    current.taxAmount += signedPosTransactionAmount(
+      group.transactionType,
+      Number(group._sum.taxAmount ?? 0),
+    );
+    current.discountAmount += signedPosTransactionAmount(
+      group.transactionType,
+      Number(group._sum.discountAmount ?? 0),
+    );
+    current.lastCompletedAt = latestDate(
+      current.lastCompletedAt,
+      group._max.completedAt ?? null,
+    );
+    current.lastCreatedAt = latestDate(
+      current.lastCreatedAt,
+      group._max.createdAt ?? null,
+    );
+    transactionGroupByStoreId.set(storeId, current);
+  }
   const inventoryGroupByStoreId = new Map(
     inventoryGroups.map((group) => [group.storeId ?? "unassigned", group] as const)
   );
@@ -1194,11 +1289,26 @@ export async function getEnterpriseOperationsDashboard(
     salesOrderGroups.map((group) => [group.storeId ?? "unassigned", group] as const)
   );
 
-  const postedTransactions = transactionAggregate._count._all;
-  const postedRevenue = Number(transactionAggregate._sum.totalAmount ?? 0);
-  const paidAmount = Number(transactionAggregate._sum.paidAmount ?? 0);
-  const taxAmount = Number(transactionAggregate._sum.taxAmount ?? 0);
-  const discountAmount = Number(transactionAggregate._sum.discountAmount ?? 0);
+  const postedTransactions = transactionAggregate.reduce(
+    (sum, group) => sum + group._count._all,
+    0,
+  );
+  const postedRevenue = sumSignedPosTransactionGroups(transactionAggregate);
+  const paidAmount = transactionAggregate.reduce(
+    (sum, group) =>
+      sum + signedPosTransactionAmount(group.transactionType, Number(group._sum.paidAmount ?? 0)),
+    0,
+  );
+  const taxAmount = transactionAggregate.reduce(
+    (sum, group) =>
+      sum + signedPosTransactionAmount(group.transactionType, Number(group._sum.taxAmount ?? 0)),
+    0,
+  );
+  const discountAmount = transactionAggregate.reduce(
+    (sum, group) =>
+      sum + signedPosTransactionAmount(group.transactionType, Number(group._sum.discountAmount ?? 0)),
+    0,
+  );
   const bankedAmount = Number(bankedAggregate._sum.amount ?? 0);
 
   const storeSummaries = salesScopedStores
@@ -1207,8 +1317,8 @@ export async function getEnterpriseOperationsDashboard(
       const inventoryGroup = inventoryGroupByStoreId.get(store.id);
       const salesOrderGroup = salesOrderGroupByStoreId.get(store.id);
       const lastPostedAt = latestDate(
-        salesGroup?._max.completedAt ?? null,
-        salesGroup?._max.createdAt ?? null,
+        salesGroup?.lastCompletedAt ?? null,
+        salesGroup?.lastCreatedAt ?? null,
         inventoryGroup?._max.occurredAt ?? null,
         salesOrderGroup?._max.updatedAt ?? null,
         salesOrderGroup?._max.createdAt ?? null
@@ -1218,12 +1328,12 @@ export async function getEnterpriseOperationsDashboard(
         store: store.name,
         storeCode: store.code,
         nodeCode: primaryNodeCodeByStoreId.get(store.id) ?? null,
-        postedTransactions: salesGroup?._count._all ?? 0,
+        postedTransactions: salesGroup?.completedTransactions ?? 0,
         salesOrders: salesOrderGroup?._count._all ?? 0,
-        salesValue: Number(salesGroup?._sum.totalAmount ?? 0),
-        paidAmount: Number(salesGroup?._sum.paidAmount ?? 0),
-        taxAmount: Number(salesGroup?._sum.taxAmount ?? 0),
-        discountAmount: Number(salesGroup?._sum.discountAmount ?? 0),
+        salesValue: salesGroup?.salesValue ?? 0,
+        paidAmount: salesGroup?.paidAmount ?? 0,
+        taxAmount: salesGroup?.taxAmount ?? 0,
+        discountAmount: salesGroup?.discountAmount ?? 0,
         stockMovements: inventoryGroup?._count._all ?? 0,
         lastPostedAt: toIsoString(lastPostedAt),
         lastPostedAtLabel: formatRelativeTime(lastPostedAt)
@@ -1282,7 +1392,10 @@ export async function getEnterpriseOperationsDashboard(
       storeName: transaction.store.name,
       revenue: 0
     };
-    current.revenue += Number(transaction.totalAmount);
+    current.revenue += signedPosTransactionAmount(
+      transaction.transactionType,
+      Number(transaction.totalAmount),
+    );
     revenueByTrendStore.set(storeCode, current);
   }
 
@@ -1345,7 +1458,11 @@ export async function getEnterpriseOperationsDashboard(
 
       if (trendStoreCodes.has(transaction.store.code)) {
         row[transaction.store.code] =
-          Number(row[transaction.store.code] ?? 0) + Number(transaction.totalAmount);
+          Number(row[transaction.store.code] ?? 0) +
+          signedPosTransactionAmount(
+            transaction.transactionType,
+            Number(transaction.totalAmount),
+          );
       }
 
       row.transactions += 1;
@@ -1387,7 +1504,10 @@ export async function getEnterpriseOperationsDashboard(
         continue;
       }
 
-      row.salesValue += Number(transaction.totalAmount);
+      row.salesValue += signedPosTransactionAmount(
+        transaction.transactionType,
+        Number(transaction.totalAmount),
+      );
       row.transactions += 1;
     }
 
@@ -1450,7 +1570,10 @@ export async function getEnterpriseOperationsDashboard(
     };
     const completedAt = transaction.completedAt ?? transaction.createdAt;
 
-    current.totalSales += Number(transaction.totalAmount);
+    current.totalSales += signedPosTransactionAmount(
+      transaction.transactionType,
+      Number(transaction.totalAmount),
+    );
     current.transactionCount += 1;
 
     if (!current.lastSaleAt || completedAt.getTime() > current.lastSaleAt.getTime()) {
@@ -1490,11 +1613,17 @@ export async function getEnterpriseOperationsDashboard(
     }
   >();
 
-  for (const row of tenderGroups) {
+  const signedTenderGroups = [
+    ...tenderGroups.map((row) => ({ row, direction: 1 })),
+    ...returnTenderGroups.map((row) => ({ row, direction: -1 })),
+    ...negativeExchangeTenderGroups.map((row) => ({ row, direction: -1 })),
+  ];
+
+  for (const { row, direction } of signedTenderGroups) {
     const tenderName = row.tenderMethodNameSnapshot?.trim() || formatEnumLabel(row.method);
     const tenderCode = row.tenderMethodCodeSnapshot?.trim() || null;
     const tenderKey = tenderCode ?? row.method;
-    const netAmount = Number(row._sum.amount ?? 0);
+    const netAmount = Math.abs(Number(row._sum.amount ?? 0)) * direction;
     const existingTender = tenderTotals.get(tenderKey);
 
     if (existingTender) {
@@ -1586,11 +1715,16 @@ export async function getEnterpriseOperationsDashboard(
 
       return {
         transactionNo: transaction.transactionNo,
+        transactionType: transaction.transactionType,
+        sourceTransactionNo: transaction.sourceTransactionNo,
         store: transaction.store.name,
         storeCode: transaction.store.code,
         terminal: transaction.terminal?.code ?? null,
         originNodeCode: transaction.originNodeCode,
-        totalAmount: Number(transaction.totalAmount),
+        totalAmount: signedPosTransactionAmount(
+          transaction.transactionType,
+          Number(transaction.totalAmount),
+        ),
         lineCount: transaction._count.lines,
         productSummary,
         paymentSummary,

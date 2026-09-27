@@ -187,12 +187,21 @@ export function EnterpriseOperationsDashboard({
         cell: ({ row }) => (
           <div className="min-w-0">
             <p className="truncate font-medium text-stone-900">{row.original.transactionNo}</p>
-            <p className="truncate text-xs text-stone-500">{row.original.productSummary}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.productSummary}
+              {row.original.sourceTransactionNo
+                ? ` / Source ${row.original.sourceTransactionNo}`
+                : ""}
+            </p>
           </div>
         ),
         meta: {
           disableTruncate: true
         }
+      },
+      {
+        accessorKey: "transactionType",
+        header: "Type"
       },
       {
         accessorKey: "store",

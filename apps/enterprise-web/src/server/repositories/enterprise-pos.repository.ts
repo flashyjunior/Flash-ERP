@@ -4,6 +4,10 @@ import { getSalesOrderCollectionAttributionMap } from "../reporting/sales-order-
 
 import { prisma } from "@/lib/db/prisma";
 import {
+  signedPosTransactionAmount,
+  sumSignedPosTransactionGroups,
+} from "@/server/repositories/pos-transaction-sign";
+import {
   PosTransactionStatus,
   RecordStatus,
   SyncEventStatus,
@@ -394,6 +398,8 @@ export type EnterprisePosWorkspaceData = {
   };
   transactionRows: Array<{
     transactionNo: string;
+    transactionType: string;
+    sourceTransactionNo: string | null;
     store: string;
     storeCode: string;
     terminal: string | null;
@@ -588,7 +594,8 @@ export async function getEnterprisePosWorkspace(
     transactionGroups,
     exceptionGroups
   ] = await Promise.all([
-    prisma.posTransaction.aggregate({
+    prisma.posTransaction.groupBy({
+      by: ["transactionType"],
       where: transactionWhere,
       _count: {
         _all: true
@@ -604,6 +611,8 @@ export async function getEnterprisePosWorkspace(
       select: {
         id: true,
         transactionNo: true,
+        transactionType: true,
+        sourceTransactionNo: true,
         totalAmount: true,
         taxAmount: true,
         completedAt: true,
@@ -694,7 +703,7 @@ export async function getEnterprisePosWorkspace(
       }
     }),
     prisma.posTransaction.groupBy({
-      by: ["storeId"],
+      by: ["storeId", "transactionType"],
       where: transactionWhere,
       _count: {
         _all: true
@@ -734,8 +743,11 @@ export async function getEnterprisePosWorkspace(
     })),
   );
 
-  const completedTransactions = transactionAggregate._count._all;
-  const postedRevenue = Number(transactionAggregate._sum.totalAmount ?? 0);
+  const completedTransactions = transactionAggregate.reduce(
+    (sum, group) => sum + group._count._all,
+    0,
+  );
+  const postedRevenue = sumSignedPosTransactionGroups(transactionAggregate);
   const averageBasket = completedTransactions > 0 ? postedRevenue / completedTransactions : 0;
   const exceptionCount = recentExceptions.length > 0
     ? await prisma.syncInboundEvent.count({
@@ -743,9 +755,39 @@ export async function getEnterprisePosWorkspace(
       })
     : 0;
 
-  const transactionGroupByStoreId = new Map(
-    transactionGroups.map((group) => [group.storeId ?? "unassigned", group] as const)
-  );
+  const transactionGroupByStoreId = new Map<
+    string,
+    {
+      completedTransactions: number;
+      salesValue: number;
+      lastCompletedAt: Date | null;
+      lastCreatedAt: Date | null;
+    }
+  >();
+
+  for (const group of transactionGroups) {
+    const storeId = group.storeId ?? "unassigned";
+    const current = transactionGroupByStoreId.get(storeId) ?? {
+      completedTransactions: 0,
+      salesValue: 0,
+      lastCompletedAt: null,
+      lastCreatedAt: null,
+    };
+    current.completedTransactions += group._count._all;
+    current.salesValue += signedPosTransactionAmount(
+      group.transactionType,
+      Number(group._sum.totalAmount ?? 0),
+    );
+    current.lastCompletedAt = latestDate(
+      current.lastCompletedAt,
+      group._max.completedAt ?? null,
+    );
+    current.lastCreatedAt = latestDate(
+      current.lastCreatedAt,
+      group._max.createdAt ?? null,
+    );
+    transactionGroupByStoreId.set(storeId, current);
+  }
   const exceptionGroupByNodeCode = new Map(
     exceptionGroups.map((group) => [group.sourceNodeCode, group] as const)
   );
@@ -759,16 +801,16 @@ export async function getEnterprisePosWorkspace(
       const salesGroup = transactionGroupByStoreId.get(node.store.id);
       const exceptionGroup = exceptionGroupByNodeCode.get(node.code);
       const lastTransactionAt = latestDate(
-        salesGroup?._max.completedAt ?? null,
-        salesGroup?._max.createdAt ?? null
+        salesGroup?.lastCompletedAt ?? null,
+        salesGroup?.lastCreatedAt ?? null
       );
 
       return {
         store: node.store.name,
         storeCode: node.store.code,
         nodeCode: node.code,
-        completedTransactions: salesGroup?._count._all ?? 0,
-        salesValue: Number(salesGroup?._sum.totalAmount ?? 0),
+        completedTransactions: salesGroup?.completedTransactions ?? 0,
+        salesValue: salesGroup?.salesValue ?? 0,
         exceptionCount: exceptionGroup?._count._all ?? 0,
         lastTransactionAt: toIsoString(lastTransactionAt),
         lastTransactionAtLabel: formatRelativeTime(lastTransactionAt)
@@ -867,13 +909,21 @@ export async function getEnterprisePosWorkspace(
 
       return {
         transactionNo: transaction.transactionNo,
+        transactionType: transaction.transactionType,
+        sourceTransactionNo: transaction.sourceTransactionNo,
         store: transaction.store.name,
         storeCode: transaction.store.code,
         terminal: transaction.terminal?.code ?? null,
         cashierCode: transaction.cashierCodeSnapshot,
         originNodeCode: transaction.originNodeCode,
-        totalAmount: Number(transaction.totalAmount),
-        taxAmount: Number(transaction.taxAmount),
+        totalAmount: signedPosTransactionAmount(
+          transaction.transactionType,
+          Number(transaction.totalAmount),
+        ),
+        taxAmount: signedPosTransactionAmount(
+          transaction.transactionType,
+          Number(transaction.taxAmount),
+        ),
         itemCount,
         tenderSummary,
         productSummary,

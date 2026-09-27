@@ -482,6 +482,7 @@ export function resolveInventoryTransferUom(input: {
 export type StoreSyncRunOptions = {
   trigger?: "manual" | "scheduled" | "tray" | "startup";
   scheduledFor?: string | null;
+  /** Retained for compatibility; true drains eligible work in both directions. */
   drainDownstream?: boolean | null;
   snapshotMode?: "full" | "status" | null;
 };
@@ -2317,8 +2318,18 @@ export type StoreSyncActionResult = {
   salesOrderNo?: string | null;
   upstreamProcessed?: number;
   downstreamApplied?: number;
+  downstreamAcknowledged?: number;
   downstreamPullPasses?: number;
   downstreamLimitReached?: boolean;
+  upstreamStillPending?: boolean;
+  acknowledgementsStillPending?: boolean;
+  syncDrainCycles?: number;
+  syncDrainStopReason?:
+    | "single-cycle"
+    | "caught-up"
+    | "no-progress"
+    | "cycle-limit"
+    | "time-limit";
   latestCursor?: string | null;
 };
 

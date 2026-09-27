@@ -3,8 +3,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   copyFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -103,6 +105,10 @@ import type {
   StoreSupervisorOverrideInput,
   StoreSellCaptureRequest
 } from "../src/shared/desktop-runtime.js";
+import {
+  runBoundedStoreSyncDrain,
+  storeSyncResultHasPendingWork
+} from "../src/shared/store-sync-drain.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -146,6 +152,7 @@ let desktopTray: Tray | null = null;
 let startupErrorMessage: string | null = null;
 let desktopUpdaterConfigured = false;
 let desktopUpdateCheckTimer: NodeJS.Timeout | null = null;
+let desktopUpdateCheckInFlight: Promise<StoreDesktopUpdateStatus> | null = null;
 let lastDesktopUpdateCheckWasManual = false;
 let isQuittingFromTray = false;
 let hasShownTrayCloseNotification = false;
@@ -167,6 +174,7 @@ let rendererWatchdogTimer: NodeJS.Timeout | null = null;
 let unresponsiveRecoveryTimer: NodeJS.Timeout | null = null;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let detachedSyncCycleInFlight: Promise<void> | null = null;
+let activeDetachedSyncWorkerPidPath: string | null = null;
 let desktopStartupCompleted = false;
 let pendingSecondInstanceFocus = false;
 const runtimeStartedAt = new Date();
@@ -189,7 +197,8 @@ const desktopConnectionConfigEnvKeys = [
   "FLASH_ERP_STORE_SERVER_PORT",
   "FLASH_ERP_STORE_SERVER_TIMEOUT_MS",
   "FLASH_ERP_STORE_SYNC_BASE_URL",
-  "FLASH_ERP_DESKTOP_UPDATE_URL"
+  "FLASH_ERP_DESKTOP_UPDATE_URL",
+  "FLASH_ERP_DESKTOP_AUTO_UPDATE_CHECKS"
 ] as const;
 const defaultDesktopUpdateFeedUrl =
   "https://flashcodesolutions.com.gh/rms-update/erp/";
@@ -205,11 +214,23 @@ const localSyncCycleRequestTimeoutMs = readDesktopDurationMs(
   10_000,
   60_000
 );
+const detachedSyncDrainBudgetMs = readDesktopDurationMs(
+  "FLASH_ERP_DESKTOP_SYNC_DRAIN_BUDGET_MS",
+  300_000,
+  5_000,
+  600_000
+);
+const detachedSyncDrainPauseMs = readDesktopInteger(
+  "FLASH_ERP_DESKTOP_SYNC_DRAIN_PAUSE_MS",
+  150,
+  0,
+  2_000
+);
 const detachedSyncCycleWatchdogMs = readDesktopDurationMs(
   "FLASH_ERP_DESKTOP_SYNC_WATCHDOG_MS",
-  localSyncCycleRequestTimeoutMs + 5_000,
-  localSyncCycleRequestTimeoutMs + 1_000,
-  90_000
+  Math.max(localSyncCycleRequestTimeoutMs + 5_000, detachedSyncDrainBudgetMs + 15_000),
+  Math.max(localSyncCycleRequestTimeoutMs + 1_000, detachedSyncDrainBudgetMs + 10_000),
+  620_000
 );
 const enterpriseSyncHttpTimeoutMs = readDesktopDurationMs(
   "FLASH_ERP_ENTERPRISE_SYNC_HTTP_TIMEOUT_MS",
@@ -224,16 +245,16 @@ const enterpriseSyncPullLimit = readDesktopInteger(
   5
 );
 const isolatedSyncWorkerTimeoutMs = Math.min(
-  detachedSyncCycleWatchdogMs - 2_000,
+  detachedSyncCycleWatchdogMs - 5_000,
   readDesktopDurationMs(
     "FLASH_ERP_DESKTOP_SYNC_WORKER_TIMEOUT_MS",
-    25_000,
+    detachedSyncDrainBudgetMs + 10_000,
     5_000,
-    85_000
+    610_000
   )
 );
-const defaultDetachedSyncDrainCycleLimit = 1;
-const maxDetachedSyncDrainCycleLimit = 5;
+const defaultDetachedSyncDrainCycleLimit = 250;
+const maxDetachedSyncDrainCycleLimit = 500;
 const desktopWindowStateFileName = "desktop-window-state.json";
 let desktopUpdateStatus: StoreDesktopUpdateStatus = {
   status: "idle",
@@ -304,6 +325,15 @@ function getDesktopUpdateFeedUrl() {
 
 function isDesktopUpdaterEnabled() {
   return app.isPackaged || process.env.FLASH_ERP_DESKTOP_ENABLE_DEV_UPDATES === "1";
+}
+
+function areAutomaticDesktopUpdateChecksEnabled() {
+  const configuredValue =
+    readDesktopConnectionConfigFile().FLASH_ERP_DESKTOP_AUTO_UPDATE_CHECKS?.trim() ||
+    process.env.FLASH_ERP_DESKTOP_AUTO_UPDATE_CHECKS?.trim() ||
+    "";
+
+  return /^(1|true|yes|on)$/i.test(configuredValue);
 }
 
 function getDesktopWindowStatePath() {
@@ -390,8 +420,55 @@ function setDesktopUpdateStatus(patch: Partial<StoreDesktopUpdateStatus>) {
     ...patch
   };
 
-  mainWindow?.webContents.send("flash-erp:desktop-update-status", desktopUpdateStatus);
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed()
+  ) {
+    mainWindow.webContents.send(
+      "flash-erp:desktop-update-status",
+      desktopUpdateStatus,
+    );
+  }
   return desktopUpdateStatus;
+}
+
+async function verifyDesktopUpdateFeedMetadata() {
+  const feedUrl = getDesktopUpdateFeedUrl();
+
+  if (!feedUrl) {
+    throw new Error("The desktop update feed URL is not configured correctly.");
+  }
+
+  const metadataUrl = new URL("latest.yml", `${feedUrl.replace(/\/+$/, "")}/`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+
+  try {
+    const response = await fetch(metadataUrl, {
+      headers: { accept: "text/yaml, text/plain;q=0.9, */*;q=0.1" },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Update metadata is unavailable (${response.status} ${response.statusText || "HTTP error"}).`,
+      );
+    }
+
+    const metadata = await response.text();
+    if (!/^version:\s*\S+/m.test(metadata) || !/^path:\s*\S+/m.test(metadata)) {
+      throw new Error("Update metadata is incomplete or malformed.");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("The desktop update feed did not respond within 8 seconds.");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function getUpdateInfoVersion(info: UpdateInfo | null | undefined) {
@@ -561,28 +638,42 @@ async function checkForDesktopUpdate(manual = false) {
     });
   }
 
-  lastDesktopUpdateCheckWasManual = manual;
+  if (desktopUpdateCheckInFlight) {
+    return desktopUpdateCheckInFlight;
+  }
 
-  try {
-    setDesktopUpdateStatus({
-      status: "checking",
-      message: "Checking for Flash ERP Store Desktop updates...",
-      checkedAt: new Date().toISOString(),
-      downloadPercent: null
-    });
-    await autoUpdater.checkForUpdates();
-    return desktopUpdateStatus;
-  } catch (error) {
-    lastDesktopUpdateCheckWasManual = false;
-    return setDesktopUpdateStatus({
-      status: "error",
-      message:
+  lastDesktopUpdateCheckWasManual = manual;
+  desktopUpdateCheckInFlight = (async () => {
+    try {
+      setDesktopUpdateStatus({
+        status: "checking",
+        message: "Checking for Flash ERP Store Desktop updates...",
+        checkedAt: new Date().toISOString(),
+        downloadPercent: null
+      });
+      await verifyDesktopUpdateFeedMetadata();
+      await autoUpdater.checkForUpdates();
+      return desktopUpdateStatus;
+    } catch (error) {
+      lastDesktopUpdateCheckWasManual = false;
+      const message =
         error instanceof Error
           ? `Desktop update check failed: ${error.message}`
-          : "Desktop update check failed.",
-      downloadPercent: null
-    });
-  }
+          : "Desktop update check failed.";
+      console.warn("Flash ERP desktop update check stopped safely.", {
+        message,
+      });
+      return setDesktopUpdateStatus({
+        status: "error",
+        message,
+        downloadPercent: null
+      });
+    } finally {
+      desktopUpdateCheckInFlight = null;
+    }
+  })();
+
+  return desktopUpdateCheckInFlight;
 }
 
 function installDesktopUpdate() {
@@ -598,11 +689,18 @@ function installDesktopUpdate() {
 }
 
 function scheduleDesktopUpdateChecks() {
-  configureDesktopAutoUpdater();
-
   if (!isDesktopUpdaterEnabled()) {
     return;
   }
+
+  if (!areAutomaticDesktopUpdateChecksEnabled()) {
+    console.info(
+      "Flash ERP automatic desktop update checks are disabled; manual update checks remain available.",
+    );
+    return;
+  }
+
+  configureDesktopAutoUpdater();
 
   setTimeout(() => {
     void checkForDesktopUpdate(false);
@@ -676,13 +774,6 @@ function publishDetachedSyncStatus(event: StoreSyncCycleStatusEvent) {
   }
 }
 
-function syncResultHasPendingDownstream(result: StoreSyncActionResult) {
-  return (
-    result.downstreamLimitReached === true ||
-    result.message.includes("More downstream packets")
-  );
-}
-
 function readDetachedSyncDrainCycleLimit() {
   const configured = Number(process.env.FLASH_ERP_DESKTOP_DETACHED_SYNC_CYCLES);
 
@@ -703,10 +794,7 @@ function shouldRunSyncInIsolatedWorker(config: StoreRuntimeConfig) {
     return false;
   }
 
-  return (
-    config.role === "embedded" &&
-    config.databaseProvider === "sqlite"
-  );
+  return config.role === "embedded";
 }
 
 function getSyncWorkerLogPath(traceId: string) {
@@ -755,49 +843,6 @@ function pruneSyncWorkerArtifacts(logDirectory: string) {
   }
 }
 
-function quotePowerShellSingle(value: string) {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function quoteWindowsCommandLineArgument(value: string) {
-  if (!/[ \t\n\v"]/.test(value)) {
-    return value;
-  }
-
-  let quoted = '"';
-  let backslashCount = 0;
-
-  for (const character of value) {
-    if (character === "\\") {
-      backslashCount += 1;
-      continue;
-    }
-
-    if (character === '"') {
-      quoted += "\\".repeat(backslashCount * 2 + 1);
-      quoted += character;
-      backslashCount = 0;
-      continue;
-    }
-
-    quoted += "\\".repeat(backslashCount);
-    quoted += character;
-    backslashCount = 0;
-  }
-
-  quoted += "\\".repeat(backslashCount * 2);
-  quoted += '"';
-  return quoted;
-}
-
-function buildWindowsCommandLineArgumentList(values: string[]) {
-  return values.map(quoteWindowsCommandLineArgument).join(" ");
-}
-
-function buildPowerShellEnvAssignment(key: string, value: string | number | null | undefined) {
-  return `$env:${key} = ${quotePowerShellSingle(value == null ? "" : String(value))}`;
-}
-
 function readTextFileIfExists(filePath: string) {
   try {
     return existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
@@ -823,27 +868,6 @@ function stopDetachedSyncWorker(workerPidPath: string) {
     windowsHide: true
   });
   killer.unref();
-}
-
-function attachSyncLauncherLogs(child: ChildProcess, traceId: string) {
-  const writeChunk = (
-    chunk: Buffer | string,
-    write: (message: string) => void
-  ) => {
-    const lines = String(chunk)
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (lines.length > 0) {
-      write(lines.map((line) => `[sync-launcher:${traceId}] ${line}`).join("\n"));
-    }
-  };
-
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk) => writeChunk(chunk, (message) => console.info(message)));
-  child.stderr?.on("data", (chunk) => writeChunk(chunk, (message) => console.error(message)));
 }
 
 function readIsolatedSyncWorkerTerminalState(input: {
@@ -923,11 +947,10 @@ function startIsolatedDetachedSyncCycle(input: {
       const cwd = resolveStoreServerProcessCwd();
       const workerErrorLogPath = workerLogPath.replace(/\.log$/i, ".error.log");
       const workerPidPath = workerLogPath.replace(/\.log$/i, ".pid");
-      const launcherLogPath = workerLogPath.replace(/\.log$/i, ".launcher.log");
-      const launcherScriptPath = workerLogPath.replace(/\.log$/i, ".launcher.ps1");
       let settled = false;
       let workerWatchdog: NodeJS.Timeout | null = null;
       let workerPoller: NodeJS.Timeout | null = null;
+      activeDetachedSyncWorkerPidPath = workerPidPath;
 
       const clearWorkerTimers = () => {
         if (workerWatchdog) {
@@ -957,7 +980,6 @@ function startIsolatedDetachedSyncCycle(input: {
           elapsedMs: event.elapsedMs,
           workerLogPath,
           workerErrorLogPath,
-          launcherLogPath,
           message: event.message
         });
         publishDetachedSyncStatus(event);
@@ -965,64 +987,99 @@ function startIsolatedDetachedSyncCycle(input: {
         if (detachedSyncCycleInFlight) {
           detachedSyncCycleInFlight = null;
         }
+        if (activeDetachedSyncWorkerPidPath === workerPidPath) {
+          activeDetachedSyncWorkerPidPath = null;
+        }
         resolve();
       };
 
       try {
-        const launcherScript = [
-          "$ErrorActionPreference = 'Stop'",
-          `$launcherLogPath = ${quotePowerShellSingle(launcherLogPath)}`,
-          `Set-Content -LiteralPath $launcherLogPath -Value ${quotePowerShellSingle(`launcher starting ${input.traceId}`)}`,
-          buildPowerShellEnvAssignment("ELECTRON_RUN_AS_NODE", "1"),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SYNC_WORKER", "1"),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_DEPLOYMENT_MODE", config.deploymentMode),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_RUNTIME_ROLE", "embedded"),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_DATABASE_PROVIDER", config.databaseProvider),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_DB_PATH", config.databasePath),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_USER_DATA_PATH", config.userDataPath ?? app.getPath("userData")),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_NODE_CODE", config.nodeCode),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_TERMINAL_CODE", config.terminalContext.terminalCode),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_TERMINAL_NAME", config.terminalContext.clientName),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SERVER_URL", config.storeServerUrl),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SERVER_TOKEN", config.storeServerToken),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SERVER_ENABLED", config.shouldStartStoreServer ? "1" : "0"),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SERVER_HOST", config.storeServerHost),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SERVER_PORT", config.storeServerPort),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SERVER_TIMEOUT_MS", config.storeServerTimeoutMs),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SYNC_BASE_URL", config.syncBaseUrl),
-          buildPowerShellEnvAssignment("FLASH_ERP_STORE_SYNC_PULL_LIMIT", enterpriseSyncPullLimit),
-          buildPowerShellEnvAssignment("FLASH_ERP_ENTERPRISE_SYNC_HTTP_TIMEOUT_MS", enterpriseSyncHttpTimeoutMs),
-          buildPowerShellEnvAssignment("FLASH_ERP_DESKTOP_SYNC_WORKER_TIMEOUT_MS", isolatedSyncWorkerTimeoutMs),
-          `$argumentList = ${quotePowerShellSingle(buildWindowsCommandLineArgumentList([
-            entryPath,
-            encodedInput
-          ]))}`,
-          `$process = Start-Process -FilePath ${quotePowerShellSingle(nodeRuntimePath)} -ArgumentList $argumentList -WorkingDirectory ${quotePowerShellSingle(cwd)} -WindowStyle Hidden -RedirectStandardOutput ${quotePowerShellSingle(workerLogPath)} -RedirectStandardError ${quotePowerShellSingle(workerErrorLogPath)} -PassThru`,
-          `Set-Content -LiteralPath ${quotePowerShellSingle(workerPidPath)} -Value $process.Id`,
-          `Add-Content -LiteralPath $launcherLogPath -Value ("worker started " + $process.Id)`
-        ].join("\r\n");
-        writeFileSync(launcherScriptPath, launcherScript, "utf8");
+        const stdoutFd = openSync(workerLogPath, "a");
+        const stderrFd = openSync(workerErrorLogPath, "a");
+        let worker: ChildProcess;
 
-        const launcher = spawn("powershell.exe", [
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          launcherScriptPath
-        ], {
-          cwd,
-          env: {
-            ...process.env,
-            FLASH_ERP_STORE_SERVER_TOKEN: config.storeServerToken ?? ""
-          },
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true
+        try {
+          worker = spawn(nodeRuntimePath, [entryPath, encodedInput], {
+            cwd,
+            detached: true,
+            env: {
+              ...process.env,
+              ELECTRON_RUN_AS_NODE: "1",
+              FLASH_ERP_STORE_SYNC_WORKER: "1",
+              FLASH_ERP_STORE_DEPLOYMENT_MODE: config.deploymentMode,
+              FLASH_ERP_STORE_RUNTIME_ROLE: "embedded",
+              FLASH_ERP_STORE_DATABASE_PROVIDER: config.databaseProvider,
+              FLASH_ERP_STORE_DB_PATH: config.databasePath ?? "",
+              FLASH_ERP_STORE_USER_DATA_PATH: config.userDataPath ?? app.getPath("userData"),
+              FLASH_ERP_STORE_NODE_CODE: config.nodeCode ?? "",
+              FLASH_ERP_STORE_TERMINAL_CODE: config.terminalContext.terminalCode ?? "",
+              FLASH_ERP_STORE_TERMINAL_NAME: config.terminalContext.clientName ?? "",
+              FLASH_ERP_STORE_SERVER_URL: config.storeServerUrl ?? "",
+              FLASH_ERP_STORE_SERVER_TOKEN: config.storeServerToken ?? "",
+              FLASH_ERP_STORE_SERVER_ENABLED: config.shouldStartStoreServer ? "1" : "0",
+              FLASH_ERP_STORE_SERVER_HOST: config.storeServerHost,
+              FLASH_ERP_STORE_SERVER_PORT: String(config.storeServerPort),
+              FLASH_ERP_STORE_SERVER_TIMEOUT_MS: String(config.storeServerTimeoutMs),
+              FLASH_ERP_STORE_SYNC_BASE_URL: config.syncBaseUrl ?? "",
+              FLASH_ERP_STORE_SYNC_PULL_LIMIT: String(enterpriseSyncPullLimit),
+              FLASH_ERP_ENTERPRISE_SYNC_HTTP_TIMEOUT_MS: String(enterpriseSyncHttpTimeoutMs),
+              FLASH_ERP_DESKTOP_SYNC_WORKER_TIMEOUT_MS: String(isolatedSyncWorkerTimeoutMs),
+              FLASH_ERP_DESKTOP_SYNC_DRAIN_BUDGET_MS: String(detachedSyncDrainBudgetMs),
+              FLASH_ERP_DESKTOP_SYNC_DRAIN_PAUSE_MS: String(detachedSyncDrainPauseMs),
+              FLASH_ERP_DESKTOP_DETACHED_SYNC_CYCLES: String(readDetachedSyncDrainCycleLimit())
+            },
+            stdio: ["ignore", stdoutFd, stderrFd],
+            windowsHide: true
+          });
+        } finally {
+          closeSync(stdoutFd);
+          closeSync(stderrFd);
+        }
+
+        worker.once("error", (error) => {
+          const elapsedMs = Date.now() - startedAtMs;
+          settleWorker(
+            {
+              traceId: input.traceId,
+              trigger: input.trigger,
+              status: "failed",
+              message: error.message || "Flash ERP could not start the isolated sync worker.",
+              elapsedMs,
+              completedAt: new Date().toISOString()
+            },
+            true
+          );
         });
 
-        attachSyncLauncherLogs(launcher, input.traceId);
-        launcher.once("close", () => {
-          rmSync(launcherScriptPath, { force: true });
+        worker.once("exit", (code) => {
+          console.info("Store Desktop isolated sync worker exited.", {
+            traceId: input.traceId,
+            trigger: input.trigger,
+            code,
+            workerPid: worker.pid ?? null
+          });
+
+          if (code && !settled) {
+            settleWorker(
+              {
+                traceId: input.traceId,
+                trigger: input.trigger,
+                status: "failed",
+                message: `Flash ERP isolated sync worker exited with code ${code}.`,
+                elapsedMs: Date.now() - startedAtMs,
+                completedAt: new Date().toISOString()
+              },
+              true
+            );
+          }
         });
+
+        if (!worker.pid) {
+          return;
+        }
+
+        writeFileSync(workerPidPath, `${worker.pid}\n`, "utf8");
+        worker.unref();
 
         workerWatchdog = setTimeout(() => {
           const elapsedMs = Date.now() - startedAtMs;
@@ -1063,61 +1120,17 @@ function startIsolatedDetachedSyncCycle(input: {
           );
         }, 1000);
 
-        console.info("Store Desktop isolated sync worker launch requested.", {
+        console.info("Store Desktop isolated sync worker started.", {
           traceId: input.traceId,
           trigger: input.trigger,
-          launcherPid: launcher.pid ?? null,
+          workerPid: worker.pid,
           workerLogPath,
           workerErrorLogPath,
           workerPidPath,
-          launcherLogPath,
-          launcherScriptPath,
           entryPath,
           nodeRuntimePath,
-          detachedLauncher: false,
+          detachedWorker: true,
           watchdogMs: detachedSyncCycleWatchdogMs
-        });
-
-        launcher.once("error", (error) => {
-          const elapsedMs = Date.now() - startedAtMs;
-          settleWorker(
-            {
-              traceId: input.traceId,
-              trigger: input.trigger,
-              status: "failed",
-              message:
-                error instanceof Error
-                  ? error.message
-                  : "Flash ERP could not start the isolated sync worker launcher.",
-              elapsedMs,
-              completedAt: new Date().toISOString()
-            },
-            true
-          );
-        });
-
-        launcher.once("exit", (code) => {
-          console.info("Store Desktop isolated sync worker launcher exited.", {
-            traceId: input.traceId,
-            trigger: input.trigger,
-            code,
-            workerPid: readWorkerPid(workerPidPath),
-            launcherLogPath
-          });
-
-          if (code && !settled) {
-            settleWorker(
-              {
-                traceId: input.traceId,
-                trigger: input.trigger,
-                status: "failed",
-                message: `Flash ERP could not start the isolated sync worker launcher. PowerShell exited with code ${code}.`,
-                elapsedMs: Date.now() - startedAtMs,
-                completedAt: new Date().toISOString()
-              },
-              true
-            );
-          }
         });
       } catch (error) {
         const elapsedMs = Date.now() - startedAtMs;
@@ -1220,52 +1233,51 @@ function startDetachedSyncCycle(input?: StoreSyncRunOptions): StoreSyncCycleStar
         });
 
         try {
-          const shouldDrainDownstream = syncInput.drainDownstream === true;
-          const cycleLimit = shouldDrainDownstream
-            ? readDetachedSyncDrainCycleLimit()
-            : 1;
-          let result: StoreSyncActionResult | null = null;
-          let cycleCount = 0;
-          let downstreamStillPending = false;
-
-          for (let cycle = 0; cycle < cycleLimit; cycle += 1) {
-            result = await withDetachedSyncWatchdog(
-              callStore<StoreSyncActionResult>("runSyncCycle", [
-                {
-                  ...syncInput,
-                  drainDownstream: shouldDrainDownstream
-                }
-              ]),
-              detachedSyncCycleWatchdogMs
-            );
-            cycleCount = cycle + 1;
-            downstreamStillPending = syncResultHasPendingDownstream(result);
-
-            console.info("Store Desktop detached sync page completed.", {
-              traceId,
-              trigger,
-              cycle: cycleCount,
-              downstreamStillPending,
-              upstreamProcessed: result.upstreamProcessed ?? null,
-              downstreamApplied: result.downstreamApplied ?? null,
-              downstreamPullPasses: result.downstreamPullPasses ?? null,
-              latestCursor: result.latestCursor ?? null
-            });
-
-            if (!shouldDrainDownstream || !downstreamStillPending) {
-              break;
+          const shouldDrainQueues = syncInput.drainDownstream === true;
+          const result = await runBoundedStoreSyncDrain({
+            drainQueues: shouldDrainQueues,
+            maxCycles: shouldDrainQueues ? readDetachedSyncDrainCycleLimit() : 1,
+            maxDurationMs: detachedSyncDrainBudgetMs,
+            pauseMs: detachedSyncDrainPauseMs,
+            runCycle: () =>
+              withDetachedSyncWatchdog(
+                callStore<StoreSyncActionResult>("runSyncCycle", [
+                  {
+                    ...syncInput,
+                    // One pull page per cycle keeps acknowledgement and upstream traffic interleaved.
+                    drainDownstream: false
+                  }
+                ]),
+                detachedSyncCycleWatchdogMs
+              ),
+            onCycleCompleted: ({ cycle, result: cycleResult, pendingWork }) => {
+              console.info("Store Desktop detached sync chunk completed.", {
+                traceId,
+                trigger,
+                cycle,
+                pendingWork,
+                upstreamProcessed: cycleResult.upstreamProcessed ?? null,
+                downstreamApplied: cycleResult.downstreamApplied ?? null,
+                downstreamAcknowledged:
+                  cycleResult.downstreamAcknowledged ?? null,
+                downstreamPullPasses:
+                  cycleResult.downstreamPullPasses ?? null,
+                latestCursor: cycleResult.latestCursor ?? null
+              });
             }
-          }
+          });
+          const cycleCount = result.syncDrainCycles ?? 1;
+          const queuesStillPending = storeSyncResultHasPendingWork(result);
 
           const elapsedMs = Date.now() - startedAtMs;
-          const message =
-            result?.message ??
-            "Flash ERP completed the background sync cycle.";
+          const message = result.message;
           const summaryMessage =
-            shouldDrainDownstream && cycleCount > 1
-              ? downstreamStillPending
-                ? `Flash ERP completed ${cycleCount} bounded sync cycle(s). More downstream packets may still be pending; run sync again to continue.`
-                : `Flash ERP completed ${cycleCount} bounded sync cycle(s) and caught up the available downstream queue.`
+            shouldDrainQueues
+              ? result.syncDrainStopReason === "caught-up"
+                ? `Flash ERP completed ${cycleCount} bounded sync chunk(s) and caught up the available upstream, downstream, and acknowledgement queues.`
+                : result.syncDrainStopReason === "no-progress"
+                  ? `Flash ERP paused after ${cycleCount} bounded sync chunk(s) because no eligible queue progress was detected. Retry-delayed and dead-letter work remains protected for review.`
+                  : `Flash ERP completed ${cycleCount} bounded sync chunk(s). Eligible queue work remains for the next sync session.`
               : message;
 
           console.info("Store Desktop detached sync completed.", {
@@ -1273,7 +1285,8 @@ function startDetachedSyncCycle(input?: StoreSyncRunOptions): StoreSyncCycleStar
             trigger,
             elapsedMs,
             drainCycles: cycleCount,
-            downstreamStillPending,
+            queuesStillPending,
+            stopReason: result.syncDrainStopReason ?? "single-cycle",
             message: summaryMessage
           });
           publishDetachedSyncStatus({
@@ -1657,6 +1670,24 @@ function isPackagedSyncRuntimeComplete(runtimeRoot: string) {
   );
 }
 
+function resolvePackagedSyncRuntimeRoot() {
+  if (!app.isPackaged) {
+    return null;
+  }
+
+  const directRuntimeRoot = [
+    path.join(process.resourcesPath, "sync-runtime"),
+    path.join(process.resourcesPath, "app.asar.unpacked", "sync-runtime")
+  ].find((candidate) => isPackagedSyncRuntimeComplete(candidate));
+
+  if (directRuntimeRoot) {
+    packagedSyncRuntimeRoot = directRuntimeRoot;
+    return directRuntimeRoot;
+  }
+
+  return ensurePackagedSyncRuntimeRoot();
+}
+
 function getPackagedSyncRuntimeStageRoot() {
   return path.join(app.getPath("userData"), "sync-runtime", app.getVersion());
 }
@@ -1795,9 +1826,9 @@ function ensurePackagedSyncRuntimeRoot() {
 
 function resolvePackagedNodeRuntimeEntryPath(fileNames: string | string[]) {
   const names = Array.isArray(fileNames) ? fileNames : [fileNames];
-  const stagedRuntimeRoot = ensurePackagedSyncRuntimeRoot();
+  const runtimeRoot = resolvePackagedSyncRuntimeRoot();
   const roots = [
-    stagedRuntimeRoot ? path.join(stagedRuntimeRoot, "dist-electron", "src", "main") : null,
+    runtimeRoot ? path.join(runtimeRoot, "dist-electron", "src", "main") : null,
     path.join(process.resourcesPath, "sync-runtime", "dist-electron", "src", "main"),
     path.join(process.resourcesPath, "app.asar.unpacked", "sync-runtime", "dist-electron", "src", "main"),
     path.join(process.resourcesPath, "app.asar.unpacked", "dist-electron", "src", "main")
@@ -1882,7 +1913,7 @@ function resolveSyncNodeRuntimePath() {
 }
 
 function resolveStoreServerProcessCwd() {
-  const stagedSyncRuntimeRoot = app.isPackaged ? ensurePackagedSyncRuntimeRoot() : null;
+  const resolvedSyncRuntimeRoot = app.isPackaged ? resolvePackagedSyncRuntimeRoot() : null;
   const packagedSyncRuntimeRoot = app.isPackaged
     ? path.join(process.resourcesPath, "sync-runtime")
     : null;
@@ -1890,7 +1921,7 @@ function resolveStoreServerProcessCwd() {
     ? path.join(process.resourcesPath, "app.asar.unpacked")
     : null;
   const candidates = [
-    stagedSyncRuntimeRoot,
+    resolvedSyncRuntimeRoot,
     packagedSyncRuntimeRoot,
     packagedUnpackedRoot,
     path.resolve(__dirname, "..", ".."),
@@ -4634,6 +4665,10 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuittingFromTray = true;
+  if (activeDetachedSyncWorkerPidPath) {
+    stopDetachedSyncWorker(activeDetachedSyncWorkerPidPath);
+    activeDetachedSyncWorkerPidPath = null;
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     saveDesktopWindowState(mainWindow);
   }

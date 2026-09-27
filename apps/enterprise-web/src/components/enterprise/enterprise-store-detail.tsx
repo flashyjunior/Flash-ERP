@@ -763,6 +763,21 @@ export function EnterpriseStoreDetail({
       {
         accessorKey: "transactionNo",
         header: "Transaction",
+        cell: ({ row }) => (
+          <div className="min-w-0">
+            <p className="truncate font-medium text-stone-900">{row.original.transactionNo}</p>
+            {row.original.sourceTransactionNo ? (
+              <p className="truncate text-xs text-stone-500">
+                Source {row.original.sourceTransactionNo}
+              </p>
+            ) : null}
+          </div>
+        ),
+        meta: { disableTruncate: true },
+      },
+      {
+        accessorKey: "transactionType",
+        header: "Type",
       },
       {
         accessorKey: "totalAmount",

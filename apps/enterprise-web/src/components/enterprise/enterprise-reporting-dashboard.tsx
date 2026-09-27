@@ -2153,10 +2153,19 @@ export function EnterpriseReportingDashboard({
         cell: ({ row }) => (
           <div className="min-w-0">
             <p className="truncate font-medium text-stone-900">{row.original.transactionNo}</p>
-            <p className="truncate text-xs text-stone-500">{row.original.tenderSummary}</p>
+            <p className="truncate text-xs text-stone-500">
+              {row.original.tenderSummary}
+              {row.original.sourceTransactionNo
+                ? ` / Source ${row.original.sourceTransactionNo}`
+                : ""}
+            </p>
           </div>
         ),
         meta: { disableTruncate: true }
+      },
+      {
+        accessorKey: "transactionType",
+        header: "Type"
       },
       {
         accessorKey: "store",

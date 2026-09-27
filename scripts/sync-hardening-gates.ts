@@ -301,7 +301,19 @@ requireIncludes(mssqlStore, "getRecentSyncEvents", "SQL Server must expose recen
 requireIncludes(mssqlStore, "getTerminalConnections", "SQL Server must expose terminal heartbeats to supervisors.");
 requireIncludes(desktopRenderer, "Export diagnostics", "desktop supervisors must be able to export sync diagnostics.");
 requireIncludes(desktopRenderer, "Retry eligible", "desktop retry must be clearly limited to eligible failures.");
-requireIncludes(desktopMain, "rmSync(launcherScriptPath", "temporary sync launcher files containing runtime tokens must be removed.");
+requireIncludes(
+  desktopMain,
+  "spawn(nodeRuntimePath, [entryPath, encodedInput]",
+  "isolated sync must launch the packaged Node worker directly."
+);
+requireIncludes(
+  desktopMain,
+  'stdio: ["ignore", stdoutFd, stderrFd]',
+  "isolated sync output must remain in bounded worker logs."
+);
+if (desktopMain.includes('spawn("powershell.exe"') || desktopMain.includes("launcherScriptPath")) {
+  throw new Error("Sync hardening gate failed: desktop sync must not use a blocking PowerShell launcher.");
+}
 requireIncludes(
   desktopSyncWorker,
   "result.succeeded === false",

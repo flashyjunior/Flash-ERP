@@ -29,6 +29,7 @@ import { type Prisma } from "@prisma/client";
 import { readJsonStringArray } from "./json-field";
 
 import { prisma } from "@/lib/db/prisma";
+import { signedPosTransactionAmount } from "@/server/repositories/pos-transaction-sign";
 import {
   InventoryMovementType,
   PosTransactionStatus,
@@ -379,6 +380,8 @@ export type EnterpriseReportingDashboardData = {
   }>;
   receiptReportRows: Array<{
     transactionNo: string;
+    transactionType: string;
+    sourceTransactionNo: string | null;
     store: string;
     storeCode: string;
     cashierCode: string | null;
@@ -2002,7 +2005,8 @@ async function getReportingFactRows(
   const movementDateFrom = parseDateStart(filters.dateFrom);
   const movementDateTo = parseDateEnd(filters.dateTo);
   const [transactionAggregate, saleLines, stockMovements, financialMovements] = await Promise.all([
-    prisma.posTransaction.aggregate({
+    prisma.posTransaction.groupBy({
+      by: ["transactionType"],
       where: transactionWhere,
       _sum: {
         subtotalAmount: true,
@@ -2013,7 +2017,6 @@ async function getReportingFactRows(
     }),
     prisma.posTransactionLine.findMany({
       where: {
-        lineIntent: "SALE",
         posTransaction: transactionWhere
       },
       orderBy: {
@@ -2025,6 +2028,7 @@ async function getReportingFactRows(
       select: {
         id: true,
         posTransactionId: true,
+        lineIntent: true,
         productCodeSnapshot: true,
         productNameSnapshot: true,
         serialNumbersSnapshot: true,
@@ -2196,6 +2200,7 @@ async function getReportingFactRows(
   >();
 
   for (const line of saleLines) {
+    const direction = line.lineIntent === "RETURN" ? -1 : 1;
     const storeCode = line.posTransaction.store.code;
     const productKey = `${storeCode}:${line.productCodeSnapshot}`;
     const existingItem = itemAggregates.get(productKey) ?? {
@@ -2212,12 +2217,13 @@ async function getReportingFactRows(
       lastSoldAt: null
     };
 
-    existingItem.quantitySold += Number(line.quantity);
-    existingItem.netSales += Number(line.lineTotal);
-    existingItem.discountAmount += Number(line.discountAmount);
+    existingItem.quantitySold += Number(line.quantity) * direction;
+    existingItem.netSales += Number(line.lineTotal) * direction;
+    existingItem.discountAmount += Number(line.discountAmount) * direction;
     existingItem.transactionIds.add(line.posTransactionId);
 
     if (
+      direction > 0 &&
       line.posTransaction.completedAt &&
       (!existingItem.lastSoldAt ||
         line.posTransaction.completedAt.getTime() > existingItem.lastSoldAt.getTime())
@@ -2246,9 +2252,9 @@ async function getReportingFactRows(
     };
 
     existingPromotion.lineCount += 1;
-    existingPromotion.quantitySold += Number(line.quantity);
-    existingPromotion.discountAmount += Number(line.discountAmount);
-    existingPromotion.netSales += Number(line.lineTotal);
+    existingPromotion.quantitySold += Number(line.quantity) * direction;
+    existingPromotion.discountAmount += Number(line.discountAmount) * direction;
+    existingPromotion.netSales += Number(line.lineTotal) * direction;
     existingPromotion.transactionIds.add(line.posTransactionId);
 
     if (
@@ -2455,11 +2461,43 @@ async function getReportingFactRows(
     })
     .slice(0, 150);
 
-  const grossReceipts = Number(transactionAggregate._sum.totalAmount ?? 0);
-  const discountAmount = Number(transactionAggregate._sum.discountAmount ?? 0);
-  const taxAmount = Number(transactionAggregate._sum.taxAmount ?? 0);
-  const netSalesExTax =
-    Number(transactionAggregate._sum.subtotalAmount ?? 0) - discountAmount;
+  const grossReceipts = transactionAggregate.reduce(
+    (sum, group) =>
+      sum +
+      signedPosTransactionAmount(
+        group.transactionType,
+        Number(group._sum.totalAmount ?? 0),
+      ),
+    0,
+  );
+  const discountAmount = transactionAggregate.reduce(
+    (sum, group) =>
+      sum +
+      signedPosTransactionAmount(
+        group.transactionType,
+        Number(group._sum.discountAmount ?? 0),
+      ),
+    0,
+  );
+  const taxAmount = transactionAggregate.reduce(
+    (sum, group) =>
+      sum +
+      signedPosTransactionAmount(
+        group.transactionType,
+        Number(group._sum.taxAmount ?? 0),
+      ),
+    0,
+  );
+  const netSalesExTax = transactionAggregate.reduce(
+    (sum, group) =>
+      sum +
+      signedPosTransactionAmount(
+        group.transactionType,
+        Number(group._sum.subtotalAmount ?? 0) -
+          Number(group._sum.discountAmount ?? 0),
+      ),
+    0,
+  );
   const cogsAmount = cogsReportRows.reduce((sum, row) => sum + row.cogsAmount, 0);
   const grossProfitAmount = netSalesExTax - cogsAmount;
 
@@ -2910,6 +2948,8 @@ export async function getEnterpriseReportingDashboard(
     }));
   const receiptReportRows = posWorkspace.transactionRows.map((row) => ({
     transactionNo: row.transactionNo,
+    transactionType: row.transactionType,
+    sourceTransactionNo: row.sourceTransactionNo,
     store: row.store,
     storeCode: row.storeCode,
     cashierCode: row.cashierCode,

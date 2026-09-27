@@ -111,6 +111,12 @@ try {
   activeService = service;
   service.signInOperator({ loginId, password });
   const before = service.getSyncSnapshot();
+  const statusSnapshot = service.getSyncStatusSnapshot();
+  assert(
+    statusSnapshot.activeOperatorSession?.sessionId ===
+      before.activeOperatorSession?.sessionId,
+    "The lightweight sync snapshot did not preserve the active operator session.",
+  );
   const retryableSummary = before.syncDeadLetters.find(
     (entry) => entry.id === retryableEventId,
   );

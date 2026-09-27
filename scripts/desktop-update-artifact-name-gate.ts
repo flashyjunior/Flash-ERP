@@ -42,6 +42,9 @@ const updaterSource = readFileSync(
 assert.match(updaterSource, /autoUpdater\.setFeedURL\(/);
 assert.match(updaterSource, /autoUpdater\.checkForUpdates\(\)/);
 assert.match(updaterSource, /autoUpdater\.downloadUpdate\(\)/);
+assert.match(updaterSource, /verifyDesktopUpdateFeedMetadata/);
+assert.match(updaterSource, /new URL\("latest\.yml"/);
+assert.match(updaterSource, /desktopUpdateCheckInFlight/);
 assert.match(
   updaterSource,
   /https:\/\/flashcodesolutions\.com\.gh\/rms-update\/erp\//,

@@ -4025,6 +4025,36 @@ export function ModernDesktopApp() {
         setSnapshot((current) =>
           current?.activeOperatorSession ? current : startupSnapshot,
         );
+
+        if (startupSnapshot.activeOperatorSession) {
+          runtime.writeDesktopDiagnostic?.(
+            "info",
+            "signed-in-startup-snapshot-start",
+            {
+              loginId: startupSnapshot.activeOperatorSession.loginId,
+            },
+          );
+          const signedInSnapshot = await withDesktopTimeout(
+            runtime.getSyncSnapshot(),
+            "Signed-in startup snapshot",
+            30_000,
+          );
+
+          if (cancelled) {
+            return;
+          }
+
+          setSnapshot(signedInSnapshot);
+          runtime.writeDesktopDiagnostic?.(
+            "info",
+            "signed-in-startup-snapshot-complete",
+            {
+              hasActiveSession: Boolean(
+                signedInSnapshot.activeOperatorSession,
+              ),
+            },
+          );
+        }
         runtime.writeDesktopDiagnostic?.(
           "info",
           "startup-status-snapshot-complete",
@@ -4077,10 +4107,6 @@ export function ModernDesktopApp() {
     }
 
     void refreshDesktopUpdateStatus();
-
-    return runtime.onDesktopUpdateStatus?.((status) => {
-      setDesktopUpdateStatus(status);
-    });
   }, [refreshDesktopUpdateStatus, runtime]);
 
   useEffect(() => {
@@ -4161,6 +4187,8 @@ export function ModernDesktopApp() {
         {
           trigger: "scheduled",
           scheduledFor,
+          drainDownstream: true,
+          snapshotMode: "status",
         },
         "Scheduled sync",
       ).finally(() => {
