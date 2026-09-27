@@ -201,6 +201,8 @@ try {
     Write-Host "`nDependencies already match package-lock.json." -ForegroundColor Green
   }
 
+  Invoke-NativeStep "Generating the Prisma client" { npm.cmd run prisma:generate }
+
   $validationScripts = @(
     "acceptance:vps-deploy",
     "acceptance:trial-lifecycle",
