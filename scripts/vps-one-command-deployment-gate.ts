@@ -17,6 +17,7 @@ for (const contract of [
   "Relaunching the current deployment script after the Git update",
   "node_modules\\.flash-erp-package-lock.sha256",
   "npm.cmd ci",
+  "npm.cmd run prisma:generate",
   "acceptance:trial-lifecycle",
   "acceptance:enterprise-authorization",
   "acceptance:sales-order-collections",
@@ -34,6 +35,12 @@ for (const contract of [
 ]) {
   requireText(deployer, contract, `The one-command deployer must retain ${contract}.`);
 }
+
+assert.ok(
+  deployer.indexOf("npm.cmd run prisma:generate") <
+    deployer.indexOf("$validationScripts = @("),
+  "The one-command deployer must generate Prisma before running validation scripts.",
+);
 
 requireText(
   launcher,
