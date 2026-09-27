@@ -38,10 +38,8 @@ requireIncludes(runtimeTypes, "reportRendererHeartbeat", "runtime API must expos
 requireIncludes(mainProcess, "desktop-window-state.json", "main process must persist window state.");
 requireIncludes(mainProcess, "sanitizeWindowBounds", "main process must sanitize restored bounds.");
 requireIncludes(mainProcess, "rendererReadyTimeoutMs", "main process must detect black-screen startup.");
-requireIncludes(mainProcess, "rendererHeartbeatRecoveryMs", "main process must recover stale renderer heartbeats.");
 requireIncludes(mainProcess, "rendererRecoveryCooldownMs", "main process must throttle repeated recovery attempts.");
 requireIncludes(mainProcess, "startRendererWatchdog", "main process must run renderer heartbeat watchdog.");
-requireIncludes(mainProcess, "renderer-unresponsive", "main process must recover unresponsive renderers.");
 requireIncludes(mainProcess, "render-process-gone", "main process must recover crashed renderers.");
 requireIncludes(mainProcess, "desktopWindowRecoveryInFlight", "main process must track in-flight recovery.");
 requireIncludes(mainProcess, "flash-erp:get-desktop-window-status", "main process must expose window status IPC.");
@@ -54,6 +52,14 @@ requireIncludes(mainProcess, "resolvePackagedSyncRuntimeRoot", "packaged sync ru
 requireIncludes(mainProcess, "spawn(nodeRuntimePath, [entryPath, encodedInput]", "scheduled sync must launch Node directly.");
 if (mainProcess.includes('spawn("powershell.exe"') || mainProcess.includes("launcherScriptPath")) {
   throw new Error("Desktop stability gate failed: scheduled sync must not block on a PowerShell launcher.");
+}
+if (
+  mainProcess.includes('recoverDesktopWindow("renderer-heartbeat-stale")') ||
+  mainProcess.includes('recoverDesktopWindow("renderer-unresponsive")')
+) {
+  throw new Error(
+    "Desktop stability gate failed: a slow renderer must not be reloaded automatically because that discards the visible operator session and in-progress work.",
+  );
 }
 
 const syncRuntimeResolutionSource = mainProcess.slice(
@@ -108,6 +114,7 @@ requireIncludes(renderer, "loginIdInputRef", "renderer must restore sign-in inpu
 requireIncludes(renderer, "notifyRendererReady", "renderer must report ready state.");
 requireIncludes(renderer, "reportRendererHeartbeat", "renderer must send heartbeats.");
 requireIncludes(renderer, "signed-in-startup-snapshot-complete", "renderer recovery must restore the persisted signed-in snapshot.");
+requireIncludes(renderer, "applyStoreSyncCycleStatusToSnapshot", "background sync completion must preserve the active desktop snapshot.");
 requireIncludes(renderer, "Renderer watchdog", "runtime UI must expose watchdog status.");
 requireIncludes(renderer, "stale heartbeats", "runtime UI must show stale heartbeat diagnostics.");
 requireIncludes(renderer, "Recover", "runtime UI must expose manual recovery.");
