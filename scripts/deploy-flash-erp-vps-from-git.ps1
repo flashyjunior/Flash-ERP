@@ -208,6 +208,7 @@ try {
     "acceptance:trial-lifecycle",
     "acceptance:license-renewal",
     "acceptance:enterprise-authorization",
+    "acceptance:inventory-catalog-shop-code",
     "acceptance:sales-order-collections",
     "acceptance:online-store-parity",
     "acceptance:transfer-requests",
