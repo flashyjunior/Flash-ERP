@@ -37,6 +37,7 @@
     "acceptance:bidirectional-sync-drain": "tsx scripts/bidirectional-sync-drain-gate.ts",
     "acceptance:desktop-sync-recovery": "node --experimental-sqlite --import tsx scripts/desktop-sync-recovery-gate.ts",
     "acceptance:inventory-search": "tsx scripts/enterprise-inventory-search-gate.ts",
+    "acceptance:inventory-catalog-shop-code": "tsx scripts/inventory-catalog-store-code-gate.ts",
     "acceptance:store-pricing-search": "tsx scripts/store-pricing-product-search-gate.ts",
     "acceptance:enterprise-authorization": "tsx --tsconfig=apps/enterprise-web/tsconfig.json scripts/enterprise-navigation-permissions-gate.ts && tsx scripts/enterprise-navigation-route-security-gate.ts && tsx scripts/enterprise-direct-route-security-gate.ts && tsx scripts/enterprise-finance-fuel-permissions-gate.ts && tsx scripts/enterprise-mutation-route-auth-gate.ts && tsx scripts/enterprise-sync-admin-route-auth-gate.ts",
     "acceptance:sales-order-payments": "node --experimental-sqlite --import tsx scripts/sales-order-payment-attribution-gate.ts",

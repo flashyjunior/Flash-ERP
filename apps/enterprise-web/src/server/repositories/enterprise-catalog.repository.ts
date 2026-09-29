@@ -8,6 +8,10 @@ import {
 } from "@/server/repositories/enterprise-settings.repository";
 import { ensureProductVariantSalesOrderDepositSchemaCompatibility } from "@/server/repositories/schema-compatibility.repository";
 import {
+  normalizeInventoryCatalogStoreCodes,
+  resolveInventoryCatalogStores,
+} from "@/server/repositories/inventory-catalog-store-code";
+import {
   buildEnterprisePageInfo,
   normalizeEnterprisePageInput,
   type EnterprisePageInfo,
@@ -205,34 +209,6 @@ function normalizeCodeList(values: unknown) {
     }
 
     const nextValue = value.trim().toUpperCase().replace(/\s+/g, "-");
-
-    if (!nextValue || seen.has(nextValue)) {
-      continue;
-    }
-
-    seen.add(nextValue);
-    normalized.push(nextValue);
-  }
-
-  return normalized;
-}
-
-function normalizeStoreCodeList(values: unknown) {
-  const source =
-    typeof values === "string"
-      ? values.split(/[,\n]+/)
-      : Array.isArray(values)
-        ? values
-        : [];
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-
-  for (const value of source) {
-    if (typeof value !== "string") {
-      continue;
-    }
-
-    const nextValue = value.trim().toLowerCase().replace(/\s+/g, "-");
 
     if (!nextValue || seen.has(nextValue)) {
       continue;
@@ -2435,7 +2411,7 @@ export async function upsertInventoryCatalog(
   const productSortOrderByCode = new Map(
     catalogProducts.map((product) => [product.productCode, product.sortOrder]),
   );
-  const storeCodes = normalizeStoreCodeList(input.storeCodes);
+  const storeCodes = normalizeInventoryCatalogStoreCodes(input.storeCodes);
 
   if (
     effectiveFrom &&
@@ -2486,14 +2462,11 @@ export async function upsertInventoryCatalog(
           code: true,
         },
       });
-      const stores =
+      const availableStores =
         storeCodes.length > 0
           ? await tx.store.findMany({
               where: {
                 retailOrgId: enterpriseNode.retailOrgId,
-                code: {
-                  in: storeCodes,
-                },
               },
               select: {
                 id: true,
@@ -2501,6 +2474,10 @@ export async function upsertInventoryCatalog(
               },
             })
           : [];
+      const { stores, missingStoreCodes } = resolveInventoryCatalogStores(
+        storeCodes,
+        availableStores,
+      );
 
       const foundProductCodes = new Set(
         products.map((product) => product.code),
@@ -2514,11 +2491,6 @@ export async function upsertInventoryCatalog(
           `Flash ERP could not find product(s) ${missingProductCodes.join(", ")} for this catalog.`,
         );
       }
-
-      const foundStoreCodes = new Set(stores.map((store) => store.code));
-      const missingStoreCodes = storeCodes.filter(
-        (code) => !foundStoreCodes.has(code),
-      );
 
       if (missingStoreCodes.length > 0) {
         throw new Error(
