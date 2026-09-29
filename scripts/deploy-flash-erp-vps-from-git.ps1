@@ -209,6 +209,7 @@ try {
     "acceptance:license-renewal",
     "acceptance:enterprise-authorization",
     "acceptance:inventory-catalog-shop-code",
+    "acceptance:mobile-catalog-scope",
     "acceptance:sales-order-collections",
     "acceptance:online-store-parity",
     "acceptance:transfer-requests",

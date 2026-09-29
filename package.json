@@ -23,6 +23,7 @@
     "start:enterprise:cluster": "node scripts/start-enterprise-web-cluster.mjs",
     "typecheck": "npm --workspaces --if-present run typecheck",
     "acceptance:mobile-startup": "tsx scripts/mobile-startup-gate.ts",
+    "acceptance:mobile-catalog-scope": "tsx scripts/mobile-inventory-catalog-scope-gate.ts",
     "prisma:validate": "prisma validate --schema=prisma/schema.prisma",
     "prisma:format": "prisma format --schema=prisma/schema.prisma",
     "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
@@ -102,8 +103,8 @@
     "typecheck:production-stock-import": "npm run prisma:generate && tsc -p scripts/tsconfig.production-stock-import.json --noEmit",
     "acceptance:mobile-auth": "tsx scripts/mobile-auth-regression-gate.ts",
     "acceptance:mobile-operations": "tsx scripts/mobile-operational-regression-gate.ts",
-    "acceptance:mobile": "npm --workspace @flash-erp/mobile run typecheck && npm run acceptance:mobile-startup && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations && npm run acceptance:mobile-ui",
-    "acceptance:mobile:static": "npm run acceptance:mobile-startup -- --static-only && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations",
+    "acceptance:mobile": "npm --workspace @flash-erp/mobile run typecheck && npm run acceptance:mobile-startup && npm run acceptance:mobile-catalog-scope && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations && npm run acceptance:mobile-ui",
+    "acceptance:mobile:static": "npm run acceptance:mobile-startup -- --static-only && npm run acceptance:mobile-catalog-scope && npm run acceptance:mobile-auth && npm run acceptance:mobile-operations",
     "acceptance:mobile-ui": "playwright test --config playwright.mobile.config.ts",
     "build:mobile:preview": "npm run acceptance:mobile && cd apps/mobile && npx eas-cli build -p android --profile preview"
   },

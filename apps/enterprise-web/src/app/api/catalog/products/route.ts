@@ -1,8 +1,10 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { assertEnterprisePermission, getEnterpriseSession, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { prisma } from "@/lib/db/prisma";
 import { createEnterpriseProduct } from "@/server/repositories/enterprise-catalog.repository";
+import { resolveStoreProductCatalogScope } from "@/server/repositories/store-product-catalog-scope";
 
 
 export async function GET(request: Request) {
@@ -18,14 +20,84 @@ export async function GET(request: Request) {
     const page = Math.max(1, Math.trunc(Number(url.searchParams.get("page") ?? 1)) || 1);
     const limit = Math.min(200, Math.max(1, Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : 100));
     const query = url.searchParams.get("query")?.trim() ?? "";
-    const productWhere = {
+    const homeStore = await prisma.store.findFirst({
+      where: {
+        retailOrgId: session.retailOrgId,
+        code: session.homeStoreCode,
+        status: "ACTIVE",
+      },
+      select: {
+        id: true,
+        code: true,
+        catalogPolicyJson: true,
+        inventoryCatalogLinks: {
+          where: {
+            catalog: {
+              status: "ACTIVE",
+              deletedAt: null,
+            },
+          },
+          select: {
+            catalog: {
+              select: {
+                products: {
+                  select: {
+                    product: {
+                      select: {
+                        id: true,
+                        code: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!homeStore) {
+      throw new EnterpriseAuthError("The assigned home shop is not active or no longer exists.", 403);
+    }
+
+    const catalogScope = resolveStoreProductCatalogScope(homeStore);
+    const catalogWhere: Prisma.ProductWhereInput | null = catalogScope
+      ? {
+          OR: [
+            { productType: "SERVICE" },
+            ...(catalogScope.productIds.length > 0
+              ? [{ id: { in: catalogScope.productIds } }]
+              : []),
+            ...(catalogScope.productCodes.length > 0
+              ? [{ code: { in: catalogScope.productCodes } }]
+              : []),
+            ...(catalogScope.departmentCodes.length > 0
+              ? [{ department: { in: catalogScope.departmentCodes } }]
+              : []),
+            ...(catalogScope.categoryCodes.length > 0
+              ? [{ category: { in: catalogScope.categoryCodes } }]
+              : []),
+          ],
+        }
+      : null;
+    const searchWhere: Prisma.ProductWhereInput | null = query
+      ? {
+          OR: [
+            { code: { contains: query } },
+            { sku: { contains: query } },
+            { name: { contains: query } },
+            { barcodes: { some: { code: query } } },
+          ],
+        }
+      : null;
+    const productWhere: Prisma.ProductWhereInput = {
       retailOrgId: session.retailOrgId,
       status: "ACTIVE" as const,
       deletedAt: null,
-      ...(query ? { OR: [
-        { code: { contains: query } }, { sku: { contains: query } },
-        { name: { contains: query } }, { barcodes: { some: { code: query } } }
-      ] } : {})
+      AND: [catalogWhere, searchWhere].filter(
+        (clause): clause is Prisma.ProductWhereInput => clause !== null,
+      ),
     };
     const [products, total] = await Promise.all([prisma.product.findMany({
       where: productWhere,
@@ -34,13 +106,13 @@ export async function GET(request: Request) {
       take: limit,
       select: { id: true, code: true, name: true, unitOfMeasure: true, baseUnitPrice: true,
         taxProfile: { select: { ratePercent: true, isTaxInclusive: true } },
-        storeProductPrices: { where: { store: { code: session.homeStoreCode }, status: "ACTIVE", productVariantId: null }, select: { unitPrice: true }, take: 1 },
-        storeProductSellingUnits: { where: { store: { code: session.homeStoreCode }, status: "ACTIVE", productVariantId: null }, orderBy: [{ isDefault: "desc" }, { unitOfMeasureNameSnapshot: "asc" }], select: { unitOfMeasureCodeSnapshot: true, unitOfMeasureNameSnapshot: true, conversionFactor: true, unitPrice: true, barcode: true, isDefault: true } },
+        storeProductPrices: { where: { storeId: homeStore.id, status: "ACTIVE", productVariantId: null }, select: { unitPrice: true }, take: 1 },
+        storeProductSellingUnits: { where: { storeId: homeStore.id, status: "ACTIVE", productVariantId: null }, orderBy: [{ isDefault: "desc" }, { unitOfMeasureNameSnapshot: "asc" }], select: { unitOfMeasureCodeSnapshot: true, unitOfMeasureNameSnapshot: true, conversionFactor: true, unitPrice: true, barcode: true, isDefault: true } },
         matrixVariants: { where: { status: "ACTIVE" }, orderBy: [{ sortOrder: "asc" }, { code: "asc" }], select: { id: true, code: true, displayName: true, barcode: true, unitPrice: true, quantityOnHand: true, values: { select: { attribute: { select: { name: true } }, valueLabelSnapshot: true } } } },
         barcodes: { select: { code: true }, take: 1 } }
     }), prisma.product.count({ where: productWhere })]);
     const locations = await prisma.inventoryLocation.findMany({
-      where: { retailOrgId: session.retailOrgId, store: { code: session.homeStoreCode }, status: "ACTIVE" },
+      where: { retailOrgId: session.retailOrgId, storeId: homeStore.id, status: "ACTIVE" },
       select: { id: true }
     });
     const balances = locations.length && products.length ? await prisma.inventoryLedgerEntry.groupBy({
@@ -57,7 +129,7 @@ export async function GET(request: Request) {
       sellingUnits: product.storeProductSellingUnits.map((unit) => ({ unitOfMeasureCode: unit.unitOfMeasureCodeSnapshot, unitOfMeasureName: unit.unitOfMeasureNameSnapshot, conversionFactor: Number(unit.conversionFactor), unitPrice: Number(unit.unitPrice), barcode: unit.barcode ?? "", isDefault: unit.isDefault })),
       variants: product.matrixVariants.map((variant) => ({ id: variant.id, code: variant.code, name: variant.displayName ?? variant.code, barcode: variant.barcode, unitPrice: Number(variant.unitPrice), quantityOnHand: Number(variant.quantityOnHand), attributes: variant.values.map((entry) => ({ name: entry.attribute.name, value: entry.valueLabelSnapshot })) })),
       unitOfMeasure: product.unitOfMeasure, quantityOnHand: quantityByProduct.get(product.id) ?? 0,
-      storeCode: session.homeStoreCode
+      storeCode: homeStore.code
     })), page, pageSize: limit, total, hasMore: page * limit < total });
   } catch (error) {
     return NextResponse.json({ message: error instanceof Error ? error.message : "Flash ERP could not download the catalog." },
