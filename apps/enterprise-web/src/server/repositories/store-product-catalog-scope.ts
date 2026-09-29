@@ -1,3 +1,5 @@
+import type { Prisma } from "@prisma/client";
+
 type CatalogPolicyRecord = Record<string, unknown>;
 
 export type StoreProductCatalogScope = {
@@ -94,4 +96,26 @@ export function resolveStoreProductCatalogScope(
         categoryCodes: normalizeCodes(legacyPolicy.categoryCodes),
       })
     : null;
+}
+
+export function buildStoreProductCatalogWhere(
+  scope: StoreProductCatalogScope | null,
+): Prisma.ProductWhereInput | null {
+  if (!scope) {
+    return null;
+  }
+
+  return {
+    OR: [
+      { productType: "SERVICE" },
+      ...(scope.productIds.length > 0 ? [{ id: { in: scope.productIds } }] : []),
+      ...(scope.productCodes.length > 0 ? [{ code: { in: scope.productCodes } }] : []),
+      ...(scope.departmentCodes.length > 0
+        ? [{ department: { in: scope.departmentCodes } }]
+        : []),
+      ...(scope.categoryCodes.length > 0
+        ? [{ category: { in: scope.categoryCodes } }]
+        : []),
+    ],
+  };
 }
