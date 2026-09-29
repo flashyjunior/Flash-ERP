@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { resolveStoreProductCatalogScope } from "../apps/enterprise-web/src/server/repositories/store-product-catalog-scope";
+import {
+  buildStoreProductCatalogWhere,
+  resolveStoreProductCatalogScope,
+} from "../apps/enterprise-web/src/server/repositories/store-product-catalog-scope";
 
 assert.deepEqual(
   resolveStoreProductCatalogScope({
@@ -62,6 +65,23 @@ assert.equal(
   "a shop without a configured policy must retain the existing unrestricted fallback",
 );
 
+assert.deepEqual(
+  buildStoreProductCatalogWhere({
+    productIds: ["product-shop-b"],
+    productCodes: ["SHOP-B-ITEM"],
+    departmentCodes: [],
+    categoryCodes: [],
+  }),
+  {
+    OR: [
+      { productType: "SERVICE" },
+      { id: { in: ["product-shop-b"] } },
+      { code: { in: ["SHOP-B-ITEM"] } },
+    ],
+  },
+  "shop-facing product queries must include only assigned products and service items",
+);
+
 const repositoryRoot = path.resolve(process.cwd());
 const routeSource = readFileSync(
   path.join(repositoryRoot, "apps/enterprise-web/src/app/api/catalog/products/route.ts"),
@@ -71,11 +91,17 @@ const mobileApiSource = readFileSync(
   path.join(repositoryRoot, "apps/mobile/lib/mobile-api.ts"),
   "utf8",
 );
+const onlineStoreSource = readFileSync(
+  path.join(
+    repositoryRoot,
+    "apps/enterprise-web/src/server/repositories/online-store.repository.ts",
+  ),
+  "utf8",
+);
 
 for (const requiredRouteFragment of [
   "resolveStoreProductCatalogScope(homeStore)",
-  '{ productType: "SERVICE" }',
-  "id: { in: catalogScope.productIds }",
+  "buildStoreProductCatalogWhere(catalogScope)",
   "storeId: homeStore.id",
   "AND: [catalogWhere, searchWhere]",
 ]) {
@@ -85,9 +111,21 @@ for (const requiredRouteFragment of [
   );
 }
 
+for (const requiredOnlineStoreFragment of [
+  "resolveStoreProductCatalogScope(assignment.store)",
+  "buildStoreProductCatalogWhere(productCatalogScope)",
+  "...(productCatalogWhere ? { AND: [productCatalogWhere] } : {})",
+  "productsForCatalog.filter(isOnlineStoreStockManagedProduct)",
+]) {
+  assert.ok(
+    onlineStoreSource.includes(requiredOnlineStoreFragment),
+    `online-store inventory scope is missing ${requiredOnlineStoreFragment}`,
+  );
+}
+
 assert.ok(
   mobileApiSource.includes("await mobileOfflineDb.pruneProducts(validProductCodes)"),
   "full mobile catalog refresh must remove products no longer assigned to the home shop",
 );
 
-console.log("Mobile inventory catalog scope acceptance passed.");
+console.log("Shop-facing inventory catalog scope acceptance passed.");

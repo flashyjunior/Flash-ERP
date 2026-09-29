@@ -4,7 +4,10 @@ import { NextResponse } from "next/server";
 import { assertEnterprisePermission, getEnterpriseSession, EnterpriseAuthError } from "@/server/auth/enterprise-session";
 import { prisma } from "@/lib/db/prisma";
 import { createEnterpriseProduct } from "@/server/repositories/enterprise-catalog.repository";
-import { resolveStoreProductCatalogScope } from "@/server/repositories/store-product-catalog-scope";
+import {
+  buildStoreProductCatalogWhere,
+  resolveStoreProductCatalogScope,
+} from "@/server/repositories/store-product-catalog-scope";
 
 
 export async function GET(request: Request) {
@@ -62,25 +65,7 @@ export async function GET(request: Request) {
     }
 
     const catalogScope = resolveStoreProductCatalogScope(homeStore);
-    const catalogWhere: Prisma.ProductWhereInput | null = catalogScope
-      ? {
-          OR: [
-            { productType: "SERVICE" },
-            ...(catalogScope.productIds.length > 0
-              ? [{ id: { in: catalogScope.productIds } }]
-              : []),
-            ...(catalogScope.productCodes.length > 0
-              ? [{ code: { in: catalogScope.productCodes } }]
-              : []),
-            ...(catalogScope.departmentCodes.length > 0
-              ? [{ department: { in: catalogScope.departmentCodes } }]
-              : []),
-            ...(catalogScope.categoryCodes.length > 0
-              ? [{ category: { in: catalogScope.categoryCodes } }]
-              : []),
-          ],
-        }
-      : null;
+    const catalogWhere = buildStoreProductCatalogWhere(catalogScope);
     const searchWhere: Prisma.ProductWhereInput | null = query
       ? {
           OR: [

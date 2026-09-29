@@ -57,6 +57,10 @@ import { defaultAccountPaymentReceiptTemplateHtml } from "@/lib/templates/therma
 import { getEnterpriseSession, requireEnterpriseSession } from "@/server/auth/enterprise-session";
 import { deriveEcommercePaymentProjection } from "@/server/ecommerce/ecommerce-payment-state";
 import { resolveStoreReceiptTemplateSelection } from "@/server/repositories/receipt-template-support";
+import {
+  buildStoreProductCatalogWhere,
+  resolveStoreProductCatalogScope,
+} from "@/server/repositories/store-product-catalog-scope";
 import { getSalesOrderCollectionAttributionMap } from "@/server/reporting/sales-order-collection-attribution";
 import {
   ensureAlternateUomSellingSchemaCompatibility,
@@ -1786,6 +1790,7 @@ async function getOnlineStoreAssignment(
                       sortOrder: true,
                       product: {
                         select: {
+                          id: true,
                           code: true
                         }
                       }
@@ -4143,6 +4148,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     salesOrderFulfilmentStore?.id === assignment.store.id;
   const branding = readOnlineStoreBranding(assignment.store.retailOrg);
   const receiptTemplateResolution = resolveOnlineStoreReceiptTemplate(assignment.store);
+  const productCatalogScope = resolveStoreProductCatalogScope(assignment.store);
+  const productCatalogWhere = buildStoreProductCatalogWhere(productCatalogScope);
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const [
@@ -4175,7 +4182,8 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
       where: {
         retailOrgId: assignment.session.retailOrgId,
         status: RecordStatus.ACTIVE,
-        deletedAt: null
+        deletedAt: null,
+        ...(productCatalogWhere ? { AND: [productCatalogWhere] } : {})
       },
       orderBy: [{ name: "asc" }],
       take: 240,
@@ -5144,7 +5152,7 @@ export async function getOnlineStoreWorkspace(): Promise<OnlineStoreWorkspaceDat
     });
   const salesLocation = inventoryLocations.find((location) => location.useForSalesDefault) ?? inventoryLocations[0] ?? null;
   const locationIds = inventoryLocations.map((location) => location.id);
-  const inventoryManagedProducts = products.filter(isOnlineStoreStockManagedProduct);
+  const inventoryManagedProducts = productsForCatalog.filter(isOnlineStoreStockManagedProduct);
   const productIds = [...new Set([...productsForCatalog, ...inventoryManagedProducts].map((product) => product.id))];
   const [ledgerPositions, activeReservationGroups, ecommerceFulfillmentLocations] =
     locationIds.length && productIds.length
